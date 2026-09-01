@@ -109,6 +109,66 @@ _COMMAND_PHRASES = (r"get\s+out|bail\s+out|cash\s+out|step\s+aside|"
                     r"remain\s+hedged|keep\s+out|keep\s+away|"
                     r"hold\s+off|sit\s+out|wait\s+for")
 
+#: ---------------------------------------------------------------------------
+#: THE INVERSION (the deny-lists above are now belt-and-braces).
+#:
+#: Five rounds enumerated what to REFUSE — verb inflections (29), stative verbs
+#: (34), verbs again (37), objects (38), adjective forms (38) — and each round
+#: closed one instance while the next found another. An open set cannot be
+#: enumerated, so the primary check is now an ALLOW-LIST.
+#:
+#: It is scoped to where it is implementable. The engine's message space is NOT
+#: tiny: the 32 shipped fallbacks open their clauses 34 different ways, several
+#: with domain prose ("Borrowing against brokerage accounts has turned down
+#: ..."), so an allow-list of whole sentence shapes would refuse legitimate
+#: output. But an imperative is SHORT and subjectless, and every short clause
+#: the library actually writes opens with a noun, a determiner, an adverb or a
+#: grounded value — never with a verb. That is the discriminator, and these
+#: openers were EXTRACTED from the shipped fallbacks rather than invented.
+#:
+#: A short clause opening with anything else is refused. The failure direction
+#: is deliberate: an unlisted subject costs a fallback, an unlisted verb sends
+#: advice to the operator.
+_SHORT_CLAUSE_WORDS = 4
+
+_APPROVED_OPENERS = frozenset("""
+bubblegauge next no none not the a an this that these those it its there their
+all both each every some any more less most fewer other another
+band bands score scores level levels reading readings flag flags breadth credit
+momentum trend trends data run runs check checks review reviews range gap gaps
+spread spreads price prices cash gold bonds bond equities equity stocks shares
+delivery message messages texts text override overrides warning warnings
+underlying overall shown fixed normal later rollover marker markers
+distance basis points percent per protection borrowing semiconductor
+volatility liquidity exposure weighting weightings allocation allocations
+history horizon window windows model models method methods source sources
+""".split())
+
+
+def _looks_imperative(clause: str, grounded: set[str]) -> bool:
+    """A SHORT clause that opens with something the library never opens with.
+
+    Long clauses are exempt: an imperative is terse, and the domain prose that
+    would trip a naive rule is not.
+    """
+    words = clause.strip().split()
+    if not words or len(words) > _SHORT_CLAUSE_WORDS:
+        return False
+    raw = words[0].strip("\"'([{").rstrip(".,;:!?)]}")
+    if not raw or not raw[0].isalpha():
+        return False                      # numerals, dashes, symbols: not a verb
+    if not raw.isascii():
+        return False                      # the language check owns non-English
+    if raw.isupper() and 2 <= len(raw) <= 5:
+        return False                      # a ticker (SPY, QQQ, TLT) is a subject
+    head = raw.casefold()
+    if head in _APPROVED_OPENERS:
+        return False
+    if head in grounded:
+        return False                      # a fact value is a subject, not a verb
+    return True
+
+
 #: A BARE IMPERATIVE ON A POSITION. "Keep cash." carried no banned verb and no
 #: advice framing, so it validated and could have been sent (round 36, SOTA-A
 #: defect 4). Enumerating verbs had already failed twice — rounds 29 and 34
@@ -892,6 +952,16 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
     # Checked BEFORE the band-verb pass, which reads "trim"/"hold" as states
     # in recognised constructions — "Hold cash." must be refused as an
     # instruction rather than examined as a band name.
+    # THE ALLOW-LIST, checked first: it does not depend on any enumeration of
+    # what to refuse, so the open-set problem the deny-lists below keep hitting
+    # cannot reach the operator through it.
+    _grounded_words = {str(v).casefold() for v in facts.values()}
+    for _clause in re.split(r"(?<=[.;:!?])\s+|(?<=:)\s+", text):
+        if _looks_imperative(_clause, _grounded_words):
+            return ValidationResult(
+                False, FailureClass.CONTENT,
+                f"{_clause.strip()!r} opens a short clause with a word this "
+                "monitor never uses as a subject - it reads as an instruction")
     if _IMPERATIVE_OBJECT_RE.search(text):
         return ValidationResult(False, FailureClass.CONTENT,
                                 "reads as an instruction about a position, "

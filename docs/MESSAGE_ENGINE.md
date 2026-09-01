@@ -284,3 +284,33 @@ transactions — insert and commit the claim on its OWN session, keep the row
 id, and resolve by id afterwards. Then the caller's session is never touched
 and the lock is never held. That changes how `compose()` is invoked, so it is
 a deliberate refactor rather than a review-round patch.
+
+## Decision 11 — the directive check is an ALLOW-LIST of clause openers
+
+Five rounds enumerated what to refuse — verb inflections (29), stative verbs
+(34), verbs again (37), objects (38), adjective forms (38). Each closed the
+instance the panel named and the next round found another, because the set of
+ways to phrase an instruction is open.
+
+**The message space is NOT tiny**, which rules out the obvious inversion. The
+32 shipped fallbacks open their clauses 34 different ways, several with domain
+prose ("Borrowing against brokerage accounts has turned down from its recent
+high"), and one opener is itself a verb ("Compute run later."). An allow-list
+of whole sentence shapes would refuse legitimate output.
+
+What holds is narrower: **an imperative is SHORT and subjectless.** Every short
+clause the library writes opens with a noun, a determiner, an adverb, a ticker
+or a grounded value — never with a verb. So a clause of four words or fewer
+must open with an approved token, and the openers were EXTRACTED from the
+shipped fallbacks rather than invented. Longer clauses are exempt, which is
+what keeps the domain prose legal.
+
+Measured on nineteen imperatives that appear nowhere in the validator — dump,
+ditch, hoard, offload, unwind, deleverage, fade, front-run and others — all
+nineteen are refused, with no shipped fallback refused.
+
+The deny-lists above remain as belt-and-braces. They are no longer the primary
+defence, so their open-set problem can no longer reach the operator.
+
+**The failure direction is deliberate**: an unlisted SUBJECT costs a fallback,
+an unlisted VERB sends advice to the operator.

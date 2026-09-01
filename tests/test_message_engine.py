@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -3560,3 +3561,125 @@ class TestRoundFortyPanelDefects:
             assert not gov.breaker_is_open(
                 sess, settings=s, now=t0 + timedelta(minutes=31)), \
                 "a five-strike breaker opened after four failures"
+
+
+class TestDirectiveAllowList:
+    """The inversion: an allow-list of clause openers, not a list of banned verbs.
+
+    Five rounds enumerated what to refuse — verb inflections (29), stative verbs
+    (34), verbs again (37), objects (38), adjective forms (38). Each closed one
+    instance and the next round found another, because the set is open. These
+    pin the shape instead.
+    """
+
+    #: Verbs enumerated NOWHERE in the validator. If the allow-list is ever
+    #: replaced by another deny-list, these are what will start validating.
+    NOVEL = [
+        "Dump your portfolio.", "Ditch your positions.", "Accumulate derivatives.",
+        "Liquidate everything.", "Hoard cash.", "Offload equities.",
+        "Short the index.", "Pivot to bonds.", "Scoop up gold.",
+        "Unwind the trade.", "Lighten up.", "Double down.", "Chase momentum.",
+        "Fade the rally.", "Rebalance now.", "Deleverage fast.",
+        "Hedge aggressively.", "Exit everything.", "Front-run the move.",
+    ]
+
+    @pytest.mark.parametrize("message", NOVEL)
+    def test_an_unenumerated_imperative_is_refused(self, message):
+        r = validate(message, channel=Channel.IMESSAGE, facts=dict(FACTS),
+                     **LIMITS)
+        assert not r.ok, f"{message!r} validated"
+
+    def test_the_openers_come_from_the_shipped_library(self):
+        # Extracted, not invented: every short clause the 32 fallbacks write
+        # must open with an approved token, or the allow-list is a fiction that
+        # happens to fit today's tests.
+        from app.message_engine import validator
+
+        values = {"F_HEADLINE_MEDIAN": "51", "F_BAND_EFFECTIVE": "trim",
+                  "F_BAND_PREVIOUS": "hold", "F_RF_COUNT": "2",
+                  "F_NEXT_CHECK": "14:00 UTC", "F_ASSET": "SPY",
+                  "F_BREADTH": "38%", "F_D2": "12", "F_S3": "9",
+                  "F_RF3_DISTANCE": "25"}
+        for name, entry in composer.library()["prompts"].items():
+            used = re.findall(r"\{([A-Z0-9_]+)\}", entry["fallback"])
+            facts = {s: values.get(s, "3") for s in used}
+            text = composer.render_fallback(entry["fallback"], facts)
+            grounded = {str(v).casefold() for v in facts.values()}
+            for clause in re.split(r"(?<=[.;:!?])\s+|(?<=:)\s+", text):
+                assert not validator._looks_imperative(clause, grounded), \
+                    f"{name}: the library's own clause {clause!r} is refused"
+
+    def test_long_domain_prose_is_exempt(self):
+        # The message space is NOT tiny — the fallbacks open their clauses 34
+        # different ways, several with domain prose. An allow-list of whole
+        # sentence shapes would refuse these, which is why the rule applies
+        # only to SHORT clauses.
+        for message in [
+            "Borrowing against brokerage accounts has turned down from its "
+            "recent high.",
+            "Semiconductor stocks lead the broad market on a two-year lookback.",
+            "Protection against near-term swings now costs more than longer "
+            "cover.",
+        ]:
+            r = validate(message, channel=Channel.IMESSAGE, facts=dict(FACTS),
+                         **LIMITS)
+            assert r.ok, f"domain prose refused: {r.reason}"
+
+    @pytest.mark.parametrize("message", [
+        "SPY 51, QQQ 51.", "QQQ -, TLT -.",
+    ])
+    def test_a_ticker_is_a_subject_not_a_verb(self, message):
+        r = validate(message, channel=Channel.IMESSAGE,
+                     facts=dict(FACTS, F_ASSET="SPY"), **LIMITS)
+        assert r.ok, f"{message!r} refused: {r.reason}"
+
+    def test_the_rule_is_not_another_verb_list(self):
+        from app.message_engine import validator
+
+        openers = validator._APPROVED_OPENERS
+        for verb in ("dump", "ditch", "buy", "sell", "keep", "choose", "hold",
+                     "take", "accumulate", "liquidate"):
+            assert verb not in openers, (
+                f"{verb!r} is in the OPENER allow-list; if verbs leak into it "
+                "the inversion degrades back into a deny-list")
+
+
+class TestScorePairKeysArePinned:
+    """A score pair whose keys nothing supplies is dead: the form it guards can
+    never validate, and the digest silently falls back."""
+
+    def _supplied_keys(self):
+        keys = set()
+        for entry in composer.library()["prompts"].values():
+            keys |= set(entry.get("grounding_fields") or [])
+        source = (Path(__file__).resolve().parents[1]
+                  / "app" / "alerts" / "render_context.py").read_text(encoding="utf-8")
+        keys |= set(re.findall(r'"(F_[A-Z0-9_]+)":', source))
+        return keys
+
+    def test_every_declared_pair_can_actually_be_supplied(self):
+        # I supplied F_SCORE_SCALE_MAX where the pair wants score_scale_max and
+        # watched the digest's own "Score 51/100, 2/4 red flags" get refused.
+        # That was my probe's error, but the coupling is real: a rename on
+        # either side mutes the digest with no test failing.
+        from app.message_engine.validator import _SCORE_PAIRS
+
+        supplied = self._supplied_keys()
+        for numerator, denominator in _SCORE_PAIRS:
+            assert numerator in supplied, f"{numerator} is supplied by nothing"
+            assert denominator in supplied, f"{denominator} is supplied by nothing"
+
+    def test_the_digest_form_validates_with_the_declared_keys(self):
+        facts = {"F_HEADLINE_MEDIAN": 51, "score_scale_max": 100,
+                 "F_RF_COUNT": 2, "F_RF_REQUIRED": 4,
+                 "F_BAND_EFFECTIVE": "trim", "F_NEXT_CHECK": "14:00 UTC"}
+        r = validate("Score 51/100, 2/4 red flags, band trim.",
+                     channel=Channel.IMESSAGE, facts=facts, **LIMITS)
+        assert r.ok, f"the digest's own form is refused: {r.reason}"
+
+    def test_an_undeclared_quotient_is_still_refused(self):
+        facts = {"F_HEADLINE_MEDIAN": 51, "score_scale_max": 100,
+                 "F_RF_COUNT": 2, "F_RF_REQUIRED": 4}
+        for bad in ("Score 51/4.", "Score 51/100/100.", "Score 51/7."):
+            r = validate(bad, channel=Channel.IMESSAGE, facts=facts, **LIMITS)
+            assert not r.ok, f"{bad!r} validated"
