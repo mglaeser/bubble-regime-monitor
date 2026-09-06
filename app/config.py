@@ -78,7 +78,12 @@ class Settings(BaseSettings):
     sipgate_recipient: str = ""      # recipient in E.164 format, e.g. +49151...
     sms_daily_hour: int = 8          # UTC hour for the daily digest
     sms_daily_minute: int = 0
-    sms_max_len: int = 160           # single-SMS GSM-7 ceiling (hard cap)
+    # Ruling Q27 (shallow-frontend program): the default drops 160 -> 150.
+    # 160 is the GSM-7 physical ceiling; 150 leaves headroom so a message
+    # the engine composes near the limit cannot spill into a second part
+    # after a transport-side prefix. The alert system's own 160-septet
+    # CHECK is a different, unchanged constraint.
+    sms_max_len: int = 150           # self-imposed cap, under the 160 GSM-7 ceiling
 
     # Daily digest over iMessage via an imessage-proxy instance
     # (POST {base}/api/messages). Auth is ONE scoped bearer key holding
@@ -276,6 +281,39 @@ class Settings(BaseSettings):
 
     service_version: str = "3.9.0"
 
+    # --- MESSAGE ENGINE (Phase C) -------------------------------------------
+    # The LLM WRITES the operator message here, unlike app/alerts/llm_selector
+    # where the model only selects codes and never writes a digit. The two
+    # coexist deliberately (ruling Q41: llm_selector untouched); see
+    # docs/MESSAGE_ENGINE.md for why, and for the P1 exemption.
+    #
+    # Inert by default: with the flag off, every trigger renders its
+    # deterministic/evergreen text and no gateway call is ever made, so
+    # merging this cannot change what the operator receives until the flag is
+    # deliberately set on the host.
+    message_engine_enabled: bool = False
+    # Reuses the existing LLM_* gateway route and model (ruling Q26); it has
+    # no model/provider settings of its own by design.
+
+    # The six pacing constants. Defaults are the rules as given, expressed as
+    # settings so an operator can widen them without a code change (Q42).
+    message_engine_min_interval_s: int = 300     # floor between two LLM requests
+    message_engine_format_retry_s: int = 30      # a FORMAT-only retry may pause just this
+    message_engine_max_content_iterations: int = 3   # content attempts before fallback
+    message_engine_technical_backoff_s: int = 120    # after a 4xx/5xx/timeout
+    message_engine_breaker_strikes: int = 5      # consecutive technical errors -> all-fallback
+    message_engine_breaker_cooldown_s: int = 86400   # all-fallback dwell before retrying
+
+    # Volume cap (ruling Q40). At the cap the evergreen fallback is used and
+    # the exhaustion is reported in the next digest — never a dropped message.
+    message_engine_daily_budget: int = 100
+
+    # Channel contracts (rulings Q27/Q29/Q30). SMS_MAX_LEN already defaults to
+    # 150; iMessage counts CODE POINTS, not septets, and allows a couple of
+    # emoji for emphasis.
+    message_engine_imessage_max_chars: int = 200
+    message_engine_imessage_max_emoji: int = 2
+
     @property
     def llm_configured(self) -> bool:
         """All values needed to open the gateway connection are present.
@@ -368,6 +406,7 @@ class Settings(BaseSettings):
 #: failure mode: one dropped character leaves the deterministic/stale fallback
 #: working, which can conceal that inference was never armed.
 _TYPO_PRONE = (
+    "MESSAGE_ENGINE_ENABLED",
     "IMESSAGE_ENABLED",
     "IMESSAGE_API_BASE_URL",
     "IMESSAGE_API_KEY",
