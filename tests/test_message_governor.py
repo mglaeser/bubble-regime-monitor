@@ -569,3 +569,59 @@ class TestRoundSixOn106:
             for j in range(3):
                 self._row(s, gov.Outcome.FORMAT_REJECTED, 100 + j)
             assert gov.consecutive_strikes(s, limit=10) == 0
+
+
+class TestRoundSevenOn106:
+    """#106 round 7 (SOTA-A and SOTA-C, independently): the breaker cooldown
+    was anchored on the newest PACING row, and FALLBACK_USED is not a pacing
+    outcome. Five exhausted composes open the breaker at the fifth marker,
+    but the dwell was measured from the last rejection row — written when the
+    compose was still running, possibly a day earlier — so the cooldown could
+    already be over at the instant the breaker opened, and with no pacing row
+    at all it was not enforced. The anchor is the newest STRIKE: the row that
+    opened, or re-opened, the breaker.
+    """
+
+    T = datetime(2026, 9, 6, 12, 0, 0)
+
+    def _row(self, s, outcome, offset_s, trigger, iteration=1):
+        r = MessageEngineAttempt(trigger=trigger, channel="imessage", priority=2,
+                                 started_at=self.T + timedelta(seconds=offset_s - 1),
+                                 finished_at=self.T + timedelta(seconds=offset_s),
+                                 outcome=outcome.value, iteration=iteration)
+        s.add(r)
+        s.commit()
+
+    def _five_exhausted_composes(self, s, gap_s):
+        # Each compose: three rejections, then the exhausted marker gap_s later.
+        for k in range(5):
+            base = k * 10
+            for i in range(3):
+                self._row(s, gov.Outcome.CONTENT_REJECTED, base + i, f"T{k}", iteration=i + 1)
+            self._row(s, gov.Outcome.FALLBACK_USED, base + gap_s, f"T{k}")
+        return 40 + gap_s  # completion of the fifth marker
+
+    @pytest.mark.parametrize("gap_s", [86_400 + 60, 3_600])
+    def test_the_cooldown_runs_from_the_strike_that_opened_the_breaker(self, gap_s):
+        settings = _settings()
+        with session_scope() as s:
+            opened = self._five_exhausted_composes(s, gap_s)
+            just_after = (self.T + timedelta(seconds=opened + 1)).replace(tzinfo=UTC)
+            assert gov.consecutive_strikes(s, limit=1000) == 5
+            assert gov.breaker_is_open(s, settings=settings, now=just_after)
+            d = gov.decide(s, priority=2, settings=settings, trigger="NEW_TRIGGER",
+                           iteration=1, now=just_after)
+            assert d.verdict is gov.Verdict.USE_FALLBACK and "breaker" in d.reason, d.reason
+            after = (self.T + timedelta(seconds=opened + 86_400 + 1)).replace(tzinfo=UTC)
+            assert not gov.breaker_is_open(s, settings=settings, now=after)
+
+    def test_markers_alone_still_hold_the_cooldown(self):
+        settings = _settings()
+        with session_scope() as s:
+            for k in range(5):
+                self._row(s, gov.Outcome.FALLBACK_USED, k, f"T{k}")
+            just_after = (self.T + timedelta(seconds=5)).replace(tzinfo=UTC)
+            assert gov.breaker_is_open(s, settings=settings, now=just_after)
+            d = gov.decide(s, priority=2, settings=settings, trigger="NEW_TRIGGER",
+                           iteration=1, now=just_after)
+            assert d.verdict is gov.Verdict.USE_FALLBACK and "breaker" in d.reason, d.reason

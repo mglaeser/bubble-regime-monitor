@@ -250,36 +250,6 @@ _ATTEMPT_BEFORE_BOUNDARY = case(
 )
 
 
-def last_attempt(session: Session, *, now: datetime | None = None,
-                 exclude_id: int | None = None) -> MessageEngineAttempt | None:
-    stmt = (
-        select(MessageEngineAttempt)
-        .where(MessageEngineAttempt.outcome.in_([o.value for o in _PACING_OUTCOMES])))
-    if exclude_id is not None:
-        stmt = stmt.where(MessageEngineAttempt.id != exclude_id)
-    row = session.execute(
-        stmt
-        # Ordered by COMPLETION, not by start. A claim reaped late finished
-        # after an attempt that STARTED later, so ordering by start time put
-        # the OK in front and the technical error silently lost its 120s
-        # backoff (round 21, SOTA-A). `_dwell_from` already measures pauses
-        # from completion; the row that governs the pause must be chosen the
-        # same way.
-        .order_by(func.coalesce(MessageEngineAttempt.finished_at,
-                                MessageEngineAttempt.started_at).desc(),
-                  # AT A COMPLETION TIE, THE MOST RESTRICTIVE OUTCOME GOVERNS.
-                  # Ids follow reservation order, so a FORMAT_REJECTED reserved
-                  # after a TECHNICAL_ERROR that finished in the same instant
-                  # won the id tie-break, and the 30s format retry replaced
-                  # the technical floor (#106 round 2, SOTA-A). Order is
-                  # unknowable at a tie; the longer pause fails closed.
-                  _PAUSE_RANK.desc(),
-                  MessageEngineAttempt.id.desc())
-        .limit(1)
-    ).scalars().first()
-    return row
-
-
 def _pause_for(row: MessageEngineAttempt, *, settings: Settings, trigger: str | None,
                last_failure: str | None, newest_id: int | None) -> int:
     """Seconds of quiet the given row imposes after its own completion."""
@@ -355,6 +325,44 @@ def pacing_deadline(session: Session, *, settings: Settings, trigger: str | None
     return best
 
 
+#: The rows that ARE strikes (ruling Q38): a terminal technical failure, or
+#: the marker the engine writes when a compose is exhausted. Shared by the
+#: strike scan and the cooldown anchor so the two can never disagree about
+#: what a strike is.
+_STRIKE_OUTCOMES = (Outcome.TECHNICAL_ERROR, Outcome.FALLBACK_USED)
+
+
+def last_strike(session: Session, *, exclude_id: int | None = None
+                ) -> MessageEngineAttempt | None:
+    """The newest strike — the row that opened, or re-opened, the breaker.
+
+    The breaker cooldown is quiet time AFTER the strike that tripped it, so
+    this is the row it must be measured from. Until #106 round 7 both anchor
+    sites used `last_attempt`, whose outcome set is the PACING set — and
+    FALLBACK_USED, the exhausted-compose strike, is not a pacing outcome.
+    SOTA-A and SOTA-C found it independently in the same round: with five
+    exhausted composes the breaker opened at the fifth marker but the dwell
+    was measured from the last rejection row, written while that compose was
+    still running; a marker one day after its rejections found the cooldown
+    already over at the instant the breaker opened, and markers with no
+    pacing row at all found no anchor and no cooldown. Executed before the
+    fix: `breaker_is_open` False one second after the fifth marker in both
+    shapes. Ordered by completion, ties to the higher id — a constant
+    cooldown makes the newest completion the latest deadline (round 5).
+    """
+    _completed = func.coalesce(MessageEngineAttempt.finished_at,
+                               MessageEngineAttempt.started_at)
+    stmt = (
+        select(MessageEngineAttempt)
+        .where(MessageEngineAttempt.outcome.in_(
+            [o.value for o in _STRIKE_OUTCOMES])))
+    if exclude_id is not None:
+        stmt = stmt.where(MessageEngineAttempt.id != exclude_id)
+    return session.execute(
+        stmt.order_by(_completed.desc(), MessageEngineAttempt.id.desc()).limit(1)
+    ).scalars().first()
+
+
 def consecutive_strikes(session: Session, *, limit: int = 50,
                         exclude_id: int | None = None) -> int:
     """Length of the trailing run of STRIKES.
@@ -410,7 +418,7 @@ def consecutive_strikes(session: Session, *, limit: int = 50,
     # violated it. With rejections gone, every fetched row is a strike, so
     # the LIMIT bounds the COUNT — and a count at or above the threshold can
     # never be hidden by rows that are not strikes.
-    strike_outcomes = (Outcome.TECHNICAL_ERROR, Outcome.FALLBACK_USED)
+    strike_outcomes = _STRIKE_OUTCOMES
     # Bound the scan by DATA: only rows after the last success can belong to
     # the current run, because a success is the only thing that resets it.
     # This is what makes the window independent of every setting.
@@ -584,7 +592,9 @@ def decide(session: Session, *, priority: int, settings: Settings,
     strikes = consecutive_strikes(
         session, limit=_strike_window(settings), exclude_id=exclude_id)
     if strikes >= _effective_strikes(settings):
-        last = last_attempt(session, now=moment, exclude_id=exclude_id)
+        # Anchored on the newest STRIKE, not the newest pacing row (#106
+        # round 7): see `last_strike`.
+        last = last_strike(session, exclude_id=exclude_id)
         if last is not None:
             resume = _dwell_from(last) + timedelta(
                 seconds=settings.message_engine_breaker_cooldown_s)
@@ -626,7 +636,7 @@ def breaker_is_open(session: Session, *, settings: Settings,
     strikes = consecutive_strikes(session, limit=_strike_window(settings))
     if strikes < _effective_strikes(settings):
         return False
-    last = last_attempt(session, now=now)
+    last = last_strike(session)
     if last is None:
         return False
     resume = _dwell_from(last) + timedelta(
