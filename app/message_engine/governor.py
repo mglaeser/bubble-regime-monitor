@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from app.config import Settings
@@ -218,6 +218,16 @@ def reap_stale_claims(session: Session, *, now: datetime | None = None) -> int:
     return len(stale)
 
 
+#: Longer pause first. Only meaningful among rows that completed in the same
+#: instant; every other ordering is by completion time.
+_PAUSE_RANK = case(
+    (MessageEngineAttempt.outcome == Outcome.TECHNICAL_ERROR.value, 3),
+    (MessageEngineAttempt.outcome == Outcome.CONTENT_REJECTED.value, 2),
+    (MessageEngineAttempt.outcome == Outcome.FORMAT_REJECTED.value, 1),
+    else_=0,
+)
+
+
 def last_attempt(session: Session, *, now: datetime | None = None,
                  exclude_id: int | None = None) -> MessageEngineAttempt | None:
     stmt = (
@@ -235,6 +245,13 @@ def last_attempt(session: Session, *, now: datetime | None = None,
         # same way.
         .order_by(func.coalesce(MessageEngineAttempt.finished_at,
                                 MessageEngineAttempt.started_at).desc(),
+                  # AT A COMPLETION TIE, THE MOST RESTRICTIVE OUTCOME GOVERNS.
+                  # Ids follow reservation order, so a FORMAT_REJECTED reserved
+                  # after a TECHNICAL_ERROR that finished in the same instant
+                  # won the id tie-break, and the 30s format retry replaced
+                  # the technical floor (#106 round 2, SOTA-A). Order is
+                  # unknowable at a tie; the longer pause fails closed.
+                  _PAUSE_RANK.desc(),
                   MessageEngineAttempt.id.desc())
         .limit(1)
     ).scalars().first()
@@ -278,7 +295,13 @@ def consecutive_strikes(session: Session, *, limit: int = 50,
     # (pacing, disabled, P1, budget, breaker-open) says nothing about whether
     # the provider works, and counting it made the breaker feed itself — while
     # open, every suppressed trigger added another strike (round 32).
-    strike_outcomes = (Outcome.OK, Outcome.FORMAT_REJECTED,
+    # OK is NOT in the scan. Its only role is the bound computed above: any OK
+    # still visible past that bound is one that COMPLETED IN THE SAME INSTANT
+    # as the last success, and round 1's tie-break let it in - where, sorted
+    # first by id, it hit `break` and truncated five tied technical errors to
+    # zero strikes (#106 round 2, SOTA-A). Order at a tie is unknowable, so
+    # the tied strikes count and the tied success does not reset them.
+    strike_outcomes = (Outcome.FORMAT_REJECTED,
                        Outcome.CONTENT_REJECTED, Outcome.TECHNICAL_ERROR,
                        Outcome.FALLBACK_USED)
     # Bound the scan by DATA: only rows after the last success can belong to
@@ -400,7 +423,13 @@ def content_attempts(session: Session, *, trigger: str | None,
         # rejection written in the same instant could be read in either
         # order, undercounting spent attempts and admitting a request past
         # the cap (round 22, SOTA-A).
-        stmt.order_by(MessageEngineAttempt.started_at.desc(),
+        # By COMPLETION, like last_attempt (round 21) and the strike scan
+        # (round 24) - the third scan to have been left on start time. A
+        # rejection that started earlier but finished after a later-started
+        # OK sorted behind it, the scan hit the OK first, and the cap admitted
+        # one request too many (#106 round 2, SOTA-A).
+        stmt.order_by(func.coalesce(MessageEngineAttempt.finished_at,
+                                    MessageEngineAttempt.started_at).desc(),
                       MessageEngineAttempt.id.desc()).limit(limit)
     ).scalars().all()
     spent = 0

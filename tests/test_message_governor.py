@@ -327,3 +327,77 @@ class TestTieBreakDoesNotDependOnReservationOrder:
             b = self._row(s, gov.Outcome.OK, self.T - timedelta(seconds=5), self.T)
             assert a < b, "the failure must have been reserved first"
             assert gov.consecutive_strikes(s, limit=10**6) == expected
+
+
+class TestRoundTwoOn106:
+    """#106 round 2 (SOTA-A): three orderings keyed on the wrong thing.
+
+    Ids follow reservation order, not completion; a tie in completion time is
+    unknowable. Every one of these fails CLOSED at a tie."""
+
+    T = datetime(2026, 9, 6, 12, 0, 0)
+
+    def _row(self, s, outcome, started, finished, trigger="BAND_TO_TRIM"):
+        r = MessageEngineAttempt(trigger=trigger, channel="imessage", priority=2,
+                                 started_at=started, finished_at=finished,
+                                 outcome=outcome.value, iteration=1)
+        s.add(r)
+        s.commit()
+        return r.id
+
+    def test_a_tied_second_ok_does_not_truncate_the_strike_scan(self):
+        # 5 technical errors at T, then 2 OKs at T with later ids. Round 1's
+        # tie-break let the second OK into the scan, where - sorted first by
+        # id - it broke the loop at zero. OK is no longer in the scan set: its
+        # only role is the bound.
+        with session_scope() as s:
+            for i in range(5):
+                self._row(s, gov.Outcome.TECHNICAL_ERROR,
+                          self.T - timedelta(seconds=60 + i), self.T)
+            self._row(s, gov.Outcome.OK, self.T - timedelta(seconds=5), self.T)
+            self._row(s, gov.Outcome.OK, self.T - timedelta(seconds=4), self.T)
+            assert gov.consecutive_strikes(s, limit=10**6) >= 5
+            assert gov.breaker_is_open(s, settings=_settings(),
+                                       now=(self.T + timedelta(seconds=1)).replace(tzinfo=UTC))
+
+    def test_a_success_that_is_strictly_later_still_resets(self):
+        # The bound must keep doing its job when there is NO tie.
+        with session_scope() as s:
+            for i in range(5):
+                self._row(s, gov.Outcome.TECHNICAL_ERROR,
+                          self.T - timedelta(seconds=60 + i), self.T)
+            self._row(s, gov.Outcome.OK, self.T - timedelta(seconds=5),
+                      self.T + timedelta(seconds=1))
+            assert gov.consecutive_strikes(s, limit=10**6) == 0
+
+    def test_a_tie_between_failures_paces_by_the_longer_pause(self):
+        # FORMAT_REJECTED reserved after (higher id) a TECHNICAL_ERROR that
+        # finished in the same instant won the id tie-break, so the 30s format
+        # retry replaced the technical floor.
+        with session_scope() as s:
+            self._row(s, gov.Outcome.TECHNICAL_ERROR, self.T - timedelta(seconds=60), self.T)
+            self._row(s, gov.Outcome.FORMAT_REJECTED, self.T - timedelta(seconds=5), self.T)
+            d = gov.decide(s, priority=2, settings=_settings(), trigger="BAND_TO_TRIM",
+                           iteration=2, last_failure="format",
+                           now=(self.T + timedelta(seconds=31)).replace(tzinfo=UTC))
+            assert not d.may_ask, f"asked after 31s: {d.reason}"
+            assert "300" in d.reason or "120" in d.reason
+
+    def test_a_lone_format_rejection_still_gets_its_short_retry(self):
+        # The other direction: without a tied technical error, format is 30s.
+        with session_scope() as s:
+            self._row(s, gov.Outcome.FORMAT_REJECTED, self.T - timedelta(seconds=5), self.T)
+            d = gov.decide(s, priority=2, settings=_settings(), trigger="BAND_TO_TRIM",
+                           iteration=2, last_failure="format",
+                           now=(self.T + timedelta(seconds=31)).replace(tzinfo=UTC))
+            assert d.may_ask, f"format retry refused: {d.reason}"
+
+    def test_the_content_cap_counts_by_completion_not_start(self):
+        # A rejection that STARTED earlier but FINISHED after a later-started
+        # OK sorted behind it; the scan hit the OK first and the cap admitted
+        # one request too many.
+        with session_scope() as s:
+            self._row(s, gov.Outcome.CONTENT_REJECTED,
+                      self.T - timedelta(seconds=60), self.T + timedelta(seconds=1))
+            self._row(s, gov.Outcome.OK, self.T - timedelta(seconds=5), self.T)
+            assert gov.content_attempts(s, trigger="BAND_TO_TRIM") == 1
