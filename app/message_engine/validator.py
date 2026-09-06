@@ -132,6 +132,7 @@ _COMMAND_PHRASES = (r"get\s+out|bail\s+out|cash\s+out|step\s+aside|"
 _SHORT_CLAUSE_WORDS = 4
 
 #: What follows a VERB, never a subject noun.
+_OBJECT_PRONOUNS = frozenset("me us you him her them it yourself ourselves".split())
 _DETERMINERS = frozenset("the a an your my our their its this that these those "
                          "all some any every each more another".split())
 
@@ -166,9 +167,12 @@ def _looks_imperative(clause: str, grounded: set[str]) -> bool:
     if raw.isupper() and 2 <= len(raw) <= 5:
         return False                      # a ticker (SPY, QQQ, TLT) is a subject
     head = raw.casefold()
-    if head in grounded:
-        return False                      # a fact value is a subject, not a verb
-    if head in _APPROVED_OPENERS:
+    if head in _APPROVED_OPENERS or head in grounded:
+        # ONE shape test for both. Round 1 exempted a grounded value outright
+        # ("a fact value is a subject"), which is the assumption SOTA-C named
+        # on #105 round 2: a band name is also a verb. The band-verb layer
+        # already refused "Hold 2 positions.", but the exemption was a hole
+        # waiting for a fact value that is a verb and not a band.
         # AN APPROVED OPENER FOLLOWED BY A DETERMINER IS A VERB. Several
         # approved nouns double as verbs - "text", "check", "flag", "score",
         # "level", "run" - and "Text your password." validated (panel on
@@ -176,8 +180,11 @@ def _looks_imperative(clause: str, grounded: set[str]) -> bool:
         # determiner ("Delivery the ..." is ungrammatical), while a verb and
         # its object always are. The library confirms it: no short clause it
         # writes has a determiner in second place.
+        # AN OBJECT PRONOUN IN SECOND PLACE IS ALSO A VERB. "Text me your
+        # password." put "me" where the determiner test looked (#105 round 2,
+        # SOTA-A). No noun subject is followed by me/us/them either.
         nxt = words[1].casefold().strip(",.;:") if len(words) > 1 else ""
-        return nxt in _DETERMINERS
+        return nxt in _DETERMINERS or nxt in _OBJECT_PRONOUNS
     return True
 
 
@@ -927,7 +934,17 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
                  text):
         return ValidationResult(False, FailureClass.CONTENT,
                                 "chained division denotes an ungrounded value")
-    for match in re.finditer(r"(\d+)\s*(/+)\s*(\d+)", text):
+    # WHOLE operands only. Matching bare digit runs took "0/4" out of the
+    # middle of "51.0/4.0" and found the declared pair (0, 4), admitting a
+    # quotient of 12.75 that no fact contains (#105 round 2, SOTA-A). A digit
+    # run touching a decimal point on either side is a fragment, not a number.
+    for match in re.finditer(
+            # The guards reject a DECIMAL CONTINUATION on either side
+            # (a digit before the dot, a digit after it) - not any dot,
+            # or the sentence-ending period in "Score 51.0/4.0." would
+            # stop the match and the slash would never be checked at all.
+            r"(?<!\d)(?<!\d\.)(\d+(?:\.\d+)?)\s*(/+)\s*(\d+(?:\.\d+)?)(?!\d)(?!\.\d)",
+            text):
         # Exactly ONE slash. "51//100" is floor division in most languages,
         # not the digest's score notation, and a declared scale must not
         # launder it (round 13, SOTA-A).

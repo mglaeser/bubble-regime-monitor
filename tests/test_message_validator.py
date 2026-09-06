@@ -606,3 +606,68 @@ class TestApprovedOpenerFollowedByADeterminer:
 
         assert "text" not in validator._DETERMINERS
         assert "your" in validator._DETERMINERS and "the" in validator._DETERMINERS
+
+
+class TestRoundTwoOn105:
+    """#105 round 2. Two SOTA-A findings confirmed; SOTA-C's scenario was
+    already refused by the band-verb layer, but the assumption it named was
+    real and is closed with the same rule."""
+
+    # ---- an object pronoun in second place is a verb, like a determiner ----
+
+    @pytest.mark.parametrize("message", [
+        "Text me your password.",         # the reviewer's exact case
+        "Check us the numbers.", "Send me the code.", "Text them the key.",
+        "Show us your holdings.",
+    ])
+    def test_an_indirect_object_does_not_evade_the_opener_test(self, message):
+        r = validate(message, channel=Channel.IMESSAGE, facts={}, **LIMITS)
+        assert not r.ok, f"{message!r} validated"
+
+    # ---- a grounded value that is a verb gets the same shape test ----------
+
+    @pytest.mark.parametrize("message", [
+        "Hold 2 positions.", "Hold your positions.", "Trim the exposure.",
+    ])
+    def test_a_grounded_band_name_used_as_a_verb_is_refused(self, message):
+        r = validate(message, channel=Channel.IMESSAGE, facts=dict(FACTS),
+                     **LIMITS)
+        assert not r.ok, f"{message!r} validated"
+
+    def test_a_grounded_band_name_as_a_state_still_passes(self):
+        r = validate("Band hold, next 14:00 UTC.", channel=Channel.IMESSAGE,
+                     facts=dict(FACTS), **LIMITS)
+        assert r.ok, r.reason
+
+    def test_a_grounded_opener_is_not_exempt_outright(self):
+        # The assumption SOTA-C named: "a fact value is a subject". It is a
+        # subject only when what follows is not an object.
+        from app.message_engine import validator
+
+        assert validator._looks_imperative("hold your positions", {"hold"})
+        assert not validator._looks_imperative("hold", {"hold"})
+
+    # ---- quotient operands are whole numbers, never decimal fragments ------
+
+    PAIRS = {"F_HEADLINE_MEDIAN": 51, "F_RF_COUNT": 0, "F_RF_REQUIRED": 4,
+             "score_scale_max": 100}
+
+    @pytest.mark.parametrize("message", [
+        "Score 51.0/4.0.",                # the reviewer's exact case: 12.75
+        "Score 51.0/4.", "Score 51/4.0.", "Score 51/4.",
+    ])
+    def test_a_decimal_fragment_cannot_form_a_declared_pair(self, message):
+        r = validate(message, channel=Channel.IMESSAGE, facts=dict(self.PAIRS),
+                     **LIMITS)
+        assert not r.ok, f"{message!r} validated"
+
+    @pytest.mark.parametrize("message", [
+        "Score 0/4.", "Score 51/100.", "Score 51/100, 0/4 flags.",
+        "0/4 flags, score 51/100.",       # the pair at the START of the text
+    ])
+    def test_the_declared_pairs_still_pass_with_a_sentence_period(self, message):
+        # My first regex rejected ANY dot after the operand, so the sentence's
+        # own period stopped the match and the slash was never checked.
+        r = validate(message, channel=Channel.IMESSAGE, facts=dict(self.PAIRS),
+                     **LIMITS)
+        assert r.ok, f"{message!r} refused: {r.reason}"
