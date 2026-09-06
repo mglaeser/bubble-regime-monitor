@@ -284,7 +284,7 @@ _ATTEMPT_BEFORE_BOUNDARY = case(
 
 
 def _pause_for(row: MessageEngineAttempt, *, settings: Settings, trigger: str | None,
-               retry_ok: bool, newest_id: int | None) -> int:
+               retry_ok: bool, open_since: datetime | None) -> int:
     """Seconds of quiet the given row imposes after its own completion.
 
     `retry_ok` is True only when the caller reports a format failure AND the
@@ -317,13 +317,40 @@ def _pause_for(row: MessageEngineAttempt, *, settings: Settings, trigger: str | 
     if (retry_ok
             and row.outcome == Outcome.FORMAT_REJECTED.value
             and row.trigger == trigger
-            and row.id == newest_id):
-        # The short pause is only earned when the newest row IS the
-        # format rejection being retried. Trusting the caller's hint alone
-        # let a format retry fire 30s after an unrelated trigger's OK row,
-        # straight through the global 300s floor (round 1, SOTA-C).
+            and (open_since is None or _dwell_from(row) > open_since)):
+        # The short pause is earned by EVERY format rejection of the OPEN
+        # compose - the one this retry continues - and by nothing else. Only
+        # the newest row earned it before, so the second format retry of one
+        # compose waited the full floor on its older sibling: one row class,
+        # two pauses, inside one gate (offline pass after round 9). A format
+        # row of a closed compose (C0) or of another trigger keeps the floor,
+        # and every OTHER row's pause still binds through the maximum, which
+        # is what stopped a retry firing 30s after an unrelated trigger's OK
+        # (round 1, SOTA-C). At a tie with the boundary the row is treated as
+        # closed: order unknowable, fail closed.
         return settings.message_engine_format_retry_s
     return settings.message_engine_min_interval_s
+
+
+def _open_since(session: Session, trigger: str | None, *,
+                exclude_id: int | None = None) -> datetime | None:
+    """Completion of the trigger's newest boundary row, i.e. when its current
+    compose began; None when the trigger has never had a boundary."""
+    if trigger is None:
+        return None
+    _completed = func.coalesce(MessageEngineAttempt.finished_at,
+                               MessageEngineAttempt.started_at)
+    stmt = (
+        select(MessageEngineAttempt)
+        .where(MessageEngineAttempt.trigger == trigger)
+        .where(MessageEngineAttempt.outcome.in_(
+            [Outcome.OK.value, Outcome.BUDGET_SKIPPED.value, Outcome.FALLBACK_USED.value])))
+    if exclude_id is not None:
+        stmt = stmt.where(MessageEngineAttempt.id != exclude_id)
+    row = session.execute(
+        stmt.order_by(_completed.desc(), MessageEngineAttempt.id.desc()).limit(1)
+    ).scalars().first()
+    return None if row is None else _dwell_from(row)
 
 
 def pacing_deadline(session: Session, *, settings: Settings, trigger: str | None,
@@ -373,11 +400,11 @@ def pacing_deadline(session: Session, *, settings: Settings, trigger: str | None
         spent = content_attempts(session, trigger=trigger, exclude_id=exclude_id,
                                  limit=_effective_cap(settings) + 1)
     retry_ok = last_failure == "format" and spent >= 1
-    newest_id = rows[0].id
+    open_since = _open_since(session, trigger, exclude_id=exclude_id) if retry_ok else None
     best: tuple[datetime, int] | None = None
     for row in rows:
         pause = _pause_for(row, settings=settings, trigger=trigger,
-                           retry_ok=retry_ok, newest_id=newest_id)
+                           retry_ok=retry_ok, open_since=open_since)
         ready = _dwell_from(row) + timedelta(seconds=pause)
         if best is None or ready > best[0]:
             best = (ready, pause)
@@ -528,8 +555,16 @@ def consecutive_strikes(session: Session, *, limit: int = 50,
     # re-reading of history: once the marker lands it is history, the compose
     # is closed, and the open-compose count for that trigger drops to zero,
     # so a compose is never counted twice. Round 11's concern (counting `cap`
-    # rejections per PAST strike made history mutable) does not arise: closed
-    # composes are counted by their markers only.
+    # rejections per PAST strike made history mutable) does not arise for
+    # closed composes: they are counted by their markers only. An OPEN
+    # compose's strike IS provisional - raise the cap and it is no longer
+    # exhausted, lower it and it is - exactly as the cap gate treats the same
+    # open compose (offline pass after round 9, critic). The marker is what
+    # makes the strike a fact, and the writer records it at the exhausting
+    # rejection, so the provisional state lasts only as long as a failed
+    # marker write. That is accepted: the alternative, counting an open
+    # compose under the cap it was rejected under, needs a cap the rows do
+    # not store.
     if settings is not None:
         run += len(_exhausted_open_composes(session, settings=settings,
                                             exclude_id=exclude_id))
@@ -664,7 +699,7 @@ def strike_anchor(session: Session, *, settings: Settings,
     return max(candidates) if candidates else None
 
 
-def _short_circuit(priority: int, settings: Settings) -> Decision | None:
+def short_circuit(priority: int, settings: Settings) -> Decision | None:
     """The verdicts that need NO database work — not a query, not a session.
 
     A P1 is the message that must arrive, and the answer for one is always
@@ -689,7 +724,10 @@ def _probe_after(session: Session, resume: datetime, *,
     stmt = (
         select(MessageEngineAttempt)
         .where(MessageEngineAttempt.outcome.in_([o.value for o in _PACING_OUTCOMES]))
-        .where(_completed > _naive_utc(resume)))
+        # `>=`: a probe made at the very instant the cooldown ended is the
+        # probe; excluding the tie admitted a second one (offline pass after
+        # round 9, critic). Every other bound in this module counts the tie.
+        .where(_completed >= _naive_utc(resume)))
     if exclude_id is not None:
         stmt = stmt.where(MessageEngineAttempt.id != exclude_id)
     return session.execute(
@@ -789,6 +827,55 @@ def spend_today(session: Session, *, now: datetime | None = None,
     return int(session.execute(stmt).scalar_one())
 
 
+def breaker_refusal(session: Session, *, settings: Settings, trigger: str | None,
+                    now: datetime, exclude_id: int | None = None) -> Decision | None:
+    """The breaker's verdict for one request, or None when it does not refuse.
+
+    ONE judgement, shared by `decide` and `breaker_is_open`. The health view
+    implemented only "strikes at threshold and inside the cooldown" and knew
+    nothing of the half-open probe rule, so it reported the breaker closed
+    while `decide` was refusing every trigger but the probe's (offline pass
+    after round 9, executed). Two functions describing one state must share
+    the code that describes it.
+
+    Open: strikes at or above the threshold and the cooldown, measured from
+    the newest strike (`strike_anchor`, round 7 and after), not yet elapsed.
+    Half-open: the cooldown has elapsed and ONE probe is allowed; its outcome
+    either resets the run (an OK) or re-opens the breaker (a strike). A probe
+    still in flight, or a rejected probe whose compose is still open, holds
+    the half-open breaker for every other trigger; the probe's own trigger
+    may continue its compose to a conclusion. A probe that neither concluded
+    nor continued within the claim TTL is abandoned — neither a reset nor a
+    strike — and the next probe may go.
+    """
+    strikes = consecutive_strikes(
+        session, limit=_strike_window(settings), exclude_id=exclude_id,
+        settings=settings)
+    if strikes < _effective_strikes(settings):
+        return None
+    anchor = strike_anchor(session, settings=settings, exclude_id=exclude_id)
+    if anchor is None:
+        return None
+    resume = anchor + timedelta(seconds=settings.message_engine_breaker_cooldown_s)
+    if now < resume:
+        return Decision(Verdict.USE_FALLBACK,
+                        f"breaker open after {strikes} consecutive strikes "
+                        "(exhausted composes or technical failures)",
+                        retry_after=resume)
+    probe = _probe_after(session, resume, exclude_id=exclude_id)
+    if probe is None:
+        return None
+    continuing = (trigger is not None and probe.trigger == trigger
+                  and probe.outcome in (Outcome.CONTENT_REJECTED.value,
+                                        Outcome.FORMAT_REJECTED.value))
+    abandoned_at = _dwell_from(probe) + timedelta(seconds=_CLAIM_TTL_S)
+    if continuing or now >= abandoned_at:
+        return None
+    return Decision(Verdict.USE_FALLBACK,
+                    "breaker half-open: a probe is in progress",
+                    retry_after=abandoned_at)
+
+
 def decide(session: Session, *, priority: int, settings: Settings,
            trigger: str | None = None, iteration: int = 1,
            last_failure: str | None = None, now: datetime | None = None,
@@ -817,7 +904,7 @@ def decide(session: Session, *, priority: int, settings: Settings,
     """
     moment = _now(now)
 
-    short = _short_circuit(priority, settings)
+    short = short_circuit(priority, settings)
     if short is not None:
         return short
 
@@ -828,43 +915,10 @@ def decide(session: Session, *, priority: int, settings: Settings,
     # The scan must be long enough to SEE the strikes: a content strike costs
     # up to `max_content_iterations` rows, so the window is sized for the
     # worst case rather than for one row per strike (ruling Q38).
-    strikes = consecutive_strikes(
-        session, limit=_strike_window(settings), exclude_id=exclude_id,
-        settings=settings)
-    if strikes >= _effective_strikes(settings):
-        # Anchored on the newest STRIKE, not the newest pacing row (#106
-        # round 7): see `strike_anchor`.
-        anchor = strike_anchor(session, settings=settings, exclude_id=exclude_id)
-        if anchor is not None:
-            resume = anchor + timedelta(
-                seconds=settings.message_engine_breaker_cooldown_s)
-            if moment < resume:
-                return Decision(Verdict.USE_FALLBACK,
-                                f"breaker open after {strikes} consecutive "
-                                "strikes (exhausted composes or technical "
-                                "failures)",
-                                retry_after=resume)
-            # Cooldown elapsed: ONE probe is allowed, and its outcome either
-            # resets the run (an OK) or re-opens the breaker (a strike). The
-            # comment used to say so while the code let every trigger ask at
-            # the pacing rate until one of them happened to strike (offline
-            # review before round 8, the critic's prediction). A probe that
-            # is still in flight, or whose compose was rejected and is still
-            # open, holds the half-open breaker for everyone else; the probe's
-            # own trigger may continue its compose to a conclusion. A probe
-            # that neither concluded nor continued within the claim TTL is
-            # abandoned — neither a reset nor a strike — and the next probe
-            # may go.
-            probe = _probe_after(session, resume, exclude_id=exclude_id)
-            if probe is not None:
-                continuing = (probe.trigger == trigger
-                              and probe.outcome in (Outcome.CONTENT_REJECTED.value,
-                                                    Outcome.FORMAT_REJECTED.value))
-                abandoned_at = _dwell_from(probe) + timedelta(seconds=_CLAIM_TTL_S)
-                if not continuing and moment < abandoned_at:
-                    return Decision(Verdict.USE_FALLBACK,
-                                    "breaker half-open: a probe is in progress",
-                                    retry_after=abandoned_at)
+    refusal = breaker_refusal(session, settings=settings, trigger=trigger,
+                              now=moment, exclude_id=exclude_id)
+    if refusal is not None:
+        return refusal
 
     # The cap is derived from ROWS, not taken on trust: a caller that passes
     # iteration=1 on its fourth content attempt would otherwise be handed a
@@ -909,16 +963,10 @@ def breaker_is_open(session: Session, *, settings: Settings,
     # calling this directly saw expired claims as "no strikes" and reported
     # the breaker closed (round 17, SOTA-A).
     reap_stale_claims(session, now=now)
-    strikes = consecutive_strikes(session, limit=_strike_window(settings),
-                                  settings=settings)
-    if strikes < _effective_strikes(settings):
-        return False
-    anchor = strike_anchor(session, settings=settings)
-    if anchor is None:
-        return False
-    resume = anchor + timedelta(
-        seconds=settings.message_engine_breaker_cooldown_s)
-    return _now(now) < resume
+    # The same judgement `decide` makes for a fresh trigger: open, or
+    # half-open with a probe in progress, both refuse.
+    return breaker_refusal(session, settings=settings, trigger=None,
+                           now=_now(now)) is not None
 
 
 #: How the engine opens its own short transactions. A parameter so tests can
@@ -1020,7 +1068,7 @@ def reserve(*, trigger: str, channel: str, priority: int, settings: Settings,
     across the call. Callers must use this, not `decide`, before touching the
     gateway; `decide` stays public for read-only inspection.
     """
-    short = _short_circuit(priority, settings)
+    short = short_circuit(priority, settings)
     if short is not None:
         return short, None
     moment = _now(now)

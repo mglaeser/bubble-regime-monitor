@@ -1002,3 +1002,77 @@ class TestRoundNineOn106:
             assert outcomes.count(gov.Outcome.FALLBACK_USED.value) == 1, outcomes
             assert outcomes.count(gov.Outcome.NOT_ASKED.value) == 2, outcomes
             assert gov.consecutive_strikes(s, settings=settings) == 1
+
+
+class TestRoundNineOffline:
+    """Targeted offline pass after the round-9 fixes (three lenses, two
+    executing verifiers each, plus the critic's own executed probes).
+    """
+
+    T = datetime(2026, 9, 6, 12, 0, 0)
+
+    def _row(self, s, outcome, started_s, finished_s, trigger, iteration=1):
+        r = MessageEngineAttempt(
+            trigger=trigger, channel="imessage", priority=2,
+            started_at=self.T + timedelta(seconds=started_s),
+            finished_at=self.T + timedelta(seconds=finished_s),
+            outcome=outcome.value, iteration=iteration)
+        s.add(r)
+        s.commit()
+        return r.id
+
+    def _at(self, seconds):
+        return (self.T + timedelta(seconds=seconds)).replace(tzinfo=UTC)
+
+    def test_breaker_is_open_agrees_with_decide_while_a_probe_is_in_progress(self):
+        settings = _settings()
+        with session_scope() as s:
+            for k in range(5):
+                self._row(s, gov.Outcome.TECHNICAL_ERROR, 600 * k - 5, 600 * k, "A")
+            resume = 2400 + 86_400
+            self._row(s, gov.Outcome.CONTENT_REJECTED, resume + 1, resume + 6, "B")
+            now = self._at(resume + 316)
+            d = gov.decide(s, priority=2, settings=settings, trigger="C", now=now)
+            assert d.verdict is gov.Verdict.USE_FALLBACK and "half-open" in d.reason, d
+            assert gov.breaker_is_open(s, settings=settings, now=now)
+            # ... and agrees again once the probe is abandoned.
+            later = self._at(resume + 6 + gov._CLAIM_TTL_S + 1)
+            assert gov.decide(s, priority=2, settings=settings, trigger="C", now=later).may_ask
+            assert not gov.breaker_is_open(s, settings=settings, now=later)
+
+    def test_every_format_rejection_of_one_open_compose_earns_the_retry(self):
+        settings = _settings()
+        with session_scope() as s:
+            self._row(s, gov.Outcome.FORMAT_REJECTED, 0, 1, "X", iteration=1)
+            self._row(s, gov.Outcome.FORMAT_REJECTED, 31, 32, "X", iteration=2)
+            d = gov.decide(s, priority=2, settings=settings, trigger="X", iteration=3,
+                           last_failure="format", now=self._at(63))
+            assert d.may_ask, d
+        decision, claim_id = gov.reserve(trigger="X", channel="imessage", priority=2,
+                                         settings=settings, now=self._at(63))
+        assert decision.may_ask and claim_id is not None, decision
+        # A format row of a CLOSED compose, or of another trigger, still
+        # imposes the floor (C0, round 1).
+        with session_scope() as s:
+            self._row(s, gov.Outcome.FORMAT_REJECTED, 1000, 1001, "Y", iteration=1)
+            self._row(s, gov.Outcome.FALLBACK_USED, 1002, 1002, "Y")
+            d = gov.decide(s, priority=2, settings=settings, trigger="Y", iteration=1,
+                           last_failure="format", now=self._at(1040))
+            assert d.verdict is gov.Verdict.WAIT, d
+
+    def test_a_probe_made_exactly_at_resume_is_still_the_probe(self):
+        settings = _settings()
+        with session_scope() as s:
+            for k in range(5):
+                self._row(s, gov.Outcome.TECHNICAL_ERROR, 600 * k - 5, 600 * k, "A")
+            resume = 2400 + 86_400
+            # Zero-elapsed probe at exactly the cooldown's end.
+            self._row(s, gov.Outcome.CONTENT_REJECTED, resume, resume, "B")
+            d = gov.decide(s, priority=2, settings=settings, trigger="C",
+                           now=self._at(resume + 316))
+            assert d.verdict is gov.Verdict.USE_FALLBACK and "half-open" in d.reason, d
+
+    def test_short_circuit_is_public_and_touches_nothing(self):
+        assert gov.short_circuit(gov.P1, _settings()) is not None
+        assert gov.short_circuit(2, _settings(message_engine_enabled=False)) is not None
+        assert gov.short_circuit(2, _settings()) is None
