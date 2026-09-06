@@ -520,3 +520,52 @@ class TestRoundFiveOn106:
                             iteration=2 if hint else 1, last_failure=hint,
                             now=(self.T + timedelta(seconds=601)).replace(tzinfo=UTC))
             assert d2.may_ask, f"still refused after the backoff: {d2.reason}"
+
+
+class TestRoundSixOn106:
+    """#106 round 6 (SOTA-A): zero-weight rows consumed the finite strike window.
+
+    The scan fetched rejection rows only to ignore them (the pending counter
+    was never read), yet each one occupied a slot of the LIMIT. Enough
+    rejections newer than five technical errors pushed the errors out of the
+    window and the breaker reported closed. Round 13 fixed exactly this for
+    BUDGET_SKIPPED and round 9 for IN_FLIGHT: a row that must not affect the
+    answer must not occupy a slot. Rejections now never enter the scan set, so
+    the window bounds STRIKES, and a strike count at or above the threshold
+    can never be hidden by rows that are not strikes.
+    """
+
+    T = datetime(2026, 9, 6, 12, 0, 0)
+
+    def _row(self, s, outcome, offset_s, trigger="BAND_TO_TRIM"):
+        r = MessageEngineAttempt(trigger=trigger, channel="imessage", priority=2,
+                                 started_at=self.T + timedelta(seconds=offset_s - 1),
+                                 finished_at=self.T + timedelta(seconds=offset_s),
+                                 outcome=outcome.value, iteration=1)
+        s.add(r)
+        s.commit()
+
+    def test_rejections_newer_than_the_strikes_do_not_hide_them(self):
+        with session_scope() as s:
+            for i in range(5):
+                self._row(s, gov.Outcome.TECHNICAL_ERROR, i)
+            # Spread over triggers so no trigger reaches the content cap: the
+            # breaker, not the cap, must be what refuses.
+            for j in range(20):
+                self._row(s, gov.Outcome.FORMAT_REJECTED, 100 + j, trigger=f"T{j}")
+            # A window of ten rows: twenty rejections fill it before a single
+            # technical error is reached. The strikes are there regardless.
+            assert gov.consecutive_strikes(s, limit=10) == 5
+            settings = _settings()
+            d = gov.decide(s, priority=2, settings=settings, trigger="BAND_TO_TRIM",
+                           iteration=1, now=(self.T + timedelta(seconds=1000)).replace(tzinfo=UTC))
+            assert d.verdict is gov.Verdict.USE_FALLBACK and "breaker" in d.reason, d.reason
+
+    def test_a_success_still_ends_the_run(self):
+        with session_scope() as s:
+            for i in range(5):
+                self._row(s, gov.Outcome.TECHNICAL_ERROR, i)
+            self._row(s, gov.Outcome.OK, 50)
+            for j in range(3):
+                self._row(s, gov.Outcome.FORMAT_REJECTED, 100 + j)
+            assert gov.consecutive_strikes(s, limit=10) == 0

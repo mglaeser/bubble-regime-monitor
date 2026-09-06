@@ -398,9 +398,19 @@ def consecutive_strikes(session: Session, *, limit: int = 50,
     # first by id, it hit `break` and truncated five tied technical errors to
     # zero strikes (#106 round 2, SOTA-A). Order at a tie is unknowable, so
     # the tied strikes count and the tied success does not reset them.
-    strike_outcomes = (Outcome.FORMAT_REJECTED,
-                       Outcome.CONTENT_REJECTED, Outcome.TECHNICAL_ERROR,
-                       Outcome.FALLBACK_USED)
+    # ONLY rows that ARE strikes enter the scan. Rejections were fetched too,
+    # and ignored by the loop below — but every one of them occupied a slot
+    # of the LIMIT, so enough rejections newer than the strikes pushed the
+    # strikes out of the window and the breaker reported closed (#106 round
+    # 6, SOTA-A: "finite strike window counts zero-weight rejects before
+    # LIMIT"). Executed at the real constant: five technical errors under
+    # 1,000,000 newer format rejections counted ZERO strikes. This is the
+    # round-13 doctrine (a row that must not affect the answer must not
+    # occupy a slot in the window) applied to the last row class that
+    # violated it. With rejections gone, every fetched row is a strike, so
+    # the LIMIT bounds the COUNT — and a count at or above the threshold can
+    # never be hidden by rows that are not strikes.
+    strike_outcomes = (Outcome.TECHNICAL_ERROR, Outcome.FALLBACK_USED)
     # Bound the scan by DATA: only rows after the last success can belong to
     # the current run, because a success is the only thing that resets it.
     # This is what makes the window independent of every setting.
@@ -418,7 +428,7 @@ def consecutive_strikes(session: Session, *, limit: int = 50,
     ).first()
 
     stmt = (
-        select(MessageEngineAttempt.outcome, MessageEngineAttempt.iteration)
+        select(MessageEngineAttempt.id)
         .where(MessageEngineAttempt.outcome.in_(
             [o.value for o in strike_outcomes])))
     if last_ok is not None:
@@ -438,41 +448,17 @@ def consecutive_strikes(session: Session, *, limit: int = 50,
             | ((_completed == ok_at) & (MessageEngineAttempt.id != ok_id)))
     if exclude_id is not None:
         stmt = stmt.where(MessageEngineAttempt.id != exclude_id)
-    rows = session.execute(
-        stmt.order_by(_completed.desc(),
-                      MessageEngineAttempt.id.desc()).limit(limit)
-    ).all()
-    run = 0
-    pending_rejects = 0
-    for outcome, _iteration in rows:
-        if outcome == Outcome.TECHNICAL_ERROR.value:
-            # A terminal technical failure is a strike on its own.
-            pending_rejects = 0
-            run += 1
-        elif outcome == Outcome.FALLBACK_USED.value:
-            # The engine gives up here. Scanning backwards, the rejects that
-            # belong to this compose come NEXT, so mark that they are now
-            # attributable to a finished compose.
-            pending_rejects = 0
-            run += 1
-        elif outcome in (Outcome.CONTENT_REJECTED.value,
-                         Outcome.FORMAT_REJECTED.value):
-            # Rejects seen BEFORE any fallback marker belong to a compose
-            # that has not ended yet — an in-flight compose must not strike.
-            # Rejects after one were already counted by that marker.
-            #
-            # This replaces counting `cap` rejects per strike, which made the
-            # past MUTABLE: widening the cap from 3 to 4 regrouped five
-            # exhausted composes into three strikes and REOPENED a breaker
-            # that had legitimately tripped (round 11, SOTA-A). Ruling Q38
-            # counts an exhausted ATTEMPT, and the fallback row is where the
-            # engine records exactly that — independent of any cap, then or
-            # now.
-            pending_rejects += 1
-        else:
-            break
-    _ = pending_rejects
-    return run
+    # A terminal technical failure is a strike on its own; a FALLBACK_USED
+    # row is where the engine records an exhausted compose (ruling Q38), so
+    # it is a strike independent of any cap, then or now — counting `cap`
+    # rejects per strike made the past MUTABLE: widening the cap from 3 to 4
+    # regrouped five exhausted composes into three strikes and REOPENED a
+    # breaker that had legitimately tripped (round 11, SOTA-A). The rejects
+    # of an unfinished compose are not strikes and are no longer read at all.
+    newest = (stmt.order_by(_completed.desc(), MessageEngineAttempt.id.desc())
+              .limit(limit).subquery())
+    run = session.execute(select(func.count()).select_from(newest)).scalar()
+    return int(run or 0)
 
 
 def content_attempts(session: Session, *, trigger: str | None,
