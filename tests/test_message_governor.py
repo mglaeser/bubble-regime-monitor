@@ -401,3 +401,41 @@ class TestRoundTwoOn106:
                       self.T - timedelta(seconds=60), self.T + timedelta(seconds=1))
             self._row(s, gov.Outcome.OK, self.T - timedelta(seconds=5), self.T)
             assert gov.content_attempts(s, trigger="BAND_TO_TRIM") == 1
+
+
+
+class TestRoundThreeOn106:
+    """#106 round 3 (SOTA-A): two consequences of the round-2 tie fixes."""
+
+    T = datetime(2026, 9, 6, 12, 0, 0)
+
+    def _row(self, s, outcome, started, finished):
+        r = MessageEngineAttempt(trigger="BAND_TO_TRIM", channel="imessage", priority=2,
+                                 started_at=started, finished_at=finished,
+                                 outcome=outcome.value, iteration=1)
+        s.add(r)
+        s.commit()
+        return r.id
+
+    @pytest.mark.parametrize("first", ["ok", "format"])
+    def test_a_format_rejection_tied_with_a_success_keeps_the_floor(self, first):
+        # Round 2 ranked OK lowest, so the format retry asked at T+31s straight
+        # through the success's 300s floor - in either reservation order.
+        with session_scope() as s:
+            a, b = (gov.Outcome.OK, gov.Outcome.FORMAT_REJECTED)
+            if first == "format":
+                a, b = b, a
+            self._row(s, a, self.T - timedelta(seconds=5), self.T)
+            self._row(s, b, self.T - timedelta(seconds=4), self.T)
+            d = gov.decide(s, priority=2, settings=_settings(), trigger="BAND_TO_TRIM",
+                           iteration=2, last_failure="format",
+                           now=(self.T + timedelta(seconds=31)).replace(tzinfo=UTC))
+            assert not d.may_ask, f"asked through the floor: {d.reason}"
+
+    def test_a_tied_rejection_is_counted_before_the_boundary_breaks(self):
+        # A later-reserved OK finishing in the same instant as an
+        # earlier-reserved rejection hid it, admitting one request past the cap.
+        with session_scope() as s:
+            self._row(s, gov.Outcome.CONTENT_REJECTED, self.T - timedelta(seconds=60), self.T)
+            self._row(s, gov.Outcome.OK, self.T - timedelta(seconds=5), self.T)
+            assert gov.content_attempts(s, trigger="BAND_TO_TRIM") == 1

@@ -220,11 +220,27 @@ def reap_stale_claims(session: Session, *, now: datetime | None = None) -> int:
 
 #: Longer pause first. Only meaningful among rows that completed in the same
 #: instant; every other ordering is by completion time.
+#: The ONLY short pause is the format retry. OK, a content rejection and a
+#: technical error all impose the full floor (the technical backoff is
+#: max(floor, backoff)), so at a completion tie anything but FORMAT_REJECTED
+#: must win. Round 2's version ranked OK LOWEST, so a format rejection tied
+#: with a success asked at T+31s straight through the success's 300s floor
+#: (#106 round 3, SOTA-A).
 _PAUSE_RANK = case(
-    (MessageEngineAttempt.outcome == Outcome.TECHNICAL_ERROR.value, 3),
-    (MessageEngineAttempt.outcome == Outcome.CONTENT_REJECTED.value, 2),
-    (MessageEngineAttempt.outcome == Outcome.FORMAT_REJECTED.value, 1),
-    else_=0,
+    (MessageEngineAttempt.outcome == Outcome.FORMAT_REJECTED.value, 0),
+    else_=1,
+)
+
+#: At a completion tie, an ATTEMPT sorts before a compose BOUNDARY, so the
+#: content-cap scan meets the tied rejection before the boundary breaks it.
+#: Round 2 kept the id tie-break here, and a later-reserved OK hid an
+#: earlier-reserved rejection that finished in the same instant, admitting one
+#: request past the cap (#106 round 3, SOTA-A). Unknowable order fails closed.
+_ATTEMPT_BEFORE_BOUNDARY = case(
+    (MessageEngineAttempt.outcome.in_([Outcome.OK.value,
+                                       Outcome.BUDGET_SKIPPED.value,
+                                       Outcome.FALLBACK_USED.value]), 0),
+    else_=1,
 )
 
 
@@ -430,6 +446,7 @@ def content_attempts(session: Session, *, trigger: str | None,
         # one request too many (#106 round 2, SOTA-A).
         stmt.order_by(func.coalesce(MessageEngineAttempt.finished_at,
                                     MessageEngineAttempt.started_at).desc(),
+                      _ATTEMPT_BEFORE_BOUNDARY.desc(),
                       MessageEngineAttempt.id.desc()).limit(limit)
     ).scalars().all()
     spent = 0
