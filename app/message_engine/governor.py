@@ -23,14 +23,17 @@ One rule overrides all of them: a P1 never waits. See `Decision.for_priority`.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
-from sqlalchemy import case, func, select
+from sqlalchemy import case, func, select, update
 from sqlalchemy.orm import Session
 
 from app.config import Settings
+from app.db import immediate_session_scope
 from app.models import MessageEngineAttempt
 
 #: Priority 1 — the message that must arrive. Mirrors app.alerts.enums.Priority
@@ -643,6 +646,23 @@ def strike_anchor(session: Session, *, settings: Settings,
     return max(candidates) if candidates else None
 
 
+def _short_circuit(priority: int, settings: Settings) -> Decision | None:
+    """The verdicts that need NO database work — not a query, not a session.
+
+    A P1 is the message that must arrive, and the answer for one is always
+    the same — send the deterministic text — so it must not sit behind a
+    reap, a flush or a lock. Ordering these checks after the reaping made a
+    busy or unavailable database able to delay, or fail, the one message
+    class that may never wait (round 19, SOTA-A). Shared by `decide` and
+    `reserve` so neither can drift.
+    """
+    if not settings.message_engine_enabled:
+        return Decision(Verdict.USE_FALLBACK, "engine disabled")
+    if priority == P1:
+        return Decision(Verdict.USE_FALLBACK, "P1 renders deterministically")
+    return None
+
+
 def _probe_after(session: Session, resume: datetime, *,
                  exclude_id: int | None = None) -> MessageEngineAttempt | None:
     """The newest request made since the cooldown ended, if any."""
@@ -779,15 +799,9 @@ def decide(session: Session, *, priority: int, settings: Settings,
     """
     moment = _now(now)
 
-    # BEFORE any database work. A P1 is the message that must arrive, and the
-    # answer for one is always the same — send the deterministic text — so it
-    # must not sit behind a reap, a flush or a lock. Ordering these checks
-    # after the reaping made a busy or unavailable database able to delay, or
-    # fail, the one message class that may never wait (round 19, SOTA-A).
-    if not settings.message_engine_enabled:
-        return Decision(Verdict.USE_FALLBACK, "engine disabled")
-    if priority == P1:
-        return Decision(Verdict.USE_FALLBACK, "P1 renders deterministically")
+    short = _short_circuit(priority, settings)
+    if short is not None:
+        return short
 
     # Resolve claims a dead worker left behind; they distort every gate below
     # (round 9, SOTA-C).
@@ -889,55 +903,188 @@ def breaker_is_open(session: Session, *, settings: Settings,
     return _now(now) < resume
 
 
-def reserve(session: Session, *, trigger: str, channel: str, priority: int,
-            settings: Settings, iteration: int = 1,
-            last_failure: str | None = None, now: datetime | None = None
-            ) -> tuple[Decision, MessageEngineAttempt | None]:
-    """Decide AND claim the slot in one atomic step.
+#: How the engine opens its own short transactions. A parameter so tests can
+#: substitute a scope; production always uses `immediate_session_scope`.
+SessionScope = Callable[[], AbstractContextManager[Session]]
+
+
+def last_failure_class(session: Session, trigger: str) -> str | None:
+    """How the previous attempt for this trigger failed, if it did.
+
+    Read from the rows rather than carried across invocations in a flag a
+    restart would lose. Ordered by COMPLETION like every other scan here; the
+    composer's copy of this ordered by start (offline review before round 8,
+    critic). NOT_ASKED rows are invisible: a refusal says nothing about the
+    model's last answer. `_pause_for` still requires the format row to be the
+    newest pacing row of an OPEN compose before the hint earns anything.
+    """
+    _completed = func.coalesce(MessageEngineAttempt.finished_at,
+                               MessageEngineAttempt.started_at)
+    outcome = session.execute(
+        select(MessageEngineAttempt.outcome)
+        .where(MessageEngineAttempt.trigger == trigger,
+               MessageEngineAttempt.outcome != Outcome.NOT_ASKED.value)
+        .order_by(_completed.desc(), MessageEngineAttempt.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    if outcome == Outcome.FORMAT_REJECTED.value:
+        return "format"
+    if outcome == Outcome.CONTENT_REJECTED.value:
+        return "content"
+    return None
+
+
+def compose_is_exhausted(trigger: str, *, settings: Settings,
+                         scope: SessionScope = immediate_session_scope) -> bool:
+    """Has this trigger's OPEN compose reached the cap?
+
+    The writer asks this right after recording a rejection, so the exhausted
+    -compose marker (FALLBACK_USED) lands at the instant of exhaustion — not
+    when the trigger next fires. Rounds C4/C5 of the offline review are what
+    a late marker costs: strikes the scan cannot see, and a cooldown restarted
+    by bookkeeping.
+    """
+    cap = _effective_cap(settings)
+    if cap < 1:
+        return False
+    with scope() as s:
+        return content_attempts(s, trigger=trigger, limit=cap + 1) >= cap
+
+
+def reserve(*, trigger: str, channel: str, priority: int, settings: Settings,
+            iteration: int | None = None, last_failure: str | None = None,
+            now: datetime | None = None,
+            scope: SessionScope = immediate_session_scope
+            ) -> tuple[Decision, int | None]:
+    """Decide AND claim the slot in one atomic, DURABLE step.
 
     `decide` alone is advisory: two workers can both read an empty-enough
     history, both conclude ASK, and both call the model inside the 300-second
-    floor or above the daily cap (round 1, SOTA-A). The gap is unavoidable
-    while the check and the claim are separate acts, so the claim has to
-    become part of the checked state.
+    floor or above the daily cap (round 1, SOTA-A). The claim has to be part
+    of the checked state, so it is written before the decision is read.
 
-    The claim is INSERTED FIRST, inside a savepoint. That is what takes the
-    database's write lock — SQLite upgrades on the first write, and a
-    concurrent caller then either blocks until this transaction resolves and
-    sees the row, or fails to acquire the lock. The gates are then evaluated
-    with this row excluded (it would otherwise pace itself), and the savepoint
-    is rolled back when the answer is not ASK, so nothing is written unless
-    the engine really is about to call the model.
+    THE ENGINE OWNS ITS TRANSACTIONS. Until the offline review before #106
+    round 8 (C6, executed by two verifiers) the claim was inserted into the
+    CALLER's session and never committed before the model call: a worker
+    that died mid-call rolled the claim back with the caller's transaction,
+    so no row existed for the reaper to find — pacing, budget and breaker all
+    missed the request — and SQLite's write lock was held for the whole call,
+    blocking every other writer. Round 32 had tried committing the caller's
+    session and rounds 39-41 rightly reverted it: a library must not commit
+    its caller's work. So the claim is written on a session of its own:
 
-    Callers must use this, not `decide`, before touching the gateway.
-    `decide` stays public for read-only inspection (health, tests).
+    1. A short transaction reaps stale claims and commits (the round-10
+       guarantee that reaping outlives a refused claim, kept).
+    2. A short BEGIN IMMEDIATE transaction inserts the IN_FLIGHT claim,
+       evaluates every gate with that row excluded (it would otherwise pace
+       itself), and COMMITS on ASK — the claim is durable before any network
+       call — or rolls back, writing nothing, on any other verdict. BEGIN
+       IMMEDIATE takes the single-writer reservation first, so a concurrent
+       reserve() waits on busy_timeout and then SEES the committed claim,
+       which holds pacing for the claim TTL (fail-closed).
+
+    `iteration` and `last_failure` are derived from the rows inside that same
+    transaction when the caller does not supply them, so the caller's hint
+    can never be staler than the rows (C2).
+
+    Returns the claim's id, never the row: the caller resolves it by id with
+    `resolve()` from any session, after the call, and holds no transaction
+    across the call. Callers must use this, not `decide`, before touching the
+    gateway; `decide` stays public for read-only inspection.
     """
-    # A P1 short-circuits before ANY database work, for the same reason as in
-    # `decide()`: the verdict is already known and must not wait on a lock.
-    if priority == P1 or not settings.message_engine_enabled:
-        return decide(session, priority=priority, settings=settings,
-                      trigger=trigger, iteration=iteration,
-                      last_failure=last_failure, now=now), None
+    short = _short_circuit(priority, settings)
+    if short is not None:
+        return short, None
+    moment = _now(now)
+    with scope() as s:
+        reap_stale_claims(s, now=moment)
+    with scope() as s:
+        row = MessageEngineAttempt(
+            trigger=trigger, channel=channel, priority=priority,
+            started_at=_naive_utc(moment),
+            outcome=Outcome.IN_FLIGHT.value, iteration=iteration or 1)
+        s.add(row)
+        s.flush()
+        if iteration is None:
+            iteration = content_attempts(s, trigger=trigger, exclude_id=row.id,
+                                         limit=_effective_cap(settings) + 1) + 1
+            row.iteration = iteration
+        if last_failure is None:
+            last_failure = last_failure_class(s, trigger)
+        decision = decide(s, priority=priority, settings=settings,
+                          trigger=trigger, iteration=iteration,
+                          last_failure=last_failure, now=moment, exclude_id=row.id)
+        if not decision.may_ask:
+            s.rollback()
+            return decision, None
+        claim_id = int(row.id)
+    return decision, claim_id
 
-    # Reap BEFORE the savepoint. `decide()` reaps too, but inside `reserve()`
-    # that call sits within the nested transaction — so a non-ASK verdict
-    # rolled the reaping back with the claim, restoring the very IN_FLIGHT
-    # rows that had just been recognised as failures, and `breaker_is_open`
-    # then reported closed (round 10, SOTA-A).
-    reap_stale_claims(session, now=now)
 
-    savepoint = session.begin_nested()
-    row = MessageEngineAttempt(
-        trigger=trigger, channel=channel, priority=priority,
-        started_at=_naive_utc(_now(now)),
-        outcome=Outcome.IN_FLIGHT.value, iteration=iteration)
-    session.add(row)
-    session.flush()  # the write lock is held from here
+def resolve(claim_id: int, *, outcome: Outcome, reason: str | None,
+            finished_at: datetime, text: str | None = None,
+            source: str | None = None,
+            scope: SessionScope = immediate_session_scope) -> bool:
+    """Close a claim by id, in a transaction of its own.
 
-    decision = decide(session, priority=priority, settings=settings,
-                      trigger=trigger, iteration=iteration,
-                      last_failure=last_failure, now=now, exclude_id=row.id)
-    if not decision.may_ask:
-        savepoint.rollback()
-        return decision, None
-    return decision, row
+    Only an IN_FLIGHT row is updated: if the reaper already resolved the
+    claim as a technical error (the call outran `_CLAIM_TTL_S`), that strike
+    stands and False is returned — a late success must not erase a recorded
+    failure (fail-closed). The caller holds no transaction across the model
+    call, so this is the first write after it.
+    """
+    values: dict[str, object] = {
+        "outcome": outcome.value,
+        "failure_reason": (reason or "")[:200] or None,
+        "finished_at": _naive_utc(finished_at),
+    }
+    if text is not None:
+        values.update(message=text, source=source, code_points=len(text))
+    with scope() as s:
+        result = s.execute(
+            update(MessageEngineAttempt)
+            .where(MessageEngineAttempt.id == claim_id)
+            .where(MessageEngineAttempt.outcome == Outcome.IN_FLIGHT.value)
+            .values(**values))
+        return int(getattr(result, "rowcount", 0) or 0) == 1
+
+
+def record_fallback(*, trigger: str, channel: str, priority: int, text: str,
+                    reason: str | None, moment: datetime, exhausted: bool,
+                    scope: SessionScope = immediate_session_scope) -> int | None:
+    """Record that a compose ended in the evergreen text.
+
+    Two different things end in the same sentence, and the OUTCOME is the
+    whole point (round 32): the engine ASKED and gave up — the compose is
+    exhausted — is a strike and closes the compose (FALLBACK_USED); the
+    engine was NOT PERMITTED to ask, or a single attempt was rejected without
+    exhausting the compose, is neither (NOT_ASKED). Writing FALLBACK_USED for
+    both made a normal burst inside the floor open the 24-hour breaker, and
+    while it was open every suppressed trigger fed it.
+    """
+    with scope() as s:
+        stamp = _naive_utc(moment)
+        if exhausted:
+            # A boundary closes the compose, so it must complete strictly
+            # AFTER the rows it closes. At a completion tie the scan counts
+            # the rejection before the boundary (round 3: order at a tie is
+            # unknowable, fail closed) - which would leave the compose open
+            # with one spent attempt. The writer KNOWS the order here, and
+            # encodes it in the stamp.
+            _completed = func.coalesce(MessageEngineAttempt.finished_at,
+                                       MessageEngineAttempt.started_at)
+            newest = s.execute(
+                select(func.max(_completed))
+                .where(MessageEngineAttempt.trigger == trigger)
+            ).scalar()
+            if newest is not None and newest >= stamp:
+                stamp = newest + timedelta(microseconds=1)
+        row = MessageEngineAttempt(
+            trigger=trigger, channel=channel, priority=priority,
+            started_at=stamp, finished_at=stamp,
+            outcome=(Outcome.FALLBACK_USED if exhausted else Outcome.NOT_ASKED).value,
+            failure_reason=(reason or "")[:200] or None,
+            message=text, source="fallback", code_points=len(text))
+        s.add(row)
+        s.flush()
+        return int(row.id)

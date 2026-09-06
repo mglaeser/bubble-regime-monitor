@@ -687,14 +687,15 @@ class TestRoundEightOffline:
             now = self._at(100).astimezone(plus_two)     # 14:01:40+02:00 == 12:01:40Z
             d = gov.decide(s, priority=2, settings=settings, trigger="A", now=now)
             assert d.verdict is gov.Verdict.WAIT and d.retry_after == self._at(300), d
-            decision, claim = gov.reserve(s, trigger="A", channel="imessage", priority=2,
-                                          settings=settings, now=now)
-            assert claim is None and decision.verdict is gov.Verdict.WAIT
+            decision, claim_id = gov.reserve(trigger="A", channel="imessage", priority=2,
+                                             settings=settings, now=now)
+            assert claim_id is None and decision.verdict is gov.Verdict.WAIT
             # A claim stamped under a +02:00 clock lands at the UTC instant.
-            decision, claim = gov.reserve(s, trigger="A", channel="imessage", priority=2,
-                                          settings=settings,
-                                          now=self._at(400).astimezone(plus_two))
-            assert claim is not None
+            decision, claim_id = gov.reserve(trigger="A", channel="imessage", priority=2,
+                                             settings=settings,
+                                             now=self._at(400).astimezone(plus_two))
+            assert claim_id is not None
+            claim = s.get(MessageEngineAttempt, claim_id)
             assert claim.started_at == self.T + timedelta(seconds=400)
 
     # C2 ------------------------------------------------------------------
@@ -711,9 +712,9 @@ class TestRoundEightOffline:
                            iteration=3, now=self._at(-200))
             assert d.verdict is gov.Verdict.WAIT and d.retry_after == self._at(300), d
             # ... and reserve() on the same rows agrees with decide().
-            decision, row = gov.reserve(s, trigger="A", channel="imessage", priority=2,
-                                        settings=settings, iteration=3, now=self._at(-200))
-            assert decision.verdict is gov.Verdict.WAIT and row is None
+            decision, claim_id = gov.reserve(trigger="A", channel="imessage", priority=2,
+                                             settings=settings, iteration=3, now=self._at(-200))
+            assert decision.verdict is gov.Verdict.WAIT and claim_id is None
             # The composer's stale hint (rows + 1 computed before the reap)
             # cannot exhaust the compose: reap first, then the rows decide.
             d2 = gov.decide(s, priority=2, settings=settings, trigger="A",
@@ -733,9 +734,9 @@ class TestRoundEightOffline:
             assert d.verdict is gov.Verdict.USE_FALLBACK, d
             # Not the exhausted reason: the writer must not record a strike.
             assert "iterations exhausted" not in d.reason and "cap 0" in d.reason, d
-            decision, row = gov.reserve(s, trigger="A", channel="imessage", priority=2,
-                                        settings=settings, now=self._at(0))
-            assert row is None and decision.verdict is gov.Verdict.USE_FALLBACK
+            decision, claim_id = gov.reserve(trigger="A", channel="imessage", priority=2,
+                                             settings=settings, now=self._at(0))
+            assert claim_id is None and decision.verdict is gov.Verdict.USE_FALLBACK
             assert s.query(MessageEngineAttempt).count() == 0
 
     # C4 ------------------------------------------------------------------
@@ -823,3 +824,105 @@ class TestRoundEightOffline:
                            now=self._at(resume + 2000))
             assert d.verdict is gov.Verdict.USE_FALLBACK and "breaker open" in d.reason, d
             assert d.retry_after == self._at(resume + 1005 + 86_400), d
+
+
+class TestRoundEightDurability:
+    """C6 of the offline review (two executing verifiers): the claim was never
+    durable before the model call, and the write lock was held across it.
+    reserve() now owns its transactions and returns a claim id; the caller
+    resolves by id afterwards and holds no transaction across the call.
+    """
+
+    T = datetime(2026, 9, 6, 12, 0, 0, tzinfo=UTC)
+
+    def _settings(self):
+        return _settings()
+
+    def _rows(self):
+        from app.db import session_scope as fresh
+        with fresh() as s:
+            return [(r.id, r.outcome, r.trigger) for r in
+                    s.query(MessageEngineAttempt).order_by(MessageEngineAttempt.id).all()]
+
+    def test_the_claim_is_durable_before_any_call_and_visible_to_others(self):
+        settings = self._settings()
+        decision, claim_id = gov.reserve(trigger="X", channel="imessage", priority=2,
+                                         settings=settings, now=self.T)
+        assert decision.may_ask and claim_id is not None
+        # Another connection sees it at once, and is held by it.
+        assert self._rows() == [(claim_id, gov.Outcome.IN_FLIGHT.value, "X")]
+        with session_scope() as other:
+            d = gov.decide(other, priority=2, settings=settings, trigger="Y",
+                           now=self.T + timedelta(seconds=1))
+            assert d.verdict is gov.Verdict.WAIT, d
+            assert d.retry_after == self.T + timedelta(seconds=gov._CLAIM_TTL_S), d
+            # No lock is held: an unrelated write on another connection commits.
+            other.add(MessageEngineAttempt(trigger="UNRELATED", channel="imessage", priority=2,
+                                           started_at=self.T.replace(tzinfo=None),
+                                           outcome=gov.Outcome.NOT_ASKED.value, iteration=1))
+        assert len(self._rows()) == 2
+
+    def test_a_concurrent_reserve_is_refused_by_the_committed_claim(self):
+        settings = self._settings()
+        _, first = gov.reserve(trigger="X", channel="imessage", priority=2,
+                               settings=settings, now=self.T)
+        decision, second = gov.reserve(trigger="Y", channel="imessage", priority=2,
+                                       settings=settings, now=self.T + timedelta(seconds=2))
+        assert first is not None and second is None
+        assert decision.verdict is gov.Verdict.WAIT, decision
+        assert [o for _, o, _ in self._rows()] == [gov.Outcome.IN_FLIGHT.value]
+
+    def test_a_crash_between_reserve_and_resolve_leaves_a_reapable_strike(self):
+        settings = self._settings()
+        _, claim_id = gov.reserve(trigger="X", channel="imessage", priority=2,
+                                  settings=settings, now=self.T)
+        # The worker dies here: nothing else is written. The claim survives it.
+        with session_scope() as s:
+            later = self.T + timedelta(seconds=gov._CLAIM_TTL_S + 1)
+            assert gov.reap_stale_claims(s, now=later) == 1
+            assert gov.consecutive_strikes(s, settings=settings) == 1
+            assert gov.spend_today(s, now=later) == 1
+            d = gov.decide(s, priority=2, settings=settings, trigger="Y", now=later)
+            assert d.verdict is gov.Verdict.WAIT, d   # the technical backoff / floor
+
+    def test_resolve_closes_the_claim_and_a_late_resolve_cannot_erase_a_reaped_strike(self):
+        settings = self._settings()
+        _, claim_id = gov.reserve(trigger="X", channel="imessage", priority=2,
+                                  settings=settings, now=self.T)
+        assert gov.resolve(claim_id, outcome=gov.Outcome.OK, reason=None,
+                           finished_at=self.T + timedelta(seconds=5), text="ok", source="generated")
+        assert self._rows()[0][1] == gov.Outcome.OK.value
+        _, second = gov.reserve(trigger="Z", channel="imessage", priority=2,
+                                settings=settings, now=self.T + timedelta(seconds=400))
+        with session_scope() as s:
+            gov.reap_stale_claims(s, now=self.T + timedelta(seconds=400 + gov._CLAIM_TTL_S + 1))
+        assert not gov.resolve(second, outcome=gov.Outcome.OK, reason=None,
+                               finished_at=self.T + timedelta(seconds=2000))
+        assert self._rows()[1][1] == gov.Outcome.TECHNICAL_ERROR.value
+
+    def test_reserve_derives_iteration_and_hint_from_rows(self):
+        settings = self._settings()
+        with session_scope() as s:
+            for i in range(1, 3):
+                s.add(MessageEngineAttempt(
+                    trigger="X", channel="imessage", priority=2, iteration=i,
+                    started_at=(self.T - timedelta(seconds=1000 - i)).replace(tzinfo=None),
+                    finished_at=(self.T - timedelta(seconds=900 - i)).replace(tzinfo=None),
+                    outcome=gov.Outcome.FORMAT_REJECTED.value))
+        decision, claim_id = gov.reserve(trigger="X", channel="imessage", priority=2,
+                                         settings=settings, now=self.T)
+        assert decision.may_ask and claim_id is not None
+        assert self._rows()[-1][0] == claim_id
+        with session_scope() as s:
+            assert s.get(MessageEngineAttempt, claim_id).iteration == 3
+        # A third rejection exhausts the compose; the writer asks the governor.
+        assert gov.resolve(claim_id, outcome=gov.Outcome.CONTENT_REJECTED, reason="x",
+                           finished_at=self.T + timedelta(seconds=5))
+        assert gov.compose_is_exhausted("X", settings=settings)
+        marker = gov.record_fallback(trigger="X", channel="imessage", priority=2, text="t",
+                                     reason="content iterations exhausted",
+                                     moment=self.T + timedelta(seconds=5), exhausted=True)
+        assert marker is not None
+        with session_scope() as s:
+            assert gov.consecutive_strikes(s, settings=settings) == 1
+            assert gov.content_attempts(s, trigger="X") == 0
