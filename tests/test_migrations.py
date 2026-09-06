@@ -439,8 +439,11 @@ def test_admin_atomicity_migration_upgrade_downgrade_upgrade(tmp_path):
 
     _run_with_db(db, _cycle)
     connection = sqlite3.connect(db)
+    # The literal head: a re-upgrade must land back on the newest revision.
+    # Bump this in the same PR that adds a migration — that is the point of
+    # pinning it rather than reading `head`, which would pass vacuously.
     assert connection.execute(
-        "select version_num from alembic_version").fetchone() == ("0017",)
+        "select version_num from alembic_version").fetchone() == ("0018",)
     connection.close()
 
 
