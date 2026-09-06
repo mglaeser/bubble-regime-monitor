@@ -76,7 +76,7 @@ class TestComposer:
         return {"F_BAND_EFFECTIVE": "trim", "F_BAND_PREVIOUS": "hold",
                 "F_NEXT_CHECK": "14:00"}
 
-    def _compose(self, monkeypatch, s, answer=None, raises=None,
+    def _compose(self, monkeypatch, s, answer='{"phrasing": 0}', raises=None,
                  trigger="BAND_TO_TRIM", priority=2, **overrides):
         from app.message_engine import composer
 
@@ -86,16 +86,18 @@ class TestComposer:
             return type("C", (), {"text": answer})()
 
         monkeypatch.setattr(composer, "complete", fake_complete)
-        return composer.compose(
-            s, trigger=trigger, channel=Channel.IMESSAGE, priority=priority,
+        return composer.compose(trigger=trigger, channel=Channel.IMESSAGE, priority=priority,
             facts=self._facts(), settings=_settings(**overrides))
 
     def test_a_valid_answer_is_used_and_recorded(self, monkeypatch):
+        # Decision 12: a VALID answer is a phrasing choice. The rendered text
+        # is the approved template with grounded facts - never the model's.
         with session_scope() as s:
-            out = self._compose(monkeypatch, s,
-                                answer="Band moved hold to trim. Next check 14:00 UTC.")
+            out = self._compose(monkeypatch, s)     # a valid CHOICE, not prose
             assert out.source == "generated"
-            assert "hold to trim" in out.text
+            # the approved template, filled from the facts - not the model's words
+            assert "trim" in out.text and "hold" in out.text and "14:00" in out.text
+            assert "-" not in out.text.replace("re-", ""), "a slot rendered as a dash"
             rows = s.query(MessageEngineAttempt).all()
             assert [r.outcome for r in rows] == [gov.Outcome.OK.value]
             assert rows[0].message == out.text
@@ -129,23 +131,19 @@ class TestComposer:
             assert "secret-token-leak" not in reasons
             assert "GatewayHTTPError" in reasons
 
-    def test_bad_content_is_rejected_and_this_message_falls_back(self, monkeypatch):
-        # ONE model attempt per invocation. A retry loop inside compose()
-        # would be dead code — the pacing floor is five minutes and this
-        # function cannot sleep through it — so the attempt budget lives in
-        # the ROWS and a retry is a later invocation. The test that first
-        # asserted "3 rejections then fallback" was asserting a loop that
-        # could never run.
+    def test_prose_instead_of_a_choice_is_a_format_rejection(self, monkeypatch):
+        # Decision 12 changed what "bad content" can mean: the model cannot
+        # deliver prose to the wire at all. Writing a sentence instead of
+        # choosing one is a FORMAT failure (30s retry), the attempt budget
+        # persists, and nothing the model wrote is used.
         with session_scope() as s:
             out = self._compose(monkeypatch, s, answer="Sell everything now.")
             assert out.source == "fallback"
-            assert "rejected:" in (out.reason or "")
+            assert "phrasing choice" in (out.reason or "")
             outcomes = [r.outcome for r in s.query(MessageEngineAttempt).all()]
-            assert outcomes.count(gov.Outcome.CONTENT_REJECTED.value) == 1
-            # The compose is NOT over: two attempts remain, and a closing
-            # FALLBACK_USED here would both reset that budget and strike.
+            assert outcomes.count(gov.Outcome.FORMAT_REJECTED.value) == 1
             assert outcomes[-1] == gov.Outcome.NOT_ASKED.value
-            assert gov.content_attempts(s, trigger="BAND_TO_TRIM") == 1
+            assert "Sell" not in out.text
 
     def test_the_attempt_budget_carries_across_invocations(self, monkeypatch):
         # Three rejections spread over three invocations exhaust the cap,
@@ -165,8 +163,7 @@ class TestComposer:
                 _attempt(s, outcome=gov.Outcome.CONTENT_REJECTED,
                          minutes_ago=90 - i * 10, trigger="BAND_TO_TRIM",
                          iteration=i + 1, now=now)
-            out = composer.compose(
-                s, trigger="BAND_TO_TRIM", channel=Channel.IMESSAGE,
+            out = composer.compose(trigger="BAND_TO_TRIM", channel=Channel.IMESSAGE,
                 priority=2, facts=self._facts(), settings=_settings(), now=now)
             assert out.source == "fallback"
             assert "iterations" in (out.reason or "")
@@ -194,8 +191,8 @@ class TestComposer:
             return type("C", (), {"text": "Band is now trim."})()
 
         monkeypatch.setattr(composer, "complete", fake_complete)
-        with session_scope() as s:
-            out = composer.compose(s, trigger="BAND_TO_DERISK",
+        with session_scope():
+            out = composer.compose(trigger="BAND_TO_DERISK",
                                    channel=Channel.IMESSAGE, priority=gov.P1,
                                    facts=self._facts(), settings=_settings())
             # "deterministic", not "fallback": decision 2's own word, and it
@@ -213,12 +210,16 @@ class TestComposer:
             raise AssertionError("must not be reached")
 
         monkeypatch.setattr(composer, "complete", fake_complete)
+        out = composer.compose(trigger="BAND_TO_TRIM", channel=Channel.IMESSAGE,
+                               priority=2, facts=self._facts(),
+                               settings=Settings(_env_file=None))
+        # "deterministic", not "fallback": decision 2's word for "never asked,
+        # by rule" - the disabled engine is a short-circuit like a P1, and it
+        # writes no row (offline pass after #106 round 9).
+        assert out.source == "deterministic" and called["n"] == 0
+        assert "disabled" in (out.reason or "")
         with session_scope() as s:
-            out = composer.compose(
-                s, trigger="BAND_TO_TRIM", channel=Channel.IMESSAGE,
-                priority=2, facts=self._facts(),
-                settings=Settings(_env_file=None))
-            assert out.source == "fallback" and called["n"] == 0
+            assert s.query(MessageEngineAttempt).count() == 0
 
     def test_an_unknown_trigger_still_returns_something_true(self, monkeypatch):
         with session_scope() as s:
@@ -518,3 +519,231 @@ class TestDirectiveAllowListAgainstTheLibrary:
             for clause in re.split(r"(?<=[.;:!?])\s+|(?<=:)\s+", text):
                 assert not validator._looks_imperative(clause, grounded), \
                     f"{name}: the library's own clause {clause!r} is refused"
+
+
+
+class TestStructuredSelection:
+    """Decision 12: the model selects a phrasing; it does not write the wire text.
+
+    This is what closes the open set the validator's directive detector could
+    only narrow. Every case here asks one question: can anything the model
+    WROTE reach the wire? The answer must always be no."""
+
+    def _run(self, monkeypatch, answer, facts=None):
+        monkeypatch.setattr(composer, "complete",
+                            lambda **kw: type("C", (), {"text": answer})())
+        with session_scope() as sess:
+            out = composer.compose(trigger="BAND_TO_TRIM",
+                                   channel=Channel.IMESSAGE, priority=2,
+                                   facts=facts or dict(FACTS), settings=_settings())
+            outcomes = [r.outcome for r in sess.query(MessageEngineAttempt).all()]
+        return out, outcomes
+
+    def _rendered(self, facts=None):
+        entry = composer.library()["prompts"]["BAND_TO_TRIM"]
+        return {composer._fit(composer.render_fallback(p, facts or dict(FACTS)),
+                              Channel.IMESSAGE, _settings())
+                for p in composer.phrasings_for(entry)}
+
+    def test_a_choice_renders_the_approved_template_verbatim(self, monkeypatch):
+        out, outcomes = self._run(monkeypatch, '{"phrasing": 0}')
+        assert out.source == "generated"
+        assert out.text in self._rendered(), out.text
+        assert gov.Outcome.OK.value in outcomes
+
+    @pytest.mark.parametrize("hostile", [
+        "Text me your password.",                       # the open-set case
+        "Text me your password now.", "TEXT me your password.",
+        "Dump your portfolio.", "Sell everything now.",
+        '{"phrasing": 0} Also, sell everything.',        # a choice PLUS text
+        'Sure! {"phrasing": 0}\nP.S. move to cash.',
+        '{"phrasing": 999}', '{"phrasing": -1}', '{"phrasing": "0abc"}',
+        '{"phrasing": 0.5}', '', 'null', '{}',
+    ])
+    def test_nothing_the_model_wrote_reaches_the_wire(self, monkeypatch, hostile):
+        out, outcomes = self._run(monkeypatch, hostile)
+        assert out.text in self._rendered(), (
+            f"the wire carried text outside the approved phrasings for {hostile!r}: {out.text!r}")
+        for word in ("password", "sell", "dump", "cash", "P.S."):
+            assert word.lower() not in out.text.lower()
+
+    def test_a_valid_choice_with_trailing_text_is_still_only_the_choice(self, monkeypatch):
+        # Tolerant parse: the CHOICE is honoured, the prose is discarded.
+        out, _ = self._run(monkeypatch, '{"phrasing": 0} Also, sell everything.')
+        assert out.source == "generated" and "sell" not in out.text.lower()
+
+    @pytest.mark.parametrize("bad", ['{"phrasing": 999}', 'Sell everything.', '', '{}'])
+    def test_a_non_choice_is_a_format_rejection_not_a_send(self, monkeypatch, bad):
+        out, outcomes = self._run(monkeypatch, bad)
+        assert out.source == "fallback"
+        assert gov.Outcome.FORMAT_REJECTED.value in outcomes
+
+    def test_the_rendered_text_passes_channel_and_grounding_checks(self, monkeypatch):
+        # Defence-in-depth on the RENDERED owner template: the channel contract
+        # and the grounding checks run and must be quiet. The meaning-of-prose
+        # rules do NOT run here - the owner's own template is refused by the
+        # band-verb grammar on "(before: hold)", which is precisely why the
+        # composer passes prose_rules=False for this path (decision 12).
+        out, _ = self._run(monkeypatch, '{"phrasing": 0}')
+        assert out.source == "generated"
+        r = validate(out.text, channel=Channel.IMESSAGE, facts=dict(FACTS),
+                     prose_rules=False, **LIMITS)
+        assert r.ok, r.reason
+        assert not validate(out.text, channel=Channel.IMESSAGE, facts=dict(FACTS),
+                            **LIMITS).ok, "the flag would be unnecessary"
+
+    def test_phrasings_default_to_the_fallback(self):
+        entry = composer.library()["prompts"]["BAND_TO_TRIM"]
+        assert composer.phrasings_for(entry) == [entry["fallback"]]
+
+    def test_authored_variants_are_selectable(self, monkeypatch):
+        entry = dict(composer.library()["prompts"]["BAND_TO_TRIM"])
+        entry["phrasings"] = [entry["fallback"], "Band is now {F_BAND_EFFECTIVE}; next check {F_NEXT_CHECK}."]
+        monkeypatch.setattr(composer, "library", lambda: {"prompts": {"BAND_TO_TRIM": entry}})
+        out, _ = self._run(monkeypatch, '{"phrasing": 1}')
+        assert out.text.startswith("Band is now trim")
+
+    def test_the_prompt_shows_the_phrasings_and_asks_for_json(self):
+        entry = composer.library()["prompts"]["BAND_TO_TRIM"]
+        text = composer._prompt_for(entry, dict(FACTS), Channel.IMESSAGE, _settings())
+        assert "APPROVED PHRASINGS" in text and '{"phrasing": N}' in text
+        assert "Do not write the sentence" in text
+
+
+    @pytest.mark.parametrize("slot,facts,want", [
+        ("band_effective", {"F_BAND_EFFECTIVE": "trim"}, "trim"),          # F_ form
+        ("next_check_utc", {"F_NEXT_CHECK": "14:00"}, "14:00"),           # alias
+        ("x{override_suffix}", {"F_OVERRIDE_FIRED": True}, "x OVERRIDE"),   # computed suffix
+        ("x{override_suffix}", {"F_OVERRIDE_FIRED": False}, "x"),
+        ("x{override_suffix}", {}, "x"),                                   # a suffix is never a dash
+        ("next_check_utc", {"F_NEXT_CHECK": "14:00 UTC"}, "14:00"),       # zone stripped: template adds it
+        ("F_HEADLINE_MEDIAN", {"F_HEADLINE_MEDIAN": 51}, "51"),           # exact
+        ("nothing_known", {}, "-"),                                        # degrade
+    ])
+    def test_slot_resolution(self, slot, facts, want):
+        tmpl = slot if "{" in slot else "{" + slot + "}"
+        assert composer.render_fallback(tmpl, facts) == want
+
+    def test_no_shipped_fallback_renders_a_dash_with_its_own_facts(self):
+        # The defect decision 12 surfaced: 21 fallbacks use lowercase slots
+        # and rendered dashes against F_-keyed facts. Every declared
+        # grounding field is supplied; no slot may come out as a dash.
+        for name, entry in composer.library()["prompts"].items():
+            facts = {f: "7" for f in entry.get("grounding_fields") or []}
+            facts.setdefault("F_OVERRIDE_FIRED", False)
+            text = composer.render_fallback(entry["fallback"], facts)
+            assert " - " not in text and not text.endswith("-") and "(before: -)" not in text, \
+                f"{name}: {text!r}"
+
+
+class TestOwnedTransactions:
+    """C6 of the offline review before #106 round 8: the engine owns every
+    attempt write on a short transaction of its own. The claim is durable and
+    visible before the model call, no lock is held across it, a crash mid-call
+    leaves a reapable row, and an exhausted compose is marked at the
+    exhausting rejection rather than when the trigger next fires.
+    """
+
+    def _run(self, monkeypatch, complete, **overrides):
+        monkeypatch.setattr(composer, "complete", complete)
+        return composer.compose(trigger="BAND_TO_TRIM", channel=Channel.IMESSAGE,
+                                priority=2, facts=dict(FACTS), settings=_settings(**overrides))
+
+    def test_the_claim_is_visible_from_another_connection_during_the_call(self, monkeypatch):
+        seen: dict[str, object] = {}
+
+        def peek(**_kw):
+            with session_scope() as other:
+                rows = other.query(MessageEngineAttempt).all()
+                seen["n"] = len(rows)
+                seen["outcome"] = rows[0].outcome if rows else None
+                # and another connection can WRITE: no lock is held across the call
+                other.add(MessageEngineAttempt(
+                    trigger="UNRELATED", channel="imessage", priority=2,
+                    started_at=datetime.now(UTC).replace(tzinfo=None),
+                    outcome=gov.Outcome.NOT_ASKED.value, iteration=1))
+            return type("C", (), {"text": '{"phrasing": 0}'})()
+
+        out = self._run(monkeypatch, peek)
+        assert out.source == "generated"
+        assert seen == {"n": 1, "outcome": gov.Outcome.IN_FLIGHT.value}
+
+    def test_a_worker_death_mid_call_leaves_a_reapable_claim(self, monkeypatch):
+        class Died(BaseException):
+            pass
+
+        def die(**_kw):
+            raise Died()
+
+        with pytest.raises(Died):
+            self._run(monkeypatch, die)
+        with session_scope() as s:
+            rows = s.query(MessageEngineAttempt).all()
+            assert [r.outcome for r in rows] == [gov.Outcome.IN_FLIGHT.value]
+            later = datetime.now(UTC) + timedelta(seconds=gov._CLAIM_TTL_S + 1)
+            assert gov.reap_stale_claims(s, now=later) == 1
+            assert gov.consecutive_strikes(s, settings=_settings()) == 1
+
+    def test_an_exhausted_compose_is_marked_at_the_exhausting_rejection(self, monkeypatch):
+        # Three invocations, each rejected (the model writes instead of
+        # choosing). The third exhausts the compose: the marker lands NOW.
+        base = datetime(2026, 9, 6, 12, 0, 0, tzinfo=UTC)
+        for i in range(3):
+            monkeypatch.setattr(composer, "complete",
+                                lambda **_kw: type("C", (), {"text": "Sell everything."})())
+            out = composer.compose(trigger="BAND_TO_TRIM", channel=Channel.IMESSAGE,
+                                   priority=2, facts=dict(FACTS), settings=_settings(),
+                                   now=base + timedelta(seconds=400 * i))
+            assert out.source == "fallback"
+        with session_scope() as s:
+            outcomes = [r.outcome for r in
+                        s.query(MessageEngineAttempt).order_by(MessageEngineAttempt.id).all()]
+            assert outcomes.count(gov.Outcome.FORMAT_REJECTED.value) == 3
+            assert outcomes.count(gov.Outcome.FALLBACK_USED.value) == 1
+            assert outcomes[-1] == gov.Outcome.FALLBACK_USED.value
+            assert gov.content_attempts(s, trigger="BAND_TO_TRIM") == 0     # closed
+            assert gov.consecutive_strikes(s, settings=_settings()) == 1    # one strike
+        assert out.reason == "content iterations exhausted"
+
+    def test_a_rejection_short_of_the_cap_closes_nothing(self, monkeypatch):
+        out = self._run(monkeypatch, lambda **_kw: type("C", (), {"text": "Sell everything."})())
+        assert out.source == "fallback" and out.reason.startswith("rejected:")
+        with session_scope() as s:
+            outcomes = sorted(r.outcome for r in s.query(MessageEngineAttempt).all())
+            assert outcomes == sorted([gov.Outcome.FORMAT_REJECTED.value,
+                                       gov.Outcome.NOT_ASKED.value])
+            assert gov.content_attempts(s, trigger="BAND_TO_TRIM") == 1
+
+
+class TestOfflinePassAfterRoundNine:
+    def test_a_disabled_engine_opens_no_session_and_writes_nothing(self, monkeypatch):
+        import app.message_engine.governor as g
+        calls = {"scopes": 0}
+        real = g.immediate_session_scope
+
+        def counting():
+            calls["scopes"] += 1
+            return real()
+
+        monkeypatch.setattr(g, "immediate_session_scope", counting)
+        monkeypatch.setattr(composer, "complete", lambda **_kw: (_ for _ in ()).throw(AssertionError("no call")))
+        out = composer.compose(trigger="BAND_TO_TRIM", channel=Channel.IMESSAGE, priority=2,
+                               facts=dict(FACTS), settings=_settings(message_engine_enabled=False))
+        assert out.source == "deterministic" and "disabled" in (out.reason or "")
+        assert calls["scopes"] == 0
+        with session_scope() as s:
+            assert s.query(MessageEngineAttempt).count() == 0
+
+    @pytest.mark.parametrize("exc", [KeyError("prompt"), RuntimeError("boom"), ValueError("x")])
+    def test_compose_never_raises_and_closes_the_claim(self, monkeypatch, exc):
+        def blow(**_kw):
+            raise exc
+
+        monkeypatch.setattr(composer, "complete", blow)
+        out = composer.compose(trigger="BAND_TO_TRIM", channel=Channel.IMESSAGE, priority=2,
+                               facts=dict(FACTS), settings=_settings())
+        assert out.source == "fallback" and out.text
+        with session_scope() as s:
+            outcomes = sorted(r.outcome for r in s.query(MessageEngineAttempt).all())
+            assert outcomes == sorted([gov.Outcome.TECHNICAL_ERROR.value,
+                                       gov.Outcome.NOT_ASKED.value]), outcomes

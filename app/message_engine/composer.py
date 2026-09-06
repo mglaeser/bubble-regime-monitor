@@ -29,15 +29,9 @@ from time import monotonic
 from typing import Any
 
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
 from app.llm_gateway import (
-    GatewayConfigError,
-    GatewayHTTPError,
-    GatewayProtocolError,
-    GatewayTimeout,
-    GatewayTransportError,
     complete,
 )
 from app.message_engine import governor as gov
@@ -96,6 +90,41 @@ _CONTROL_RE = re.compile(
     r"\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\u00ad\ufeff]+")
 
 
+#: Slot names the library spells differently from the fact that fills them.
+#: 21 of the 32 shipped fallbacks use lowercase slots ("{band_effective}")
+#: while every fact is F_-keyed; a case-insensitive F_ lookup bridges those.
+#: Two are documented exceptions in the library's own notes.
+_SLOT_ALIASES = {"next_check_utc": "F_NEXT_CHECK"}
+_TRAILING_ZONE_RE = re.compile(r"\s*\b(?:UTC|GMT|Z)\s*$", re.IGNORECASE)
+
+
+def _slot_value(name: str, facts: dict[str, object]) -> object | None:
+    """The fact behind a slot: exact key, then its F_ form, then an alias.
+
+    Under the old contract the rendered fallback was never the generated path,
+    so a template that rendered dashes went unnoticed; decision 12 makes the
+    rendered template the ONLY path, and the test that should have caught it
+    matched uppercase slots only. Resolution is now explicit, and a slot that
+    resolves to nothing still degrades to a readable dash.
+    """
+    if name in facts:
+        return facts[name]
+    if name == "override_suffix":
+        # The library's note defines it: the literal " OVERRIDE" when the
+        # override fired, else empty - a suffix, so never a dash.
+        return " OVERRIDE" if facts.get("F_OVERRIDE_FIRED") else ""
+    for key in (_SLOT_ALIASES.get(name), "F_" + name.upper()):
+        if key and key in facts:
+            value = facts[key]
+            if name.endswith("_utc"):
+                # The template supplies the zone itself ("{next_check_utc}
+                # UTC"), so a fact that already carries one rendered
+                # "14:00 UTC UTC". A *_utc slot is the bare time.
+                value = _TRAILING_ZONE_RE.sub("", str(value))
+            return value
+    return None
+
+
 def render_fallback(template: str, facts: dict[str, object]) -> str:
     """The evergreen text with CURRENT metrics substituted (owner's rule).
 
@@ -105,7 +134,7 @@ def render_fallback(template: str, facts: dict[str, object]) -> str:
     can read.
     """
     def _sub(match: re.Match[str]) -> str:
-        value = facts.get(match.group(1))
+        value = _slot_value(match.group(1), facts)
         # Substituted values are DATA, and one line of it. A fact carrying a
         # newline split the message into a second line — and an SMS is not a
         # thing that has lines; a multiline body becomes a multipart send or a
@@ -263,6 +292,7 @@ def _prompt_for(entry: dict[str, Any], facts: dict[str, object],
     # fallback and failing open costs a disclosure.
     visible = visible_facts(entry, facts)
     grounded = "\n".join(f"  {key} = {value}" for key, value in sorted(visible.items()))
+    listed = "\n".join(f"  {i}: {t}" for i, t in enumerate(phrasings_for(entry)))
     # The library's own OUTPUT FORMAT is OVERRIDDEN here, last word wins.
     # Eighteen entries ask for two labelled lines, one per channel; twenty
     # spell out an "SMS: <...>" line and only eight also spell out
@@ -278,24 +308,36 @@ def _prompt_for(entry: dict[str, Any], facts: dict[str, object],
         f"CHANNEL: {channel.value}, at most {cap} characters.\n"
         f"GROUNDED FACTS — use these values verbatim and invent no others:\n"
         f"{grounded}\n"
-        f"\nOUTPUT (this instruction replaces any output format above): reply "
-        f"with the {channel.value} body ONLY — one line, no label, no prefix, "
-        f"no quotes, and no line for any other channel.\n"
+        f"\nAPPROVED PHRASINGS for this message (the ONLY sentences that can be "
+        f"sent; slots are filled from the facts above, verbatim):\n{listed}\n"
+        f"OUTPUT (this instruction replaces any output format above): choose the "
+        f"phrasing that fits the facts and reply with exactly one line of JSON, "
+        f'{{"phrasing": N}}, and nothing else. Do not write the sentence.\n'
     )
 
 
-def compose(session: Session, *, trigger: str, channel: Channel,
+def compose(*, trigger: str, channel: Channel,
             priority: int, facts: dict[str, object],
             settings: Settings | None = None,
             now: datetime | None = None) -> Composed:
-    """Produce the message for one trigger. Never raises, always returns text."""
+    """Produce the message for one trigger. Never raises, always returns text.
+
+    THE ENGINE OWNS ITS TRANSACTIONS; this function takes no session. Every
+    attempt row is written by the governor on a short transaction of its own
+    (`gov.reserve`, `gov.resolve`, `gov.record_fallback`), so the claim is
+    durable and visible before the model is called, no lock is held across the
+    call, and nothing of the caller's is ever committed or rolled back on its
+    behalf. Callers must not hold an open write transaction while calling
+    this — the dispatcher already sends outside transactions — or the
+    engine's own writes wait on busy_timeout and the message falls back.
+    (Offline review before #106 round 8, C6: the claim was inserted into the
+    caller's session and never committed before the call, so a worker that
+    died mid-call left NO row for the reaper, and the write lock was held for
+    the whole call. Rounds 32/39-41 had shown that committing the caller's
+    session is not the fix; owning the session is.)
+    """
     settings = settings or get_settings()
     moment = now or datetime.now(UTC)
-    # Whether the caller's unit of work is EMPTY, decided before this function
-    # writes anything. Only then may the claim be committed to release the
-    # write lock; otherwise committing would make the caller's own pending
-    # writes durable behind their back (round 39, SOTA-A defect 5).
-    caller_was_clean = not (session.new or session.dirty or session.deleted)
     entry = library()["prompts"].get(trigger)
     if entry is None:
         # An unknown trigger is a programming error, but the operator still
@@ -304,7 +346,8 @@ def compose(session: Session, *, trigger: str, channel: Channel,
                         source="deterministic", trigger=trigger,
                         channel=channel.value, reason="trigger not in library")
 
-    fallback = _fit(render_fallback(entry["fallback"], facts), channel, settings)
+    phrasings = phrasings_for(entry)
+    fallback = _fit(render_fallback(phrasings[0], facts), channel, settings)
     limits = _channel_limits(settings)
 
     # ONE model attempt per invocation, deliberately. A retry loop here would
@@ -321,7 +364,8 @@ def compose(session: Session, *, trigger: str, channel: Channel,
     # to build arguments for a call whose answer is already known
     # (round 32, SOTA-A defect 3). The message that must arrive does not wait
     # on the engine's bookkeeping.
-    if priority == gov.P1:
+    short = gov.short_circuit(priority, settings)
+    if short is not None:
         # NO DATABASE WORK AT ALL — not a query, and not a write. Round 32
         # moved the queries out of the way but still recorded an audit row,
         # and `session.add()` + `session.flush()` takes SQLite's write lock:
@@ -333,60 +377,61 @@ def compose(session: Session, *, trigger: str, channel: Channel,
         # model; the delivery itself is recorded by the alert system, which is
         # where a P1's audit trail belongs. Q46 asks for every ATTEMPT, and
         # this is deliberately not one.
+        #
+        # THE SAME FOR A DISABLED ENGINE, which is the shipped default (Q42:
+        # defaults inert). The writer used to record a NOT_ASKED row for it,
+        # taking the write lock on every message in the default-off
+        # configuration and blocking up to busy_timeout behind an unrelated
+        # writer - the governor's no-session short-circuit defeated by its own
+        # caller (offline pass after #106 round 9, executed). The governor's
+        # `short_circuit` is now the one place these verdicts live.
         return Composed(text=fallback, source="deterministic", trigger=trigger,
-                        channel=channel.value,
-                        reason="P1 renders deterministically")
+                        channel=channel.value, reason=short.reason)
 
-    iteration = gov.content_attempts(session, trigger=trigger) + 1
-    last_failure = _last_failure_class(session, trigger)
+    # The iteration and the last failure class are derived from the rows BY
+    # THE GOVERNOR, inside the same transaction that writes the claim, so the
+    # hint can never be staler than the rows (C2).
     try:
-        decision, row = gov.reserve(
-            session, trigger=trigger, channel=channel.value, priority=priority,
-            settings=settings, iteration=iteration, last_failure=last_failure,
-            now=moment)
+        decision, claim_id = gov.reserve(
+            trigger=trigger, channel=channel.value, priority=priority,
+            settings=settings, now=moment)
     except SQLAlchemyError as exc:
-        # The reservation FLUSHES, and a flush can raise on lock contention —
+        # The reservation writes, and a write can raise on lock contention —
         # outside the gateway-only try block below, so an OperationalError
         # propagated to the caller in place of the message this function
         # promises always to return (round 40, SOTA-A defect 3). The whole
         # point of the fallback is the moments when something is already wrong.
-        session.rollback()
-        return _fallback(session, trigger, channel, priority, fallback,
-                         f"reservation failed: {type(exc).__name__}", moment,
-                         settings)
-    if not decision.may_ask:
+        return _fallback(trigger, channel, priority, fallback,
+                         f"reservation failed: {type(exc).__name__}", moment)
+    if not decision.may_ask or claim_id is None:
         # The engine composes AHEAD of delivery, so there is nothing to wait
         # for: this message goes out with the evergreen text, and the attempt
         # budget it did not spend is still there next time.
         #
         # Only ONE of these reasons is a strike. See _fallback.
-        return _fallback(session, trigger, channel, priority, fallback,
-                         decision.reason, moment, settings,
-                         exhausted=decision.reason == _EXHAUSTED_REASON)
+        return _fallback(trigger, channel, priority, fallback,
+                         decision.reason, moment,
+                         exhausted=decision.reason == _EXHAUSTED_REASON,
+                         settings=settings)
 
-    # RELEASE THE WRITE LOCK BEFORE THE MODEL CALL. `reserve()` takes SQLite's
-    # write lock at its flush ("the write lock is held from here") and nothing
-    # committed it until the caller's `session_scope` exited — so the lock was
-    # held across `complete()`, up to the full 60s deadline. Every unrelated
-    # writer in the process blocked or hit "database is locked" for the
-    # duration, INCLUDING the alert dispatcher, whose whole job is not to be
-    # delayed (round 32, SOTA-A defect 3).
-    #
-    # Committing here is also what makes the claim do its job: its purpose is
-    # to be VISIBLE to a concurrent worker, and an uncommitted row is visible
-    # to nobody. If the process dies mid-call the row stays IN_FLIGHT and
-    # `reap_stale_claims()` collects it after its TTL — the case that
-    # machinery already exists for.
-    _release_write_lock(session, row, caller_was_clean=caller_was_clean)
-
+    # NO TRANSACTION IS OPEN HERE. The claim is committed — durable, and
+    # visible to a concurrent worker, which is its whole purpose — and the
+    # write lock is released. If the process dies during the call the row
+    # stays IN_FLIGHT and `reap_stale_claims()` collects it after its TTL.
     started = monotonic()
     try:
         answer = complete(user=_prompt_for(entry, facts, channel, settings),
                           deadline_s=_DEADLINE_S, settings=settings).text
-    except (GatewayHTTPError, GatewayTimeout, GatewayTransportError,
-            GatewayProtocolError, GatewayConfigError) as exc:
+    except Exception as exc:  # noqa: BLE001 - the promise is "never raises"
         # The gateway's error boundary is deliberate: only the class name
-        # crosses it, never a response body (app/llm_gateway.py).
+        # crosses it, never a response body (app/llm_gateway.py). The same
+        # boundary now covers anything else the call raises - a library
+        # entry missing a key in _prompt_for, a programming error in the
+        # client: "never raises, always returns text" is the contract, and
+        # an escaped exception also left the claim IN_FLIGHT until the
+        # reaper (offline pass after #106 round 9, executed three ways). A
+        # BaseException (a dying worker) still propagates: that IS the
+        # crash path the reaper exists for.
         # The FAILURE time, not the moment the request was issued. Pacing
         # after a technical error runs from `finished_at`, so recording the
         # pre-call timestamp started the quiet period when the call BEGAN:
@@ -395,12 +440,11 @@ def compose(session: Session, *, trigger: str, channel: Channel,
         # Measured, not assumed, so an injected clock stays deterministic and
         # production still gets the true elapsed time.
         failed_at = moment + timedelta(seconds=monotonic() - started)
-        _resolve(row, gov.Outcome.TECHNICAL_ERROR, type(exc).__name__,
-                 failed_at)
+        _close(claim_id, gov.Outcome.TECHNICAL_ERROR, type(exc).__name__, failed_at)
         # NOT a strike: the row above already recorded it. Counting the
         # fallback too made one timeout cost two strikes.
-        return _fallback(session, trigger, channel, priority, fallback,
-                         f"gateway {type(exc).__name__}", failed_at, settings)
+        return _fallback(trigger, channel, priority, fallback,
+                         f"gateway {type(exc).__name__}", failed_at)
 
     # The call SUCCEEDED at this instant. Round 32 fixed only the
     # technical-error path and left OK and the rejections stamped with the
@@ -408,10 +452,24 @@ def compose(session: Session, *, trigger: str, channel: Channel,
     # 300-second floor to 240 (round 34, SOTA-A defect 2). Pacing reads
     # finished_at; every path that closes a claim owes it the truth.
     finished = moment + timedelta(seconds=monotonic() - started)
-    text = _body_for(answer, channel)
+    choice = _select_phrasing(answer, phrasings)
+    if choice is None:
+        # Not a valid choice: the model wrote instead of choosing, or chose
+        # out of range. A FORMAT failure, so the governor grants the short
+        # retry, and NOTHING the model wrote is used.
+        _close(claim_id, gov.Outcome.FORMAT_REJECTED,
+               "reply was not a phrasing choice", finished)
+        return _rejected(trigger, channel, priority, fallback,
+                         "rejected: reply was not a phrasing choice", finished,
+                         settings)
+    text = _fit(render_fallback(phrasings[choice], facts), channel, settings)
     # THE SAME SUBSET THE PROMPT SHOWED. See visible_facts().
+    # prose_rules=False: this is the OWNER's approved template rendered from
+    # the facts, not text the model wrote. The channel contract and the
+    # grounding checks still run on it; the meaning-of-prose rules exist to
+    # judge model text, of which there is none on this path (decision 12).
     result = validate(text, channel=channel, facts=visible_facts(entry, facts),
-                      **limits)
+                      prose_rules=False, **limits)
     if result.ok:
         # TRIGGER-SPECIFIC MANDATE. `validate()` is deliberately trigger-blind
         # — it enforces the channel contract and the house style, which are
@@ -425,90 +483,59 @@ def compose(session: Session, *, trigger: str, channel: Channel,
         if missing is not None:
             result = ValidationResult(False, FailureClass.CONTENT, missing)
     if result.ok:
-        _resolve(row, gov.Outcome.OK, None, finished, text=text,
-                 source="generated")
+        if not _close(claim_id, gov.Outcome.OK, None, finished, text=text,
+                      source="generated"):
+            # The reaper already recorded this claim as a technical error:
+            # the call outran the claim TTL. The strike stands (fail closed),
+            # and so does the deterministic text - a reply that late is not
+            # one the governor has accounted for.
+            return _fallback(trigger, channel, priority, fallback,
+                             "reply arrived after the claim expired", finished)
         return Composed(text=text, source="generated", trigger=trigger,
                         channel=channel.value)
 
-    _resolve(row,
-             gov.Outcome.FORMAT_REJECTED
-             if result.failure_class is FailureClass.FORMAT
-             else gov.Outcome.CONTENT_REJECTED,
-             result.reason, finished)
-    # The rejection is already on the attempt row. This fallback closes
-    # nothing — the attempt budget must survive so a later invocation can use
-    # what is left of it.
-    return _fallback(session, trigger, channel, priority, fallback,
-                     f"rejected: {result.reason}", moment, settings)
+    _close(claim_id,
+           gov.Outcome.FORMAT_REJECTED
+           if result.failure_class is FailureClass.FORMAT
+           else gov.Outcome.CONTENT_REJECTED,
+           result.reason, finished)
+    return _rejected(trigger, channel, priority, fallback,
+                     f"rejected: {result.reason}", finished, settings)
 
 
 
-def _last_failure_class(session: Session, trigger: str) -> str | None:
-    """How the previous attempt for this trigger failed, if it did.
+def phrasings_for(entry: dict[str, Any]) -> list[str]:
+    """The owner-approved sentences this trigger may send (decision 12).
 
-    The governor grants a 30-second retry only when the newest row IS that
-    trigger's own format rejection (round 19), so this reads the row rather
-    than carrying a flag across invocations that a restart would lose."""
-    from sqlalchemy import select
-
-    from app.models import MessageEngineAttempt
-
-    # NOT_ASKED rows are INVISIBLE here. Every rejection is now followed by
-    # one (the fallback this same compose returned), so the newest row was
-    # never the rejection and this always answered None — the configured
-    # 30-second format retry could not fire at all (round 33, SOTA-A defect
-    # 3). The question is "how did the last ATTEMPT end", and a refusal the
-    # engine issued to itself is not an attempt.
-    outcome = session.execute(
-        select(MessageEngineAttempt.outcome)
-        .where(MessageEngineAttempt.trigger == trigger,
-               MessageEngineAttempt.outcome != gov.Outcome.NOT_ASKED.value)
-        .order_by(MessageEngineAttempt.started_at.desc(),
-                  MessageEngineAttempt.id.desc())
-        .limit(1)
-    ).scalar_one_or_none()
-    if outcome == gov.Outcome.FORMAT_REJECTED.value:
-        return "format"
-    if outcome == gov.Outcome.CONTENT_REJECTED.value:
-        return "content"
-    return None
-
-
-#: A channel-labelled reply line: "SMS: ..." / "IMESSAGE: ...".
-_LABELLED_RE = re.compile(r"^\s*(SMS|IMESSAGE)\s*:\s*(.+?)\s*$",
-                          re.IGNORECASE | re.MULTILINE)
-
-
-def _body_for(answer: str, channel: Channel) -> str:
-    """The body for THIS channel, out of whatever shape the reply arrived in.
-
-    Eighteen of the thirty-two shipped prompts end with an OUTPUT FORMAT
-    instruction — in two different wordings — telling the model to reply with
-    two labelled lines, "SMS: ..." then "IMESSAGE: ...". The composer took
-    `answer.strip()` as the message, so a model that OBEYED was handed to the
-    validator as one multiline over-length string and rejected every time:
-    those eighteen triggers could never produce generated text at all
-    (round 34, SOTA-A defect 3). The remaining fourteen prompts specify no
-    format, so the reply is the body.
-
-    Parsed rather than re-authored, because both shapes are legitimate and the
-    library is ratified: the model is judged on what it was ASKED for.
-
-    Falls back to the whole reply when nothing is labelled, and to the other
-    channel's body when only one label is present — a message for the wrong
-    channel still has to pass that channel's contract, so nothing unsafe rides
-    on the guess.
+    Authored in the library under `phrasings`; absent that key, the evergreen
+    fallback is the single phrasing, so a trigger with no variants behaves
+    deterministically. Variants are added by authoring, never by code.
     """
-    found = {m.group(1).upper(): m.group(2) for m in _LABELLED_RE.finditer(answer)}
-    if not found:
-        return answer.strip()
-    want = "SMS" if channel is Channel.SMS else "IMESSAGE"
-    other = "IMESSAGE" if want == "SMS" else "SMS"
-    return (found.get(want) or found.get(other) or answer).strip()
+    return list(entry.get("phrasings") or [entry["fallback"]])
 
 
-#: A denial close enough in front of the required phrase to reverse it.
-#: A denial FOLLOWING the required phrase, before the clause ends.
+#: The model's reply is a CHOICE. Tolerant of surrounding prose or a bare
+#: integer; strict about the value.
+_CHOICE_RE = re.compile(r'"phrasing"\s*:\s*(\d+)|^\s*(\d+)\s*$')
+
+
+def _select_phrasing(answer: str, phrasings: list[str]) -> int | None:
+    """Which approved phrasing the model chose, or None if it did not choose.
+
+    Decision 12: the model selects, it does not write. Free text - however
+    fluent, however harmful - is not a choice and is refused here before
+    anything is rendered. This is what closes the open set the validator's
+    directive detector could only narrow (decision 9): what reaches the wire
+    is always an approved template with grounded facts, so an instruction
+    cannot be smuggled in, only chosen from a list that contains none.
+    """
+    m = _CHOICE_RE.search(answer or "")
+    if not m:
+        return None
+    n = int(m.group(1) or m.group(2))
+    return n if 0 <= n < len(phrasings) else None
+
+
 _POST_NEGATOR_RE = re.compile(
     r"^[^.;!?]{0,40}?\b(?:is|are|was|were|has|have|had)?\s*"
     r"(?:not|never|no longer)\b"
@@ -518,36 +545,6 @@ _POST_NEGATOR_RE = re.compile(
 _NEGATOR_RE = re.compile(
     r"\b(?:not|never|no longer|isn't|is not|aren't|are not|without|"
     r"ceased to be|stopped being|nothing)\b[^.;!?]*$")
-
-
-def _release_write_lock(session: Session, row: Any, *,
-                        caller_was_clean: bool) -> None:
-    """Deliberately does NOT commit. See below.
-
-    Round 32 committed here so SQLite's write lock would not be held across a
-    60-second model call. Round 39 found that this makes the CALLER's unrelated
-    pending writes durable, and round 40 found the guard added for that still
-    misses work already flushed before `compose()` was entered, or issued as
-    Core DML that never appears in `session.new` at all.
-
-    Two failed attempts at the same guard is evidence about the APPROACH, not
-    the details: there is no reliable way to ask a shared Session "is anything
-    here not mine". So the mechanism that can corrupt is removed rather than
-    guarded again.
-
-    THE COST IS REAL AND IS NOT HIDDEN. The write lock is now held for the
-    duration of the model call, which is what round 32 set out to avoid: other
-    writers in the process block for up to the deadline. That is a DELAY, and
-    the alternative was a caller silently losing the ability to roll back —
-    delay over corruption, and bounded by `_DEADLINE_S` plus
-    `reap_stale_claims()`.
-
-    THE REAL FIX is for the engine to own its transactions: insert and commit
-    the claim on its OWN session, keep the row id, and resolve by id afterwards.
-    That is a caller-visible change to how `compose()` is invoked, so it belongs
-    in a deliberate refactor rather than in the tenth round of a review.
-    """
-    _ = (session, row, caller_was_clean)   # kept for the signature's meaning
 
 
 def _unmet_mandate(entry: dict[str, Any], text: str) -> str | None:
@@ -582,20 +579,22 @@ def _unmet_mandate(entry: dict[str, Any], text: str) -> str | None:
             f"{sorted(required)} and it does not")
 
 
-def _resolve(row: Any, outcome: gov.Outcome, reason: str | None,
-             moment: datetime, *, text: str | None = None,
-             source: str | None = None) -> None:
-    """Close a claimed attempt. The governor reads these rows, so a claim left
-    unresolved would distort every later decision (round 9)."""
-    if row is None:
-        return
-    row.outcome = outcome.value
-    row.failure_reason = (reason or "")[:200] or None
-    row.finished_at = moment.replace(tzinfo=None)
-    if text is not None:
-        row.message = text
-        row.source = source
-        row.code_points = len(text)
+def _close(claim_id: int, outcome: gov.Outcome, reason: str | None,
+           moment: datetime, *, text: str | None = None,
+           source: str | None = None) -> bool:
+    """Close the claimed attempt by id, on the governor's own transaction.
+
+    The governor reads these rows, so a claim left unresolved would distort
+    every later decision (round 9). False means the reaper resolved it first
+    (the call outran the claim TTL) and that strike stands. A database error
+    here is logged by the exception, not raised: this function is called on
+    the way to returning text, and text is always returned.
+    """
+    try:
+        return gov.resolve(claim_id, outcome=outcome, reason=reason,
+                           finished_at=moment, text=text, source=source)
+    except SQLAlchemyError:
+        return False
 
 
 #: The ONE refusal that means the engine tried and gave up. Every other
@@ -604,9 +603,10 @@ def _resolve(row: Any, outcome: gov.Outcome, reason: str | None,
 _EXHAUSTED_REASON = "content iterations exhausted"
 
 
-def _fallback(session: Session, trigger: str, channel: Channel, priority: int,
+def _fallback(trigger: str, channel: Channel, priority: int,
               text: str, reason: str | None, moment: datetime,
-              settings: Settings, *, exhausted: bool = False) -> Composed:
+              *, exhausted: bool = False,
+              settings: Settings | None = None) -> Composed:
     """Record that this compose ended in the evergreen text, and return it.
 
     The OUTCOME is the whole point, and getting it wrong is what round 32
@@ -627,16 +627,35 @@ def _fallback(session: Session, trigger: str, channel: Channel, priority: int,
     single gateway timeout cost TWO strikes (the TECHNICAL_ERROR row plus this
     one), so a threshold of five opened after three real failures.
     """
-    from app.models import MessageEngineAttempt
-
-    session.add(MessageEngineAttempt(
-        trigger=trigger, channel=channel.value, priority=priority,
-        started_at=moment.replace(tzinfo=None),
-        finished_at=moment.replace(tzinfo=None),
-        outcome=(gov.Outcome.FALLBACK_USED if exhausted
-                 else gov.Outcome.NOT_ASKED).value,
-        failure_reason=(reason or "")[:200] or None,
-        message=text, source="fallback", code_points=len(text)))
-    session.flush()
+    try:
+        gov.record_fallback(trigger=trigger, channel=channel.value,
+                            priority=priority, text=text, reason=reason,
+                            moment=moment, exhausted=exhausted,
+                            settings=settings)
+    except SQLAlchemyError:
+        # Recording is bookkeeping; the text is the promise. A locked database
+        # loses this row, never the message.
+        pass
     return Composed(text=text, source="fallback", trigger=trigger,
                     channel=channel.value, reason=reason)
+
+
+def _rejected(trigger: str, channel: Channel, priority: int, text: str,
+              reason: str, finished: datetime, settings: Settings) -> Composed:
+    """The fallback after a REJECTED attempt: the writer records exhaustion.
+
+    The rejection is already on the attempt row. If it was the cap-th, the
+    compose is exhausted NOW - a strike, and the row that closes the compose
+    is written at this instant rather than when the trigger next fires (the
+    offline review before #106 round 8, C4/C5: a marker written late was a
+    strike the scan could not see and a cooldown restarted by bookkeeping).
+    Otherwise the attempt budget must survive for a later invocation, and the
+    row records only that the evergreen text went out.
+    """
+    try:
+        exhausted = gov.compose_is_exhausted(trigger, settings=settings)
+    except SQLAlchemyError:
+        exhausted = False
+    return _fallback(trigger, channel, priority, text,
+                     _EXHAUSTED_REASON if exhausted else reason, finished,
+                     exhausted=exhausted, settings=settings)
