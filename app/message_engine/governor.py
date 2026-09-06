@@ -465,7 +465,7 @@ def consecutive_strikes(session: Session, *, limit: int = 50,
     ).first()
 
     stmt = (
-        select(MessageEngineAttempt.id)
+        select(MessageEngineAttempt)
         .where(MessageEngineAttempt.outcome.in_(
             [o.value for o in strike_outcomes])))
     if last_ok is not None:
@@ -492,9 +492,26 @@ def consecutive_strikes(session: Session, *, limit: int = 50,
     # regrouped five exhausted composes into three strikes and REOPENED a
     # breaker that had legitimately tripped (round 11, SOTA-A). The rejects
     # of an unfinished compose are not strikes and are no longer read at all.
-    newest = (stmt.order_by(_completed.desc(), MessageEngineAttempt.id.desc())
-              .limit(limit).subquery())
-    run = int(session.execute(select(func.count()).select_from(newest)).scalar() or 0)
+    # A marker is bounded by its STRIKE INSTANT, not by its row time. A
+    # marker written after a success for a compose exhausted before it is a
+    # row after the reset recording a strike from before the reset; counting
+    # it by row time resurrected a pre-reset strike and could open the
+    # breaker on four real failures (#106 round 8 rerun, SOTA-A defect 2,
+    # executed). A technical error's instant IS its row time, so the SQL
+    # bound already places it. Filtered markers are at most one per trigger
+    # per reset - a trigger has one open compose at a time - so they cannot
+    # consume a meaningful part of the window (round 6).
+    rows = session.execute(
+        stmt.order_by(_completed.desc(), MessageEngineAttempt.id.desc()).limit(limit)
+    ).scalars().all()
+    run = 0
+    for row in rows:
+        if row.outcome == Outcome.FALLBACK_USED.value and last_ok is not None:
+            instant = _strike_instant(session, row, exclude_id=exclude_id)
+            # At a tie the order is unknowable: the strike counts (round 2).
+            if instant < _aware(ok_at):
+                continue
+        run += 1
 
     # An exhausted compose is a strike the moment it is exhausted, not when
     # the writer next records it. The FALLBACK_USED marker is written when
@@ -622,13 +639,14 @@ def strike_anchor(session: Session, *, settings: Settings,
                           | ((_completed == ok_at) & (MessageEngineAttempt.id != ok_id)))
     if exclude_id is not None:
         stmt = stmt.where(MessageEngineAttempt.id != exclude_id)
-    candidates = [
-        _strike_instant(session, row, exclude_id=exclude_id)
-        for row in session.execute(
+    candidates = []
+    for row in session.execute(
             stmt.order_by(_completed.desc(), MessageEngineAttempt.id.desc())
-            .limit(_STRIKE_SCAN_ROWS)
-        ).scalars().all()
-    ]
+            .limit(_STRIKE_SCAN_ROWS)).scalars().all():
+        instant = _strike_instant(session, row, exclude_id=exclude_id)
+        if last_ok is not None and instant < _aware(ok_at):
+            continue    # a late marker for a compose exhausted before the reset
+        candidates.append(instant)
     for trigger in _exhausted_open_composes(session, settings=settings,
                                             exclude_id=exclude_id):
         open_stmt = (
@@ -908,8 +926,16 @@ def breaker_is_open(session: Session, *, settings: Settings,
 SessionScope = Callable[[], AbstractContextManager[Session]]
 
 
-def last_failure_class(session: Session, trigger: str) -> str | None:
+def last_failure_class(session: Session, trigger: str, *,
+                       exclude_id: int | None = None) -> str | None:
     """How the previous attempt for this trigger failed, if it did.
+
+    `exclude_id` is the caller's own claim: reserve() inserts the IN_FLIGHT
+    row BEFORE reading the rows, and that row was the newest row of the
+    trigger, so the hint was always None and the format retry never fired
+    through reserve() - a 300s WAIT where the rule says 30s (#106 round 8
+    rerun, SOTA-A defect 1, executed). Every scan that runs with a claim
+    open must exclude it; this one did not.
 
     Read from the rows rather than carried across invocations in a flag a
     restart would lose. Ordered by COMPLETION like every other scan here; the
@@ -920,12 +946,14 @@ def last_failure_class(session: Session, trigger: str) -> str | None:
     """
     _completed = func.coalesce(MessageEngineAttempt.finished_at,
                                MessageEngineAttempt.started_at)
-    outcome = session.execute(
+    stmt = (
         select(MessageEngineAttempt.outcome)
         .where(MessageEngineAttempt.trigger == trigger,
-               MessageEngineAttempt.outcome != Outcome.NOT_ASKED.value)
-        .order_by(_completed.desc(), MessageEngineAttempt.id.desc())
-        .limit(1)
+               MessageEngineAttempt.outcome != Outcome.NOT_ASKED.value))
+    if exclude_id is not None:
+        stmt = stmt.where(MessageEngineAttempt.id != exclude_id)
+    outcome = session.execute(
+        stmt.order_by(_completed.desc(), MessageEngineAttempt.id.desc()).limit(1)
     ).scalar_one_or_none()
     if outcome == Outcome.FORMAT_REJECTED.value:
         return "format"
@@ -1010,7 +1038,7 @@ def reserve(*, trigger: str, channel: str, priority: int, settings: Settings,
                                          limit=_effective_cap(settings) + 1) + 1
             row.iteration = iteration
         if last_failure is None:
-            last_failure = last_failure_class(s, trigger)
+            last_failure = last_failure_class(s, trigger, exclude_id=row.id)
         decision = decide(s, priority=priority, settings=settings,
                           trigger=trigger, iteration=iteration,
                           last_failure=last_failure, now=moment, exclude_id=row.id)
@@ -1051,6 +1079,7 @@ def resolve(claim_id: int, *, outcome: Outcome, reason: str | None,
 
 def record_fallback(*, trigger: str, channel: str, priority: int, text: str,
                     reason: str | None, moment: datetime, exhausted: bool,
+                    settings: Settings | None = None,
                     scope: SessionScope = immediate_session_scope) -> int | None:
     """Record that a compose ended in the evergreen text.
 
@@ -1064,6 +1093,21 @@ def record_fallback(*, trigger: str, channel: str, priority: int, text: str,
     """
     with scope() as s:
         stamp = _naive_utc(moment)
+        if exhausted:
+            # THE WRITER GUARDS ITSELF. A marker is a strike and a boundary,
+            # so it is written only for a compose that has actually spent
+            # the cap (or, without settings, at least one attempt) and has
+            # no marker yet. Two writers racing at the cap-th rejection, or
+            # a caller whose over-counted hint made decide() say "exhausted"
+            # for a fresh compose, otherwise marked one compose twice or
+            # marked nothing at all - a strike for nothing (#106 round 8
+            # rerun, SOTA-A defect 3, executed). BEGIN IMMEDIATE serialises
+            # the writers, so the second one sees the first marker and finds
+            # nothing left to close.
+            needed = _effective_cap(settings) if settings is not None else 1
+            spent = content_attempts(s, trigger=trigger, limit=max(needed, 1) + 1)
+            if needed < 1 or spent < needed:
+                exhausted = False
         if exhausted:
             # A boundary closes the compose, so it must complete strictly
             # AFTER the rows it closes. At a completion tie the scan counts

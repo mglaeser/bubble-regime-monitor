@@ -926,3 +926,79 @@ class TestRoundEightDurability:
         with session_scope() as s:
             assert gov.consecutive_strikes(s, settings=settings) == 1
             assert gov.content_attempts(s, trigger="X") == 0
+
+
+class TestRoundNineOn106:
+    """#106 round 8 rerun (SOTA-A, high; SOTA-B and SOTA-C approved): three
+    findings, two of them consequences of the round-8 refactor.
+
+    1. reserve() derived the last failure class AFTER inserting its own claim,
+       and that IN_FLIGHT row was the newest row of the trigger, so the hint
+       was always None: the format retry never fired through reserve().
+    2. A marker written after a success was counted after that success by
+       its row time, although the compose it closes was exhausted before the
+       success: a pre-reset strike resurrected after the reset.
+    3. record_fallback(exhausted=True) had no guard: two writers, or a caller's
+       over-counted hint, could mark one compose twice, or mark a compose that
+       had spent nothing - a strike for nothing.
+    """
+
+    T = datetime(2026, 9, 6, 12, 0, 0)
+
+    def _row(self, s, outcome, started_s, finished_s, trigger, iteration=1):
+        r = MessageEngineAttempt(
+            trigger=trigger, channel="imessage", priority=2,
+            started_at=self.T + timedelta(seconds=started_s),
+            finished_at=self.T + timedelta(seconds=finished_s),
+            outcome=outcome.value, iteration=iteration)
+        s.add(r)
+        s.commit()
+        return r.id
+
+    def _at(self, seconds):
+        return (self.T + timedelta(seconds=seconds)).replace(tzinfo=UTC)
+
+    def test_1_reserve_still_grants_the_format_retry(self):
+        settings = _settings()
+        with session_scope() as s:
+            self._row(s, gov.Outcome.FORMAT_REJECTED, -50, -40, "X")
+        decision, claim_id = gov.reserve(trigger="X", channel="imessage", priority=2,
+                                         settings=settings, now=self._at(0))
+        assert decision.may_ask and claim_id is not None, decision
+        with session_scope() as s:
+            assert s.get(MessageEngineAttempt, claim_id).iteration == 2
+
+    def test_2_a_marker_written_after_a_success_does_not_resurrect_the_strike(self):
+        settings = _settings()
+        with session_scope() as s:
+            for i in range(1, 4):
+                self._row(s, gov.Outcome.CONTENT_REJECTED, i - 1, i, "X", iteration=i)
+            self._row(s, gov.Outcome.OK, 99, 100, "Y")            # the reset
+            self._row(s, gov.Outcome.FALLBACK_USED, 200, 200, "X")  # late marker for X
+            for k in range(4):
+                self._row(s, gov.Outcome.TECHNICAL_ERROR, 300 + k, 301 + k, f"E{k}")
+            assert gov.consecutive_strikes(s, settings=settings) == 4
+            assert not gov.breaker_is_open(s, settings=settings, now=self._at(400))
+            d = gov.decide(s, priority=2, settings=settings, trigger="Z", now=self._at(700))
+            assert "breaker" not in d.reason, d
+
+    def test_3_an_exhausted_marker_is_written_once_and_only_for_a_spent_compose(self):
+        settings = _settings()
+        with session_scope() as s:
+            for i in range(1, 4):
+                self._row(s, gov.Outcome.CONTENT_REJECTED, i - 1, i, "X", iteration=i)
+        gov.record_fallback(trigger="X", channel="imessage", priority=2, text="t",
+                            reason="content iterations exhausted", moment=self._at(5),
+                            exhausted=True, settings=settings)
+        gov.record_fallback(trigger="X", channel="imessage", priority=2, text="t",
+                            reason="content iterations exhausted", moment=self._at(6),
+                            exhausted=True, settings=settings)
+        gov.record_fallback(trigger="FRESH", channel="imessage", priority=2, text="t",
+                            reason="content iterations exhausted", moment=self._at(7),
+                            exhausted=True, settings=settings)
+        with session_scope() as s:
+            outcomes = [r.outcome for r in
+                        s.query(MessageEngineAttempt).order_by(MessageEngineAttempt.id).all()]
+            assert outcomes.count(gov.Outcome.FALLBACK_USED.value) == 1, outcomes
+            assert outcomes.count(gov.Outcome.NOT_ASKED.value) == 2, outcomes
+            assert gov.consecutive_strikes(s, settings=settings) == 1
