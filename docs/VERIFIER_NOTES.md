@@ -679,3 +679,21 @@ approver that streams). #105 stands at three defect rounds fixed plus one
 attempt with no defects found and no required-approver vote; it merges by
 the bridge with its residual documented (decision 9) and the residual
 closed upstream (decision 12).
+
+**#106 round 5 — SOTA-A, real, and the root of rounds 2–4: "only newest
+completion's pause is enforced".** Pacing read one row, the newest
+completion, and enforced that row's pause alone. A technical error with a
+600 s backoff completed at T; a format rejection in flight across that
+instant completed at T+10 and, as the newest row, became the only row the
+gate saw: the engine answered "clear" at T+41 with the retry hint and at
+T+311 without it, in both reservation orders (executed before the fix).
+Rounds 2, 3 and 4 had each repaired one instance of this shape at a
+completion tie — the case in which "newest" is ambiguous — with a rank on
+the tied rows. The tie was the special case. Fixed with the general rule:
+every row that completed within the longest configured pause is consulted
+and the latest deadline wins; the old deadline is one term of that maximum,
+so nothing becomes looser, and the per-row pause rules moved verbatim into
+a helper. Round-5 tests red before and green after; the 181 governor pins
+and the rounds 2–4 tie tests still pass under the general rule, which is
+the proof it is a repair rather than a removal. Lesson: when three rounds
+patch the same shape at its boundary, the boundary is not the defect.
