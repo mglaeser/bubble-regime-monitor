@@ -718,3 +718,31 @@ exhausted-compose markers only, counted in SQL. Round-6 test red on the
 previous head and green after; the 181 pins unchanged. Lesson: when a
 doctrine has been applied to two row classes, list the others before the
 panel does.
+
+**#106 round 7 — SOTA-A and SOTA-C independently, both high: the breaker
+cooldown was anchored on the newest PACING row.** FALLBACK_USED, the
+exhausted-compose strike, is not a pacing outcome, so five exhausted
+composes opened the breaker at the fifth marker while the dwell was
+measured from the last rejection row, written while that compose was still
+running. Executed: a marker one day after its rejections found the cooldown
+already over at the instant the breaker opened, and five markers with no
+pacing row at all found no anchor and no cooldown — `breaker_is_open`
+False one second after the breaker opened, in both shapes. Fixed with one
+anchor, the newest strike, shared by `decide` and `breaker_is_open` and
+drawn from the same outcome set the strike scan uses, so the two can never
+disagree about what a strike is. The old anchor helper had no callers left
+and was removed; both of its duties had purpose-built replacements with
+tests. Two vendors converging on one defect in one round is the strongest
+signal the panel produces, and it arrived one round after the stop this
+log had announced. The stop rule is therefore revised below.
+
+**Stop rule, revised (2026-09-06).** "Three rounds then bridge" was written
+for an open set — the validator's directive detection, where each round
+finds another instance of an unbounded class. It is wrong for a stateful
+component where each round finds a distinct defect that executes: bridging
+then ships a known defect on the owner's signature. The rule now: a round
+earns a fix when its finding executes as described AND is a distinct defect
+from every earlier round AND the fix is a bounded, general rule rather than
+a patch at the boundary. A round that fails any of the three ends the
+iteration. Before each push, the branch is reviewed adversarially offline so
+the panel's next round is spent on what the offline review could not see.
