@@ -784,3 +784,24 @@ rejection first. Two lessons from the day: a slice-replace between two `def`
 markers deleted two unrelated functions that sat between them, caught by the
 suite; and a scale test seeded with upper-case outcome strings matched
 nothing and proved nothing, caught before it was cited.
+
+**#106 round 8 — infrastructure, then three real findings.** The first
+attempt got no vote from anyone: from 22:20Z every upstream provider
+answered 502 within forty seconds and the gateway fast-failed with 503 — the
+VM's uplink dropped for the second time that evening. One rerun. SOTA-B and
+SOTA-C approved; SOTA-A refuted with three findings, all executed: (1)
+`reserve()` derived the last failure class after inserting its own claim,
+and that IN_FLIGHT row was the newest row of the trigger, so the hint was
+always None and the format retry never fired through `reserve()` — a
+regression of the round-8 refactor, fixed by excluding the claim as every
+other scan does; (2) a marker written after a success was counted after
+that success by its row time although the compose it closes was exhausted
+before the success — a pre-reset strike resurrected after the reset, fixed
+by bounding markers by their strike instant, ties counting; (3) the
+exhausted-marker writer had no guard, so two writers or an over-counted hint
+could mark one compose twice or mark a compose that had spent nothing —
+fixed by making the writer check, inside its own serialised transaction,
+that the compose has spent the cap and has no marker yet. Lesson: the
+offline review executes what it can construct; a regression introduced by
+the fix it recommended is exactly what it cannot see. Each fix now gets a
+second offline pass before the push.
