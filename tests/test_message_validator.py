@@ -568,3 +568,41 @@ class TestDirectiveAllowList:
                 "the inversion degrades back into a deny-list")
 
 
+
+
+class TestApprovedOpenerFollowedByADeterminer:
+    """Panel on #105 (SOTA-A): "Text your password." validated.
+
+    Several approved openers are nouns in the library and verbs in English -
+    text, check, flag, score, level, run. No noun subject is ever followed
+    directly by a determiner ("Delivery the ..." is ungrammatical), while a verb
+    and its object always are. That is a shape, not a word list.
+    """
+
+    @pytest.mark.parametrize("message", [
+        "Text your password.",            # the reviewer's exact case
+        "Check your account.", "Review your holdings.", "Run for the exits.",
+        "Flag your broker.", "Score your risk.", "Band your assets.",
+        "Level your book.", "Range your bets.", "Message your adviser.",
+        "Check the app now.", "Run the numbers.",
+    ])
+    def test_an_approved_opener_used_as_a_verb_is_refused(self, message):
+        r = validate(message, channel=Channel.IMESSAGE, facts={}, **LIMITS)
+        assert not r.ok, f"{message!r} validated"
+
+    @pytest.mark.parametrize("message", [
+        "Next check at month-end.", "Fixed texts in use.", "Breadth flag on.",
+        "Normal texts resume.", "Delivery path working.", "Later runs skipped.",
+        "Underlying level -.", "Scores and alerts unaffected.",
+    ])
+    def test_the_same_openers_as_nouns_still_pass(self, message):
+        # The library's own short clauses, with those words as SUBJECTS.
+        r = validate(message, channel=Channel.IMESSAGE, facts=dict(FACTS),
+                     **LIMITS)
+        assert r.ok, f"{message!r} refused: {r.reason}"
+
+    def test_the_rule_keys_on_the_determiner_not_the_verb(self):
+        from app.message_engine import validator
+
+        assert "text" not in validator._DETERMINERS
+        assert "your" in validator._DETERMINERS and "the" in validator._DETERMINERS

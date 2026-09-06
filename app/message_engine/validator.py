@@ -131,6 +131,10 @@ _COMMAND_PHRASES = (r"get\s+out|bail\s+out|cash\s+out|step\s+aside|"
 #: advice to the operator.
 _SHORT_CLAUSE_WORDS = 4
 
+#: What follows a VERB, never a subject noun.
+_DETERMINERS = frozenset("the a an your my our their its this that these those "
+                         "all some any every each more another".split())
+
 _APPROVED_OPENERS = frozenset("""
 bubblegauge next no none not the a an this that these those it its there their
 all both each every some any more less most fewer other another
@@ -162,10 +166,18 @@ def _looks_imperative(clause: str, grounded: set[str]) -> bool:
     if raw.isupper() and 2 <= len(raw) <= 5:
         return False                      # a ticker (SPY, QQQ, TLT) is a subject
     head = raw.casefold()
-    if head in _APPROVED_OPENERS:
-        return False
     if head in grounded:
         return False                      # a fact value is a subject, not a verb
+    if head in _APPROVED_OPENERS:
+        # AN APPROVED OPENER FOLLOWED BY A DETERMINER IS A VERB. Several
+        # approved nouns double as verbs - "text", "check", "flag", "score",
+        # "level", "run" - and "Text your password." validated (panel on
+        # #105, SOTA-A). No noun subject is ever followed directly by a
+        # determiner ("Delivery the ..." is ungrammatical), while a verb and
+        # its object always are. The library confirms it: no short clause it
+        # writes has a determiner in second place.
+        nxt = words[1].casefold().strip(",.;:") if len(words) > 1 else ""
+        return nxt in _DETERMINERS
     return True
 
 
