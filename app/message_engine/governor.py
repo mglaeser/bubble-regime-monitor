@@ -91,7 +91,25 @@ class Decision:
 
 
 def _now(now: datetime | None) -> datetime:
-    return now or datetime.now(UTC)
+    """The decision instant, always AWARE UTC.
+
+    Every naive bound or stamp this module hands to SQL is derived from this
+    value, and rows are stored naive UTC — so a non-UTC aware `now` must be
+    converted, not stripped. `.replace(tzinfo=None)` on 14:01:40+02:00 gave
+    the wall-clock 14:01:40, two hours ahead of UTC: the pacing scan's lower
+    bound then excluded every row inside the real floor, the scan came back
+    empty and the engine asked 100s after an OK; reserve() stamped its claim
+    two hours in the future (offline review before round 8, C1, executed). A
+    naive `now` is read as UTC, the same rule `_aware` applies to rows.
+    """
+    if now is None:
+        return datetime.now(UTC)
+    return now.astimezone(UTC) if now.tzinfo else now.replace(tzinfo=UTC)
+
+
+def _naive_utc(moment: datetime) -> datetime:
+    """A bound or stamp for SQL: rows are stored naive UTC."""
+    return _now(moment).replace(tzinfo=None)
 
 
 def _aware(value: datetime) -> datetime:
@@ -141,7 +159,19 @@ def _effective_strikes(settings: Settings) -> int:
 
 
 def _effective_cap(settings: Settings) -> int:
-    return max(1, min(settings.message_engine_max_content_iterations,
+    """The content-iteration cap, clamped in BOTH directions to fail closed.
+
+    Above: a million iterations is a typo, read as the ceiling (round 18).
+    Below: a cap of zero or less was floored to ONE, so
+    MESSAGE_ENGINE_MAX_CONTENT_ITERATIONS=0 still admitted one model call per
+    compose — the fail-OPEN reading of an operator's value, the opposite of
+    the rule the upper clamp follows (offline review before round 8, C3,
+    executed: cap 0, -1 and -100 all returned ASK on an empty table). Zero
+    means zero: no content attempt is ever admitted; the deterministic
+    fallback carries every message. `message_engine_enabled` remains the
+    explicit off switch; a zero cap is a coherent policy, not a trap.
+    """
+    return max(0, min(settings.message_engine_max_content_iterations,
                       _MAX_CONTENT_ITERATIONS))
 
 
@@ -197,7 +227,7 @@ def reap_stale_claims(session: Session, *, now: datetime | None = None) -> int:
     Idempotent, and cheap enough to run on every decision.
     """
     moment = _now(now)
-    cutoff = (moment - timedelta(seconds=_CLAIM_TTL_S)).replace(tzinfo=None)
+    cutoff = _naive_utc(moment - timedelta(seconds=_CLAIM_TTL_S))
     stale = session.execute(
         select(MessageEngineAttempt)
         .where(MessageEngineAttempt.outcome == Outcome.IN_FLIGHT.value)
@@ -251,8 +281,27 @@ _ATTEMPT_BEFORE_BOUNDARY = case(
 
 
 def _pause_for(row: MessageEngineAttempt, *, settings: Settings, trigger: str | None,
-               last_failure: str | None, newest_id: int | None) -> int:
-    """Seconds of quiet the given row imposes after its own completion."""
+               retry_ok: bool, newest_id: int | None) -> int:
+    """Seconds of quiet the given row imposes after its own completion.
+
+    `retry_ok` is True only when the caller reports a format failure AND the
+    rows show at least one spent attempt on an OPEN compose for this trigger.
+    The caller's hint alone was trusted, and a FALLBACK_USED marker — not a
+    pacing outcome, so invisible here — had already closed the compose: the
+    same state that content_attempts() called "fresh compose, nothing spent"
+    earned the 30s retry pause here, and iteration 1 of a new compose asked
+    31s after the last model call (offline review before round 8, C0,
+    executed). A row class must mean the same thing in every gate.
+    """
+    if row.outcome == Outcome.IN_FLIGHT.value:
+        # A claim that has not resolved holds the engine until it does, or
+        # until the reaper turns it into the technical error it almost
+        # certainly is (_CLAIM_TTL_S after its start). It is NOT a spent
+        # content attempt — its outcome is unknown — so it no longer counts
+        # toward the cap either (C2: the same row was "a spent content
+        # attempt" for fifteen minutes and "a technical error, not a content
+        # attempt, but a strike" afterwards, and one crash cost two strikes).
+        return _CLAIM_TTL_S
     if row.outcome == Outcome.TECHNICAL_ERROR.value:
         # The 5-minute floor is a FLOOR, and the owner's rule reads
         # "technical 4xx/5xx -> wait MIN 2 min" — an additional minimum,
@@ -262,7 +311,7 @@ def _pause_for(row: MessageEngineAttempt, *, settings: Settings, trigger: str | 
         # is an explicit exception to the floor.
         return max(settings.message_engine_min_interval_s,
                    settings.message_engine_technical_backoff_s)
-    if (last_failure == "format"
+    if (retry_ok
             and row.outcome == Outcome.FORMAT_REJECTED.value
             and row.trigger == trigger
             and row.id == newest_id):
@@ -276,7 +325,8 @@ def _pause_for(row: MessageEngineAttempt, *, settings: Settings, trigger: str | 
 
 def pacing_deadline(session: Session, *, settings: Settings, trigger: str | None,
                     last_failure: str | None, now: datetime,
-                    exclude_id: int | None = None) -> tuple[datetime, int] | None:
+                    exclude_id: int | None = None,
+                    spent: int | None = None) -> tuple[datetime, int] | None:
     """The latest instant any recent attempt still holds the engine quiet.
 
     EVERY row that can still bind is consulted, and the LATEST deadline wins.
@@ -297,10 +347,12 @@ def pacing_deadline(session: Session, *, settings: Settings, trigger: str | None
     bind — anything older has already expired — so the scan is bounded by
     time, not by a row count that a burst could overflow.
     """
+    now = _now(now)
     longest = max(settings.message_engine_min_interval_s,
                   settings.message_engine_technical_backoff_s,
-                  settings.message_engine_format_retry_s)
-    since = (now - timedelta(seconds=longest)).replace(tzinfo=None)
+                  settings.message_engine_format_retry_s,
+                  _CLAIM_TTL_S)
+    since = _naive_utc(now - timedelta(seconds=longest))
     _completed = func.coalesce(MessageEngineAttempt.finished_at,
                                MessageEngineAttempt.started_at)
     stmt = (
@@ -314,11 +366,15 @@ def pacing_deadline(session: Session, *, settings: Settings, trigger: str | None
     ).scalars().all()
     if not rows:
         return None
+    if spent is None:
+        spent = content_attempts(session, trigger=trigger, exclude_id=exclude_id,
+                                 limit=_effective_cap(settings) + 1)
+    retry_ok = last_failure == "format" and spent >= 1
     newest_id = rows[0].id
     best: tuple[datetime, int] | None = None
     for row in rows:
         pause = _pause_for(row, settings=settings, trigger=trigger,
-                           last_failure=last_failure, newest_id=newest_id)
+                           retry_ok=retry_ok, newest_id=newest_id)
         ready = _dwell_from(row) + timedelta(seconds=pause)
         if best is None or ready > best[0]:
             best = (ready, pause)
@@ -332,39 +388,9 @@ def pacing_deadline(session: Session, *, settings: Settings, trigger: str | None
 _STRIKE_OUTCOMES = (Outcome.TECHNICAL_ERROR, Outcome.FALLBACK_USED)
 
 
-def last_strike(session: Session, *, exclude_id: int | None = None
-                ) -> MessageEngineAttempt | None:
-    """The newest strike — the row that opened, or re-opened, the breaker.
-
-    The breaker cooldown is quiet time AFTER the strike that tripped it, so
-    this is the row it must be measured from. Until #106 round 7 both anchor
-    sites used `last_attempt`, whose outcome set is the PACING set — and
-    FALLBACK_USED, the exhausted-compose strike, is not a pacing outcome.
-    SOTA-A and SOTA-C found it independently in the same round: with five
-    exhausted composes the breaker opened at the fifth marker but the dwell
-    was measured from the last rejection row, written while that compose was
-    still running; a marker one day after its rejections found the cooldown
-    already over at the instant the breaker opened, and markers with no
-    pacing row at all found no anchor and no cooldown. Executed before the
-    fix: `breaker_is_open` False one second after the fifth marker in both
-    shapes. Ordered by completion, ties to the higher id — a constant
-    cooldown makes the newest completion the latest deadline (round 5).
-    """
-    _completed = func.coalesce(MessageEngineAttempt.finished_at,
-                               MessageEngineAttempt.started_at)
-    stmt = (
-        select(MessageEngineAttempt)
-        .where(MessageEngineAttempt.outcome.in_(
-            [o.value for o in _STRIKE_OUTCOMES])))
-    if exclude_id is not None:
-        stmt = stmt.where(MessageEngineAttempt.id != exclude_id)
-    return session.execute(
-        stmt.order_by(_completed.desc(), MessageEngineAttempt.id.desc()).limit(1)
-    ).scalars().first()
-
-
 def consecutive_strikes(session: Session, *, limit: int = 50,
-                        exclude_id: int | None = None) -> int:
+                        exclude_id: int | None = None,
+                        settings: Settings | None = None) -> int:
     """Length of the trailing run of STRIKES.
 
     Ruling Q38 defines a strike as "an exhausted content attempt (3
@@ -465,8 +491,172 @@ def consecutive_strikes(session: Session, *, limit: int = 50,
     # of an unfinished compose are not strikes and are no longer read at all.
     newest = (stmt.order_by(_completed.desc(), MessageEngineAttempt.id.desc())
               .limit(limit).subquery())
-    run = session.execute(select(func.count()).select_from(newest)).scalar()
-    return int(run or 0)
+    run = int(session.execute(select(func.count()).select_from(newest)).scalar() or 0)
+
+    # An exhausted compose is a strike the moment it is exhausted, not when
+    # the writer next records it. The FALLBACK_USED marker is written when
+    # the trigger fires AGAIN and is refused as exhausted; an event-driven
+    # trigger need not fire again, so five composes, each rejected `cap`
+    # times, counted ZERO strikes while decide() classified every one of them
+    # as "content iterations exhausted" — the engine kept asking through the
+    # very failure ruling Q38 exists to stop (offline review before round 8,
+    # C4, executed: 15 rejections over 5 triggers, no marker, strikes 0,
+    # breaker closed, sixth trigger ASK). So the OPEN composes are read too,
+    # with decide()'s own classification: a trigger whose current compose
+    # has `cap` or more spent attempts is one strike. This is PRESENT state
+    # under the CURRENT cap — the same evaluation the cap gate makes — not a
+    # re-reading of history: once the marker lands it is history, the compose
+    # is closed, and the open-compose count for that trigger drops to zero,
+    # so a compose is never counted twice. Round 11's concern (counting `cap`
+    # rejections per PAST strike made history mutable) does not arise: closed
+    # composes are counted by their markers only.
+    if settings is not None:
+        run += len(_exhausted_open_composes(session, settings=settings,
+                                            exclude_id=exclude_id))
+    return run
+
+
+def _last_ok(session: Session) -> tuple[datetime, int] | None:
+    """Completion and id of the newest success — the strike run's boundary."""
+    _completed = func.coalesce(MessageEngineAttempt.finished_at,
+                               MessageEngineAttempt.started_at)
+    row = session.execute(
+        select(_completed, MessageEngineAttempt.id)
+        .where(MessageEngineAttempt.outcome == Outcome.OK.value)
+        .order_by(_completed.desc(), MessageEngineAttempt.id.desc())
+        .limit(1)
+    ).first()
+    return None if row is None else (row[0], row[1])
+
+
+def _exhausted_open_composes(session: Session, *, settings: Settings,
+                             exclude_id: int | None = None) -> list[str]:
+    """Triggers whose CURRENT compose has reached the cap but is not yet marked.
+
+    See `consecutive_strikes` for why these are strikes now, not when the
+    writer next records them. Only rows after the last success are read: a
+    compose exhausted before the reset belongs to the run the success ended.
+    """
+    cap = _effective_cap(settings)
+    if cap < 1:
+        return []
+    _completed = func.coalesce(MessageEngineAttempt.finished_at,
+                               MessageEngineAttempt.started_at)
+    stmt = (
+        select(MessageEngineAttempt.trigger)
+        .where(MessageEngineAttempt.outcome.in_(
+            [Outcome.CONTENT_REJECTED.value, Outcome.FORMAT_REJECTED.value]))
+        .where(MessageEngineAttempt.trigger.is_not(None)))
+    last_ok = _last_ok(session)
+    if last_ok is not None:
+        ok_at, ok_id = last_ok
+        stmt = stmt.where((_completed > ok_at)
+                          | ((_completed == ok_at) & (MessageEngineAttempt.id != ok_id)))
+    if exclude_id is not None:
+        stmt = stmt.where(MessageEngineAttempt.id != exclude_id)
+    return [t for t in session.execute(stmt.distinct()).scalars().all()
+            if content_attempts(session, trigger=t, exclude_id=exclude_id,
+                                limit=cap + 1) >= cap]
+
+
+def _strike_instant(session: Session, row: MessageEngineAttempt, *,
+                    exclude_id: int | None = None) -> datetime:
+    """When the strike a row records actually happened.
+
+    A technical error struck when it completed. An exhausted-compose marker
+    (FALLBACK_USED) is bookkeeping: the compose it closes struck when its last
+    rejection completed, and the marker may be written any time after that —
+    when the trigger next fires and is refused as exhausted. Anchoring on the
+    marker's own completion let a marker written after an outage restart the
+    cooldown with no model call made (offline review before round 8, C5,
+    executed). A marker with no rejection before it anchors on itself.
+    """
+    if row.outcome != Outcome.FALLBACK_USED.value or row.trigger is None:
+        return _dwell_from(row)
+    _completed = func.coalesce(MessageEngineAttempt.finished_at,
+                               MessageEngineAttempt.started_at)
+    stmt = (
+        select(MessageEngineAttempt)
+        .where(MessageEngineAttempt.trigger == row.trigger)
+        .where(MessageEngineAttempt.outcome.in_(
+            [Outcome.CONTENT_REJECTED.value, Outcome.FORMAT_REJECTED.value]))
+        .where(_completed <= _naive_utc(_dwell_from(row))))
+    if exclude_id is not None:
+        stmt = stmt.where(MessageEngineAttempt.id != exclude_id)
+    last_reject = session.execute(
+        stmt.order_by(_completed.desc(), MessageEngineAttempt.id.desc()).limit(1)
+    ).scalars().first()
+    return _dwell_from(last_reject) if last_reject is not None else _dwell_from(row)
+
+
+def strike_anchor(session: Session, *, settings: Settings,
+                  exclude_id: int | None = None) -> datetime | None:
+    """When the newest strike happened — the instant the cooldown runs from.
+
+    The breaker cooldown is quiet time AFTER the strike that tripped it, so
+    it is measured from a STRIKE. Until #106 round 7 both anchor sites used
+    the newest PACING row, and FALLBACK_USED — the exhausted-compose strike —
+    is not a pacing outcome; SOTA-A and SOTA-C found it independently in the
+    same round (executed: `breaker_is_open` False one second after the fifth
+    marker, in two shapes). The offline review before round 8 then refined
+    WHEN an exhausted compose strikes: at its last rejection, whether or not
+    the writer has marked it yet (C4: five exhausted unmarked composes were
+    five strikes with no anchor at all; C5: a marker written late restarted
+    the cooldown). So the candidates are: every strike row since the last
+    success at its strike instant (`_strike_instant`), and every exhausted
+    open compose at its newest rejection. The latest wins — a constant
+    cooldown makes the newest completion the latest deadline (round 5).
+    """
+    _completed = func.coalesce(MessageEngineAttempt.finished_at,
+                               MessageEngineAttempt.started_at)
+    stmt = (
+        select(MessageEngineAttempt)
+        .where(MessageEngineAttempt.outcome.in_([o.value for o in _STRIKE_OUTCOMES])))
+    last_ok = _last_ok(session)
+    if last_ok is not None:
+        ok_at, ok_id = last_ok
+        stmt = stmt.where((_completed > ok_at)
+                          | ((_completed == ok_at) & (MessageEngineAttempt.id != ok_id)))
+    if exclude_id is not None:
+        stmt = stmt.where(MessageEngineAttempt.id != exclude_id)
+    candidates = [
+        _strike_instant(session, row, exclude_id=exclude_id)
+        for row in session.execute(
+            stmt.order_by(_completed.desc(), MessageEngineAttempt.id.desc())
+            .limit(_STRIKE_SCAN_ROWS)
+        ).scalars().all()
+    ]
+    for trigger in _exhausted_open_composes(session, settings=settings,
+                                            exclude_id=exclude_id):
+        open_stmt = (
+            select(MessageEngineAttempt)
+            .where(MessageEngineAttempt.trigger == trigger)
+            .where(MessageEngineAttempt.outcome.in_(
+                [Outcome.CONTENT_REJECTED.value, Outcome.FORMAT_REJECTED.value])))
+        if exclude_id is not None:
+            open_stmt = open_stmt.where(MessageEngineAttempt.id != exclude_id)
+        newest = session.execute(
+            open_stmt.order_by(_completed.desc(), MessageEngineAttempt.id.desc()).limit(1)
+        ).scalars().first()
+        if newest is not None:
+            candidates.append(_dwell_from(newest))
+    return max(candidates) if candidates else None
+
+
+def _probe_after(session: Session, resume: datetime, *,
+                 exclude_id: int | None = None) -> MessageEngineAttempt | None:
+    """The newest request made since the cooldown ended, if any."""
+    _completed = func.coalesce(MessageEngineAttempt.finished_at,
+                               MessageEngineAttempt.started_at)
+    stmt = (
+        select(MessageEngineAttempt)
+        .where(MessageEngineAttempt.outcome.in_([o.value for o in _PACING_OUTCOMES]))
+        .where(_completed > _naive_utc(resume)))
+    if exclude_id is not None:
+        stmt = stmt.where(MessageEngineAttempt.id != exclude_id)
+    return session.execute(
+        stmt.order_by(_completed.desc(), MessageEngineAttempt.id.desc()).limit(1)
+    ).scalars().first()
 
 
 def content_attempts(session: Session, *, trigger: str | None,
@@ -489,18 +679,31 @@ def content_attempts(session: Session, *, trigger: str | None,
     # SOTA-A defect 4). This is the round-13 defect exactly — BUDGET_SKIPPED
     # was moved into the query for the same reason, four lines below — and the
     # round-32 fix reintroduced it in a new outcome.
+    # INCLUSION-based, like every other scan in this module. The old
+    # exclusion list (`not_in([NOT_ASKED, TECHNICAL_ERROR])`) made every
+    # outcome it had not heard of — IN_FLIGHT included — "a spent content
+    # attempt", the one place a row class was classified by default. An
+    # unresolved claim is not a spent attempt: its outcome is unknown, and it
+    # holds the engine through pacing instead (see `_pause_for`); when the
+    # reaper resolves it, it is a technical error, which is not a content
+    # attempt either. Counting the claim here made reserve() declare a
+    # compose exhausted that decide() on the reaped rows said was not, wrote
+    # a FALLBACK_USED strike for a compose that never reached the cap, and
+    # opened the breaker on four real failures (offline review before round
+    # 8, C2, executed).
+    # TECHNICAL_ERROR is not a CONTENT attempt. Ruling Q38 counts "an
+    # exhausted content attempt OR a terminal technical failure" as separate
+    # things, and letting a gateway failure consume the content cap made them
+    # compound: three timeouts exhausted the cap, the next compose recorded
+    # FALLBACK_USED as a further strike, and a threshold of five opened after
+    # FOUR failures (round 40, SOTA-A defect 2). The technical failures
+    # already strike on their own rows.
     stmt = select(MessageEngineAttempt.outcome).where(
         MessageEngineAttempt.trigger == trigger,
-        MessageEngineAttempt.outcome.not_in(
-            # TECHNICAL_ERROR is not a CONTENT attempt. Ruling Q38 counts
-            # "an exhausted content attempt OR a terminal technical failure"
-            # as separate things, and letting a gateway failure consume the
-            # content cap made them compound: three timeouts exhausted the
-            # cap, the next compose recorded FALLBACK_USED as a further
-            # strike, and a threshold of five opened after FOUR failures
-            # (round 40, SOTA-A defect 2). The technical failures already
-            # strike on their own rows.
-            [Outcome.NOT_ASKED.value, Outcome.TECHNICAL_ERROR.value]))
+        MessageEngineAttempt.outcome.in_([
+            Outcome.CONTENT_REJECTED.value, Outcome.FORMAT_REJECTED.value,
+            Outcome.OK.value, Outcome.BUDGET_SKIPPED.value,
+            Outcome.FALLBACK_USED.value]))
     if exclude_id is not None:
         # reserve() inserts its claim BEFORE evaluating the gates, so without
         # this the reservation counts itself as an already-spent attempt and
@@ -541,7 +744,7 @@ def spend_today(session: Session, *, now: datetime | None = None,
     stmt = (
         select(func.count())
         .select_from(MessageEngineAttempt)
-        .where(MessageEngineAttempt.started_at >= midnight.replace(tzinfo=None))
+        .where(MessageEngineAttempt.started_at >= _naive_utc(midnight))
         .where(MessageEngineAttempt.outcome.in_([o.value for o in _PACING_OUTCOMES])))
     if exclude_id is not None:
         stmt = stmt.where(MessageEngineAttempt.id != exclude_id)
@@ -555,7 +758,24 @@ def decide(session: Session, *, priority: int, settings: Settings,
     """May the engine call the model right now?
 
     `last_failure` is the failure class of the PREVIOUS iteration of this same
-    compose ('format' or 'content'), which selects the shorter format pause.
+    compose ('format' or 'content'), which selects the shorter format pause —
+    and only when the rows agree that a compose is open (see `_pause_for`).
+
+    Gate order matters, because the REASON decides what the writer records:
+    the composer maps "content iterations exhausted" to a FALLBACK_USED row (a
+    strike) and every other refusal to NOT_ASKED (not a strike, round 32). The
+    breaker is therefore consulted BEFORE the cap. With the cap first, a
+    trigger that had reached its cap before an outage was refused as
+    "exhausted" while the breaker was open, the writer recorded a strike at
+    the time of the REFUSAL, and that strike re-anchored the cooldown — the
+    breaker fed itself again, the round-32 shape through the other door
+    (offline review before round 8, C5, executed: a strike written at T+23h
+    kept the breaker open past T+48h with no model call made).
+
+    The durations applied here — floor, backoffs, cooldown — are the CURRENT
+    settings applied to historical rows. That is policy applied now, not
+    history re-read: the fact of a strike or a request is immutable, the
+    quiet time an operator wants after it is theirs to change.
     """
     moment = _now(now)
 
@@ -573,30 +793,18 @@ def decide(session: Session, *, priority: int, settings: Settings,
     # (round 9, SOTA-C).
     reap_stale_claims(session, now=moment)
 
-    # The cap is derived from ROWS, not taken on trust: a caller that passes
-    # iteration=1 on its fourth content attempt would otherwise be handed a
-    # fresh allowance (round 4, SOTA-A). The caller's own count still counts —
-    # whichever is larger wins, so an honest caller is never under-counted.
-    # The window is sized from the cap, not fixed: a 64-row scan let a cap of
-    # 65 permit request 66 (round 5, SOTA-A).
-    spent = content_attempts(
-        session, trigger=trigger, exclude_id=exclude_id,
-        limit=_effective_cap(settings) + 1)
-    effective_iteration = max(iteration, spent + 1)
-    if effective_iteration > _effective_cap(settings):
-        return Decision(Verdict.USE_FALLBACK, "content iterations exhausted")
-
     # The scan must be long enough to SEE the strikes: a content strike costs
     # up to `max_content_iterations` rows, so the window is sized for the
     # worst case rather than for one row per strike (ruling Q38).
     strikes = consecutive_strikes(
-        session, limit=_strike_window(settings), exclude_id=exclude_id)
+        session, limit=_strike_window(settings), exclude_id=exclude_id,
+        settings=settings)
     if strikes >= _effective_strikes(settings):
         # Anchored on the newest STRIKE, not the newest pacing row (#106
-        # round 7): see `last_strike`.
-        last = last_strike(session, exclude_id=exclude_id)
-        if last is not None:
-            resume = _dwell_from(last) + timedelta(
+        # round 7): see `strike_anchor`.
+        anchor = strike_anchor(session, settings=settings, exclude_id=exclude_id)
+        if anchor is not None:
+            resume = anchor + timedelta(
                 seconds=settings.message_engine_breaker_cooldown_s)
             if moment < resume:
                 return Decision(Verdict.USE_FALLBACK,
@@ -604,8 +812,44 @@ def decide(session: Session, *, priority: int, settings: Settings,
                                 "strikes (exhausted composes or technical "
                                 "failures)",
                                 retry_after=resume)
-        # Cooldown elapsed: one probe is allowed, and its outcome either
-        # resets the run or re-opens the breaker for another cooldown.
+            # Cooldown elapsed: ONE probe is allowed, and its outcome either
+            # resets the run (an OK) or re-opens the breaker (a strike). The
+            # comment used to say so while the code let every trigger ask at
+            # the pacing rate until one of them happened to strike (offline
+            # review before round 8, the critic's prediction). A probe that
+            # is still in flight, or whose compose was rejected and is still
+            # open, holds the half-open breaker for everyone else; the probe's
+            # own trigger may continue its compose to a conclusion. A probe
+            # that neither concluded nor continued within the claim TTL is
+            # abandoned — neither a reset nor a strike — and the next probe
+            # may go.
+            probe = _probe_after(session, resume, exclude_id=exclude_id)
+            if probe is not None:
+                continuing = (probe.trigger == trigger
+                              and probe.outcome in (Outcome.CONTENT_REJECTED.value,
+                                                    Outcome.FORMAT_REJECTED.value))
+                abandoned_at = _dwell_from(probe) + timedelta(seconds=_CLAIM_TTL_S)
+                if not continuing and moment < abandoned_at:
+                    return Decision(Verdict.USE_FALLBACK,
+                                    "breaker half-open: a probe is in progress",
+                                    retry_after=abandoned_at)
+
+    # The cap is derived from ROWS, not taken on trust: a caller that passes
+    # iteration=1 on its fourth content attempt would otherwise be handed a
+    # fresh allowance (round 4, SOTA-A). The caller's own count still counts —
+    # whichever is larger wins, so an honest caller is never under-counted.
+    # The window is sized from the cap, not fixed: a 64-row scan let a cap of
+    # 65 permit request 66 (round 5, SOTA-A).
+    cap = _effective_cap(settings)
+    if cap == 0:
+        # Not "exhausted": nothing was spent, and the writer must not record
+        # a strike for a policy that asks for no content attempts at all.
+        return Decision(Verdict.USE_FALLBACK, "content attempts disabled (cap 0)")
+    spent = content_attempts(
+        session, trigger=trigger, exclude_id=exclude_id, limit=cap + 1)
+    effective_iteration = max(iteration, spent + 1)
+    if effective_iteration > cap:
+        return Decision(Verdict.USE_FALLBACK, "content iterations exhausted")
 
     if (spend_today(session, now=moment, exclude_id=exclude_id)
             >= settings.message_engine_daily_budget):
@@ -613,7 +857,7 @@ def decide(session: Session, *, priority: int, settings: Settings,
 
     bound = pacing_deadline(session, settings=settings, trigger=trigger,
                             last_failure=last_failure, now=moment,
-                            exclude_id=exclude_id)
+                            exclude_id=exclude_id, spent=spent)
     if bound is not None:
         ready, pause = bound
         if moment < ready:
@@ -633,13 +877,14 @@ def breaker_is_open(session: Session, *, settings: Settings,
     # calling this directly saw expired claims as "no strikes" and reported
     # the breaker closed (round 17, SOTA-A).
     reap_stale_claims(session, now=now)
-    strikes = consecutive_strikes(session, limit=_strike_window(settings))
+    strikes = consecutive_strikes(session, limit=_strike_window(settings),
+                                  settings=settings)
     if strikes < _effective_strikes(settings):
         return False
-    last = last_strike(session)
-    if last is None:
+    anchor = strike_anchor(session, settings=settings)
+    if anchor is None:
         return False
-    resume = _dwell_from(last) + timedelta(
+    resume = anchor + timedelta(
         seconds=settings.message_engine_breaker_cooldown_s)
     return _now(now) < resume
 
@@ -684,7 +929,7 @@ def reserve(session: Session, *, trigger: str, channel: str, priority: int,
     savepoint = session.begin_nested()
     row = MessageEngineAttempt(
         trigger=trigger, channel=channel, priority=priority,
-        started_at=_now(now).replace(tzinfo=None),
+        started_at=_naive_utc(_now(now)),
         outcome=Outcome.IN_FLIGHT.value, iteration=iteration)
     session.add(row)
     session.flush()  # the write lock is held from here

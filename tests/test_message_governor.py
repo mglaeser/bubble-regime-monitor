@@ -603,16 +603,23 @@ class TestRoundSevenOn106:
 
     @pytest.mark.parametrize("gap_s", [86_400 + 60, 3_600])
     def test_the_cooldown_runs_from_the_strike_that_opened_the_breaker(self, gap_s):
+        # Refined before round 8 (offline review, C4/C5): the strike is the
+        # EXHAUSTION - the fifth compose's last rejection at T+42 - and the
+        # marker only closes the compose, however late the writer records it.
+        # The anchor is still a strike, never a pacing row (this round's
+        # finding); it is simply the strike's own instant.
         settings = _settings()
         with session_scope() as s:
-            opened = self._five_exhausted_composes(s, gap_s)
-            just_after = (self.T + timedelta(seconds=opened + 1)).replace(tzinfo=UTC)
+            self._five_exhausted_composes(s, gap_s)
+            exhausted = 42
             assert gov.consecutive_strikes(s, limit=1000) == 5
+            just_after = (self.T + timedelta(seconds=exhausted + 1)).replace(tzinfo=UTC)
             assert gov.breaker_is_open(s, settings=settings, now=just_after)
             d = gov.decide(s, priority=2, settings=settings, trigger="NEW_TRIGGER",
                            iteration=1, now=just_after)
             assert d.verdict is gov.Verdict.USE_FALLBACK and "breaker" in d.reason, d.reason
-            after = (self.T + timedelta(seconds=opened + 86_400 + 1)).replace(tzinfo=UTC)
+            assert d.retry_after == (self.T + timedelta(seconds=exhausted + 86_400)).replace(tzinfo=UTC)
+            after = (self.T + timedelta(seconds=exhausted + 86_400 + 1)).replace(tzinfo=UTC)
             assert not gov.breaker_is_open(s, settings=settings, now=after)
 
     def test_markers_alone_still_hold_the_cooldown(self):
@@ -625,3 +632,194 @@ class TestRoundSevenOn106:
             d = gov.decide(s, priority=2, settings=settings, trigger="NEW_TRIGGER",
                            iteration=1, now=just_after)
             assert d.verdict is gov.Verdict.USE_FALLBACK and "breaker" in d.reason, d.reason
+
+
+class TestRoundEightOffline:
+    """Before round 8: an offline six-lens review, every finding reproduced by
+    two independent executing verifiers. C0-C5 are governor defects; the
+    critic's predicted finding (the half-open breaker had no probe bound) is
+    the last case. C6 (the claim is not durable before the model call) is a
+    writer/transaction design and is handled with the composer.
+    """
+
+    T = datetime(2026, 9, 6, 12, 0, 0)
+
+    def _row(self, s, outcome, started_s, finished_s, trigger="A", iteration=1):
+        r = MessageEngineAttempt(
+            trigger=trigger, channel="imessage", priority=2,
+            started_at=self.T + timedelta(seconds=started_s),
+            finished_at=None if finished_s is None else self.T + timedelta(seconds=finished_s),
+            outcome=outcome.value, iteration=iteration)
+        s.add(r)
+        s.commit()
+        return r.id
+
+    def _at(self, seconds):
+        return (self.T + timedelta(seconds=seconds)).replace(tzinfo=UTC)
+
+    # C0 ------------------------------------------------------------------
+    @pytest.mark.parametrize("fmt_iteration", [1, 3])
+    def test_c0_a_closed_compose_earns_no_format_retry(self, fmt_iteration):
+        settings = _settings()
+        with session_scope() as s:
+            self._row(s, gov.Outcome.FORMAT_REJECTED, -10, 0, iteration=fmt_iteration)
+            self._row(s, gov.Outcome.FALLBACK_USED, 5, 5)
+            assert gov.content_attempts(s, trigger="A") == 0
+            d = gov.decide(s, priority=2, settings=settings, trigger="A",
+                           iteration=1, last_failure="format", now=self._at(31))
+            assert d.verdict is gov.Verdict.WAIT, d
+            assert d.retry_after == self._at(300), d
+            # The retry IS earned while the compose is open.
+        with session_scope() as s:
+            # (Beyond trigger A's 300s floor, which binds every trigger.)
+            self._row(s, gov.Outcome.FORMAT_REJECTED, 400, 410, trigger="B")
+            d = gov.decide(s, priority=2, settings=settings, trigger="B",
+                           iteration=2, last_failure="format", now=self._at(441))
+            assert d.may_ask, d
+
+    # C1 ------------------------------------------------------------------
+    def test_c1_a_non_utc_aware_now_is_converted_not_stripped(self):
+        from datetime import timezone
+        settings = _settings()
+        plus_two = timezone(timedelta(hours=2))
+        with session_scope() as s:
+            self._row(s, gov.Outcome.OK, -10, 0)
+            now = self._at(100).astimezone(plus_two)     # 14:01:40+02:00 == 12:01:40Z
+            d = gov.decide(s, priority=2, settings=settings, trigger="A", now=now)
+            assert d.verdict is gov.Verdict.WAIT and d.retry_after == self._at(300), d
+            decision, claim = gov.reserve(s, trigger="A", channel="imessage", priority=2,
+                                          settings=settings, now=now)
+            assert claim is None and decision.verdict is gov.Verdict.WAIT
+            # A claim stamped under a +02:00 clock lands at the UTC instant.
+            decision, claim = gov.reserve(s, trigger="A", channel="imessage", priority=2,
+                                          settings=settings,
+                                          now=self._at(400).astimezone(plus_two))
+            assert claim is not None
+            assert claim.started_at == self.T + timedelta(seconds=400)
+
+    # C2 ------------------------------------------------------------------
+    def test_c2_an_unresolved_claim_is_not_a_spent_attempt_but_holds_pacing(self):
+        settings = _settings()
+        with session_scope() as s:
+            self._row(s, gov.Outcome.CONTENT_REJECTED, -3000, -3000, iteration=1)
+            self._row(s, gov.Outcome.CONTENT_REJECTED, -2400, -2400, iteration=2)
+            claim = self._row(s, gov.Outcome.IN_FLIGHT, -600, None, iteration=3)
+            # Not spent: two content attempts, one unknown.
+            assert gov.content_attempts(s, trigger="A") == 2
+            # But the engine is held while the claim is unresolved ...
+            d = gov.decide(s, priority=2, settings=settings, trigger="A",
+                           iteration=3, now=self._at(-200))
+            assert d.verdict is gov.Verdict.WAIT and d.retry_after == self._at(300), d
+            # ... and reserve() on the same rows agrees with decide().
+            decision, row = gov.reserve(s, trigger="A", channel="imessage", priority=2,
+                                        settings=settings, iteration=3, now=self._at(-200))
+            assert decision.verdict is gov.Verdict.WAIT and row is None
+            # The composer's stale hint (rows + 1 computed before the reap)
+            # cannot exhaust the compose: reap first, then the rows decide.
+            d2 = gov.decide(s, priority=2, settings=settings, trigger="A",
+                            iteration=1, now=self._at(1000))
+            assert d2.may_ask, d2
+            reaped = s.get(MessageEngineAttempt, claim)
+            assert reaped.outcome == gov.Outcome.TECHNICAL_ERROR.value
+            assert gov.consecutive_strikes(s, settings=settings) == 1
+
+    # C3 ------------------------------------------------------------------
+    @pytest.mark.parametrize("cap", [0, -1, -100])
+    def test_c3_a_zero_cap_admits_no_content_attempt(self, cap):
+        settings = _settings(message_engine_max_content_iterations=cap)
+        with session_scope() as s:
+            d = gov.decide(s, priority=2, settings=settings, trigger="A",
+                           iteration=1, now=self._at(0))
+            assert d.verdict is gov.Verdict.USE_FALLBACK, d
+            # Not the exhausted reason: the writer must not record a strike.
+            assert "iterations exhausted" not in d.reason and "cap 0" in d.reason, d
+            decision, row = gov.reserve(s, trigger="A", channel="imessage", priority=2,
+                                        settings=settings, now=self._at(0))
+            assert row is None and decision.verdict is gov.Verdict.USE_FALLBACK
+            assert s.query(MessageEngineAttempt).count() == 0
+
+    # C4 ------------------------------------------------------------------
+    def test_c4_five_exhausted_unmarked_composes_open_the_breaker(self):
+        settings = _settings()
+        triggers = ["BAND_TO_DERISK", "BAND_TO_TRIM", "BAND_TO_HOLD",
+                    "OVERRIDE_FIRES", "OVERRIDE_RESOLVES"]
+        with session_scope() as s:
+            for k, trig in enumerate(triggers):
+                for i in range(1, 4):
+                    t = 400 * (3 * k + i)
+                    self._row(s, gov.Outcome.CONTENT_REJECTED, t - 5, t,
+                              trigger=trig, iteration=i)
+            now = self._at(400 * 16)
+            for trig in triggers:
+                assert gov.content_attempts(s, trigger=trig) >= 3   # exhausted
+            assert gov.consecutive_strikes(s, limit=10**6, settings=settings) == 5
+            assert gov.breaker_is_open(s, settings=settings, now=now)
+            d = gov.decide(s, priority=2, settings=settings, trigger="S3_TIER", now=now)
+            assert d.verdict is gov.Verdict.USE_FALLBACK and "breaker" in d.reason, d
+            # The cooldown runs from the fifth exhaustion (T+400*15).
+            assert d.retry_after == self._at(400 * 15 + 86_400), d
+            # Once the writer marks one of them, it is counted once, not twice,
+            # and the late marker does not move the anchor (C5, second shape).
+            self._row(s, gov.Outcome.FALLBACK_USED, 400 * 16 + 1, 400 * 16 + 1,
+                      trigger="BAND_TO_TRIM")
+            assert gov.consecutive_strikes(s, limit=10**6, settings=settings) == 5
+            d = gov.decide(s, priority=2, settings=settings, trigger="S3_TIER",
+                           now=self._at(400 * 16 + 2))
+            assert d.retry_after == self._at(400 * 15 + 86_400), d
+
+    def test_c4_an_open_compose_below_the_cap_is_not_a_strike(self):
+        settings = _settings()
+        with session_scope() as s:
+            for k in range(5):
+                self._row(s, gov.Outcome.CONTENT_REJECTED, k * 400, k * 400 + 5,
+                          trigger=f"T{k}", iteration=1)
+                self._row(s, gov.Outcome.CONTENT_REJECTED, k * 400 + 200, k * 400 + 205,
+                          trigger=f"T{k}", iteration=2)
+            assert gov.consecutive_strikes(s, limit=10**6, settings=settings) == 0
+
+    # C5 ------------------------------------------------------------------
+    def test_c5_an_open_breaker_answers_before_the_cap(self):
+        settings = _settings()
+        with session_scope() as s:
+            for i in range(1, 4):
+                self._row(s, gov.Outcome.CONTENT_REJECTED, -3600 * i - 5, -3600 * i,
+                          trigger="BAND_TO_TRIM", iteration=i)
+            for k in range(5):
+                self._row(s, gov.Outcome.TECHNICAL_ERROR, -k - 5, -k, trigger=f"E{k}")
+            # Breaker opened at T (newest strike); the capped trigger asks at T+23h.
+            d = gov.decide(s, priority=2, settings=settings, trigger="BAND_TO_TRIM",
+                           iteration=4, now=self._at(23 * 3600))
+            assert d.verdict is gov.Verdict.USE_FALLBACK and "breaker" in d.reason, d
+            # (The exhausted compose is itself the sixth strike; the anchor is
+            # still the newest technical error, so the cooldown ends at T+24h.)
+            assert d.retry_after == self._at(86_400), d
+
+    # the critic's prediction ---------------------------------------------
+    def test_half_open_breaker_admits_one_probe_at_a_time(self):
+        settings = _settings()
+        with session_scope() as s:
+            for k in range(5):
+                self._row(s, gov.Outcome.TECHNICAL_ERROR, 600 * k - 5, 600 * k, trigger="A")
+            opened = 2400
+            resume = opened + 86_400
+            # The probe.
+            d = gov.decide(s, priority=2, settings=settings, trigger="B", now=self._at(resume + 1))
+            assert d.may_ask, d
+            self._row(s, gov.Outcome.CONTENT_REJECTED, resume + 1, resume + 6, trigger="B")
+            # Another trigger 310s later: pacing is clear, the breaker is not.
+            d = gov.decide(s, priority=2, settings=settings, trigger="C", now=self._at(resume + 316))
+            assert d.verdict is gov.Verdict.USE_FALLBACK and "half-open" in d.reason, d
+            # The probe's own trigger may continue its compose.
+            d = gov.decide(s, priority=2, settings=settings, trigger="B", iteration=2,
+                           now=self._at(resume + 316))
+            assert d.may_ask, d
+            # An abandoned probe releases the slot after the claim TTL.
+            d = gov.decide(s, priority=2, settings=settings, trigger="C",
+                           now=self._at(resume + 6 + gov._CLAIM_TTL_S + 1))
+            assert d.may_ask, d
+            # A probe that strikes re-opens the breaker for a full cooldown.
+            self._row(s, gov.Outcome.TECHNICAL_ERROR, resume + 1000, resume + 1005, trigger="C")
+            d = gov.decide(s, priority=2, settings=settings, trigger="D",
+                           now=self._at(resume + 2000))
+            assert d.verdict is gov.Verdict.USE_FALLBACK and "breaker open" in d.reason, d
+            assert d.retry_after == self._at(resume + 1005 + 86_400), d
