@@ -1,0 +1,293 @@
+"""Message-engine governor: pacing, the content-strike rule (Q38), breaker and budget, the P1 exemption, and inert-by-default.
+
+Carried out of PR #100 unchanged; see docs/MESSAGE_ENGINE.md.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+
+import pytest
+
+from app.config import Settings
+from app.db import session_scope
+from app.message_engine import governor as gov
+from app.models import MessageEngineAttempt
+
+pytestmark = pytest.mark.usefixtures("isolated_db")
+
+FACTS = {
+    "F_HEADLINE_MEDIAN": 51,
+    "F_BAND_EFFECTIVE": "trim",
+    "F_BAND_PREVIOUS": "hold",
+    "F_RF_COUNT": 2,
+    "F_NEXT_CHECK": "14:00 UTC",
+}
+
+LIMITS = {"sms_max_len": 150, "imessage_max_chars": 200, "imessage_max_emoji": 2}
+
+
+def _settings(**overrides) -> Settings:
+    base = {
+        "message_engine_enabled": True,
+        "message_engine_min_interval_s": 300,
+        "message_engine_format_retry_s": 30,
+        "message_engine_max_content_iterations": 3,
+        "message_engine_technical_backoff_s": 120,
+        "message_engine_breaker_strikes": 5,
+        "message_engine_breaker_cooldown_s": 86400,
+        "message_engine_daily_budget": 100,
+    }
+    base.update(overrides)
+    return Settings(_env_file=None, **base)
+
+
+def _attempt(session, *, outcome, minutes_ago=0, trigger="BAND_TO_TRIM",
+             now=None, iteration=1):
+    moment = (now or datetime.now(UTC)) - timedelta(minutes=minutes_ago)
+    row = MessageEngineAttempt(
+        trigger=trigger, channel="imessage", priority=2,
+        started_at=moment.replace(tzinfo=None), outcome=outcome.value,
+        iteration=iteration)
+    session.add(row)
+    # COMMITTED, not just flushed: seed data has to be real for a query on a
+    # different transaction to see it.
+    session.commit()
+    return row
+
+
+
+class TestGovernorPacing:
+    def test_first_ever_request_is_allowed(self):
+        with session_scope() as s:
+            assert gov.decide(s, priority=2, settings=_settings()).may_ask
+
+    def test_five_minute_floor_between_requests(self):
+        with session_scope() as s:
+            _attempt(s, outcome=gov.Outcome.OK, minutes_ago=1)
+            d = gov.decide(s, priority=2, settings=_settings())
+            assert d.verdict is gov.Verdict.WAIT and d.retry_after is not None
+
+    def test_floor_clears_after_the_interval(self):
+        with session_scope() as s:
+            _attempt(s, outcome=gov.Outcome.OK, minutes_ago=6)
+            assert gov.decide(s, priority=2, settings=_settings()).may_ask
+
+    def test_format_retry_may_pause_only_thirty_seconds(self):
+        # The shape was wrong, not the substance — the re-ask is immediate.
+        with session_scope() as s:
+            _attempt(s, outcome=gov.Outcome.FORMAT_REJECTED, minutes_ago=1,
+                     trigger="BAND_TO_TRIM")
+            assert gov.decide(s, priority=2, settings=_settings(),
+                              trigger="BAND_TO_TRIM",
+                              iteration=2, last_failure="format").may_ask
+
+    def test_content_retry_still_waits_the_full_interval(self):
+        with session_scope() as s:
+            _attempt(s, outcome=gov.Outcome.CONTENT_REJECTED, minutes_ago=1)
+            d = gov.decide(s, priority=2, settings=_settings(),
+                           iteration=2, last_failure="content")
+            assert d.verdict is gov.Verdict.WAIT
+
+    def test_technical_error_holds_for_the_backoff(self):
+        with session_scope() as s:
+            _attempt(s, outcome=gov.Outcome.TECHNICAL_ERROR, minutes_ago=1)
+            assert gov.decide(s, priority=2, settings=_settings()).verdict is gov.Verdict.WAIT
+
+    def test_the_floor_still_applies_after_a_technical_error(self):
+        # THIS TEST ENCODED MY MISREADING (round 27, SOTA-A). It asserted the
+        # 120 s backoff CLEARS at two minutes, but the owner's rule reads
+        # "technical 4xx/5xx -> wait MIN 2 min" — an additional minimum on
+        # top of the 5-minute floor, not a licence to ask sooner. Only the
+        # format retry is an explicit exception to that floor.
+        with session_scope() as s:
+            _attempt(s, outcome=gov.Outcome.TECHNICAL_ERROR, minutes_ago=3)
+            assert gov.decide(s, priority=2,
+                              settings=_settings()).verdict is gov.Verdict.WAIT
+
+    def test_a_technical_error_clears_after_the_floor(self):
+        with session_scope() as s:
+            _attempt(s, outcome=gov.Outcome.TECHNICAL_ERROR, minutes_ago=6)
+            assert gov.decide(s, priority=2, settings=_settings()).may_ask
+
+    def test_a_longer_backoff_than_the_floor_still_wins(self):
+        settings = _settings(message_engine_technical_backoff_s=1200)
+        with session_scope() as s:
+            _attempt(s, outcome=gov.Outcome.TECHNICAL_ERROR, minutes_ago=10)
+            assert gov.decide(s, priority=2,
+                              settings=settings).verdict is gov.Verdict.WAIT
+
+    def test_budget_skips_do_not_pace_the_next_request(self):
+        # No request was made, so it must not push the next one away.
+        with session_scope() as s:
+            _attempt(s, outcome=gov.Outcome.BUDGET_SKIPPED, minutes_ago=0)
+            assert gov.decide(s, priority=2, settings=_settings()).may_ask
+
+    def test_iterations_are_capped_then_fallback(self):
+        with session_scope() as s:
+            d = gov.decide(s, priority=2, settings=_settings(), iteration=4)
+            assert d.verdict is gov.Verdict.USE_FALLBACK
+            assert "iterations" in d.reason
+
+
+
+
+class TestRulingQ38ContentStrikes:
+    """Ruling Q38: a strike is an exhausted content attempt OR a terminal
+    technical failure. Counting only the technical half left a provider that
+    returns 200s with unusable content able to run forever."""
+
+    def test_exhausted_content_composes_are_strikes(self):
+        settings = _settings()  # 3 iterations per compose, 5 strikes
+        with session_scope() as s:
+            for c in range(5):
+                for i in range(3):
+                    _attempt(s, outcome=gov.Outcome.CONTENT_REJECTED,
+                             minutes_ago=500 - c * 10 - i, trigger="T",
+                             iteration=i + 1)
+                # The engine records giving up; that row IS the exhausted
+                # attempt ruling Q38 counts.
+                _attempt(s, outcome=gov.Outcome.FALLBACK_USED,
+                         minutes_ago=500 - c * 10 - 3, trigger="T")
+            assert gov.breaker_is_open(s, settings=settings), \
+                "five exhausted composes must open the breaker"
+
+    def test_a_partial_content_run_is_not_yet_a_strike(self):
+        with session_scope() as s:
+            for i in range(2):  # 2 of 3, and no fallback row: still running
+                _attempt(s, outcome=gov.Outcome.CONTENT_REJECTED,
+                         minutes_ago=100 + i, trigger="T", iteration=i + 1)
+            assert gov.consecutive_strikes(s, limit=50) == 0
+
+    def test_content_rejections_no_longer_reset_the_run(self):
+        # The original defect: a content rejection fell into the else-branch
+        # and RESET the technical run to zero.
+        settings = _settings()
+        with session_scope() as s:
+            for i in range(4):
+                _attempt(s, outcome=gov.Outcome.TECHNICAL_ERROR,
+                         minutes_ago=300 + i)
+            _attempt(s, outcome=gov.Outcome.FALLBACK_USED, minutes_ago=200,
+                     trigger="T")
+            for i in range(3):
+                _attempt(s, outcome=gov.Outcome.CONTENT_REJECTED,
+                         minutes_ago=201 + i, trigger="T", iteration=3 - i)
+            # 4 technical + 1 exhausted content compose = 5 strikes.
+            assert gov.breaker_is_open(s, settings=settings)
+
+    def test_a_success_still_resets_everything(self):
+        settings = _settings()
+        with session_scope() as s:
+            for i in range(9):
+                _attempt(s, outcome=gov.Outcome.CONTENT_REJECTED,
+                         minutes_ago=300 + i, trigger="T")
+            _attempt(s, outcome=gov.Outcome.OK, minutes_ago=10)
+            assert gov.consecutive_strikes(s, limit=50) == 0
+            assert not gov.breaker_is_open(s, settings=settings)
+
+    def test_the_scan_window_covers_multi_row_strikes(self):
+        # A content strike costs up to max_content_iterations ROWS, so a
+        # window sized one-row-per-strike could not see five of them.
+        settings = _settings()
+        with session_scope() as s:
+            for c in range(5):
+                for i in range(3):
+                    _attempt(s, outcome=gov.Outcome.CONTENT_REJECTED,
+                             minutes_ago=900 - c * 10 - i, trigger="T",
+                             iteration=i + 1)
+                _attempt(s, outcome=gov.Outcome.FALLBACK_USED,
+                         minutes_ago=900 - c * 10 - 3, trigger="T")
+            d = gov.decide(s, priority=2, settings=settings, trigger="OTHER")
+            assert d.verdict is gov.Verdict.USE_FALLBACK and "breaker" in d.reason
+
+
+
+
+class TestGovernorBreakerAndBudget:
+    def test_breaker_opens_after_five_consecutive_technical_errors(self):
+        with session_scope() as s:
+            for i in range(5):
+                _attempt(s, outcome=gov.Outcome.TECHNICAL_ERROR, minutes_ago=10 + i)
+            settings = _settings()
+            assert gov.breaker_is_open(s, settings=settings)
+            d = gov.decide(s, priority=2, settings=settings)
+            assert d.verdict is gov.Verdict.USE_FALLBACK and "breaker" in d.reason
+
+    def test_four_errors_do_not_open_the_breaker(self):
+        with session_scope() as s:
+            for i in range(4):
+                _attempt(s, outcome=gov.Outcome.TECHNICAL_ERROR, minutes_ago=10 + i)
+            assert not gov.breaker_is_open(s, settings=_settings())
+
+    def test_one_success_resets_the_run(self):
+        with session_scope() as s:
+            for i in range(5):
+                _attempt(s, outcome=gov.Outcome.TECHNICAL_ERROR, minutes_ago=20 + i)
+            _attempt(s, outcome=gov.Outcome.OK, minutes_ago=10)
+            assert gov.consecutive_strikes(s) == 0
+            assert not gov.breaker_is_open(s, settings=_settings())
+
+    def test_breaker_reopens_only_after_the_cooldown(self):
+        now = datetime.now(UTC)
+        with session_scope() as s:
+            for i in range(5):
+                _attempt(s, outcome=gov.Outcome.TECHNICAL_ERROR,
+                         minutes_ago=60 * 25 + i, now=now)
+            # 25h since the last error, cooldown is 24h: a probe is allowed.
+            assert not gov.breaker_is_open(s, settings=_settings(), now=now)
+            assert gov.decide(s, priority=2, settings=_settings(), now=now).may_ask
+
+    def test_daily_budget_exhaustion_falls_back(self):
+        # `now` is pinned at midday: with a floating clock the rows landed
+        # before midnight UTC when the suite ran just after it, fell outside
+        # the daily window, and the test failed roughly once a day.
+        now = datetime.now(UTC).replace(hour=12, minute=0, second=0,
+                                        microsecond=0)
+        with session_scope() as s:
+            for i in range(3):
+                _attempt(s, outcome=gov.Outcome.OK, minutes_ago=60 + i, now=now)
+            d = gov.decide(s, priority=2, now=now,
+                           settings=_settings(message_engine_daily_budget=3))
+            assert d.verdict is gov.Verdict.USE_FALLBACK and "budget" in d.reason
+
+    def test_budget_counts_only_today(self):
+        now = datetime.now(UTC).replace(hour=12)
+        with session_scope() as s:
+            for i in range(5):
+                _attempt(s, outcome=gov.Outcome.OK,
+                         minutes_ago=60 * 24 + i, now=now)  # yesterday
+            assert gov.spend_today(s, now=now) == 0
+
+
+
+
+class TestP1Exemption:
+    def test_p1_never_waits_for_the_engine(self):
+        # Every gate that could delay: fresh attempt, open breaker, no budget.
+        with session_scope() as s:
+            for i in range(6):
+                _attempt(s, outcome=gov.Outcome.TECHNICAL_ERROR, minutes_ago=i)
+            d = gov.decide(s, priority=gov.P1,
+                           settings=_settings(message_engine_daily_budget=0))
+            assert d.verdict is gov.Verdict.USE_FALLBACK
+            assert d.verdict is not gov.Verdict.WAIT, "a P1 must never be held"
+
+    def test_p1_is_never_told_to_wait_under_any_state(self):
+        with session_scope() as s:
+            _attempt(s, outcome=gov.Outcome.OK, minutes_ago=0)
+            assert gov.decide(s, priority=gov.P1, settings=_settings()).verdict \
+                is not gov.Verdict.WAIT
+
+
+
+
+class TestDisabledByDefault:
+    def test_engine_off_means_no_model_call_ever(self):
+        # Merging this must not change what the operator receives until the
+        # flag is deliberately set on the host (ruling Q42, defaults inert).
+        assert Settings(_env_file=None).message_engine_enabled is False
+        with session_scope() as s:
+            d = gov.decide(s, priority=2, settings=Settings(_env_file=None))
+            assert d.verdict is gov.Verdict.USE_FALLBACK
+
+
