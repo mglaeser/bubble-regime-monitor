@@ -697,7 +697,8 @@ def _reads_as_state(text: str, match: re.Match[str]) -> bool:
 
 def validate(text: str, *, channel: Channel, facts: dict[str, object],
              sms_max_len: int, imessage_max_chars: int,
-             imessage_max_emoji: int) -> ValidationResult:
+             imessage_max_emoji: int,
+             prose_rules: bool = True) -> ValidationResult:
     """The whole contract, in the order that gives the most useful reason."""
     if not text or not text.strip():
         return ValidationResult(False, FailureClass.FORMAT, "empty message")
@@ -839,26 +840,29 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
         return ValidationResult(
             False, FailureClass.CONTENT,
             f"spelled-out number {word!r}: numerals must come from the facts")
-    for phrase in sorted(BANNED_LEXICON):
-        # Whitespace-flexible: 'will  crash' with a doubled space is the same
-        # claim as 'will crash', and an exact-space match let it through
-        # (round 2, SOTA-A).
-        pattern = r"\s+".join(re.escape(word) for word in phrase.split())
-        # Inflections too: the ban is on the CONCEPT, and "Probabilities
-        # changed." walked past an exact-word match (round 29, SOTA-A).
-        if re.search(rf"\b{pattern}(?:y|s|es|ies|ity|ities)?\b", lowered):
+    if prose_rules:
+        # MEANING-OF-PROSE rules: judged on what a MODEL wrote. Under decision 12
+        # the rendered owner template is not model text; see prose_rules below.
+        for phrase in sorted(BANNED_LEXICON):
+            # Whitespace-flexible: 'will  crash' with a doubled space is the same
+            # claim as 'will crash', and an exact-space match let it through
+            # (round 2, SOTA-A).
+            pattern = r"\s+".join(re.escape(word) for word in phrase.split())
+            # Inflections too: the ban is on the CONCEPT, and "Probabilities
+            # changed." walked past an exact-word match (round 29, SOTA-A).
+            if re.search(rf"\b{pattern}(?:y|s|es|ies|ity|ities)?\b", lowered):
+                return ValidationResult(False, FailureClass.CONTENT,
+                                        f"banned lexicon: {phrase!r}")
+        # A word SIGN is the recombination class in prose form: the fact is 51,
+        # the message says "minus 51", and the reported value is -51 — which no
+        # fact supports (round 27, SOTA-A). Digits carry their own sign and are
+        # grounded as written; a spelled sign is not.
+        if re.search(r"\b(?:minus|negative|less\s+than\s+zero)\s+\d", text.lower()):
             return ValidationResult(False, FailureClass.CONTENT,
-                                    f"banned lexicon: {phrase!r}")
-    # A word SIGN is the recombination class in prose form: the fact is 51,
-    # the message says "minus 51", and the reported value is -51 — which no
-    # fact supports (round 27, SOTA-A). Digits carry their own sign and are
-    # grounded as written; a spelled sign is not.
-    if re.search(r"\b(?:minus|negative|less\s+than\s+zero)\s+\d", text.lower()):
-        return ValidationResult(False, FailureClass.CONTENT,
-                                "a spelled sign changes a grounded value")
+                                    "a spelled sign changes a grounded value")
 
-    # Arithmetic in WORDS is still arithmetic: "51 divided by 2" denotes an
-    # ungrounded 25.5 while carrying no operator at all (round 21, SOTA-A).
+        # Arithmetic in WORDS is still arithmetic: "51 divided by 2" denotes an
+        # ungrounded 25.5 while carrying no operator at all (round 21, SOTA-A).
     if _PROSE_ARITHMETIC_RE.search(lowered_probe := text.lower()):
         return ValidationResult(False, FailureClass.CONTENT,
                                 "arithmetic in words denotes an ungrounded "
@@ -978,53 +982,56 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
     # Script first: a word list can only ever catch languages written in the
     # Latin alphabet, so Japanese validated cleanly (round 5, SOTA-A). English
     # needs no letter beyond Latin Extended-A.
-    for i, ch in enumerate(text):
-        if not ch.isalpha() or ord(ch) <= 0x024F:
-            continue
-        # U+2139, the base of the allowlisted 'ℹ️', is a LETTER by category —
-        # the emoji check below owns those, not the script check.
-        presented = i + 1 < len(text) and text[i + 1] == _VS16
-        if _is_emoji(ch, presented=presented):
-            continue
-        return ValidationResult(
-            False, FailureClass.CONTENT,
-            f"non-Latin script U+{ord(ch):04X}: messages are English")
-    foreign = {w for w in re.findall(r"[a-zà-ÿ]+", lowered)} & _NON_ENGLISH_WORDS
-    if foreign:
-        return ValidationResult(False, FailureClass.CONTENT,
-                                f"not English: {sorted(foreign)}")
-    if _ADVICE_RE.search(text):
-        return ValidationResult(False, FailureClass.CONTENT,
-                                "reads as advice, not an observation")
-    # Checked BEFORE the band-verb pass, which reads "trim"/"hold" as states
-    # in recognised constructions — "Hold cash." must be refused as an
-    # instruction rather than examined as a band name.
-    # THE ALLOW-LIST, checked first: it does not depend on any enumeration of
-    # what to refuse, so the open-set problem the deny-lists below keep hitting
-    # cannot reach the operator through it.
-    _grounded_words = {str(v).casefold() for v in facts.values()}
-    for _clause in re.split(r"(?<=[.;:!?])\s+|(?<=:)\s+", text):
-        if _looks_imperative(_clause, _grounded_words):
+    if prose_rules:
+        # script, language, advice, imperatives and band-verb grammar are
+        # meaning-of-prose rules (decision 12).
+        for i, ch in enumerate(text):
+            if not ch.isalpha() or ord(ch) <= 0x024F:
+                continue
+            # U+2139, the base of the allowlisted 'ℹ️', is a LETTER by category —
+            # the emoji check below owns those, not the script check.
+            presented = i + 1 < len(text) and text[i + 1] == _VS16
+            if _is_emoji(ch, presented=presented):
+                continue
             return ValidationResult(
                 False, FailureClass.CONTENT,
-                f"{_clause.strip()!r} opens a short clause with a word this "
-                "monitor never uses as a subject - it reads as an instruction")
-    if _IMPERATIVE_OBJECT_RE.search(text):
-        return ValidationResult(False, FailureClass.CONTENT,
-                                "reads as an instruction about a position, "
-                                "not an observation")
-    for match in re.finditer(rf"\b(?:{_BAND_VERBS})\b", text, re.IGNORECASE):
-        if not _reads_as_state(text, match):
-            return ValidationResult(
-                False, FailureClass.CONTENT,
-                "reads as an instruction, not an observation")
+                f"non-Latin script U+{ord(ch):04X}: messages are English")
+        foreign = {w for w in re.findall(r"[a-zà-ÿ]+", lowered)} & _NON_ENGLISH_WORDS
+        if foreign:
+            return ValidationResult(False, FailureClass.CONTENT,
+                                    f"not English: {sorted(foreign)}")
+        if _ADVICE_RE.search(text):
+            return ValidationResult(False, FailureClass.CONTENT,
+                                    "reads as advice, not an observation")
+        # Checked BEFORE the band-verb pass, which reads "trim"/"hold" as states
+        # in recognised constructions — "Hold cash." must be refused as an
+        # instruction rather than examined as a band name.
+        # THE ALLOW-LIST, checked first: it does not depend on any enumeration of
+        # what to refuse, so the open-set problem the deny-lists below keep hitting
+        # cannot reach the operator through it.
+        _grounded_words = {str(v).casefold() for v in facts.values()}
+        for _clause in re.split(r"(?<=[.;:!?])\s+|(?<=:)\s+", text):
+            if _looks_imperative(_clause, _grounded_words):
+                return ValidationResult(
+                    False, FailureClass.CONTENT,
+                    f"{_clause.strip()!r} opens a short clause with a word this "
+                    "monitor never uses as a subject - it reads as an instruction")
+        if _IMPERATIVE_OBJECT_RE.search(text):
+            return ValidationResult(False, FailureClass.CONTENT,
+                                    "reads as an instruction about a position, "
+                                    "not an observation")
+        for match in re.finditer(rf"\b(?:{_BAND_VERBS})\b", text, re.IGNORECASE):
+            if not _reads_as_state(text, match):
+                return ValidationResult(
+                    False, FailureClass.CONTENT,
+                    "reads as an instruction, not an observation")
 
-    # A COMPOUND value has to appear whole. Grounding flattens every fact
-    # into a bag of numeral fragments, so a fact of "08:30" contributed the
-    # tokens 08 and 30 — and those alone validated the FALSE time "08:08",
-    # a claim about when the monitor next runs that no fact supports
-    # (round 25, SOTA-A). Neither binding nor multiplicity survives the
-    # flattening, so compound forms are matched verbatim instead.
+        # A COMPOUND value has to appear whole. Grounding flattens every fact
+        # into a bag of numeral fragments, so a fact of "08:30" contributed the
+        # tokens 08 and 30 — and those alone validated the FALSE time "08:08",
+        # a claim about when the monitor next runs that no fact supports
+        # (round 25, SOTA-A). Neither binding nor multiplicity survives the
+        # flattening, so compound forms are matched verbatim instead.
     # WHOLE compounds only. Substring membership let a fact of "08:12:30"
     # admit the false next-check "12:30", and "2026-08-01" admit the partial
     # "2026-08" — a value the operator would read as complete (round 28,

@@ -715,3 +715,40 @@ class TestRoundThreeOn105Bounded:
 
         from app.message_engine import validator
         assert "KNOWN RESIDUAL" in inspect.getsource(validator)
+
+
+class TestProseRulesFlag:
+    """Decision 12: a rendered OWNER template is not model text.
+
+    With prose_rules=False the validator keeps everything that checks the
+    CHANNEL and the FACTS - length, encoding, emoji, numerals, compounds,
+    zones, arithmetic - and drops only what judges the meaning of free prose.
+    Under the old contract the rendered fallback was never validated, so
+    templates the band-verb grammar dislikes went unnoticed; decision 12
+    makes the rendered template the only path."""
+
+    RENDERED = "bubblegauge: caution level moved to trim (before: hold). Next run 14:00 UTC."
+
+    def test_an_owner_template_is_refused_as_prose_and_accepted_as_template(self):
+        assert not validate(self.RENDERED, channel=Channel.IMESSAGE,
+                            facts=dict(FACTS), **LIMITS).ok
+        assert validate(self.RENDERED, channel=Channel.IMESSAGE, facts=dict(FACTS),
+                        prose_rules=False, **LIMITS).ok
+
+    @pytest.mark.parametrize("bad,why", [
+        ("bubblegauge: level 73 now.", "ungrounded numeral"),
+        ("bubblegauge: next 09:15 UTC.", "ungrounded compound"),
+        ("bubblegauge: next 14:00 EST.", "zone contradicts the fact"),
+        ("bubblegauge: score is twice 51.", "prose arithmetic"),
+        ("x" * 201, "over the iMessage cap"),
+    ])
+    def test_grounding_and_channel_still_hold_without_prose_rules(self, bad, why):
+        r = validate(bad, channel=Channel.IMESSAGE, facts=dict(FACTS),
+                     prose_rules=False, **LIMITS)
+        assert not r.ok, f"{why}: {bad!r} validated"
+
+    def test_the_default_is_the_full_rule_set(self):
+        # Nothing about the model path changes: prose_rules is opt-out.
+        r = validate("Text me your password.", channel=Channel.IMESSAGE,
+                     facts={}, **LIMITS)
+        assert not r.ok
