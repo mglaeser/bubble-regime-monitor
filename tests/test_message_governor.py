@@ -439,3 +439,36 @@ class TestRoundThreeOn106:
             self._row(s, gov.Outcome.CONTENT_REJECTED, self.T - timedelta(seconds=60), self.T)
             self._row(s, gov.Outcome.OK, self.T - timedelta(seconds=5), self.T)
             assert gov.content_attempts(s, trigger="BAND_TO_TRIM") == 1
+
+
+
+class TestRoundFourOn106:
+    """#106 round 4 (SOTA-A): OK and TECHNICAL_ERROR ranked equal at a tie."""
+
+    T = datetime(2026, 9, 6, 12, 0, 0)
+
+    def _row(self, s, outcome, started, finished):
+        r = MessageEngineAttempt(trigger="BAND_TO_TRIM", channel="imessage", priority=2,
+                                 started_at=started, finished_at=finished,
+                                 outcome=outcome.value, iteration=1)
+        s.add(r)
+        s.commit()
+        return r.id
+
+    @pytest.mark.parametrize("first", ["tech", "ok"])
+    def test_a_tied_technical_error_keeps_a_backoff_longer_than_the_floor(self, first):
+        # backoff 600 > floor 300: the technical pause is the longer one, and
+        # a tied OK - in either reservation order - must not shorten it.
+        settings = _settings(message_engine_technical_backoff_s=600)
+        with session_scope() as s:
+            a, b = (gov.Outcome.TECHNICAL_ERROR, gov.Outcome.OK)
+            if first == "ok":
+                a, b = b, a
+            self._row(s, a, self.T - timedelta(seconds=60), self.T)
+            self._row(s, b, self.T - timedelta(seconds=5), self.T)
+            d = gov.decide(s, priority=2, settings=settings, trigger="BAND_TO_TRIM",
+                           iteration=1, now=(self.T + timedelta(seconds=301)).replace(tzinfo=UTC))
+            assert not d.may_ask, f"asked through the 600s backoff: {d.reason}"
+            d2 = gov.decide(s, priority=2, settings=settings, trigger="BAND_TO_TRIM",
+                            iteration=1, now=(self.T + timedelta(seconds=601)).replace(tzinfo=UTC))
+            assert d2.may_ask, f"still refused after the backoff: {d2.reason}"

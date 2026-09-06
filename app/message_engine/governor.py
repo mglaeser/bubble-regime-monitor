@@ -228,6 +228,12 @@ def reap_stale_claims(session: Session, *, now: datetime | None = None) -> int:
 #: (#106 round 3, SOTA-A).
 _PAUSE_RANK = case(
     (MessageEngineAttempt.outcome == Outcome.FORMAT_REJECTED.value, 0),
+    # A technical error's pause is max(floor, backoff), never shorter than
+    # OK's floor and longer whenever the backoff is configured above it.
+    # Round 3 ranked them equal, so with backoff 600 > floor 300 a tied OK
+    # with the later id won and the engine asked at T+301s (#106 round 4,
+    # SOTA-A). Rank by the pause actually imposed.
+    (MessageEngineAttempt.outcome == Outcome.TECHNICAL_ERROR.value, 2),
     else_=1,
 )
 
