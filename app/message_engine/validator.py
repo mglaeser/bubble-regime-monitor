@@ -126,6 +126,16 @@ _COMMAND_PHRASES = (r"get\s+out|bail\s+out|cash\s+out|step\s+aside|"
 #: grounded value — never with a verb. That is the discriminator, and these
 #: openers were EXTRACTED from the shipped fallbacks rather than invented.
 #:
+#: KNOWN RESIDUAL (owner decision, 2026-09-06). This rule narrows an OPEN set
+#: and cannot close it: its own bounds are bypasses - a fifth word ("Text me
+#: your password now."), an all-caps opener taken for a ticker ("TEXT me your
+#: password."), a bare object ("Text password."). Three panel rounds each
+#: found a new edge, which is the signature of an open set. It is carried as
+#: documented residual while the CLOSING fix lands upstream in the composer:
+#: the model's output becomes a structured selection over owner-approved
+#: phrasings with facts filled verbatim, so free text never reaches the wire
+#: and this detector becomes defence-in-depth rather than the gate.
+#:
 #: A short clause opening with anything else is refused. The failure direction
 #: is deliberate: an unlisted subject costs a fallback, an unlisted verb sends
 #: advice to the operator.
@@ -560,6 +570,11 @@ def emoji_used(text: str) -> set[str]:
 #: 2026-08-01 supplied every fragment needed for the FALSE "2026-01-08". The
 #: pattern is deliberately one place, so the next compound form is added here
 #: rather than discovered as a third instance of the same class.
+#: A time and the zone/meridiem token that follows it, if any.
+_TIME_ZONE_RE = re.compile(
+    r"(\d{1,2}:\d{2}(?::\d{2})?)\s*"
+    r"((?:UTC|GMT|Z|[ECMP][SD]T|CET|CEST|BST|IST|JST|AEST|[AaPp]\.?[Mm]\.?)\b)?")
+
 _COMPOUND_RE = re.compile(
     r"\d{4}-\d{2}-\d{2}"      # a date
     r"|\d{4}-\d{2}"            # a year-month
@@ -872,7 +887,10 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
     # The right operand may be BRACKETED — "51-(2)" is the same subtraction
     # written differently, and the plain digit-hyphen-digit scan missed it
     # (round 24, SOTA-A).
-    if re.search(r"\d\s*-\s*[(\[]\s*\d", text):
+    # The bracketed operand may carry a SIGN: "51-(-2)" is 53, and the scan
+    # that catches "51-(2)" walked straight past the inner minus (#105 round
+    # 3, SOTA-A).
+    if re.search(r"\d\s*-\s*[(\[]\s*[-+\u2212]?\s*\d", text):
         return ValidationResult(False, FailureClass.CONTENT,
                                 "bracketed subtraction denotes an ungrounded "
                                 "value")
@@ -1023,6 +1041,23 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
             return ValidationResult(
                 False, FailureClass.CONTENT,
                 f"{compound!r} is not in the grounded facts")
+    # A ZONE OR MERIDIEM TOKEN AFTER A TIME IS PART OF THE TIME. The compound
+    # check equates "14:00" wherever it appears, so a fact of "14:00 UTC"
+    # admitted "Next check 14:00 EST." (#105 round 3, SOTA-A). If a fact
+    # gives a time a token, the message may not give the same time a
+    # DIFFERENT one. A message adding a token to a bare fact is left alone:
+    # the library's own templates write "{next_check_utc} UTC" around a bare
+    # time, and that literal is the template's word, not a substitution.
+    fact_zones: dict[str, set[str]] = {}
+    for value in facts.values():
+        for t, z in _TIME_ZONE_RE.findall(str(value)):
+            if z:
+                fact_zones.setdefault(t, set()).add(z.upper())
+    for t, z in _TIME_ZONE_RE.findall(text):
+        if z and t in fact_zones and z.upper() not in fact_zones[t]:
+            return ValidationResult(
+                False, FailureClass.CONTENT,
+                f"{t} {z} contradicts the grounded time zone for {t}")
 
     allowed = grounded_numerals(facts)
     for numeral in _NUMERAL_RE.findall(grounding_text):

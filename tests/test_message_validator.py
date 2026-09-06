@@ -671,3 +671,47 @@ class TestRoundTwoOn105:
         r = validate(message, channel=Channel.IMESSAGE, facts=dict(self.PAIRS),
                      **LIMITS)
         assert r.ok, f"{message!r} refused: {r.reason}"
+
+
+
+class TestRoundThreeOn105Bounded:
+    """#105 round 3: the two BOUNDED findings. The third (the allow-list's own
+    exemptions as bypasses) is an open set, carried as documented residual by
+    owner decision while the closing fix lands upstream in the composer."""
+
+    @pytest.mark.parametrize("message", [
+        "Next check 14:00 EST.",         # the reviewer's exact case
+        "Next check 14:00 CET.", "Next check 14:00 PST.",
+    ])
+    def test_a_time_cannot_change_zone(self, message):
+        r = validate(message, channel=Channel.IMESSAGE, facts=dict(FACTS),
+                     **LIMITS)
+        assert not r.ok, f"{message!r} validated against a UTC fact"
+
+    @pytest.mark.parametrize("message", [
+        "Next check 14:00 UTC.", "Next check 14:00 utc.", "Next check 14:00.",
+    ])
+    def test_the_same_or_no_zone_still_passes(self, message):
+        r = validate(message, channel=Channel.IMESSAGE, facts=dict(FACTS),
+                     **LIMITS)
+        assert r.ok, f"{message!r} refused: {r.reason}"
+
+    def test_a_template_may_add_a_zone_to_a_bare_time(self):
+        # The library writes "{next_check_utc} UTC" around a bare "14:00".
+        r = validate("Next check 14:00 UTC.", channel=Channel.IMESSAGE,
+                     facts={"F_NEXT_CHECK": "14:00"}, **LIMITS)
+        assert r.ok, r.reason
+
+    @pytest.mark.parametrize("message", [
+        "Score 51-(-2).", "Score 51 - (-2).", "Score 51-(+2).", "Score 51-[-2].",
+    ])
+    def test_a_signed_bracketed_operand_is_subtraction(self, message):
+        r = validate(message, channel=Channel.IMESSAGE,
+                     facts={"F_HEADLINE_MEDIAN": 51, "F_DELTA": -2}, **LIMITS)
+        assert not r.ok, f"{message!r} asserted an ungrounded 53"
+
+    def test_the_residual_is_named_not_hidden(self):
+        import inspect
+
+        from app.message_engine import validator
+        assert "KNOWN RESIDUAL" in inspect.getsource(validator)
