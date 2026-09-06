@@ -645,3 +645,37 @@ against a UTC fact) and a signed bracketed operand ("51-(-2)") — fixed; and
 the allow-list's own bounds as bypasses — NOT fixed. Three rounds, three new
 edges: an open set. Stopped per the rule; owner chose to bridge (merge with
 the residual documented) and close upstream (decision 12).
+
+**#105 attempt 4 and #106 attempt 4 (2026-09-06, after the edge outage) —
+what the gateway log proves about SOTA-A.** Both current heads (#105
+be26dd8, #106 c528775) had never been evaluated: three attempts died at the
+public edge (`GET /models -> Connection refused`; the reverse proxy in front
+of the gateway was down from ~16:35Z, the gateway itself healthy throughout).
+On the first attempt after the proxy returned, #105 got one complete vote —
+SOTA-C approved, no defects — while SOTA-A never delivered a verdict and
+SOTA-B's answer failed the content check. The gateway's own request log
+(`usage.jsonl`, CI key) explains SOTA-A, and refutes the remedy this log
+had assumed for it:
+
+- On every successful SOTA-A review today `firstOutputMs == durationMs`:
+  the model emits nothing until it has finished thinking. Review time is
+  thinking-bound, not diff-bound — 352 s for #104's 163 lines, 428–784 s
+  for #105/#106's 1.1–1.8k lines. Splitting a PR further does not buy a
+  verdict.
+- Three failure signatures, all present on earlier days too: `/responses`
+  502 at 901 s (the provider's 15-minute cap, nothing produced); `/responses`
+  499 at 207–258 s (the verifier's 180 s per-read timeout on a stream that
+  carried no bytes after the headers); and `chat/completions` 502 at 179 s
+  on every one of today's seven fallbacks — the chat wire is silent while
+  the model thinks, so that fallback can never succeed for SOTA-A.
+- After the proxy restart SOTA-A went 0/7 on #105; its one success (742 s)
+  belongs to #106's run.
+
+Consequence for the regime: an infrastructure failure on SOTA-A is not a
+signal about the diff and is not answered by a split. It is answered by one
+rerun, then the owner's bridge, and by owner-side changes to the wire
+(provider cap above 900 s, a heartbeat from the first byte, or a required
+approver that streams). #105 stands at three defect rounds fixed plus one
+attempt with no defects found and no required-approver vote; it merges by
+the bridge with its residual documented (decision 9) and the residual
+closed upstream (decision 12).
