@@ -280,6 +280,81 @@ def last_attempt(session: Session, *, now: datetime | None = None,
     return row
 
 
+def _pause_for(row: MessageEngineAttempt, *, settings: Settings, trigger: str | None,
+               last_failure: str | None, newest_id: int | None) -> int:
+    """Seconds of quiet the given row imposes after its own completion."""
+    if row.outcome == Outcome.TECHNICAL_ERROR.value:
+        # The 5-minute floor is a FLOOR, and the owner's rule reads
+        # "technical 4xx/5xx -> wait MIN 2 min" — an additional minimum,
+        # not a licence to ask sooner. Treating the 120 s backoff as a
+        # REPLACEMENT admitted a request 120 s after a 5xx, undercutting
+        # the global interval (round 27, SOTA-A). Only the format retry
+        # is an explicit exception to the floor.
+        return max(settings.message_engine_min_interval_s,
+                   settings.message_engine_technical_backoff_s)
+    if (last_failure == "format"
+            and row.outcome == Outcome.FORMAT_REJECTED.value
+            and row.trigger == trigger
+            and row.id == newest_id):
+        # The short pause is only earned when the newest row IS the
+        # format rejection being retried. Trusting the caller's hint alone
+        # let a format retry fire 30s after an unrelated trigger's OK row,
+        # straight through the global 300s floor (round 1, SOTA-C).
+        return settings.message_engine_format_retry_s
+    return settings.message_engine_min_interval_s
+
+
+def pacing_deadline(session: Session, *, settings: Settings, trigger: str | None,
+                    last_failure: str | None, now: datetime,
+                    exclude_id: int | None = None) -> tuple[datetime, int] | None:
+    """The latest instant any recent attempt still holds the engine quiet.
+
+    EVERY row that can still bind is consulted, and the LATEST deadline wins.
+    Until #106 round 5 this gate read one row — the newest completion — and
+    enforced that row's pause alone. SOTA-A (round 5, confidence high):
+    "only newest completion's pause is enforced — later format rejection
+    permits ASK during an older technical-error backoff". Executed before the
+    fix: a technical error (backoff 600s) completed at T, a format rejection
+    that had been in flight across that instant completed at T+10; with the
+    retry hint the engine answered "clear" at T+41, without it at T+311 —
+    560s and 290s inside the backoff, in both reservation orders. Rounds 2-4
+    had each repaired one instance of the same shape at a completion TIE
+    (`_PAUSE_RANK`); the tie was only the special case in which "newest" is
+    ambiguous. The general rule makes the family unreachable: the old
+    deadline is one term of this maximum, so no decision becomes looser.
+
+    Only rows that completed within the longest configured pause can still
+    bind — anything older has already expired — so the scan is bounded by
+    time, not by a row count that a burst could overflow.
+    """
+    longest = max(settings.message_engine_min_interval_s,
+                  settings.message_engine_technical_backoff_s,
+                  settings.message_engine_format_retry_s)
+    since = (now - timedelta(seconds=longest)).replace(tzinfo=None)
+    _completed = func.coalesce(MessageEngineAttempt.finished_at,
+                               MessageEngineAttempt.started_at)
+    stmt = (
+        select(MessageEngineAttempt)
+        .where(MessageEngineAttempt.outcome.in_([o.value for o in _PACING_OUTCOMES]))
+        .where(_completed >= since))
+    if exclude_id is not None:
+        stmt = stmt.where(MessageEngineAttempt.id != exclude_id)
+    rows = session.execute(
+        stmt.order_by(_completed.desc(), _PAUSE_RANK.desc(), MessageEngineAttempt.id.desc())
+    ).scalars().all()
+    if not rows:
+        return None
+    newest_id = rows[0].id
+    best: tuple[datetime, int] | None = None
+    for row in rows:
+        pause = _pause_for(row, settings=settings, trigger=trigger,
+                           last_failure=last_failure, newest_id=newest_id)
+        ready = _dwell_from(row) + timedelta(seconds=pause)
+        if best is None or ready > best[0]:
+            best = (ready, pause)
+    return best
+
+
 def consecutive_strikes(session: Session, *, limit: int = 50,
                         exclude_id: int | None = None) -> int:
     """Length of the trailing run of STRIKES.
@@ -540,28 +615,11 @@ def decide(session: Session, *, priority: int, settings: Settings,
             >= settings.message_engine_daily_budget):
         return Decision(Verdict.USE_FALLBACK, "daily budget exhausted")
 
-    last = last_attempt(session, now=moment, exclude_id=exclude_id)
-    if last is not None:
-        if last.outcome == Outcome.TECHNICAL_ERROR.value:
-            # The 5-minute floor is a FLOOR, and the owner's rule reads
-            # "technical 4xx/5xx -> wait MIN 2 min" — an additional minimum,
-            # not a licence to ask sooner. Treating the 120 s backoff as a
-            # REPLACEMENT admitted a request 120 s after a 5xx, undercutting
-            # the global interval (round 27, SOTA-A). Only the format retry
-            # is an explicit exception to the floor.
-            pause = max(settings.message_engine_min_interval_s,
-                        settings.message_engine_technical_backoff_s)
-        elif (last_failure == "format"
-              and last.outcome == Outcome.FORMAT_REJECTED.value
-              and last.trigger == trigger):
-            # The short pause is only earned when the newest row IS the
-            # format rejection being retried. Trusting the caller's hint alone
-            # let a format retry fire 30s after an unrelated trigger's OK row,
-            # straight through the global 300s floor (round 1, SOTA-C).
-            pause = settings.message_engine_format_retry_s
-        else:
-            pause = settings.message_engine_min_interval_s
-        ready = _dwell_from(last) + timedelta(seconds=pause)
+    bound = pacing_deadline(session, settings=settings, trigger=trigger,
+                            last_failure=last_failure, now=moment,
+                            exclude_id=exclude_id)
+    if bound is not None:
+        ready, pause = bound
         if moment < ready:
             return Decision(Verdict.WAIT, f"pacing: {pause}s floor", retry_after=ready)
 

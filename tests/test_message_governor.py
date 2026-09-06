@@ -472,3 +472,51 @@ class TestRoundFourOn106:
             d2 = gov.decide(s, priority=2, settings=settings, trigger="BAND_TO_TRIM",
                             iteration=1, now=(self.T + timedelta(seconds=601)).replace(tzinfo=UTC))
             assert d2.may_ask, f"still refused after the backoff: {d2.reason}"
+
+
+class TestRoundFiveOn106:
+    """#106 round 5 (SOTA-A): only the NEWEST completion's pause was enforced.
+
+    A technical error with a 600s backoff completed at T. A format rejection
+    that had been in flight across that instant completed at T+10 and, being
+    the newest row, became the only row pacing looked at: its 30s retry (or,
+    without the retry hint, its 300s floor) ended the technical backoff 560s
+    early. The pause that binds is the LATEST deadline any recent row imposes,
+    whichever row completed last and in whichever order they were reserved.
+    """
+
+    T = datetime(2026, 9, 6, 12, 0, 0)
+
+    def _row(self, s, outcome, started, finished):
+        r = MessageEngineAttempt(trigger="BAND_TO_TRIM", channel="imessage", priority=2,
+                                 started_at=started, finished_at=finished,
+                                 outcome=outcome.value, iteration=1)
+        s.add(r)
+        s.commit()
+        return r.id
+
+    @pytest.mark.parametrize("first", ["tech", "format"])
+    @pytest.mark.parametrize("hint", ["format", None])
+    def test_a_newer_short_pause_does_not_end_an_older_backoff(self, first, hint):
+        settings = _settings(message_engine_technical_backoff_s=600)
+        with session_scope() as s:
+            rows = {
+                "tech": (gov.Outcome.TECHNICAL_ERROR, self.T - timedelta(seconds=60), self.T),
+                "format": (gov.Outcome.FORMAT_REJECTED, self.T - timedelta(seconds=50),
+                           self.T + timedelta(seconds=10)),
+            }
+            order = ["tech", "format"] if first == "tech" else ["format", "tech"]
+            for name in order:
+                self._row(s, *rows[name])
+            # 30s after the format rejection (the retry is due by its own row)
+            # and 310s after it (its floor has elapsed too): both still inside
+            # the technical error's 600s backoff, which ends at T+600.
+            for at in (41, 311, 599):
+                d = gov.decide(s, priority=2, settings=settings, trigger="BAND_TO_TRIM",
+                               iteration=2 if hint else 1, last_failure=hint,
+                               now=(self.T + timedelta(seconds=at)).replace(tzinfo=UTC))
+                assert not d.may_ask, f"asked at T+{at}s through the 600s backoff: {d.reason}"
+            d2 = gov.decide(s, priority=2, settings=settings, trigger="BAND_TO_TRIM",
+                            iteration=2 if hint else 1, last_failure=hint,
+                            now=(self.T + timedelta(seconds=601)).replace(tzinfo=UTC))
+            assert d2.may_ask, f"still refused after the backoff: {d2.reason}"
