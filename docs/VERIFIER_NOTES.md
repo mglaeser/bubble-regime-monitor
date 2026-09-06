@@ -697,3 +697,24 @@ a helper. Round-5 tests red before and green after; the 181 governor pins
 and the rounds 2–4 tie tests still pass under the general rule, which is
 the proof it is a repair rather than a removal. Lesson: when three rounds
 patch the same shape at its boundary, the boundary is not the defect.
+
+**#106 round 6 — SOTA-A, real: "finite strike window counts zero-weight
+rejects before LIMIT".** The round-5 fix was accepted (SOTA-B checked the
+max-of-deadlines explicitly; SOTA-C approved). The new finding was in the
+strike scan: rejection rows were fetched only to be ignored — the pending
+counter was never read — yet each occupied a slot of the LIMIT, so enough
+rejections newer than five technical errors pushed the errors out of the
+window and the breaker reported closed. Executed at the real constant with
+the enum's own values, after a first attempt with upper-case strings that
+matched nothing and proved nothing: five technical errors under 1,000,000
+newer format rejections over distinct triggers — old scan 0 strikes, new
+scan 5. Honest boundary: in that instantiation the daily budget still
+refused the ask, and with rejections on one trigger the content cap does;
+the scan's answer was wrong regardless, and `breaker_is_open()` reported
+closed. Fixed by the code's own round-13 doctrine — a row that must not
+affect the answer must not occupy a slot in the window — applied to the
+last row class that violated it: the scan set is technical errors and
+exhausted-compose markers only, counted in SQL. Round-6 test red on the
+previous head and green after; the 181 pins unchanged. Lesson: when a
+doctrine has been applied to two row classes, list the others before the
+panel does.
