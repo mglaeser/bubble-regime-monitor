@@ -805,3 +805,25 @@ that the compose has spent the cap and has no marker yet. Lesson: the
 offline review executes what it can construct; a regression introduced by
 the fix it recommended is exactly what it cannot see. Each fix now gets a
 second offline pass before the push.
+
+**The offline pass after the round-9 fixes.** Three lenses on the changed
+surfaces, two executing verifiers per finding, and the critic executed its
+own probes. Six items, all reproduced: the disabled engine — the shipped
+default — still opened a write transaction to record a NOT_ASKED row on
+every message, defeating the governor's no-session short-circuit (fixed: the
+composer asks the governor's short-circuit first and writes nothing);
+`breaker_is_open` knew nothing of the half-open probe rule and reported
+closed while `decide` refused every trigger but the probe's (fixed: one
+shared judgement, `breaker_refusal`); the second format retry of one open
+compose waited the full floor on its older sibling — one row class, two
+pauses, in one gate (fixed: every format rejection of the open compose earns
+the retry, bounded by the compose's own boundary, replacing the newest-row
+rule); a probe made at the very instant the cooldown ended was not counted
+as the probe (fixed: the bound counts the tie, like every other bound); a
+non-gateway exception from the model call escaped `compose()` and left the
+claim in flight (fixed: the never-raises boundary covers every Exception; a
+dying worker still propagates, which is the reaper's case); and an unmarked
+exhausted compose's strike is provisional under the current cap — stated as
+a deliberate policy now, because the alternative needs a cap the rows do not
+store, and the writer marks at exhaustion so the provisional state lasts only
+as long as a failed marker write.
