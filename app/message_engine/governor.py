@@ -307,9 +307,15 @@ def consecutive_strikes(session: Session, *, limit: int = 50,
         # the success it followed — the breaker then reported closed
         # (round 19, SOTA-A).
         ok_at, ok_id = last_ok
+        # On a timestamp TIE, include every other row at that instant - not
+        # only those with a higher id. Ids are assigned at RESERVATION, so an
+        # attempt reserved earlier (lower id) whose long call fails at the same
+        # instant a later, quicker one succeeds was excluded, and the breaker
+        # stayed closed on a strike it should have counted (panel on #106,
+        # SOTA-A). Completion order is unknowable at a tie; fail closed.
         stmt = stmt.where(
             (_completed > ok_at)
-            | ((_completed == ok_at) & (MessageEngineAttempt.id > ok_id)))
+            | ((_completed == ok_at) & (MessageEngineAttempt.id != ok_id)))
     if exclude_id is not None:
         stmt = stmt.where(MessageEngineAttempt.id != exclude_id)
     rows = session.execute(

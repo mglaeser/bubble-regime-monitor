@@ -291,3 +291,39 @@ class TestDisabledByDefault:
             assert d.verdict is gov.Verdict.USE_FALLBACK
 
 
+
+
+
+class TestTieBreakDoesNotDependOnReservationOrder:
+    """Panel on #106 (SOTA-A): ids are assigned at reservation, not completion.
+
+    An attempt reserved FIRST (lower id) whose long call fails at the same
+    instant a later, quicker one succeeds was excluded from the strike scan by
+    the `id > ok_id` tie-break, so the breaker stayed closed.
+    """
+
+    T = datetime(2026, 9, 6, 12, 0, 0)
+
+    def _row(self, s, outcome, started, finished):
+        r = MessageEngineAttempt(trigger="BAND_TO_TRIM", channel="imessage",
+                                 priority=2, started_at=started,
+                                 finished_at=finished, outcome=outcome.value,
+                                 iteration=1)
+        s.add(r)
+        s.commit()
+        return r.id
+
+    @pytest.mark.parametrize("a_offset_s,expected", [
+        (0, 1),    # the reviewer's case: a TIE, lower id fails -> must count
+        (1, 1),    # strictly after the success -> counts
+        (-1, 0),   # strictly before the success -> reset by it
+    ])
+    def test_a_lower_id_failure_at_the_same_instant_still_strikes(
+            self, a_offset_s, expected):
+        with session_scope() as s:
+            a = self._row(s, gov.Outcome.TECHNICAL_ERROR,
+                          self.T - timedelta(seconds=60),
+                          self.T + timedelta(seconds=a_offset_s))
+            b = self._row(s, gov.Outcome.OK, self.T - timedelta(seconds=5), self.T)
+            assert a < b, "the failure must have been reserved first"
+            assert gov.consecutive_strikes(s, limit=10**6) == expected
