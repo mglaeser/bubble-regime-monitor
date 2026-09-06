@@ -368,3 +368,25 @@ uses for the alert path (ruling Q41), applied to the message path.
   (`next_check_utc` → `F_NEXT_CHECK` as a bare time; `override_suffix`
   computed). No shipped fallback renders a dash with its own declared facts.
 
+
+
+## Decision 13 — the engine owns its transactions
+
+`compose()` takes no session. Every `message_engine_attempts` write is made
+by the governor on a short transaction of its own: `reserve()` writes the
+IN_FLIGHT claim under `BEGIN IMMEDIATE`, evaluates every gate with that row
+excluded, commits on ASK and returns the claim's id; `resolve()` closes the
+claim by id, only while it is still in flight, so a reaped claim's strike is
+never erased by a late reply; `record_fallback()` records the evergreen text
+as NOT_ASKED, or as the FALLBACK_USED marker when the compose is exhausted —
+written at the exhausting rejection, stamped strictly after the rows it
+closes. No lock is held across the model call, the claim is durable and
+visible to a concurrent worker before the call, and nothing of the caller's
+is ever committed or rolled back on its behalf.
+
+Why: rounds 32, 39, 40 and 41 of the #100 review argued about committing the
+caller's session; the offline review before #106 round 8 executed the cost of
+the truce (a claim lost with the caller's transaction on a crash, the reaper
+unreachable, the write lock held for the whole call). Callers must not hold
+an open write transaction while calling `compose()`; the dispatcher already
+sends outside transactions.

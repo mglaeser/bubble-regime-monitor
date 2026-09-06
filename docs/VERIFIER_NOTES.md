@@ -746,3 +746,41 @@ from every earlier round AND the fix is a bounded, general rule rather than
 a patch at the boundary. A round that fails any of the three ends the
 iteration. Before each push, the branch is reviewed adversarially offline so
 the panel's next round is spent on what the offline review could not see.
+
+**Before #106 round 8 — an offline review, and what it changed.** The
+revised stop rule asked for an adversarial review before each push, so the
+panel's round is spent on what an offline review cannot see. Six independent
+lenses read the governor (pacing, breaker, cap, what the composer writes,
+cross-function consistency of outcome sets, settings/budget/concurrency);
+eleven raw findings were merged to seven; each was handed to two independent
+verifiers who had to reproduce it by writing and running a test. Seven
+confirmed, none refuted. Six were governor defects and are fixed with the
+executed scenario in the docstring of each: a non-UTC aware `now` stripped
+rather than converted; an in-flight claim counted as a spent content attempt
+before the reaper and as a technical error after it; the format retry
+granted on the caller's hint alone after a marker had closed the compose; a
+cap of zero floored to one; exhausted composes counted as strikes only once
+the trigger fired again and the marker was written; the cap gate answering
+before the breaker, so a marker written at refusal time restarted the
+cooldown. The review's critic predicted the panel's likely next finding — the
+half-open breaker admitted every trigger at the pacing rate — and that is
+closed too: one probe at a time. Two pins were flipped, each with its reason
+written into the pin: a zero cap now admits nothing, and the claim IS
+committed before the model call.
+
+**The seventh finding resolved a three-round argument.** Rounds 32, 39 and
+40 had argued about committing the caller's session to release the write
+lock; round 41 removed the commit and accepted a lock held across the whole
+model call. Executed: a worker dying mid-call rolled the claim back with the
+caller's transaction, so no row existed for the reaper and pacing, budget
+and breaker all missed the request. Both sides were right, and the answer is
+neither: the engine owns its transactions. `reserve()` writes the claim on a
+short transaction of its own and returns its id; `resolve()` closes it by id;
+`record_fallback()` records the evergreen text; the composer takes no
+session and holds no transaction across the call. The exhausted-compose
+marker is now written at the exhausting rejection, and a boundary is stamped
+strictly after the compose it closes, because at a tie the scan counts the
+rejection first. Two lessons from the day: a slice-replace between two `def`
+markers deleted two unrelated functions that sat between them, caught by the
+suite; and a scale test seeded with upper-case outcome strings matched
+nothing and proved nothing, caught before it was cited.
