@@ -1105,8 +1105,10 @@ class TestRoundTenOn106:
     def _at(self, seconds):
         return (self.T + timedelta(seconds=seconds)).replace(tzinfo=UTC)
 
-    @pytest.mark.parametrize("boundary", [gov.Outcome.FALLBACK_USED, gov.Outcome.OK,
-                                          gov.Outcome.BUDGET_SKIPPED])
+    # BUDGET_SKIPPED is not a boundary (#107 round 1): with it in place of the
+    # boundary, the later marker closes the earlier rejections and anchors on
+    # them - correct, and not the marker-only shape this test is about.
+    @pytest.mark.parametrize("boundary", [gov.Outcome.FALLBACK_USED, gov.Outcome.OK])
     def test_a_marker_only_strike_on_a_reused_trigger_anchors_on_itself(self, boundary):
         settings = _settings()
         with session_scope() as s:
@@ -1208,3 +1210,44 @@ class TestRoundTenRefutation:
         decision, claim_id = gov.reserve(trigger="Z", channel="imessage", priority=2,
                                          settings=settings, now=now)
         assert decision.verdict is gov.Verdict.USE_FALLBACK and claim_id is None
+
+
+class TestOn107RoundOne:
+    """#107 round 1 (SOTA-A, high; SOTA-B and SOTA-C approved): BUDGET_SKIPPED
+    was a compose boundary, so an exhausted compose followed by a budget skip
+    was closed with no marker and its strike vanished - five such runs stayed
+    below the threshold and the engine kept asking. A budget skip is a refusal
+    the engine issues to itself (round 32): no model call was made, nothing
+    was spent, and nothing is closed. No writer records it today; the outcome
+    stays in the schema and is now invisible to every scan, like NOT_ASKED.
+    """
+
+    T = datetime(2026, 9, 6, 12, 0, 0)
+
+    def _row(self, s, outcome, started_s, finished_s, trigger, iteration=1):
+        r = MessageEngineAttempt(
+            trigger=trigger, channel="imessage", priority=2,
+            started_at=self.T + timedelta(seconds=started_s),
+            finished_at=self.T + timedelta(seconds=finished_s),
+            outcome=outcome.value, iteration=iteration)
+        s.add(r)
+        s.commit()
+
+    def _at(self, seconds):
+        return (self.T + timedelta(seconds=seconds)).replace(tzinfo=UTC)
+
+    def test_a_budget_skip_does_not_erase_an_exhausted_compose(self):
+        settings = _settings()
+        with session_scope() as s:
+            for k in range(5):
+                base = k * 1000
+                for i in range(1, 4):
+                    self._row(s, gov.Outcome.CONTENT_REJECTED, base + i - 1, base + i,
+                              f"T{k}", iteration=i)
+                self._row(s, gov.Outcome.BUDGET_SKIPPED, base + 10, base + 10, f"T{k}")
+            assert gov.content_attempts(s, trigger="T0") == 3      # still open, exhausted
+            assert gov.consecutive_strikes(s, settings=settings) == 5
+            now = self._at(5000)
+            assert gov.breaker_is_open(s, settings=settings, now=now)
+            d = gov.decide(s, priority=2, settings=settings, trigger="NEW", now=now)
+            assert d.verdict is gov.Verdict.USE_FALLBACK and "breaker" in d.reason, d
