@@ -880,3 +880,10 @@ kept asking. Executed; fixed by one shared boundary set (OK, FALLBACK_USED):
 a budget skip is a refusal the engine issues to itself and closes nothing,
 the rule NOT_ASKED already follows. The fix rides on #107, stacked on #106,
 and lands in #106 instead if the module-only round does not pass on its own.
+
+**#107 round 2 — green, three of three.** With the budget-skip fix on top of
+the tests, all three vendors approved at confidence high, the required
+approver in about fifteen minutes on 1,224 lines: the first green on the
+governor lineage since the schema PR, and the confirmation that the split
+was the right remedy for a reviewer bound by its own clock rather than by
+the code.
