@@ -630,12 +630,36 @@ def _strike_instant(session: Session, row: MessageEngineAttempt, *,
         return _dwell_from(row)
     _completed = func.coalesce(MessageEngineAttempt.finished_at,
                                MessageEngineAttempt.started_at)
+    marker_at = _naive_utc(_dwell_from(row))
+    # ONLY the rejections of the compose THIS marker closes: those after the
+    # trigger's previous boundary. Without that bound a marker closing a
+    # compose with no rejections of its own - on a trigger that had
+    # rejections in an earlier compose - borrowed the earlier compose's last
+    # rejection as its instant; the cooldown was already over the moment the
+    # breaker opened and the engine asked (#106 round 9, SOTA-A, executed).
+    prev = (
+        select(_completed)
+        .where(MessageEngineAttempt.trigger == row.trigger)
+        .where(MessageEngineAttempt.id != row.id)
+        .where(MessageEngineAttempt.outcome.in_(
+            [Outcome.OK.value, Outcome.BUDGET_SKIPPED.value, Outcome.FALLBACK_USED.value]))
+        .where(_completed <= marker_at))
+    if exclude_id is not None:
+        prev = prev.where(MessageEngineAttempt.id != exclude_id)
+    previous_boundary = session.execute(
+        prev.order_by(_completed.desc(), MessageEngineAttempt.id.desc()).limit(1)
+    ).scalar()
     stmt = (
         select(MessageEngineAttempt)
         .where(MessageEngineAttempt.trigger == row.trigger)
         .where(MessageEngineAttempt.outcome.in_(
             [Outcome.CONTENT_REJECTED.value, Outcome.FORMAT_REJECTED.value]))
-        .where(_completed <= _naive_utc(_dwell_from(row))))
+        .where(_completed <= marker_at))
+    if previous_boundary is not None:
+        # Strictly after: a rejection tied with the previous boundary belongs
+        # to the compose that boundary closed (order unknowable, fail closed -
+        # the marker then anchors on itself, the later instant).
+        stmt = stmt.where(_completed > previous_boundary)
     if exclude_id is not None:
         stmt = stmt.where(MessageEngineAttempt.id != exclude_id)
     last_reject = session.execute(

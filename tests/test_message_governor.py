@@ -1076,3 +1076,74 @@ class TestRoundNineOffline:
         assert gov.short_circuit(gov.P1, _settings()) is not None
         assert gov.short_circuit(2, _settings(message_engine_enabled=False)) is not None
         assert gov.short_circuit(2, _settings()) is None
+
+
+class TestRoundTenOn106:
+    """#106 round 9 (SOTA-A, high; SOTA-B and SOTA-C approved): a marker's
+    strike instant was the newest rejection of its trigger at or before the
+    marker, with no regard for the compose boundary in between. A marker
+    closing a compose that has no rejections of its own - on a trigger that
+    had rejections in an EARLIER compose - borrowed that earlier compose's
+    last rejection as its instant, so the cooldown was already over the
+    moment the breaker opened, and the engine asked. The search now stops at
+    the trigger's previous boundary; a marker with no rejection of its own
+    compose anchors on itself.
+    """
+
+    T = datetime(2026, 9, 6, 12, 0, 0)
+
+    def _row(self, s, outcome, started_s, finished_s, trigger, iteration=1):
+        r = MessageEngineAttempt(
+            trigger=trigger, channel="imessage", priority=2,
+            started_at=self.T + timedelta(seconds=started_s),
+            finished_at=self.T + timedelta(seconds=finished_s),
+            outcome=outcome.value, iteration=iteration)
+        s.add(r)
+        s.commit()
+        return r.id
+
+    def _at(self, seconds):
+        return (self.T + timedelta(seconds=seconds)).replace(tzinfo=UTC)
+
+    @pytest.mark.parametrize("boundary", [gov.Outcome.FALLBACK_USED, gov.Outcome.OK,
+                                          gov.Outcome.BUDGET_SKIPPED])
+    def test_a_marker_only_strike_on_a_reused_trigger_anchors_on_itself(self, boundary):
+        settings = _settings()
+        with session_scope() as s:
+            # An earlier compose of X: three rejections, closed by `boundary`.
+            for i in range(1, 4):
+                self._row(s, gov.Outcome.CONTENT_REJECTED, i - 1, i, "X", iteration=i)
+            self._row(s, boundary, 10, 10, "X")
+            # Much later, four technical errors and a marker-only strike on X
+            # (its compose has no rejection rows of its own).
+            for k in range(4):
+                self._row(s, gov.Outcome.TECHNICAL_ERROR, 90_000 + k - 1, 90_000 + k, f"E{k}")
+            self._row(s, gov.Outcome.FALLBACK_USED, 90_010, 90_010, "X")
+            # Five strikes since the last success: the breaker is open, and the
+            # cooldown runs from the newest strike - the marker itself.
+            # An earlier exhausted compose closed by its own marker is a
+            # strike in the same run when no success intervened: six then.
+            expected_strikes = 6 if boundary is gov.Outcome.FALLBACK_USED else 5
+            assert gov.consecutive_strikes(s, settings=settings) == expected_strikes
+            now = self._at(90_011)
+            assert gov.breaker_is_open(s, settings=settings, now=now)
+            d = gov.decide(s, priority=2, settings=settings, trigger="Z", now=now)
+            assert d.verdict is gov.Verdict.USE_FALLBACK and "breaker open" in d.reason, d
+            assert d.retry_after == self._at(90_010 + 86_400), d
+
+    def test_a_marker_with_its_own_rejections_still_anchors_on_the_last_of_them(self):
+        settings = _settings()
+        with session_scope() as s:
+            for i in range(1, 4):
+                self._row(s, gov.Outcome.CONTENT_REJECTED, i - 1, i, "X", iteration=i)
+            self._row(s, gov.Outcome.FALLBACK_USED, 10, 10, "X")
+            for i in range(1, 4):
+                self._row(s, gov.Outcome.CONTENT_REJECTED, 500 + i - 1, 500 + i, "X", iteration=i)
+            self._row(s, gov.Outcome.FALLBACK_USED, 9_000, 9_000, "X")   # late marker
+            for k in range(3):
+                self._row(s, gov.Outcome.TECHNICAL_ERROR, 100 + k, 101 + k, f"E{k}")
+            assert gov.consecutive_strikes(s, settings=settings) == 5
+            # Anchor: the second compose's last rejection (T+503), not the
+            # first compose's, and not the late marker.
+            d = gov.decide(s, priority=2, settings=settings, trigger="Z", now=self._at(9_001))
+            assert d.retry_after == self._at(503 + 86_400), d
