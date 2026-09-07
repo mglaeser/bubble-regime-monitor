@@ -1147,3 +1147,64 @@ class TestRoundTenOn106:
             # first compose's, and not the late marker.
             d = gov.decide(s, priority=2, settings=settings, trigger="Z", now=self._at(9_001))
             assert d.retry_after == self._at(503 + 86_400), d
+
+
+class TestRoundTenRefutation:
+    """#106 round 10 rerun, SOTA-C (confidence high): "_strike_instant
+    incorrectly selects the trigger column instead of the full row object,
+    causing an AttributeError when the resulting string is passed to
+    _dwell_from". Executed here on every path that hands a marker to
+    `_strike_instant`, across every shape a marker can have, with and without
+    a success, with and without an open claim excluded: no exception, and the
+    counts and anchors are the documented ones. The one trigger-column select
+    in the module (`_exhausted_open_composes`) feeds trigger FILTERS and is
+    never passed to `_dwell_from`; the strike scan and the anchor select full
+    rows. The claim is refuted by execution and this test pins it.
+    """
+
+    T = datetime(2026, 9, 6, 12, 0, 0)
+
+    def _row(self, s, outcome, started_s, finished_s, trigger, iteration=1):
+        r = MessageEngineAttempt(
+            trigger=trigger, channel="imessage", priority=2,
+            started_at=self.T + timedelta(seconds=started_s),
+            finished_at=None if finished_s is None else self.T + timedelta(seconds=finished_s),
+            outcome=outcome.value, iteration=iteration)
+        s.add(r)
+        s.commit()
+        return r.id
+
+    def _at(self, seconds):
+        return (self.T + timedelta(seconds=seconds)).replace(tzinfo=UTC)
+
+    @pytest.mark.parametrize("with_ok", [False, True])
+    @pytest.mark.parametrize("with_claim", [False, True])
+    def test_every_marker_shape_survives_every_scan(self, with_ok, with_claim):
+        settings = _settings()
+        with session_scope() as s:
+            if with_ok:
+                self._row(s, gov.Outcome.OK, -1000, -999, "OLD")
+            # a marker with its own rejections
+            for i in range(1, 4):
+                self._row(s, gov.Outcome.CONTENT_REJECTED, i - 1, i, "A", iteration=i)
+            self._row(s, gov.Outcome.FALLBACK_USED, 4, 4, "A")
+            # a marker-only strike on a reused trigger
+            self._row(s, gov.Outcome.FALLBACK_USED, 500, 500, "A")
+            # a marker with no rejection anywhere
+            self._row(s, gov.Outcome.FALLBACK_USED, 600, 600, "B")
+            # a technical error and a marker tied with it
+            self._row(s, gov.Outcome.TECHNICAL_ERROR, 699, 700, "C")
+            self._row(s, gov.Outcome.FALLBACK_USED, 700, 700, "D")
+            claim = self._row(s, gov.Outcome.IN_FLIGHT, 800, None, "E") if with_claim else None
+            now = self._at(801)
+            strikes = gov.consecutive_strikes(s, settings=settings, exclude_id=claim)
+            anchor = gov.strike_anchor(s, settings=settings, exclude_id=claim)
+            assert strikes == 5 and anchor == self._at(700), (strikes, anchor)
+            assert gov.breaker_is_open(s, settings=settings, now=now)
+            d = gov.decide(s, priority=2, settings=settings, trigger="Z", now=now,
+                           exclude_id=claim)
+            assert d.verdict is gov.Verdict.USE_FALLBACK and "breaker" in d.reason, d
+            assert d.retry_after == self._at(700 + 86_400), d
+        decision, claim_id = gov.reserve(trigger="Z", channel="imessage", priority=2,
+                                         settings=settings, now=now)
+        assert decision.verdict is gov.Verdict.USE_FALLBACK and claim_id is None

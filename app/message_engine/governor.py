@@ -491,6 +491,13 @@ def consecutive_strikes(session: Session, *, limit: int = 50,
         .limit(1)
     ).first()
 
+    # FULL ROWS, because every row goes through `_strike_instant`. (#106
+    # round 10, SOTA-C, confidence high: "selects the trigger column instead
+    # of the full row object, causing an AttributeError in _dwell_from".
+    # Executed across every marker shape, with and without a success and an
+    # open claim - TestRoundTenRefutation: no exception, documented counts
+    # and anchors. The module's one trigger-column select is in
+    # `_exhausted_open_composes` and feeds trigger filters only.)
     stmt = (
         select(MessageEngineAttempt)
         .where(MessageEngineAttempt.outcome.in_(
