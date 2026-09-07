@@ -75,6 +75,16 @@ class Outcome(StrEnum):
 _PACING_OUTCOMES = (Outcome.IN_FLIGHT, Outcome.OK, Outcome.FORMAT_REJECTED,
                     Outcome.CONTENT_REJECTED, Outcome.TECHNICAL_ERROR)
 
+#: The rows that END a compose: a success, or the marker of an exhausted one.
+#: BUDGET_SKIPPED was a boundary too, so an exhausted compose followed by a
+#: budget skip was closed with no marker and its strike vanished - five such
+#: runs stayed below the threshold and the engine kept asking (#107 round 1,
+#: SOTA-A, executed). A budget skip is a refusal the engine issues to itself:
+#: no model call was made, nothing was spent, nothing is closed (round 32,
+#: the same rule NOT_ASKED already follows). No writer records the outcome
+#: today; it stays in the schema and is invisible to every scan.
+_BOUNDARY_OUTCOMES = (Outcome.OK.value, Outcome.FALLBACK_USED.value)
+
 
 class Verdict(StrEnum):
     ASK = "ask"                  # go ahead and call the model
@@ -277,7 +287,6 @@ _PAUSE_RANK = case(
 #: request past the cap (#106 round 3, SOTA-A). Unknowable order fails closed.
 _ATTEMPT_BEFORE_BOUNDARY = case(
     (MessageEngineAttempt.outcome.in_([Outcome.OK.value,
-                                       Outcome.BUDGET_SKIPPED.value,
                                        Outcome.FALLBACK_USED.value]), 0),
     else_=1,
 )
@@ -343,8 +352,7 @@ def _open_since(session: Session, trigger: str | None, *,
     stmt = (
         select(MessageEngineAttempt)
         .where(MessageEngineAttempt.trigger == trigger)
-        .where(MessageEngineAttempt.outcome.in_(
-            [Outcome.OK.value, Outcome.BUDGET_SKIPPED.value, Outcome.FALLBACK_USED.value])))
+        .where(MessageEngineAttempt.outcome.in_(_BOUNDARY_OUTCOMES)))
     if exclude_id is not None:
         stmt = stmt.where(MessageEngineAttempt.id != exclude_id)
     row = session.execute(
@@ -648,8 +656,7 @@ def _strike_instant(session: Session, row: MessageEngineAttempt, *,
         select(_completed)
         .where(MessageEngineAttempt.trigger == row.trigger)
         .where(MessageEngineAttempt.id != row.id)
-        .where(MessageEngineAttempt.outcome.in_(
-            [Outcome.OK.value, Outcome.BUDGET_SKIPPED.value, Outcome.FALLBACK_USED.value]))
+        .where(MessageEngineAttempt.outcome.in_(_BOUNDARY_OUTCOMES))
         .where(_completed <= marker_at))
     if exclude_id is not None:
         prev = prev.where(MessageEngineAttempt.id != exclude_id)
@@ -809,8 +816,7 @@ def content_attempts(session: Session, *, trigger: str | None,
         MessageEngineAttempt.trigger == trigger,
         MessageEngineAttempt.outcome.in_([
             Outcome.CONTENT_REJECTED.value, Outcome.FORMAT_REJECTED.value,
-            Outcome.OK.value, Outcome.BUDGET_SKIPPED.value,
-            Outcome.FALLBACK_USED.value]))
+            *_BOUNDARY_OUTCOMES]))
     if exclude_id is not None:
         # reserve() inserts its claim BEFORE evaluating the gates, so without
         # this the reservation counts itself as an already-spent attempt and
@@ -836,7 +842,7 @@ def content_attempts(session: Session, *, trigger: str | None,
     ).scalars().all()
     spent = 0
     for outcome in rows:
-        if outcome in (Outcome.OK.value, Outcome.BUDGET_SKIPPED.value,
+        if outcome in (Outcome.OK.value,
                        Outcome.FALLBACK_USED.value):
             break
         spent += 1
