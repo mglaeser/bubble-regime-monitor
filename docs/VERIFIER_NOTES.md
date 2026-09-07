@@ -827,3 +827,15 @@ exhausted compose's strike is provisional under the current cap — stated as
 a deliberate policy now, because the alternative needs a cap the rows do not
 store, and the writer marks at exhaustion so the provisional state lasts only
 as long as a failed marker write.
+
+**#106 round 9 — one finding, and the offline pass had not seen it.** SOTA-A
+alone, with the other two approving: a marker closing a compose with no
+rejection rows of its own, on a trigger that had rejections in an earlier
+compose, borrowed the earlier compose's last rejection as its strike
+instant, so the cooldown was already over the moment the breaker opened.
+Executed for each boundary kind; fixed by stopping the rejection search at
+the trigger's previous boundary, with a tie at that boundary treated as
+belonging to the compose it closed so the marker anchors on itself. The
+count also taught a smaller lesson: an earlier exhausted compose closed by
+its own marker is a strike in the same run when no success intervened, and
+the first draft of the test expected five where six is right.
