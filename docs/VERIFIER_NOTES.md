@@ -896,3 +896,25 @@ rerun). The evidence for size as the bound is now direct: the same reviewer
 approved the same fix at 1,224 lines in fifteen minutes the same afternoon.
 So the module stands alone in #106 once more, carrying the approved fix,
 and the unchanged tests return as PR 3c stacked on it. No code changed.
+
+**#106 and #109 landed — and a governance finding about how.** With the
+module alone at 1,228 lines, #106's panel approved in 269 seconds and the
+tests followed as #109 in 267 seconds; both merged once their test jobs
+passed (auto-merge is disabled in this repository, so the watch merged them
+explicitly). Then the gateway log showed what the fast approvals were made
+of: from 21:33Z the required approver's own model, gpt-5.6-sol behind the
+owner's Codex account, returned 401 invalid_api_key on every call, and the
+SOTA-A combo failed over to its second target — anthropic/claude-fable-5,
+the same model that is SOTA-B's first target. The "SOTA-A" votes that
+approved #106 at 21:37Z and #109 at 21:33Z and 21:42Z were therefore
+Anthropic's model, not OpenAI's: two of the three voices were one vendor,
+and the required-approver vote was not independent of SOTA-B's. The code
+that merged is the code SOTA-B and SOTA-C had approved on every one of the
+preceding four rounds, and the last genuine gpt-5.6-sol read of the module
+(19:46Z, 818 seconds in, cancelled by a branch merge) never voted. Recorded
+so the owner can decide whether the merged diffs get a genuine SOTA-A read
+once the account is re-authenticated — and so the combo's failover list is
+reconsidered: a required approver that falls back to another panelist's
+model silently voids the panel's cross-vendor premise. #105's round and
+rerun on the same evening failed for the same reason: claude-fable-5
+answering as SOTA-A produced replies the verifier could not parse.
