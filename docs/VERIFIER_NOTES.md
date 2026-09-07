@@ -858,3 +858,14 @@ at the scan. Under the revised stop rule a round whose finding does not
 execute ends the iteration: #106 stands with zero open findings and joins
 #105 at the bridge. Ten rounds, thirteen offline findings, all but this one
 real; the residual is a required approver that cannot finish reviewing.
+
+**#106 round 11 and the split.** Both other vendors approved the head that
+carries the pinned refutation; SOTA-A again delivered no vote. The gateway
+log settled the question of why: the diff had grown to 2,432 lines, and the
+required approver, which finished 1,127–1,268-line reviews in 428–784
+seconds and a 2,269-line one once in three tries at 735 seconds, was cut at
+its provider's 900-second cap on eighteen of eighteen attempts in one day.
+The residual is not in the code; it is a reviewer that cannot finish reading
+it. So the tests moved to a follow-up PR stacked on #106, unchanged, and
+#106 became the module alone at 1,222 lines — the size the approver has
+finished before. No code changed in the split.
