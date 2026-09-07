@@ -887,3 +887,12 @@ approver in about fifteen minutes on 1,224 lines: the first green on the
 governor lineage since the schema PR, and the confirmation that the split
 was the right remedy for a reviewer bound by its own clock rather than by
 the code.
+
+**#106 on the merged head, and the second split.** The owner merged #107
+into the branch; the diff was 2,481 lines again, and on the next run and
+its rerun the required approver failed on the wire on every attempt while
+SOTA-B and SOTA-C approved (SOTA-B's reply failed the content check on the
+rerun). The evidence for size as the bound is now direct: the same reviewer
+approved the same fix at 1,224 lines in fifteen minutes the same afternoon.
+So the module stands alone in #106 once more, carrying the approved fix,
+and the unchanged tests return as PR 3c stacked on it. No code changed.
