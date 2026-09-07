@@ -869,3 +869,14 @@ The residual is not in the code; it is a reviewer that cannot finish reading
 it. So the tests moved to a follow-up PR stacked on #106, unchanged, and
 #106 became the module alone at 1,222 lines — the size the approver has
 finished before. No code changed in the split.
+
+**#107 round 1 — the split works, and the tests carried a finding.** On the
+1,210-line tests PR the required approver finished in eighteen minutes and
+voted; the other two approved. SOTA-A read a test expectation and found the
+semantic hole behind it: BUDGET_SKIPPED was a compose boundary, so an
+exhausted compose followed by a budget skip was closed with no marker and
+its strike vanished — five such runs counted zero strikes and the engine
+kept asking. Executed; fixed by one shared boundary set (OK, FALLBACK_USED):
+a budget skip is a refusal the engine issues to itself and closes nothing,
+the rule NOT_ASKED already follows. The fix rides on #107, stacked on #106,
+and lands in #106 instead if the module-only round does not pass on its own.
