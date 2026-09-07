@@ -839,3 +839,22 @@ belonging to the compose it closed so the marker anchors on itself. The
 count also taught a smaller lesson: an earlier exhausted compose closed by
 its own marker is a strike in the same run when no success intervened, and
 the first draft of the test expected five where six is right.
+
+**#106 round 10 — two approvals, a wire that would not finish, and a claim
+refuted by execution.** On the head carrying every fix from rounds 1–9 and
+the two offline reviews, SOTA-B approved twice and SOTA-C approved once;
+SOTA-A never delivered a vote on either attempt (its stream hit the
+provider's 900-second cap and both chat fallbacks died at 179 seconds, the
+chronic signature). On the rerun SOTA-C refuted with confidence high: the
+strike scan "selects the trigger column instead of the full row object,
+causing an AttributeError in `_dwell_from`". The cited line is a comment;
+the scan and the anchor select full rows; the module's one trigger-column
+select feeds trigger filters only. Executed rather than argued: every
+marker shape — with its own rejections, marker-only on a reused trigger,
+with no rejection anywhere, tied with a technical error — through every
+scan, with and without a success and an open claim; no exception, counts
+and anchors as documented. The test pins it and the refutation is written
+at the scan. Under the revised stop rule a round whose finding does not
+execute ends the iteration: #106 stands with zero open findings and joins
+#105 at the bridge. Ten rounds, thirteen offline findings, all but this one
+real; the residual is a required approver that cannot finish reviewing.
