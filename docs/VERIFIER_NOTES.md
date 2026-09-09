@@ -918,3 +918,31 @@ reconsidered: a required approver that falls back to another panelist's
 model silently voids the panel's cross-vendor premise. #105's round and
 rerun on the same evening failed for the same reason: claude-fable-5
 answering as SOTA-A produced replies the verifier could not parse.
+
+**2026-09-09 — the size hypothesis, tested.** The owner asked whether
+smaller PRs (smaller messages to the model) go through while bigger ones get
+blocked or time out. Every independent-verify run from 2026-08-30 to 09-07
+was joined to the size of the diff it reviewed and to the gateway log's
+genuine gpt-5.6-sol attempts for the CI key:
+
+| diff size | runs | approver attempts | completed | cut at ~900 s |
+|---|---|---|---|---|
+| up to 1,300 lines | 21 | 49 | 21 (43%) | 8 |
+| 1,301 to 1,900 | 10 | 31 | 9 (29%) | 4 |
+| above 1,900 (to 7,858) | 49 | 115 | 48 (42%) | 13 |
+
+Completed reads take 300 to 880 seconds at every size, and 80,000-token
+prompts from #100 completed as often as 35,000-token ones. So size does not
+decide. Time does: the cut at about 900 seconds existed before (one attempt
+in twenty from August 25 to September 1, while a 1,772-second read completed
+on September 2 through the same provider), and on September 6 and 7 it hit
+between forty and eighty percent of attempts. It is a condition on the
+provider side of the approver's own account, varying by day, and no PR
+shape changes it. Since 2026-09-07 21:33Z that account has answered 401 on
+every call, and the gateway reports both Codex accounts as
+`reauth_required` with reason `refresh_failed`: only an interactive
+re-login clears it. Approach from here: no more splitting of PRs for the
+approver's sake (the two splits cost extra rounds and a merge confusion);
+the levers are the account, the provider-side cut, and the approver's
+`max` reasoning effort, which is what makes a read take up to fifteen
+minutes in the first place.
