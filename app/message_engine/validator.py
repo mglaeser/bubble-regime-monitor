@@ -736,6 +736,12 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
             # LETTER and the base of the allowlisted 'ℹ️', while 'e' is a
             # letter that must never carry a selector.
             prev = text[i - 1] if i else ""
+            # This allow-list test comes FIRST, and it is what admits the
+            # letter-based 'ℹ️'. (#105 round 5, SOTA-C, confidence high,
+            # claimed the sequence is rejected because `_is_emoji(prev)` below
+            # lacks `presented=True`; executed across every allow-listed
+            # selector sequence, both channels and three positions - it is
+            # not: TestRoundFiveRefutation.)
             if prev and (prev + _VS16) in EMOJI_ALLOWLIST:
                 continue
             if prev and _is_emoji(prev) and not prev.isalpha():

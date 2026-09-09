@@ -752,3 +752,44 @@ class TestProseRulesFlag:
         r = validate("Text me your password.", channel=Channel.IMESSAGE,
                      facts={}, **LIMITS)
         assert not r.ok
+
+
+class TestRoundFiveRefutation:
+    """#105 round 5 (2026-09-09), SOTA-C (confidence high): "validate()
+    rejects allowlisted emoji sequences using Ll-category bases (e.g. U+2139
+    U+FE0F) because the format control check calls _is_emoji(prev) without
+    the presented=True flag". Executed and refuted: the allow-list test on
+    the base plus selector runs BEFORE that call, so every allow-listed
+    selector sequence passes on iMessage in every position; the counter sees
+    the letter-category base and enforces the cap; the bare base without its
+    selector is rejected as non-Latin, and a stray selector on a letter is
+    still rejected (round 6). The only rejections in the sweep are SMS, which
+    carries no emoji by contract. Pinned here so the claim stays executed.
+    """
+
+    FACTS = {"F_BAND_EFFECTIVE": "hold", "F_NEXT_CHECK": "14:00 UTC"}
+    LIMITS = dict(sms_max_len=160, imessage_max_chars=200, imessage_max_emoji=2)
+
+    def _ok(self, text, channel=Channel.IMESSAGE):
+        return validate(text, channel=channel, facts=self.FACTS, **self.LIMITS)
+
+    @pytest.mark.parametrize("emoji", sorted(EMOJI_ALLOWLIST))
+    @pytest.mark.parametrize("shape", [
+        "{e} bubblegauge: caution level moved to hold. Next run 14:00 UTC.",
+        "bubblegauge: caution level moved to hold {e} next run 14:00 UTC.",
+        "bubblegauge: caution level moved to hold. Next run 14:00 UTC. {e}",
+    ])
+    def test_every_allowlisted_emoji_passes_in_every_position(self, emoji, shape):
+        r = self._ok(shape.format(e=emoji))
+        assert r.ok, (emoji, r.reason)
+
+    def test_the_letter_based_emoji_is_counted_toward_the_cap(self):
+        assert count_emoji("ℹ️ℹ️ℹ️") == 3
+        text = "bubblegauge: caution level moved to hold. ℹ️ℹ️ℹ️ Next run 14:00 UTC."
+        r = self._ok(text)
+        assert not r.ok and "exceeds" in r.reason
+
+    def test_the_bare_base_and_a_stray_selector_are_still_refused(self):
+        assert not self._ok("bubblegauge: caution level moved to hold ℹ next run 14:00 UTC.").ok
+        r = self._ok("bubblegauge: Se️ll holdings. Next run 14:00 UTC.")
+        assert not r.ok and "U+FE0F" in r.reason
