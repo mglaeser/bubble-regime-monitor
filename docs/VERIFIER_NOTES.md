@@ -946,3 +946,18 @@ approver's sake (the two splits cost extra rounds and a merge confusion);
 the levers are the account, the provider-side cut, and the approver's
 `max` reasoning effort, which is what makes a read take up to fifteen
 minutes in the first place.
+
+**#105 round 5 (2026-09-09), the first genuine round after the account was
+re-authenticated.** The required approver's own model was cut at 901
+seconds on all three stream attempts and its chat fallback died at 179
+seconds on all three, on the whole 1,831-line diff; SOTA-B's reply failed
+the content check; SOTA-C refuted with confidence high: the allow-listed
+'ℹ️' is rejected because the format-control check calls the emoji test
+without the presentation flag. Executed across every allow-listed selector
+sequence, both channels and three positions: it is not rejected — the
+allow-list test on base plus selector runs first and admits it; the counter
+sees the letter-category base and enforces the cap; the bare base and a
+stray selector on a letter are still refused. The only rejections in the
+sweep are SMS, which carries no emoji by contract. Refuted by execution,
+pinned, and written at the check. Under the size finding of the same day,
+#105 goes to the bridge: no rerun lottery, and no further code change.
