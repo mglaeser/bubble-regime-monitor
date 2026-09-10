@@ -793,3 +793,47 @@ class TestRoundFiveRefutation:
         assert not self._ok("bubblegauge: caution level moved to hold ℹ next run 14:00 UTC.").ok
         r = self._ok("bubblegauge: Se️ll holdings. Next run 14:00 UTC.")
         assert not r.ok and "U+FE0F" in r.reason
+
+
+class TestRoundSixOn105:
+    """#105 round 6 (2026-09-10, SOTA-A, confidence high, on a genuine 885 s
+    read of the whole diff): four grounding and directive escapes, each
+    executed before the fix with its control refused and its variant passing.
+    """
+
+    LIMITS = dict(sms_max_len=160, imessage_max_chars=200, imessage_max_emoji=2)
+
+    def _v(self, text, facts):
+        return validate(text, channel=Channel.IMESSAGE, facts=facts, **self.LIMITS)
+
+    @pytest.mark.parametrize("marker", ["- ", "• ", "* ", "– ", "1. ", "1) ", "> "])
+    def test_a_list_marker_does_not_hide_a_directive(self, marker):
+        facts = {"F_BAND_EFFECTIVE": "hold"}
+        assert not self._v("Text your password.", facts).ok            # control
+        r = self._v(f"{marker}Text your password.", facts)
+        assert not r.ok, marker
+
+    @pytest.mark.parametrize("wrapped", ["14:00 (EST)", "14:00 [EST]", "14:00, EST", "14:00 (est)"])
+    def test_a_wrapped_zone_still_contradicts_the_fact(self, wrapped):
+        facts = {"F_NEXT_CHECK": "14:00 UTC"}
+        assert not self._v("bubblegauge: next run 14:00 EST.", facts).ok  # control
+        r = self._v(f"bubblegauge: next run {wrapped}.", facts)
+        assert not r.ok and "zone" in (r.reason or ""), (wrapped, r.reason)
+        assert self._v("bubblegauge: next run 14:00 (UTC).", facts).ok
+
+    @pytest.mark.parametrize("form", ["-(51)", "-[51]", "- (51)", "−(51)", "+(51)"])
+    def test_a_sign_before_a_bracketed_numeral_is_a_new_value(self, form):
+        facts = {"F_HEADLINE_MEDIAN": 51}
+        assert not self._v("bubblegauge: the score is -51.", facts).ok    # control
+        r = self._v(f"bubblegauge: the score is {form}.", facts)
+        assert not r.ok, (form, r.reason)
+        assert self._v("bubblegauge: the score is (51).", facts).ok
+
+    @pytest.mark.parametrize("cue", ["subtraction", "difference", "subtract", "minus", "less"])
+    def test_an_ascending_pair_with_an_arithmetic_cue_is_not_a_range(self, cue):
+        facts = {"F_RF_COUNT": 2, "F_HEADLINE_MEDIAN": 51}
+        assert not self._v("bubblegauge: the subtraction is 51-2.", facts).ok  # control
+        r = self._v(f"bubblegauge: the {cue} is 2-51.", facts)
+        assert not r.ok, (cue, r.reason)
+        # A genuine range with no arithmetic cue stays valid.
+        assert self._v("bubblegauge: the scale runs 2-51.", facts).ok

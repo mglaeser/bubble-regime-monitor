@@ -153,11 +153,20 @@ band bands score scores level levels reading readings flag flags breadth credit
 momentum trend trends data run runs check checks review reviews range gap gaps
 spread spreads price prices cash gold bonds bond equities equity stocks shares
 delivery message messages texts text override overrides warning warnings
+events event month-end
 underlying overall shown fixed normal later rollover marker markers
 distance basis points percent per protection borrowing semiconductor
 volatility liquidity exposure weighting weightings allocation allocations
 history horizon window windows model models method methods source sources
 """.split())
+
+
+#: Bullets, dashes and enumerators that may precede a clause's first word.
+#: Stripping them surfaced one library head word the opener list had never
+#: seen: the weekly digest's "- events." (its head used to be "-", never
+#: analysed), so "events" joins the list above - the same extraction rule,
+#: applied after the marker is gone.
+_LIST_MARKER_RE = re.compile(r"^(?:[-\u2013\u2014\u2022*\u00b7>]+|\(?(?:\d{1,2}|[a-zA-Z])[.)])\s+")
 
 
 def _looks_imperative(clause: str, grounded: set[str]) -> bool:
@@ -166,7 +175,12 @@ def _looks_imperative(clause: str, grounded: set[str]) -> bool:
     Long clauses are exempt: an imperative is terse, and the domain prose that
     would trip a naive rule is not.
     """
-    words = clause.strip().split()
+    # A LIST MARKER is not the head word. "- Text your password." split to a
+    # first token of "-", which is not alphabetic, so the directive test
+    # returned False before it looked at the verb (#105 round 6, SOTA-A,
+    # executed for "-", "•", "*", "–", "1.", "1)" and ">"). The marker is
+    # stripped and the clause judged by its first real word.
+    words = _LIST_MARKER_RE.sub("", clause.strip(), count=1).split()
     if not words or len(words) > _SHORT_CLAUSE_WORDS:
         return False
     raw = words[0].strip("\"'([{").rstrip(".,;:!?)]}")
@@ -418,6 +432,11 @@ _NUMERAL_RE = re.compile(
 #: between digits because it is neither a range nor a subtraction.
 _DATE_RE = re.compile(r"\d{4}-\d{2}(?:-\d{2})?")
 
+#: An arithmetic cue followed, within one clause, by a tight digit pair.
+_CUED_SUBTRACTION_RE = re.compile(
+    r"\b(?:subtraction|subtract(?:ed|ing)?|difference|deduct(?:ed|ing)?|"
+    r"minus|less|remainder)\b[^.;!?]{0,30}?\b\d+(?:[.,]\d+)?\s*-\s*\d+(?:[.,]\d+)?\b")
+
 #: Arithmetic spelled out. Bounded by digits on both sides so ordinary prose
 #: ("the gap between 51 and 60") cannot trip it.
 _PROSE_ARITHMETIC_RE = re.compile(
@@ -572,8 +591,12 @@ def emoji_used(text: str) -> set[str]:
 #: rather than discovered as a third instance of the same class.
 #: A time and the zone/meridiem token that follows it, if any.
 _TIME_ZONE_RE = re.compile(
-    r"(\d{1,2}:\d{2}(?::\d{2})?)\s*"
-    r"((?:UTC|GMT|Z|[ECMP][SD]T|CET|CEST|BST|IST|JST|AEST|[AaPp]\.?[Mm]\.?)\b)?")
+    # The zone may be wrapped or set off: "14:00 (EST)", "14:00, EST". The
+    # bare form was the only one seen, so a UTC fact accepted "14:00 (EST)"
+    # (#105 round 6, SOTA-A, executed).
+    r"(\d{1,2}:\d{2}(?::\d{2})?)\s*[,;]?\s*[(\[]?\s*"
+    # Case-insensitive: "(est)" names a zone as surely as "(EST)".
+    r"((?i:UTC|GMT|Z|[ECMP][SD]T|CET|CEST|BST|IST|JST|AEST|[AP]\.?M\.?)\b)?")
 
 _COMPOUND_RE = re.compile(
     r"\d{4}-\d{2}-\d{2}"      # a date
@@ -873,6 +896,16 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
         return ValidationResult(False, FailureClass.CONTENT,
                                 "arithmetic in words denotes an ungrounded "
                                 "value")
+    # An ascending pair reads as a range ONLY when nothing calls it a
+    # subtraction. "The subtraction is 2-51." ascends, so the range rule below
+    # accepted it while the sentence asserts an ungrounded -49 (#105 round 6,
+    # SOTA-A, executed). A closed list of arithmetic cues before the pair
+    # decides; the residual - cues this list lacks - is the decision-9 class,
+    # closed upstream by decision 12 (the model never writes the wire text).
+    if _CUED_SUBTRACTION_RE.search(lowered_probe):
+        return ValidationResult(False, FailureClass.CONTENT,
+                                "a pair named as a subtraction denotes an "
+                                "ungrounded value")
     del lowered_probe
     # The ASCII hyphen is three different things between digits, and the
     # engine must tell them apart (round 23, SOTA-C — whose own example was
@@ -900,6 +933,15 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
     # The bracketed operand may carry a SIGN: "51-(-2)" is 53, and the scan
     # that catches "51-(2)" walked straight past the inner minus (#105 round
     # 3, SOTA-A).
+    # A UNARY sign in front of a bracketed numeral is a new value: "-(51)"
+    # asserts -51 while the scan saw only the grounded 51 inside the brackets
+    # (#105 round 6, SOTA-A, executed for -( -[ - ( −( and +( ). The
+    # lookbehind keeps "51-(2)" for the subtraction rule below and leaves a
+    # sign INSIDE brackets, "(-2)", to the signed-numeral scan.
+    if re.search(r"(?<![\w)\]])[-+\u2212]\s*[(\[]\s*\d", text):
+        return ValidationResult(False, FailureClass.CONTENT,
+                                "a sign before a bracketed numeral asserts a "
+                                "value that is not grounded")
     if re.search(r"\d\s*-\s*[(\[]\s*[-+\u2212]?\s*\d", text):
         return ValidationResult(False, FailureClass.CONTENT,
                                 "bracketed subtraction denotes an ungrounded "
