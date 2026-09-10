@@ -961,3 +961,16 @@ stray selector on a letter are still refused. The only rejections in the
 sweep are SMS, which carries no emoji by contract. Refuted by execution,
 pinned, and written at the check. Under the size finding of the same day,
 #105 goes to the bridge: no rerun lottery, and no further code change.
+
+**#105 round 6 (2026-09-10) — the first genuine full read, and four real
+findings.** After the tests PR was merged back into the branch a third time,
+the whole 1,831-line diff got a complete read from the required approver at
+885 seconds, fifteen under the cut, and it refuted with four findings while
+SOTA-C approved. All four executed: a list marker hid a directive's head
+word ("- Text your password." validated); a wrapped zone was invisible to
+the time-zone scan ("14:00 (EST)" against a UTC fact); a unary sign before a
+bracketed numeral asserted a new value ("-(51)"); and an ascending pair
+named as a subtraction was read as a range ("the subtraction is 2-51"). All
+four fixed with their executed scenarios in the docstrings; the fourth by a
+closed list of arithmetic cues, whose residual is the decision-9 class that
+decision 12 closes upstream. Twenty-one new cases red before, green after.
