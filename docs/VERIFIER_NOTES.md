@@ -974,3 +974,10 @@ named as a subtraction was read as a range ("the subtraction is 2-51"). All
 four fixed with their executed scenarios in the docstrings; the fourth by a
 closed list of arithmetic cues, whose residual is the decision-9 class that
 decision 12 closes upstream. Twenty-one new cases red before, green after.
+The marker fix had a second effect worth recording: with bullets stripped,
+two clauses of the shipped library gained a head word the opener list had
+never been asked about — "- events." in the weekly digest and "- month-end
+trend signal negative;" in the execution-armed message — and the library
+guard test refused both until they joined the list. The guard did its job:
+an allow-list extracted from data must be re-extracted whenever the way the
+data is read changes.
