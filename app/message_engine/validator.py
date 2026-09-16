@@ -146,6 +146,20 @@ _OBJECT_PRONOUNS = frozenset("me us you him her them it yourself ourselves".spli
 _DETERMINERS = frozenset("the a an your my our their its this that these those "
                          "all some any every each more another".split())
 
+#: Heads that are never verbs: a short clause opening with a preposition or a
+#: conjunction cannot be an instruction, whatever follows. Needed once leading
+#: values are skipped, so "2 of 4 flags." and "12% below the peak." keep
+#: their prose heads instead of being judged on "of" and "below".
+_FUNCTION_HEADS = frozenset(
+    "of at in on for with by from as and or but nor after before since until "
+    "till per via than into onto over under below above near within between "
+    "around about across along against among beyond despite during except "
+    "inside outside through toward towards upon without".split())
+
+#: Round 11 (SOTA-C): once a leading VALUE is skipped the way a list marker
+#: is, the composer corpus surfaced two more head words the list had never
+#: seen - "red" ("2 red flags.") and "breaker" ("24-hour breaker.") - the same
+#: extraction rule, applied after the value is gone.
 _APPROVED_OPENERS = frozenset("""
 bubblegauge next no none not the a an this that these those it its there their
 all both each every some any more less most fewer other another
@@ -158,6 +172,7 @@ underlying overall shown fixed normal later rollover marker markers
 distance basis points percent per protection borrowing semiconductor
 volatility liquidity exposure weighting weightings allocation allocations
 history horizon window windows model models method methods source sources
+red breaker
 """.split())
 
 
@@ -181,6 +196,14 @@ def _looks_imperative(clause: str, grounded: set[str]) -> bool:
     # executed for "-", "•", "*", "–", "1.", "1)" and ">"). The marker is
     # stripped and the clause judged by its first real word.
     words = _LIST_MARKER_RE.sub("", clause.strip(), count=1).split()
+    # A LEADING VALUE IS NOT THE HEAD WORD EITHER. "51 Select holdings now."
+    # put a grounded numeral in first place, and the numeral test below
+    # answered "not a verb" for the whole clause — the round-6 marker hole in
+    # another spelling (#105 round 11, SOTA-C, executed; "51 Text your
+    # password." likewise). Numerals, ratios, percentages and times are
+    # skipped and the clause is judged by its first real word.
+    while words and not words[0].strip("\"'([{").rstrip(".,;:!?)]}")[:1].isalpha():
+        words.pop(0)
     if not words or len(words) > _SHORT_CLAUSE_WORDS:
         return False
     raw = words[0].strip("\"'([{").rstrip(".,;:!?)]}")
@@ -191,6 +214,8 @@ def _looks_imperative(clause: str, grounded: set[str]) -> bool:
     if raw.isupper() and 2 <= len(raw) <= 5:
         return False                      # a ticker (SPY, QQQ, TLT) is a subject
     head = raw.casefold()
+    if head in _FUNCTION_HEADS:
+        return False                      # a preposition or conjunction is never a verb
     if head in _APPROVED_OPENERS or head in grounded:
         # ONE shape test for both. Round 1 exempted a grounded value outright
         # ("a fact value is a subject"), which is the assumption SOTA-C named
@@ -506,7 +531,12 @@ _PROSE_ARITHMETIC_RE = re.compile(
     # claims 102, and no fact contains it. The trailing forms were covered
     # and the leading ones were not (round 39, SOTA-A defect 2).
     r"|\b(?:twice|double|doubled|triple|tripled|thrice|quadruple|"
-    r"half|halved|quarter|third|tenth)\s+(?:the\s+|that\s+|of\s+)?\d")
+    r"half|halved|quarter|third|tenth)\s+(?:the\s+|that\s+|of\s+)?\d"
+    # PERCENT-OF is multiplication in words: "51% of 2" denotes 1.02 while
+    # both operands were grounded (#105 round 11, SOTA-A, executed; "51% of
+    # the 2 flags" and "51 percent of 2" likewise).
+    r"|\d\s*(?:%|percent|per\s+cent)\s+of\s+"
+    r"(?:(?:the|a|an|these|those|its|their)\s+)?\d")
 
 #: Units that make a spelled-out number part of the METHODOLOGY rather than a
 #: measurement ("a two-year lookback", "three months of data").

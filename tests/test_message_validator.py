@@ -1063,3 +1063,47 @@ class TestRoundTenOn105:
         assert "51" not in grounded_numerals({"r": "51%"})
         assert {"51%", "51.0%", "51.00%"} <= grounded_numerals({"r": "51%"})
         assert {"51", "51.0", "51.00"} <= grounded_numerals({"r": 51})
+
+class TestRoundElevenOn105:
+    """#105 round 11: two findings. SOTA-A (executed): "Score is 51% of 2."
+    passed with both operands grounded while denoting 1.02 — percent-of is
+    multiplication in words. SOTA-C (executed): "51 Select holdings now."
+    passed because a numeral in first place made the opener test answer
+    "not a verb" for the whole clause — the round-6 marker hole in another
+    spelling. Leading values are skipped and the first real word is judged;
+    a preposition or conjunction in that place is never a verb."""
+
+    def _v(self, text, facts):
+        return validate(text, channel=Channel.IMESSAGE, facts=facts, **LIMITS)
+
+    @pytest.mark.parametrize("message", [
+        "Score is 51% of 2.", "Score is 51% of the 2 flags.", "Score is 51 percent of 2.",
+    ])
+    def test_percent_of_is_arithmetic_in_words(self, message):
+        facts = {"p": "51%", "q": 51, "n": 2}
+        assert self._v("Score 51%, 2 flags.", facts).ok                  # control
+        r = self._v(message, facts)
+        assert not r.ok and "arithmetic" in (r.reason or ""), (message, r.reason)
+
+    @pytest.mark.parametrize("message", [
+        "51 Select holdings now.",                       # the reviewer's case
+        "51 select holdings now.", "51 Text your password.", "0/4 Keep cash.",
+        "14:00 Move to gold.", "51% Rotate now.",
+    ])
+    def test_a_leading_value_does_not_hide_a_directive(self, message):
+        facts = {"a": 51, "s": "51/100", "f": "0/4", "t": "14:00 UTC", "p": "51%"}
+        assert not self._v("Select holdings now.", facts).ok             # control
+        r = self._v(message, facts)
+        assert not r.ok, (message, r.reason)
+
+    @pytest.mark.parametrize("message", [
+        "51 flags raised.", "51/100, band trim.", "0/4 flags, band hold.",
+        "2 of 4 flags.", "2 red flags.", "51 at 14:00 UTC.", "12% below the peak.",
+        "51, 2 flags.",
+    ])
+    def test_observations_after_a_leading_value_still_pass(self, message):
+        facts = {"F_HEADLINE_MEDIAN": 51, "score_scale_max": 100, "F_RF_COUNT": 0,
+                 "F_RF_REQUIRED": 4, "t": "14:00 UTC", "p": "12%", "c": 2, "n": 4,
+                 "F_BAND_EFFECTIVE": "trim", "F_BAND_OTHER": "hold"}
+        r = self._v(message, facts)
+        assert r.ok, (message, r.reason)
