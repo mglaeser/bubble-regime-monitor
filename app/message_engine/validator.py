@@ -408,6 +408,62 @@ _NON_ENGLISH_WORDS = frozenset({
     "el", "la", "los", "las", "por", "para", "con", "pero", "este",
     "les", "une", "avec", "pour", "mais", "cette", "vous",
     "che", "non", "per", "una", "sono",
+    # Round 9 (SOTA-A, executed): "Aktien fallen heute deutlich weiter." had
+    # none of the words above. The top function and market words of German,
+    # French, Spanish, Italian, Portuguese and Dutch follow, minus English
+    # homographs (fallen, gut, alt, stark, war, nun, oft, hay, nada, met, tot,
+    # door, hoe, dove, come, era, sin, con, pour, plus, sans, est, encore).
+    # This remains the backstop it was declared to be: a sentence built
+    # entirely of words outside it passes, and under decision 12 no model
+    # prose reaches the wire at all.
+    "heute", "morgen", "gestern", "deutlich", "weiter", "wieder", "immer",
+    "nur", "auch", "mehr", "schon", "alle", "alles", "keine", "kein",
+    "zwischen", "gegen", "ohne", "unter", "ueber", "über", "nach", "vor",
+    "seit", "durch", "beim", "zum", "zur", "vom", "wird", "hatte", "sollte",
+    "muss", "müssen", "dieser", "diese", "dieses", "jeder", "jede", "welche",
+    "aber", "oder", "sondern", "weil", "wenn", "dass", "dann", "damit",
+    "hier", "dort", "aktie", "aktien", "kurs", "kurse", "markt", "steigen",
+    "steigt", "sinken", "sinkt", "bleibt", "bleiben", "wurden", "worden",
+    "sein", "seine", "ihre", "ihren", "unser", "unsere", "mich", "dich",
+    "uns", "euch", "ihm", "ihn", "ihnen", "nichts", "etwas", "viel", "viele",
+    "wenig", "wenige", "schlecht", "neu", "neue", "neuen", "alte", "klein",
+    "hoch", "niedrig", "schwach", "leicht", "schwer", "gerade", "bereits",
+    "ganz", "kaum", "meist", "selten", "nie", "niemals", "nein", "doch",
+    "aujourd", "hui", "demain", "toujours", "jamais", "très", "tres",
+    "moins", "beaucoup", "aussi", "dans", "sous", "vers", "chez", "entre",
+    "donc", "alors", "parce", "puis", "ainsi", "cet", "ces", "leur", "leurs",
+    "notre", "votre", "sont", "était", "etait", "sera", "ont", "avoir",
+    "être", "etre", "fait", "faire", "peut", "doit", "nous", "elle", "elles",
+    "ils", "ceci", "cela", "quel", "quelle", "quels", "quelles", "tout",
+    "tous", "toute", "toutes", "rien", "quelque", "quelques", "chaque",
+    "plusieurs", "aucun", "aucune", "déjà", "deja", "hausse", "baisse",
+    "bourse", "baissent", "montent",
+    "hoy", "mañana", "manana", "ayer", "ahora", "siempre", "nunca",
+    "también", "tambien", "muy", "más", "menos", "mucho", "mucha", "muchos",
+    "muchas", "poco", "pocos", "sobre", "sino", "porque", "entonces", "aquí",
+    "aqui", "allí", "alli", "estos", "estas", "ese", "esa", "esos", "esas",
+    "aquel", "aquella", "cada", "todo", "toda", "todos", "todas", "algo",
+    "alguien", "nadie", "está", "están", "estan", "fue", "será", "tiene",
+    "tienen", "puede", "pueden", "debe", "deben", "hasta", "desde", "cuando",
+    "donde", "según", "segun", "acciones", "caen", "sube", "suben", "bajan",
+    "mercado", "bolsa", "otra", "otro", "otros", "otras", "vez", "veces",
+    "bien", "nuevo", "nueva", "nuevos", "nuevas",
+    "oggi", "domani", "ieri", "ancora", "sempre", "molto", "molti", "molte",
+    "anche", "senza", "tra", "fra", "però", "perché", "perche", "quindi",
+    "allora", "questo", "questa", "questi", "queste", "quello", "quella",
+    "quelli", "ogni", "tutto", "tutti", "tutte", "niente", "nulla",
+    "siamo", "siete", "hanno", "avere", "essere", "può", "puo", "deve",
+    "devono", "fino", "secondo", "azioni", "azione", "scendono", "salgono",
+    "mercato", "borsa",
+    "hoje", "amanhã", "amanha", "ontem", "ainda", "muito", "muita", "muitos",
+    "muitas", "pouco", "sem", "então", "entao", "esse", "essa", "esses",
+    "essas", "tudo", "são", "sao", "estão", "estao", "foi", "tem", "têm",
+    "pode", "até", "onde", "segundo", "ações", "acoes", "caem", "sobem",
+    "vandaag", "gisteren", "altijd", "nooit", "ook", "zeer", "meer", "minder",
+    "veel", "weinig", "zonder", "voor", "tussen", "maar", "omdat", "dus",
+    "deze", "dit", "elke", "niets", "iets", "zijn", "wordt", "heeft", "moet",
+    "sinds", "wanneer", "waar", "volgens", "aandelen", "dalen", "stijgen",
+    "beurs",
 })
 
 #: A numeral as it appears in prose, including decimals, percentages and
@@ -603,8 +659,12 @@ _TIME_ZONE_RE = re.compile(
     # The zone may be wrapped or set off: "14:00 (EST)", "14:00, EST". The
     # bare form was the only one seen, so a UTC fact accepted "14:00 (EST)"
     # (#105 round 6, SOTA-A, executed).
-    r"(\d{1,2}:\d{2}(?::\d{2})?)\s*[,;]?\s*[(\[]?\s*"
-    r"([AaPp]\.[Mm]\.?|[A-Za-z]{2,5}|[Zz])?\b")
+    r"(?<!\d)(\d{1,2}:\d{2}(?::\d{2})?)\s*[,;]?\s*[(\[]?\s*"
+    # An OFFSET belongs to the zone: "14:00 UTC+1" is not 14:00 UTC, but the
+    # token stopped at the letters and the "+1" was just a grounded numeral
+    # (#105 round 9, SOTA-A, executed; tight and spaced forms alike).
+    r"((?:[AaPp]\.[Mm]\.?|[A-Za-z]{2,5}|[Zz])\b"
+    r"(?:\s*[-+−]\s*\d{1,2}(?::?\d{2})?(?!\d))?)?")
 
 #: Spellings that name a zone even bare and lowercase: the library's own "utc",
 #: the meridiem, and the names earlier rounds saw written that way.
@@ -630,17 +690,24 @@ def _zone_token(token: str) -> str | None:
     """The zone a time is given, or None when the word after it is prose."""
     if not token:
         return None
+    token = re.sub(r"\s+", "", token)  # "UTC + 1" is the zone "UTC+1"
     if _NAMED_ZONE_RE.fullmatch(token):
         return token.upper()
     if token.islower() and token in _PROSE_AFTER_A_TIME:
         return None
     return token.upper()
 
+#: Bounded by NON-DIGITS on both sides: without the boundaries "114:00"
+#: contained the grounded compound "14:00" plus the grounded numeral 1, so a
+#: fact of 14:00 admitted "Next run 114:00 UTC." — and "14:001" likewise
+#: (#105 round 9, SOTA-A, executed).
 _COMPOUND_RE = re.compile(
+    r"(?<!\d)(?:"
     r"\d{4}-\d{2}-\d{2}"      # a date
     r"|\d{4}-\d{2}"            # a year-month
     r"|\d{1,2}:\d{2}(?::\d{2})?"  # a time
-    r"|\d{1,2}/\d{1,2}/\d{2,4}")  # a slash date
+    r"|\d{1,2}/\d{1,2}/\d{2,4}"  # a slash date
+    r")(?!\d)")
 
 
 def _compound_spans(text: str) -> list[tuple[int, int]]:

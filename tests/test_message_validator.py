@@ -925,3 +925,87 @@ class TestRoundEightOn105:
     def test_a_caret_is_ordinary_text_on_both_channels(self, channel):
         r = self._v("Score 51^ ok.", channel)
         assert r.ok, (channel, r.reason)
+
+
+class TestRoundNineOn105:
+    """#105 round 9 (SOTA-A, executed): three escapes. "114:00" contained the
+    grounded compound "14:00" and the grounded numeral 1; "14:00 UTC+1" bound
+    the zone as "UTC" and grounded the "+1" as a numeral; and the German
+    sentence "Aktien fallen heute deutlich weiter." had none of the backstop's
+    words. The compound and time regexes are bounded by non-digits, the zone
+    token absorbs a tight or spaced offset, and the backstop carries the top
+    function and market words of six languages (minus English homographs)."""
+
+    def _v(self, text, facts):
+        return validate(text, channel=Channel.IMESSAGE, facts=facts, **LIMITS)
+
+    @pytest.mark.parametrize("message", [
+        "Next run 114:00 UTC.", "Next run 14:001 UTC.", "Next run 1114:00.",
+    ])
+    def test_a_compound_inside_a_longer_digit_run_is_not_the_grounded_one(self, message):
+        facts = {"time": "14:00", "n": 1}
+        assert self._v("Next run 14:00 UTC.", facts).ok                # control
+        assert self._v("Next run 1 14:00 UTC.", facts).ok
+        r = self._v(message, facts)
+        assert not r.ok, (message, r.reason)
+
+    def test_a_date_inside_a_longer_digit_run_is_not_the_grounded_one(self):
+        facts = {"asof": "2026-09-16", "n": 1}
+        assert self._v("Data as of 2026-09-16.", facts).ok             # control
+        assert not self._v("Data as of 2026-09-161.", facts).ok
+        assert not self._v("Data as of 12026-09-16.", facts).ok
+
+    @pytest.mark.parametrize("form", [
+        "14:00 UTC+1", "14:00 UTC + 1", "14:00 UTC-1", "14:00 GMT+1",
+        "14:00 utc+1", "14:00 (UTC+1)",
+    ])
+    def test_an_offset_makes_a_different_zone(self, form):
+        facts = {"time": "14:00 UTC", "n": 1}
+        assert self._v("Next check 14:00 UTC.", facts).ok              # control
+        r = self._v(f"Next check {form}.", facts)
+        assert not r.ok and "zone" in (r.reason or ""), (form, r.reason)
+
+    def test_a_colon_offset_is_refused_by_the_compound_check_first(self):
+        # "01:00" is a compound the facts do not carry; the zone rule would
+        # refuse it too, but the compound scan runs first. Refused either way.
+        r = self._v("Next check 14:00 UTC+01:00.", {"time": "14:00 UTC", "n": 1})
+        assert not r.ok, r.reason
+
+    def test_a_grounded_offset_is_kept_whole(self):
+        facts = {"time": "14:00 UTC+1", "n": 1}
+        assert self._v("Next check 14:00 UTC+1.", facts).ok
+        assert not self._v("Next check 14:00 UTC.", facts).ok
+
+    @pytest.mark.parametrize("message", [
+        "Aktien fallen heute deutlich weiter.",             # the reviewer's case
+        "Kurse steigen wieder, Markt bleibt schwach.",
+        "Les actions baissent toujours, rien de nouveau.",
+        "Las acciones caen otra vez, nada nuevo hoy.",
+        "Le azioni scendono ancora oggi, niente di nuovo.",
+        "As ações caem hoje, ainda sem novidade.",
+        "Aandelen dalen vandaag, niets nieuws.",
+    ])
+    def test_non_english_prose_without_the_old_words_is_refused(self, message):
+        r = self._v(message, {"F_HEADLINE_MEDIAN": 51})
+        assert not r.ok and "English" in (r.reason or ""), (message, r.reason)
+
+    @pytest.mark.parametrize("message", [
+        "Score falls further today.", "Flags 0/4, band hold, next check 14:00 UTC.",
+        "Score 51/100, 0/4 flags. Next check 14:00 UTC.",
+    ])
+    def test_english_prose_still_passes(self, message):
+        facts = {"F_HEADLINE_MEDIAN": 51, "score_scale_max": 100,
+                 "F_RF_COUNT": 0, "F_RF_REQUIRED": 4, "F_BAND_EFFECTIVE": "hold",
+                 "F_NEXT_CHECK": "14:00 UTC"}
+        r = self._v(message, facts)
+        assert r.ok, (message, r.reason)
+
+    def test_the_backstop_holds_no_english_words(self):
+        from app.message_engine.validator import _NON_ENGLISH_WORDS
+        # "con" and "pour" predate this round and are left as they were.
+        english = set("score flags band next check hold trim run today further "
+                      "falls fell rises rose at of the and is are was were not no "
+                      "yes on off up down high low new old since until again "
+                      "fallen gut alt stark war nun oft hay nada met tot door hoe "
+                      "dove come era sin plus sans est encore".split())
+        assert not english & _NON_ENGLISH_WORDS
