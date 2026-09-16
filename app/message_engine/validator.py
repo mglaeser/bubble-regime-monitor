@@ -589,14 +589,47 @@ def emoji_used(text: str) -> set[str]:
 #: 2026-08-01 supplied every fragment needed for the FALSE "2026-01-08". The
 #: pattern is deliberately one place, so the next compound form is added here
 #: rather than discovered as a third instance of the same class.
-#: A time and the zone/meridiem token that follows it, if any.
+#: A time and the token that follows it, if any. The token is taken by SHAPE
+#: (two to five letters, a meridiem, or "Z") and judged by _zone_token below.
+#: The earlier LIST of zone names recognised EST but not NZST, so a UTC fact
+#: accepted "Next check 14:00 NZST." — and 30 of 30 real abbreviations the
+#: list lacked (#105 round 7, SOTA-A, executed).
 _TIME_ZONE_RE = re.compile(
     # The zone may be wrapped or set off: "14:00 (EST)", "14:00, EST". The
     # bare form was the only one seen, so a UTC fact accepted "14:00 (EST)"
     # (#105 round 6, SOTA-A, executed).
     r"(\d{1,2}:\d{2}(?::\d{2})?)\s*[,;]?\s*[(\[]?\s*"
-    # Case-insensitive: "(est)" names a zone as surely as "(EST)".
-    r"((?i:UTC|GMT|Z|[ECMP][SD]T|CET|CEST|BST|IST|JST|AEST|[AP]\.?M\.?)\b)?")
+    r"([AaPp]\.[Mm]\.?|[A-Za-z]{2,5}|[Zz])?\b")
+
+#: Spellings that name a zone even bare and lowercase: the library's own "utc",
+#: the meridiem, and the names earlier rounds saw written that way.
+_NAMED_ZONE_RE = re.compile(
+    r"(?i:UTC|GMT|Z|[ECMP][SD]T|CET|CEST|BST|IST|JST|AEST|[AP]\.?M\.?)")
+
+#: The SAFE side of the zone rule: a bare lowercase word after a time that is
+#: the sentence going on ("14:00 today"), taken from the corpus and the
+#: function words. Anything else after a time is a zone and must agree with
+#: the fact — fail-closed, so the next unlisted abbreviation is refused rather
+#: than discovered by a reviewer. The library itself only ever writes
+#: "{next_check_utc} UTC" after a time.
+_PROSE_AFTER_A_TIME = frozenset(
+    "a an the and or but so then than as at by for from in into is it its if "
+    "of on our per to till until up via was we with when while next last each "
+    "every daily again sharp today local hour hours hrs min mins later now "
+    "once only still yet over after before since this that these those here "
+    "there also too not no all any both done due just two onto run check mark "
+    "slot time cycle sweep".split())
+
+
+def _zone_token(token: str) -> str | None:
+    """The zone a time is given, or None when the word after it is prose."""
+    if not token:
+        return None
+    if _NAMED_ZONE_RE.fullmatch(token):
+        return token.upper()
+    if token.islower() and token in _PROSE_AFTER_A_TIME:
+        return None
+    return token.upper()
 
 _COMPOUND_RE = re.compile(
     r"\d{4}-\d{2}-\d{2}"      # a date
@@ -1103,13 +1136,16 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
     # DIFFERENT one. A message adding a token to a bare fact is left alone:
     # the library's own templates write "{next_check_utc} UTC" around a bare
     # time, and that literal is the template's word, not a substitution.
+    # Which tokens count is decided by shape in _zone_token (#105 round 7).
     fact_zones: dict[str, set[str]] = {}
     for value in facts.values():
         for t, z in _TIME_ZONE_RE.findall(str(value)):
-            if z:
-                fact_zones.setdefault(t, set()).add(z.upper())
+            zone = _zone_token(z)
+            if zone:
+                fact_zones.setdefault(t, set()).add(zone)
     for t, z in _TIME_ZONE_RE.findall(text):
-        if z and t in fact_zones and z.upper() not in fact_zones[t]:
+        zone = _zone_token(z)
+        if zone and t in fact_zones and zone not in fact_zones[t]:
             return ValidationResult(
                 False, FailureClass.CONTENT,
                 f"{t} {z} contradicts the grounded time zone for {t}")

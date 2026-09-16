@@ -837,3 +837,51 @@ class TestRoundSixOn105:
         assert not r.ok, (cue, r.reason)
         # A genuine range with no arithmetic cue stays valid.
         assert self._v("bubblegauge: the scale runs 2-51.", facts).ok
+
+
+class TestRoundSevenOn105:
+    """#105 round 7 (SOTA-A, executed): the zone after a time was recognised
+    from a LIST, so a UTC fact accepted "Next check 14:00 NZST." — and every
+    real abbreviation the list lacked. The token is now taken by shape and
+    judged fail-closed: a named zone, a set-off token, or anything not on the
+    short prose allow-list is a zone and must agree with the fact."""
+
+    FACTS = {"F_NEXT_CHECK": "14:00 UTC"}
+
+    def _v(self, text, facts=None):
+        return validate(text, channel=Channel.IMESSAGE,
+                        facts=dict(facts or self.FACTS), **LIMITS)
+
+    def test_the_reviewers_exact_case(self):
+        assert not self._v("Next check 14:00 EST.").ok             # control
+        r = self._v("Next check 14:00 NZST.")
+        assert not r.ok and "zone" in (r.reason or ""), r.reason
+
+    @pytest.mark.parametrize("zone", (
+        "NZST NZDT AKST AKDT HST AEDT ACST AWST SAST WAT CAT EAT WET WEST EET "
+        "EEST MSK PKT HKT SGT KST WIB BRT ART AST ADT NST NDT PHT ICT").split())
+    def test_every_abbreviation_the_list_lacked_contradicts_the_fact(self, zone):
+        r = self._v(f"Next check 14:00 {zone}.")
+        assert not r.ok and "zone" in (r.reason or ""), (zone, r.reason)
+
+    @pytest.mark.parametrize("form", [
+        "14:00 (NZST)", "14:00, NZST", "14:00 [nzst]", "14:00 (nzst)",
+        "14:00 nzst", "14:00 Nzst", "14:00NZST",
+    ])
+    def test_case_and_wrapping_do_not_hide_a_zone(self, form):
+        r = self._v(f"Next check {form}.")
+        assert not r.ok and "zone" in (r.reason or ""), (form, r.reason)
+
+    @pytest.mark.parametrize("message", [
+        "Next check 14:00 UTC.", "Next check 14:00 (UTC).", "Next check 14:00 utc.",
+        "Next check 14:00.", "Next check 14:00 today.", "Next check 14:00 sharp.",
+        "Next check 14:00 local time.", "Next check 14:00 and then 18:00 UTC.",
+    ])
+    def test_prose_after_a_time_is_not_a_zone(self, message):
+        r = self._v(message, {"F_NEXT_CHECK": "14:00 UTC", "F_LATER": "18:00 UTC"})
+        assert r.ok, (message, r.reason)
+
+    def test_the_rule_binds_only_a_time_the_facts_give_a_zone(self):
+        # A bare fact leaves the message free to add one: the library writes
+        # "{next_check_utc} UTC" around a bare time (round 3, unchanged).
+        assert self._v("Next check 14:00 UTC.", {"F_NEXT_CHECK": "14:00"}).ok
