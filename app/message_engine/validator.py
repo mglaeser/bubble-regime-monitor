@@ -558,7 +558,12 @@ def _is_emoji(ch: str, *, presented: bool = False) -> bool:
         return False
     if presented:
         return True
-    return unicodedata.category(ch) in {"So", "Sk"} or ord(ch) >= 0x1F000
+    # `Sk` was here for the skin-tone modifiers (U+1F3FB..FF), which the
+    # code-point floor already covers; the whole category also holds "^",
+    # "`" and "´" — plain GSM-7 — so a caret counted as an emoji and a valid
+    # SMS was refused before septet accounting (#105 round 8, SOTA-A,
+    # executed).
+    return unicodedata.category(ch) == "So" or ord(ch) >= 0x1F000
 
 
 def count_emoji(text: str) -> int:
@@ -974,6 +979,16 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
     if re.search(r"(?<![\w)\]])[-+\u2212]\s*[(\[]\s*\d", text):
         return ValidationResult(False, FailureClass.CONTENT,
                                 "a sign before a bracketed numeral asserts a "
+                                "value that is not grounded")
+    # A SIGN BEFORE A SIGNED NUMERAL is a new value too: "-+51" reads as -51
+    # while the numeral scan took "+51" and grounded it as 51; the unary rule
+    # above wanted a digit straight after the bracket, so "-(+51)" walked past
+    # it as well (#105 round 8, SOTA-A, executed for -+ +- -- ++ -(+ and
+    # "- +"). Two sign characters with nothing but space or a bracket between
+    # them never denote a grounded value, unary or binary ("51-+2").
+    if re.search(r"[-+\u2212]\s*[(\[]?\s*[-+\u2212]\s*[(\[]?\s*\d", text):
+        return ValidationResult(False, FailureClass.CONTENT,
+                                "repeated signs before a numeral assert a "
                                 "value that is not grounded")
     if re.search(r"\d\s*-\s*[(\[]\s*[-+\u2212]?\s*\d", text):
         return ValidationResult(False, FailureClass.CONTENT,

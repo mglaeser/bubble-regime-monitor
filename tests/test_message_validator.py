@@ -885,3 +885,43 @@ class TestRoundSevenOn105:
         # A bare fact leaves the message free to add one: the library writes
         # "{next_check_utc} UTC" around a bare time (round 3, unchanged).
         assert self._v("Next check 14:00 UTC.", {"F_NEXT_CHECK": "14:00"}).ok
+
+class TestRoundEightOn105:
+    """#105 round 8 (SOTA-A, executed): two escapes. "-+51" read as -51 while
+    the numeral scan grounded "+51" as 51, and the round-6 unary rule wanted a
+    digit straight after the bracket, so "-(+51)" passed too. And `_is_emoji`
+    took the whole Unicode `Sk` category for emoji, so a caret — plain GSM-7 —
+    had an SMS refused before septet accounting."""
+
+    FACTS = {"F_HEADLINE_MEDIAN": 51, "F_RF_COUNT": 2}
+
+    def _v(self, text, channel=Channel.IMESSAGE):
+        return validate(text, channel=channel, facts=dict(self.FACTS), **LIMITS)
+
+    @pytest.mark.parametrize("form", [
+        "-+51", "+-51", "--51", "++51", "-(+51)", "- +51", "\u2212+51", "+[-51]",
+    ])
+    def test_repeated_signs_before_a_numeral_assert_a_new_value(self, form):
+        assert not self._v("Score -51.").ok                       # control
+        r = self._v(f"Score {form}.")
+        assert not r.ok, (form, r.reason)
+        assert self._v("Score +51.").ok and self._v("Score (51).").ok
+
+    def test_a_sign_chain_after_a_numeral_is_not_a_grounded_value(self):
+        r = self._v("Score 51-+2.")
+        assert not r.ok, r.reason
+
+    @pytest.mark.parametrize("ch", ["^", "`", "\u00b4", "\u00a8", "\u00af"])
+    def test_a_modifier_symbol_is_not_an_emoji(self, ch):
+        from app.message_engine.validator import _is_emoji, count_emoji
+        assert not _is_emoji(ch)
+        assert count_emoji(f"a{ch}b") == 0
+
+    def test_the_skin_tone_modifier_still_counts(self):
+        from app.message_engine.validator import _is_emoji
+        assert _is_emoji("\U0001F3FB")
+
+    @pytest.mark.parametrize("channel", [Channel.SMS, Channel.IMESSAGE])
+    def test_a_caret_is_ordinary_text_on_both_channels(self, channel):
+        r = self._v("Score 51^ ok.", channel)
+        assert r.ok, (channel, r.reason)
