@@ -880,7 +880,7 @@ class TestRoundSevenOn105:
     @pytest.mark.parametrize("message", [
         "Next check 14:00 UTC.", "Next check 14:00 (UTC).", "Next check 14:00 utc.",
         "Next check 14:00.", "Next check 14:00 today.", "Next check 14:00 sharp.",
-        "Next check 14:00 local time.", "Next check 14:00 and then 18:00 UTC.",
+        "Next check 14:00 and then 18:00 UTC.",  # "local time" is a zone since round 13
     ])
     def test_prose_after_a_time_is_not_a_zone(self, message):
         r = self._v(message, {"F_NEXT_CHECK": "14:00 UTC", "F_LATER": "18:00 UTC"})
@@ -1156,3 +1156,57 @@ class TestRoundTwelveOn105:
         assert self._v("Band trim, 2 positions.", facts).ok            # control
         r = self._v(message, facts)
         assert not r.ok, (message, r.reason)
+
+
+class TestRoundThirteenOn105:
+    """#105 round 13 (SOTA-A, executed): two escapes. "Text me your password
+    now." is five words, and the four-word bound exempted the whole clause
+    from the opener test - the d1 residual of round 3. A content head
+    followed by a determiner or an object pronoun is now a verb at any
+    length; a function-word head never is, and a long clause's demonstrative
+    reads as a time adverbial. What remains of the residual is a long clause
+    whose first word is unknown to the list. And the zone token saw only
+    2-5-letter names, so a UTC fact accepted "14:00 America/New_York" and
+    "14:00 Eastern Time"; IANA and long-form names are zones now."""
+
+    FACTS = {"F_HEADLINE_MEDIAN": 51, "score_scale_max": 100, "F_RF_COUNT": 0,
+             "F_RF_REQUIRED": 4, "F_BAND_EFFECTIVE": "hold", "F_NEXT_CHECK": "14:00 UTC"}
+
+    def _v(self, text, facts=None):
+        return validate(text, channel=Channel.IMESSAGE, facts=dict(facts or self.FACTS), **LIMITS)
+
+    @pytest.mark.parametrize("message", [
+        "Text me your password now.",                    # the reviewer's case
+        "Send us your password today.", "Check your account before the close today.",
+        "Run the numbers again before the close.", "Text me your password now please.",
+    ])
+    def test_a_long_clause_with_a_verb_shaped_head_is_an_instruction(self, message):
+        assert not self._v("Text me your password.").ok                # control
+        r = self._v(message)
+        assert not r.ok, (message, r.reason)
+
+    @pytest.mark.parametrize("message", [
+        "Score is 51/100 and the band is hold.", "All the flags are lit today.",
+        "Breadth this week narrowed sharply.", "The band is hold, score 51/100.",
+        "Next check at month-end, delivery path working.",
+    ])
+    def test_long_observations_still_pass(self, message):
+        r = self._v(message)
+        assert r.ok, (message, r.reason)
+
+    @pytest.mark.parametrize("form", [
+        "America/New_York", "Europe/Berlin", "Eastern Time",
+        "Central European Summer Time", "local time", "Berlin time",
+    ])
+    def test_an_iana_or_long_form_zone_contradicts_the_fact(self, form):
+        for ok in ["14:00 UTC", "14:00 today"]:                            # controls
+            assert self._v(f"Next check {ok}.").ok, ok
+        r = self._v(f"Next check 14:00 {form}.")
+        assert not r.ok and "zone" in (r.reason or ""), (form, r.reason)
+        r = self._v(f"Next check 14:00 {form}.", {"F_NEXT_CHECK": "14:00"})   # bare fact
+        assert not r.ok and "zone" in (r.reason or ""), (form, r.reason)
+
+    def test_a_grounded_iana_zone_is_kept_whole(self):
+        facts = {"F_NEXT_CHECK": "14:00 Europe/Berlin"}
+        assert self._v("Next check 14:00 Europe/Berlin.", facts).ok
+        assert not self._v("Next check 14:00 UTC.", facts).ok

@@ -156,6 +156,13 @@ _FUNCTION_HEADS = frozenset(
     "around about across along against among beyond despite during except "
     "inside outside through toward towards upon without".split())
 
+#: Approved openers that are function words: they head prose ("All the flags
+#: are lit.") and are never the verb of an instruction, whatever follows.
+_FUNCTION_OPENERS = frozenset(
+    "bubblegauge next no none not the a an this that these those it its there "
+    "their all both each every some any more less most fewer other another".split())
+_DEMONSTRATIVES = frozenset("this that these those".split())
+
 #: Round 11 (SOTA-C): once a leading VALUE is skipped the way a list marker
 #: is, the composer corpus surfaced two more head words the list had never
 #: seen - "red" ("2 red flags.") and "breaker" ("24-hour breaker.") - the same
@@ -204,8 +211,9 @@ def _looks_imperative(clause: str, grounded: set[str]) -> bool:
     # skipped and the clause is judged by its first real word.
     while words and not words[0].strip("\"'([{").rstrip(".,;:!?)]}")[:1].isalpha():
         words.pop(0)
-    if not words or len(words) > _SHORT_CLAUSE_WORDS:
+    if not words:
         return False
+    long = len(words) > _SHORT_CLAUSE_WORDS
     raw = words[0].strip("\"'([{").rstrip(".,;:!?)]}")
     if not raw or not raw[0].isalpha():
         return False                      # numerals, dashes, symbols: not a verb
@@ -232,9 +240,28 @@ def _looks_imperative(clause: str, grounded: set[str]) -> bool:
         # AN OBJECT PRONOUN IN SECOND PLACE IS ALSO A VERB. "Text me your
         # password." put "me" where the determiner test looked (#105 round 2,
         # SOTA-A). No noun subject is followed by me/us/them either.
+        # THE SHAPE TEST HOLDS AT ANY LENGTH. The four-word bound exempted
+        # "Text me your password now." (#105 round 3, d1, carried as a
+        # residual; #105 round 13, SOTA-A, executed) - but a content head
+        # followed by a determiner or an object pronoun is a verb however
+        # long the clause runs. A function-word head is never one ("All the
+        # flags are lit today."), and in a long clause a demonstrative after
+        # a noun is a time adverbial ("Breadth this week narrowed"), not an
+        # object.
+        if head in _FUNCTION_OPENERS:
+            return False
         nxt = words[1].casefold().strip(",.;:") if len(words) > 1 else ""
-        return nxt in _DETERMINERS or nxt in _OBJECT_PRONOUNS
-    return True
+        if nxt in _OBJECT_PRONOUNS and not (long and nxt == "it"):
+            return True                   # "it" is also a subject: "Overall it rose again."
+        return nxt in _DETERMINERS and not (long and nxt in _DEMONSTRATIVES)
+    # An UNLISTED head is judged in a short clause, and in a long one only
+    # when an object pronoun follows it ("Send us your password today."):
+    # no subject noun is ever followed by me/us/them. A long clause with an
+    # unknown first word and no such tell is the domain prose the bound
+    # protects, and the residual decision 9 records (closed upstream by
+    # decision 12).
+    nxt = words[1].casefold().strip(",.;:") if len(words) > 1 else ""
+    return (not long) or (nxt in _OBJECT_PRONOUNS and nxt != "it")
 
 
 #: A BARE IMPERATIVE ON A POSITION. "Keep cash." carried no banned verb and no
@@ -697,7 +724,13 @@ _TIME_ZONE_RE = re.compile(
     # An OFFSET belongs to the zone: "14:00 UTC+1" is not 14:00 UTC, but the
     # token stopped at the letters and the "+1" was just a grounded numeral
     # (#105 round 9, SOTA-A, executed; tight and spaced forms alike).
-    r"((?:[AaPp]\.[Mm]\.?|[A-Za-z]{2,5}|[Zz])\b"
+    # IANA names ("America/New_York") and long forms ("Eastern Time", "Central
+    # European Summer Time", "local time") are zones too; a 2-5-letter token
+    # saw none of them, so a UTC fact accepted "14:00 America/New_York" (#105
+    # round 13, SOTA-A, executed).
+    r"((?:[A-Z][A-Za-z_]+(?:/[A-Z][A-Za-z_+\-]+){1,2}"
+    r"|(?:(?:[A-Z][A-Za-z]+|local|standard|daylight|summer)\s+){1,3}[Tt]ime"
+    r"|[AaPp]\.[Mm]\.?|[A-Za-z]{2,5}|[Zz])\b"
     r"(?:\s*[-+−]\s*\d{1,2}(?::?\d{2})?(?!\d))?)?")
 
 #: Spellings that name a zone even bare and lowercase: the library's own "utc",
