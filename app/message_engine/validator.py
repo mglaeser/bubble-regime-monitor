@@ -753,20 +753,24 @@ def grounded_numerals(facts: dict[str, object]) -> set[str]:
         for token in _NUMERAL_RE.findall(text):
             allowed.add(token)
             allowed.add(token.lstrip("+"))
-            if token.endswith("%"):
-                allowed.add(token[:-1])
-            if "." in token:
-                head, _, tail = token.partition(".")
+            # THE UNIT TRAVELS WITH THE VALUE. A fact of "51%" grounds "51%",
+            # "51.0%" and "51.00%" — never a bare "51", which is the same
+            # digits and a hundredfold different value (#105 round 10,
+            # SOTA-A, executed: fact "51%" admitted "The reported return is
+            # 51." and "51 %").
+            unit = "%" if token.endswith("%") else ""
+            core = token.lstrip("+").rstrip("%")
+            if "." in core:
+                head, _, tail = core.partition(".")
                 if tail.rstrip("0") == "":
-                    allowed.add(head)
+                    allowed.add(f"{head}{unit}")
             else:
                 # The reverse direction: a fact of 51 may legitimately be
                 # written '51.0'. Admitting it is not a hole — the VALUE is
                 # unchanged, and rejecting it would fail a message for
                 # formatting a number it was correctly given.
-                bare = token.rstrip("%")
-                allowed.add(f"{bare}.0")
-                allowed.add(f"{bare}.00")
+                allowed.add(f"{core}.0{unit}")
+                allowed.add(f"{core}.00{unit}")
     return allowed
 
 
@@ -1056,6 +1060,17 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
     if re.search(r"[-+\u2212]\s*[(\[]?\s*[-+\u2212]\s*[(\[]?\s*\d", text):
         return ValidationResult(False, FailureClass.CONTENT,
                                 "repeated signs before a numeral assert a "
+                                "value that is not grounded")
+    # A SPACED unary sign is still a sign: "- 51" reads as -51, but the
+    # numeral pattern wants the sign glued to the digits, so the scan took a
+    # grounded 51 and the dash was prose (#105 round 10, SOTA-A, executed;
+    # "+ 51" and "Score: - 51 flags." likewise). A sign preceded, across any
+    # space, by a digit or a closing bracket is binary ("51 - 2") and belongs
+    # to the arithmetic gate; compounds are already blanked in grounding_text,
+    # so a dash between two times is not a sign before a numeral.
+    if re.search(r"(?:^|[^\d)\]\s])\s*[-+\u2212]\s+\d", grounding_text):
+        return ValidationResult(False, FailureClass.CONTENT,
+                                "a spaced sign before a numeral asserts a "
                                 "value that is not grounded")
     if re.search(r"\d\s*-\s*[(\[]\s*[-+\u2212]?\s*\d", text):
         return ValidationResult(False, FailureClass.CONTENT,

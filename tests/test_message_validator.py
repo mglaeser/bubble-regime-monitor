@@ -119,9 +119,14 @@ class TestGroundingAndLexicon:
         r = _v("You should sell now.")
         assert not r.ok and r.failure_class is FailureClass.CONTENT
 
-    def test_grounded_numerals_admits_signed_and_percent_forms(self):
+    def test_grounded_numerals_keeps_sign_and_unit_together(self):
+        # The unit-stripped "-3.10" used to be admitted here; #105 round 10
+        # showed that a fact of "51%" then grounded a bare "51" — the same
+        # digits, a hundredfold different value — so the unit now travels
+        # with the value in every derived form.
         allowed = grounded_numerals({"a": "-3.10%", "b": 51})
-        assert "-3.10%" in allowed and "-3.10" in allowed and "51" in allowed
+        assert "-3.10%" in allowed and "51" in allowed
+        assert "-3.10" not in allowed
 
     def test_allowlist_carries_no_alarm_glyphs(self):
         assert "🚨" not in EMOJI_ALLOWLIST and "⚠️" not in EMOJI_ALLOWLIST
@@ -956,8 +961,7 @@ class TestRoundNineOn105:
         assert not self._v("Data as of 12026-09-16.", facts).ok
 
     @pytest.mark.parametrize("form", [
-        "14:00 UTC+1", "14:00 UTC + 1", "14:00 UTC-1", "14:00 GMT+1",
-        "14:00 utc+1", "14:00 (UTC+1)",
+        "14:00 UTC+1", "14:00 UTC-1", "14:00 GMT+1", "14:00 utc+1", "14:00 (UTC+1)",
     ])
     def test_an_offset_makes_a_different_zone(self, form):
         facts = {"time": "14:00 UTC", "n": 1}
@@ -965,11 +969,13 @@ class TestRoundNineOn105:
         r = self._v(f"Next check {form}.", facts)
         assert not r.ok and "zone" in (r.reason or ""), (form, r.reason)
 
-    def test_a_colon_offset_is_refused_by_the_compound_check_first(self):
-        # "01:00" is a compound the facts do not carry; the zone rule would
-        # refuse it too, but the compound scan runs first. Refused either way.
-        r = self._v("Next check 14:00 UTC+01:00.", {"time": "14:00 UTC", "n": 1})
-        assert not r.ok, r.reason
+    @pytest.mark.parametrize("form", ["14:00 UTC+01:00", "14:00 UTC + 1"])
+    def test_other_offset_spellings_are_refused_by_an_earlier_rule(self, form):
+        # "01:00" is a compound the facts do not carry, and "+ 1" is a spaced
+        # sign before a numeral (round 10); the zone rule would refuse both,
+        # but those scans run first. Refused either way.
+        r = self._v(f"Next check {form}.", {"time": "14:00 UTC", "n": 1})
+        assert not r.ok, (form, r.reason)
 
     def test_a_grounded_offset_is_kept_whole(self):
         facts = {"time": "14:00 UTC+1", "n": 1}
@@ -1009,3 +1015,51 @@ class TestRoundNineOn105:
                       "fallen gut alt stark war nun oft hay nada met tot door hoe "
                       "dove come era sin plus sans est encore".split())
         assert not english & _NON_ENGLISH_WORDS
+
+
+class TestRoundTenOn105:
+    """#105 round 10 (SOTA-A, executed): a SPACED unary sign was prose to the
+    numeral scan, so "The reported score is - 51." grounded as 51; and a
+    percent fact grounded its bare digits, so a fact of "51%" admitted "The
+    reported return is 51." — the same digits, a hundredfold different value."""
+
+    def _v(self, text, facts):
+        return validate(text, channel=Channel.IMESSAGE, facts=facts, **LIMITS)
+
+    @pytest.mark.parametrize("message", [
+        "The reported score is - 51.",                   # the reviewer's case
+        "The reported score is + 51.", "The reported score is -  51.",
+        "Score: - 51 flags.", "- 51 flags.", "Band hold- 51.",
+    ])
+    def test_a_spaced_sign_before_a_numeral_asserts_a_new_value(self, message):
+        facts = {"a": 51}
+        assert not self._v("The reported score is -51.", facts).ok       # control
+        assert self._v("The reported score is 51.", facts).ok            # control
+        r = self._v(message, facts)
+        assert not r.ok and "sign" in (r.reason or ""), (message, r.reason)
+
+    def test_a_binary_minus_still_belongs_to_the_arithmetic_gate(self):
+        r = self._v("Score 51 - 2.", {"a": 51, "b": 2})
+        assert not r.ok and "arithmetic" in (r.reason or ""), r.reason
+
+    @pytest.mark.parametrize("message", [
+        "The reported return is 51.",                    # the reviewer's case
+        "The reported return is 51 %.", "The reported return is 51.0.",
+    ])
+    def test_a_percent_fact_does_not_ground_the_bare_number(self, message):
+        facts = {"r": "51%"}
+        assert self._v("The reported return is 51%.", facts).ok         # control
+        assert self._v("The reported return is 51.0%.", facts).ok
+        r = self._v(message, facts)
+        assert not r.ok and "grounded" in (r.reason or ""), (message, r.reason)
+
+    def test_the_unit_is_kept_in_both_directions(self):
+        assert self._v("The reported return is 51%.", {"r": "51.0%"}).ok
+        assert not self._v("The reported return is 51%.", {"r": 51}).ok
+        assert self._v("The reported return is 51.0.", {"r": 51}).ok
+
+    def test_grounded_numerals_keeps_the_unit(self):
+        from app.message_engine.validator import grounded_numerals
+        assert "51" not in grounded_numerals({"r": "51%"})
+        assert {"51%", "51.0%", "51.00%"} <= grounded_numerals({"r": "51%"})
+        assert {"51", "51.0", "51.00"} <= grounded_numerals({"r": 51})
