@@ -281,7 +281,11 @@ _POSITION_OBJECT = (
 #: and "quality" does not, though both modify the noun the same way, and
 #: "Select quality instruments." slipped the first attempt at this. Counting
 #: words is a shape; recognising adjectives is another enumeration.
-_OBJECT_MODIFIER = r"(?:[A-Za-z]+\s+){0,2}"
+#: A NUMERAL is a modifier too: "Check 2 positions." put a count between the
+#: verb and its object, and a letters-only modifier let the clause through
+#: (#105 round 12, SOTA-C, executed for the approved-opener verbs; "Trim 2
+#: positions." was already refused by the band-verb rule).
+_OBJECT_MODIFIER = r"(?:(?:[A-Za-z]+|\d+(?:[.,]\d+)?%?)\s+){0,2}"
 _IMPERATIVE_OBJECT_RE = re.compile(
     # NO VERB LIST. Three rounds running, one more spelling got through a
     # list: round 29 added inflections, round 34 added the stative forms, and
@@ -714,6 +718,11 @@ _PROSE_AFTER_A_TIME = frozenset(
     "once only still yet over after before since this that these those here "
     "there also too not no all any both done due just two onto run check mark "
     "slot time cycle sweep".split())
+
+
+#: The zone a bare fact time may be given: the monitor reports in UTC, and
+#: "Z" is its designator. Anything else on a bare time is a fabrication.
+_MONITOR_ZONES = frozenset({"UTC", "Z"})
 
 
 def _zone_token(token: str) -> str | None:
@@ -1272,11 +1281,28 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
                 fact_zones.setdefault(t, set()).add(zone)
     for t, z in _TIME_ZONE_RE.findall(text):
         zone = _zone_token(z)
-        if zone and t in fact_zones and zone not in fact_zones[t]:
+        if not zone:
+            continue
+        if t in fact_zones:
+            if zone not in fact_zones[t]:
+                return ValidationResult(
+                    False, FailureClass.CONTENT,
+                    f"{t} {z} contradicts the grounded time zone for {t}")
+        elif zone not in _MONITOR_ZONES:
+            # A BARE FACT MAY ONLY BE GIVEN THE MONITOR'S OWN ZONE. The library
+            # writes "{next_check_utc} UTC" around a bare time, and that
+            # exemption let a bare 14:00 be written "14:00 EST" — a zone the
+            # facts never gave (#105 round 12, SOTA-A, executed).
             return ValidationResult(
                 False, FailureClass.CONTENT,
-                f"{t} {z} contradicts the grounded time zone for {t}")
+                f"{t} {z} gives a bare time a zone the facts do not")
 
+    # A UNIT WORD AFTER A NUMBER IS THE NUMBER'S UNIT. "51 %" and "51 percent"
+    # left the numeral scan with a grounded 51 and a stray unit, so a bare
+    # fact of 51 accepted a percentage it never gave (#105 round 12, SOTA-A,
+    # executed). The spelled forms are folded onto the number, so the round-10
+    # rule — the unit travels with the value — judges them the same way.
+    grounding_text = re.sub(r"(\d)\s*(?:%|percent\b|per\s+cent\b)", r"\1%", grounding_text)
     allowed = grounded_numerals(facts)
     for numeral in _NUMERAL_RE.findall(grounding_text):
         if numeral not in allowed and numeral.lstrip("+") not in allowed:

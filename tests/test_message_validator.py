@@ -1044,12 +1044,16 @@ class TestRoundTenOn105:
 
     @pytest.mark.parametrize("message", [
         "The reported return is 51.",                    # the reviewer's case
-        "The reported return is 51 %.", "The reported return is 51.0.",
+        "The reported return is 51.0.",
     ])
     def test_a_percent_fact_does_not_ground_the_bare_number(self, message):
         facts = {"r": "51%"}
         assert self._v("The reported return is 51%.", facts).ok         # control
         assert self._v("The reported return is 51.0%.", facts).ok
+        # "51 %" is the same value with a space: since round 12 a unit word is
+        # folded onto its number before grounding, so it passes here and is
+        # refused against a bare 51 (TestRoundTwelveOn105).
+        assert self._v("The reported return is 51 %.", facts).ok
         r = self._v(message, facts)
         assert not r.ok and "grounded" in (r.reason or ""), (message, r.reason)
 
@@ -1107,3 +1111,48 @@ class TestRoundElevenOn105:
                  "F_BAND_EFFECTIVE": "trim", "F_BAND_OTHER": "hold"}
         r = self._v(message, facts)
         assert r.ok, (message, r.reason)
+
+
+class TestRoundTwelveOn105:
+    """#105 round 12: three findings. SOTA-A (executed): a bare time fact
+    accepted any zone ("14:00 EST" for a fact of 14:00), and a bare numeric
+    fact accepted a spaced or spelled unit ("51 %", "51 percent" for a fact
+    of 51). SOTA-C: a numeral between an approved-opener verb and a position
+    ("Check 2 positions.") escaped the position-object rule, whose modifier
+    slot admitted letters only."""
+
+    def _v(self, text, facts):
+        return validate(text, channel=Channel.IMESSAGE, facts=facts, **LIMITS)
+
+    @pytest.mark.parametrize("form", ["14:00 EST", "14:00 NZST", "14:00 (EST)", "14:00 GMT+1"])
+    def test_a_bare_time_may_only_be_given_the_monitors_zone(self, form):
+        facts = {"t": "14:00"}
+        for ok in ["14:00 UTC", "14:00 (UTC)", "14:00Z", "14:00"]:           # controls
+            assert self._v(f"Next check {ok}.", facts).ok, ok
+        r = self._v(f"Next check {form}.", facts)
+        assert not r.ok and "zone" in (r.reason or ""), (form, r.reason)
+
+    def test_a_meridiem_on_a_bare_time_is_a_fabrication_too(self):
+        assert self._v("Next check 2:00.", {"t": "2:00"}).ok
+        assert not self._v("Next check 2:00 PM.", {"t": "2:00"}).ok
+
+    @pytest.mark.parametrize("message", ["Score 51 %.", "Score 51 percent."])
+    def test_a_unit_word_after_a_number_is_its_unit(self, message):
+        assert self._v("Score 51.", {"a": 51}).ok                        # control
+        r = self._v(message, {"a": 51})
+        assert not r.ok and "grounded" in (r.reason or ""), (message, r.reason)
+        assert self._v(message, {"a": "51%"}).ok                        # and the reverse
+
+    # "Flag 2 positions." is not here: the rule leaves the monitor's own nouns
+    # (band, score, flag, level, reading) out of the verb slot by design, with
+    # or without a numeral, because they head observations.
+    @pytest.mark.parametrize("message", [
+        "Check 2 positions.", "Review 2 holdings.", "Check 2.5 positions.",
+        "Trim 2 positions.",                              # the reviewer's example
+    ])
+    def test_a_numeral_between_verb_and_position_is_still_an_instruction(self, message):
+        facts = {"n": 2, "F_BAND_EFFECTIVE": "trim"}
+        assert not self._v("Check positions.", facts).ok                # control
+        assert self._v("Band trim, 2 positions.", facts).ok            # control
+        r = self._v(message, facts)
+        assert not r.ok, (message, r.reason)
