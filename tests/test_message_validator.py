@@ -1783,3 +1783,34 @@ class TestRoundThirtyThreeOn105:
     def test_an_unknown_channel_is_a_format_failure(self, channel):
         r = self._v("Score 51.", channel)
         assert not r.ok and r.failure_class is FailureClass.FORMAT, (channel, r.reason)
+
+
+class TestRoundThirtyFourOn105:
+    """#105 round 34 (SOTA-A, executed): the zone normalisation stripped
+    every hyphen, so the POSIX zones "EST-5" and "EST5" - opposite offsets -
+    compared equal and a fact of "14:00 EST-5" accepted "14:00 EST5". A dot
+    or hyphen between letters is punctuation; a hyphen before a digit is a
+    sign and stays."""
+
+    def _v(self, text, facts):
+        return validate(text, channel=Channel.IMESSAGE, facts=facts, **LIMITS)
+
+    def test_a_posix_sign_is_not_punctuation(self):
+        facts = {"t": "14:00 EST-5", "n": 5}
+        assert self._v("Next check 14:00 EST-5.", facts).ok
+        r = self._v("Next check 14:00 EST5.", facts)                   # the reviewer's case
+        assert not r.ok and "zone" in (r.reason or ""), r.reason
+
+    def test_offset_signs_are_kept_apart(self):
+        facts = {"t": "14:00 UTC-1", "n": 1}
+        assert self._v("Next check 14:00 UTC-1.", facts).ok
+        assert not self._v("Next check 14:00 UTC+1.", facts).ok
+        assert not self._v("Next check 14:00 UTC.", facts).ok
+
+    @pytest.mark.parametrize("form", ["14:00 E-S-T", "14:00 E.S.T."])
+    def test_letter_punctuation_still_folds(self, form):
+        facts = {"t": "14:00 UTC", "n": 1}
+        assert self._v("Next check 14:00 U.T.C.", facts).ok
+        assert self._v("Next check 14:00 U-T-C.", facts).ok
+        r = self._v(f"Next check {form}.", facts)
+        assert not r.ok and "zone" in (r.reason or ""), (form, r.reason)

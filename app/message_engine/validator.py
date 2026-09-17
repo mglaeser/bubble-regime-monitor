@@ -938,7 +938,12 @@ def _zone_token(token: str) -> str | None:
     """The zone a time is given, or None when the word after it is prose."""
     if not token:
         return None
-    token = re.sub(r"[\s.\-]+", "", token)  # "UTC + 1" is "UTC+1"; "E.S.T." and "E-S-T" are "EST"
+    # A dot or a hyphen BETWEEN LETTERS is punctuation ("E.S.T.", "E-S-T" are
+    # "EST"); a hyphen before a digit is a SIGN and stays: stripping every
+    # hyphen made the POSIX zones "EST-5" and "EST5" - opposite offsets -
+    # compare equal (#105 round 34, SOTA-A, executed).
+    token = re.sub(r"(?<=[A-Za-z])[.\-](?=[A-Za-z]|$)", "", token)
+    token = re.sub(r"\s+", "", token)     # "UTC + 1" is "UTC+1"
     if token.upper() == "Z":
         return "UTC"                      # the ISO designator names the same zone
     if _NAMED_ZONE_RE.fullmatch(token):
