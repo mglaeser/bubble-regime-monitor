@@ -592,7 +592,9 @@ _CUED_SUBTRACTION_RE = re.compile(
 #: ("the gap between 51 and 60") cannot trip it.
 _PROSE_ARITHMETIC_RE = re.compile(
     r"\d[^.]{0,20}?\b(?:divided\s+by|multiplied\s+by|times|plus|minus|"
-    r"over\s+a\s+total\s+of|less|to\s+the\s+power\s+of|raised\s+to)\b"
+    # MODULO is arithmetic too: "51 modulo 2" denotes 1 with both operands
+    # grounded (#105 round 28, SOTA-A, executed).
+    r"over\s+a\s+total\s+of|less|to\s+the\s+power\s+of|raised\s+to|mod|modulo)\b"
     r"[^.]{0,10}?\d"
     # ...and the unary forms, which take no second number at all.
     r"|\d\s*(?:squared|cubed)\b"

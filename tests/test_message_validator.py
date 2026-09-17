@@ -1645,3 +1645,18 @@ class TestRoundTwentySevenOn105:
         assert not self._v("Score 51.0/2.0.").ok                        # control
         r = self._v(message)
         assert not r.ok and "quotient" in (r.reason or ""), (message, r.reason)
+
+
+class TestRoundTwentyEightOn105:
+    """#105 round 28 (SOTA-A, executed): "Score 51 modulo 2." passed with
+    both operands grounded while denoting 1; modulo joins the arithmetic
+    spelled out in words."""
+
+    def _v(self, text):
+        return validate(text, channel=Channel.IMESSAGE, facts={"a": 51, "b": 2}, **LIMITS)
+
+    @pytest.mark.parametrize("message", ["Score 51 modulo 2.", "Score 51 mod 2.", "Score 51 MODULO 2."])
+    def test_modulo_is_arithmetic_in_words(self, message):
+        assert self._v("Score 51, 2 flags.").ok                          # control
+        r = self._v(message)
+        assert not r.ok and "arithmetic" in (r.reason or ""), (message, r.reason)
