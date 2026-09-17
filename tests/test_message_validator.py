@@ -1455,3 +1455,36 @@ class TestRoundTwentyOn105:
         assert self._v("Gold rose today.", facts).ok
         r = self._v(message, facts)
         assert not r.ok, (message, r.reason)
+
+
+class TestRoundTwentyOneOn105:
+    """#105 round 21 (SOTA-A, executed): "14:00 UTC (EST)" carried two zone
+    designators and the binding read only the first, so an ungrounded EST
+    schedule passed. Every zone-shaped token that follows a time is now held
+    to the fact; a bare lowercase word ends the run, so prose after the zone
+    is still prose."""
+
+    FACTS = {"t": "14:00 UTC", "F_RF_COUNT": 0, "F_RF_REQUIRED": 4}
+
+    def _v(self, text, facts=None):
+        return validate(text, channel=Channel.IMESSAGE, facts=dict(facts or self.FACTS), **LIMITS)
+
+    @pytest.mark.parametrize("form", [
+        "14:00 UTC (EST)",                                # the reviewer's case
+        "14:00 UTC, EST", "14:00 UTC EST", "14:00 UTC E.S.T.", "14:00 UTC (est)",
+        "14:00 UTC America/New_York", "14:00 UTC Eastern Time", "14:00 (UTC) EST",
+    ])
+    def test_a_second_zone_is_held_to_the_fact_too(self, form):
+        r = self._v(f"Next check {form}.")
+        assert not r.ok and "zone" in (r.reason or ""), (form, r.reason)
+        r = self._v(f"Next check {form}.", {"t": "14:00"})              # bare fact
+        assert not r.ok and "zone" in (r.reason or ""), (form, r.reason)
+
+    @pytest.mark.parametrize("message", [
+        "Next check 14:00 UTC (UTC).", "Next check 14:00 UTC, flags 0/4.",
+        "Next check 14:00 UTC (see note).", "Next check 14:00 UTC today.",
+        "Next check 14:00 UTC. Then more.", "Next check 14:00 UTC Z.",
+    ])
+    def test_prose_after_the_zone_is_still_prose(self, message):
+        r = self._v(message)
+        assert r.ok, (message, r.reason)

@@ -811,6 +811,57 @@ _TIME_ZONE_RE = re.compile(
     r"|[AaPp]\.[Mm]\.?|[A-Za-z]{2,5}|[Zz])(?![A-Za-z0-9_])"
     r"(?:\s*[-+−]\s*\d{1,2}(?::?\d{2})?(?!\d))?)?")
 
+#: The zone spellings, for the tokens that FOLLOW the first one after a time.
+#: "14:00 UTC (EST)" carried two designators and the binding read only the
+#: first, so the ungrounded EST schedule passed (#105 round 21, SOTA-A,
+#: executed). Every zone-shaped token in the run is held to the fact.
+_ZONE_FORMS = (
+    r"(?:[A-Z][A-Za-z_]+(?:/[A-Z][A-Za-z_+\-]+){1,2}"
+    r"|(?:(?:[A-Z][A-Za-z]+|local|standard|daylight|summer)\s+){1,3}[Tt]ime"
+    r"|(?:[A-Za-z]\.){1,4}[A-Za-z]\.?"
+    r"|[AaPp]\.[Mm]\.?|[A-Za-z]{2,5}|[Zz])")
+_TRAILING_ZONE_RE = re.compile(
+    # The first zone may have been wrapped - "14:00 (UTC) EST" - so a closing
+    # bracket or quote may precede the next token.
+    r'\s*[)\]"\'”’]?\s*[,;]?\s*(?:'
+    r'[(\["\'“‘]\s*(?P<wrapped>' + _ZONE_FORMS + r')\s*[)\]"\'”’]'
+    r"|(?P<bare>" + _ZONE_FORMS + r"))(?![A-Za-z0-9_])"
+    r"(?:\s*[-+−]\s*\d{1,2}(?::?\d{2})?(?!\d))?")
+
+
+def _zones_after(text: str, match: re.Match[str]) -> list[tuple[str, str]]:
+    """Every zone a time is given: the first token and any that trail it.
+
+    A trailing token counts when it is wrapped and closed ("(EST)"), or bare
+    and unmistakably a zone - named, IANA, long-form, dotted or in capitals.
+    A bare lowercase word is the sentence going on ("14:00 UTC, flags 0/4",
+    "14:00 UTC today"), and ends the run.
+    """
+    zones: list[tuple[str, str]] = []
+    first = match.group(2)
+    if first:
+        zone = _zone_token(first)
+        if zone:
+            zones.append((zone, first))
+    pos = match.end()
+    while True:
+        trailing = _TRAILING_ZONE_RE.match(text, pos)
+        if not trailing:
+            break
+        raw = trailing.group("wrapped") or trailing.group("bare") or ""
+        zone = _zone_token(raw)
+        if not zone:
+            break
+        if trailing.group("bare") is not None:
+            plain = re.sub(r"[\s.]+", "", raw)
+            if not (raw.isupper() or "/" in raw or "." in raw
+                    or raw.lower().endswith("time") or _NAMED_ZONE_RE.fullmatch(plain)):
+                break
+        zones.append((zone, raw))
+        pos = trailing.end()
+    return zones
+
+
 #: Spellings that name a zone even bare and lowercase: the library's own "utc",
 #: the meridiem, and the names earlier rounds saw written that way.
 _NAMED_ZONE_RE = re.compile(
@@ -855,6 +906,8 @@ def _zone_token(token: str) -> str | None:
     if not token:
         return None
     token = re.sub(r"[\s.]+", "", token)  # "UTC + 1" is "UTC+1"; "E.S.T." is "EST"
+    if token.upper() == "Z":
+        return "UTC"                      # the ISO designator names the same zone
     if _NAMED_ZONE_RE.fullmatch(token):
         return token.upper()
     if token.islower() and token in _PROSE_AFTER_A_TIME:
@@ -1436,20 +1489,20 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
     # Which tokens count is decided by shape in _zone_token (#105 round 7).
     fact_zones: dict[str, set[str]] = {}
     for value in facts.values():
-        for t, z in _TIME_ZONE_RE.findall(str(value)):
-            zone = _zone_token(z)
-            if zone:
-                fact_zones.setdefault(t, set()).add(zone)
-    for t, z in _TIME_ZONE_RE.findall(text):
-        zone = _zone_token(z)
-        if not zone:
-            continue
-        if t in fact_zones:
-            if zone not in fact_zones[t]:
-                return ValidationResult(
-                    False, FailureClass.CONTENT,
-                    f"{t} {z} contradicts the grounded time zone for {t}")
-        elif zone not in _MONITOR_ZONES:
+        for found in _TIME_ZONE_RE.finditer(str(value)):
+            for zone, _raw in _zones_after(str(value), found):
+                fact_zones.setdefault(found.group(1), set()).add(zone)
+    for found in _TIME_ZONE_RE.finditer(text):
+        t = found.group(1)
+        for zone, z in _zones_after(text, found):
+            if t in fact_zones:
+                if zone not in fact_zones[t]:
+                    return ValidationResult(
+                        False, FailureClass.CONTENT,
+                        f"{t} {z} contradicts the grounded time zone for {t}")
+                continue
+            if zone in _MONITOR_ZONES:
+                continue
             # A BARE FACT MAY ONLY BE GIVEN THE MONITOR'S OWN ZONE. The library
             # writes "{next_check_utc} UTC" around a bare time, and that
             # exemption let a bare 14:00 be written "14:00 EST" — a zone the
