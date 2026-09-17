@@ -1417,3 +1417,41 @@ class TestRoundNineteenOn105:
         facts = {"t": "2:00 PM"}
         assert self._v("Next check 2:00 p.m.", facts).ok
         assert not self._v("Next check 2:00 a.m.", facts).ok
+
+
+class TestRoundTwentyOn105:
+    """#105 round 20. SOTA-A (executed): "The quotient is 51:2." grounded
+    both operands while denoting 25.5 - a colon between numerals that is not
+    a time is a ratio, and is arithmetic. SOTA-C objected that observations
+    opening with an unlisted noun are refused; they are, by design: the
+    opener rule fails closed, an unlisted subject costs a fallback and an
+    unlisted verb would send advice to the operator (decision 9, closed
+    upstream by decision 12). The second pin records that disposition."""
+
+    def _v(self, text, facts):
+        return validate(text, channel=Channel.IMESSAGE, facts=facts, **LIMITS)
+
+    @pytest.mark.parametrize("message", [
+        "The quotient is 51:2.",                          # the reviewer's case
+        "Score 3:1 today.", "Score 51:100.", "Level 100:1 now.",
+    ])
+    def test_a_colon_ratio_is_arithmetic(self, message):
+        facts = {"a": 51, "b": 2, "c": 3, "d": 1, "score_scale_max": 100,
+                 "F_HEADLINE_MEDIAN": 51, "t": "14:00 UTC", "u": "14:00:30 UTC"}
+        for ok in ["Score 51/100.", "Next check 14:00 UTC.", "Next check 14:00:30 UTC."]:
+            assert self._v(ok, facts).ok, ok                             # controls
+        r = self._v(message, facts)
+        assert not r.ok and "ratio" in (r.reason or ""), (message, r.reason)
+
+    @pytest.mark.parametrize("message", [
+        "Inflation rose today.", "Inflation pressures gold prices lower today.",
+    ])
+    def test_an_unlisted_subject_is_refused_by_design(self, message):
+        # Recorded for #105 round 20 (SOTA-C): the refusal is the documented
+        # failure direction, not an error. The library's own subjects are the
+        # approved openers; anything else opens a fallback, never the wire.
+        facts = {"F_HEADLINE_MEDIAN": 51}
+        assert self._v("Score rose today.", facts).ok                    # a listed subject
+        assert self._v("Gold rose today.", facts).ok
+        r = self._v(message, facts)
+        assert not r.ok, (message, r.reason)

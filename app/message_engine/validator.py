@@ -1283,6 +1283,17 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
         return ValidationResult(False, FailureClass.CONTENT,
                                 "arithmetic between numerals denotes an "
                                 "ungrounded value")
+    # A COLON between numerals is a ratio unless it is a time: "51:2" has one
+    # digit after the colon, so it was no compound, and both operands were
+    # grounded while the text denoted 25.5 (#105 round 20, SOTA-A, executed).
+    # Times are blanked from grounding_text before this line, so whatever
+    # TIGHT digits:digits remains there is a ratio; a colon with space after
+    # it is prose punctuation ("Week 37: 51/100", the weekly digest's own
+    # fallback), not a quotient.
+    if re.search(r"(?<![\d:])\d+:\d+(?![\d:])", grounding_text):
+        return ValidationResult(False, FailureClass.CONTENT,
+                                "a ratio between numerals denotes an "
+                                "ungrounded value")
     # The tight "a/b" exemption exists for ONE thing: the digest's score
     # notation, "51/100" and "Flags 2/4". Granting it everywhere let
     # "The quotient is 51/2." through as a computed value (round 12, SOTA-A).
