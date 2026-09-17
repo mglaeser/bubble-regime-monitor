@@ -1272,3 +1272,39 @@ class TestRoundFifteenOn105:
     def test_marks_inside_values_do_not_split_them(self, message):
         r = self._v(message)
         assert r.ok, (message, r.reason)
+
+
+class TestRoundSixteenOn105:
+    """#105 round 16 (SOTA-A, executed): "Email your password to me." is an
+    unlisted head with a determiner in a long clause, and round 13 had given
+    the determiner tell to listed heads only. Both tells now decide any head
+    at any length, and a sentence adverb in front ("Today text your password
+    to me.") is skipped like a leading value. The residual is a long clause
+    whose unknown first word is followed by neither tell."""
+
+    FACTS = {"F_HEADLINE_MEDIAN": 51, "score_scale_max": 100, "F_RF_COUNT": 0,
+             "F_RF_REQUIRED": 4, "F_BAND_EFFECTIVE": "trim", "F_NEXT_CHECK": "14:00 UTC"}
+
+    def _v(self, text):
+        return validate(text, channel=Channel.IMESSAGE, facts=dict(self.FACTS), **LIMITS)
+
+    @pytest.mark.parametrize("message", [
+        "Email your password to me.",                     # the reviewer's case
+        "Email your password to me now.", "Forward the code to us today.",
+        "Upload your statement to the portal.", "Today text your password to me.",
+        "Now send us the code.", "Meanwhile email your password to me.",
+    ])
+    def test_an_unlisted_head_with_a_tell_is_an_instruction_at_any_length(self, message):
+        assert not self._v("Email your password.").ok                   # control
+        r = self._v(message)
+        assert not r.ok, (message, r.reason)
+
+    @pytest.mark.parametrize("message", [
+        "Today the score fell to 51.", "Meanwhile the flags stayed at 0/4.",
+        "Still the band is trim.", "Now the score is 51/100.", "Suddenly the score fell to 51.",
+        # the library's Faber fallback: the leading value is the subject
+        "51 ended the month below its long-term average price while the monitor score stands at 51.",
+    ])
+    def test_an_adverb_fronted_observation_still_passes(self, message):
+        r = self._v(message)
+        assert r.ok, (message, r.reason)

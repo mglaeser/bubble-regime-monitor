@@ -163,6 +163,15 @@ _FUNCTION_OPENERS = frozenset(
     "their all both each every some any more less most fewer other another".split())
 _DEMONSTRATIVES = frozenset("this that these those".split())
 
+#: Sentence adverbs: a word that may front a clause without being its head
+#: ("Today the score fell.", "Now text me the code."). Skipped like a leading
+#: value, so the clause is judged by the word that follows (#105 round 16).
+_ADVERB_HEADS = frozenset(
+    "today yesterday tomorrow overnight meanwhile suddenly now still again "
+    "also however otherwise instead currently already recently lately briefly "
+    "finally then here there so yet nevertheless nonetheless overall earlier "
+    "later elsewhere once".split())
+
 #: Round 11 (SOTA-C): once a leading VALUE is skipped the way a list marker
 #: is, the composer corpus surfaced two more head words the list had never
 #: seen - "red" ("2 red flags.") and "breaker" ("24-hour breaker.") - the same
@@ -209,7 +218,20 @@ def _looks_imperative(clause: str, grounded: set[str]) -> bool:
     # another spelling (#105 round 11, SOTA-C, executed; "51 Text your
     # password." likewise). Numerals, ratios, percentages and times are
     # skipped and the clause is judged by its first real word.
-    while words and not words[0].strip("\"'([{").rstrip(".,;:!?)]}")[:1].isalpha():
+    # A SENTENCE ADVERB is not the head word either: "Today text your password
+    # to me." fronted the imperative with "today" (#105 round 16). It is
+    # skipped the same way, and the clause judged by the word that follows.
+    def _bare(word: str) -> str:
+        return word.strip("\"'([{").rstrip(".,;:!?)]}")
+    # A skipped VALUE may be the clause's subject ("51 ended the month below
+    # its average" - the library's own Faber fallback), so after one only the
+    # short-clause rule and the pronoun tell apply; a skipped adverb is never
+    # a subject, so the word after it is the true head.
+    value_fronted = False
+    while words and (not _bare(words[0])[:1].isalpha()
+                     or _bare(words[0]).casefold() in _ADVERB_HEADS):
+        if not _bare(words[0])[:1].isalpha():
+            value_fronted = True
         words.pop(0)
     if not words:
         return False
@@ -254,14 +276,19 @@ def _looks_imperative(clause: str, grounded: set[str]) -> bool:
         if nxt in _OBJECT_PRONOUNS and not (long and nxt == "it"):
             return True                   # "it" is also a subject: "Overall it rose again."
         return nxt in _DETERMINERS and not (long and nxt in _DEMONSTRATIVES)
-    # An UNLISTED head is judged in a short clause, and in a long one only
-    # when an object pronoun follows it ("Send us your password today."):
-    # no subject noun is ever followed by me/us/them. A long clause with an
-    # unknown first word and no such tell is the domain prose the bound
-    # protects, and the residual decision 9 records (closed upstream by
-    # decision 12).
+    # An UNLISTED head is judged in a short clause outright, and in a long
+    # one by the same tells as a listed one: an object pronoun ("Send us your
+    # password today.", round 13) or a determiner ("Email your password to
+    # me.", #105 round 16, SOTA-A, executed) in second place - no subject
+    # noun is followed by either. A long clause whose unknown first word has
+    # neither tell is the domain prose the bound protects, and the residual
+    # decision 9 records (closed upstream by decision 12).
     nxt = words[1].casefold().strip(",.;:") if len(words) > 1 else ""
-    return (not long) or (nxt in _OBJECT_PRONOUNS and nxt != "it")
+    if nxt in _OBJECT_PRONOUNS and nxt != "it":
+        return True
+    if nxt in _DETERMINERS and not (long and nxt in _DEMONSTRATIVES) and not value_fronted:
+        return True
+    return not long
 
 
 #: A BARE IMPERATIVE ON A POSITION. "Keep cash." carried no banned verb and no
