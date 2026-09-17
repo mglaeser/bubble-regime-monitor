@@ -720,7 +720,11 @@ _TIME_ZONE_RE = re.compile(
     # The zone may be wrapped or set off: "14:00 (EST)", "14:00, EST". The
     # bare form was the only one seen, so a UTC fact accepted "14:00 (EST)"
     # (#105 round 6, SOTA-A, executed).
-    r"(?<!\d)(\d{1,2}:\d{2}(?::\d{2})?)\s*[,;]?\s*[(\[]?\s*"
+    # QUOTES wrap a zone as surely as brackets do: a UTC fact accepted
+    # 14:00 "EST" (#105 round 14, SOTA-A, executed; single and curly quotes
+    # likewise).
+    r"(?<!\d)(\d{1,2}:\d{2}(?::\d{2})?)\s*[,;]?\s*"
+    r'[(\["\'\u201c\u2018]?\s*'
     # An OFFSET belongs to the zone: "14:00 UTC+1" is not 14:00 UTC, but the
     # token stopped at the letters and the "+1" was just a grounded numeral
     # (#105 round 9, SOTA-A, executed; tight and spaced forms alike).
@@ -752,6 +756,10 @@ _PROSE_AFTER_A_TIME = frozenset(
     "there also too not no all any both done due just two onto run check mark "
     "slot time cycle sweep".split())
 
+
+#: Binary, octal and hex literals: digits that read as one number to a
+#: programmer and as two grounded numerals to the scan (#105 round 14).
+_CODED_NUMERAL_RE = re.compile(r"\b0[bB][01]+\b|\b0[oO][0-7]+\b|\b0[xX][0-9a-fA-F]+\b")
 
 #: The zone a bare fact time may be given: the monitor reports in UTC, and
 #: "Z" is its designator. Anything else on a bare time is a fabrication.
@@ -1330,6 +1338,12 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
                 False, FailureClass.CONTENT,
                 f"{t} {z} gives a bare time a zone the facts do not")
 
+    # A CODED NUMERAL IS A DIFFERENT NUMBER. "0b11" tokenised as the grounded
+    # 0 and the grounded 11 while denoting 3; the octal and hex spellings are
+    # the same trick (#105 round 14, SOTA-A, executed).
+    if _CODED_NUMERAL_RE.search(text):
+        return ValidationResult(False, FailureClass.CONTENT,
+                                "a coded numeral asserts a value that is not grounded")
     # A UNIT WORD AFTER A NUMBER IS THE NUMBER'S UNIT. "51 %" and "51 percent"
     # left the numeral scan with a grounded 51 and a stray unit, so a bare
     # fact of 51 accepted a percentage it never gave (#105 round 12, SOTA-A,

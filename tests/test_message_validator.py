@@ -1210,3 +1210,31 @@ class TestRoundThirteenOn105:
         facts = {"F_NEXT_CHECK": "14:00 Europe/Berlin"}
         assert self._v("Next check 14:00 Europe/Berlin.", facts).ok
         assert not self._v("Next check 14:00 UTC.", facts).ok
+
+
+class TestRoundFourteenOn105:
+    """#105 round 14 (SOTA-A, executed): a zone in quotes was invisible to
+    the time-zone binding, so a UTC fact accepted 14:00 "EST"; and a coded
+    numeral split into two grounded ones, so facts of 0 and 11 accepted
+    "0b11", which denotes 3."""
+
+    def _v(self, text, facts):
+        return validate(text, channel=Channel.IMESSAGE, facts=facts, **LIMITS)
+
+    @pytest.mark.parametrize("form", [
+        '14:00 "EST"', "14:00 'EST'", "14:00 \u201cEST\u201d", "14:00 \u2018est\u2019",
+    ])
+    def test_a_quoted_zone_still_contradicts_the_fact(self, form):
+        facts = {"t": "14:00 UTC"}
+        assert self._v('Next check 14:00 "UTC".', facts).ok                 # control
+        r = self._v(f"Next check {form}.", facts)
+        assert not r.ok and "zone" in (r.reason or ""), (form, r.reason)
+
+    @pytest.mark.parametrize("message", [
+        "Score 0b11.", "Score 0B11.", "Score 0o17.", "Score 0x1F.",
+    ])
+    def test_a_coded_numeral_is_not_two_grounded_ones(self, message):
+        facts = {"a": 0, "b": 11, "c": 1, "d": 15, "e": 17}
+        assert self._v("Score 11.", facts).ok and self._v("Score 0.", facts).ok  # controls
+        r = self._v(message, facts)
+        assert not r.ok, (message, r.reason)
