@@ -1392,3 +1392,28 @@ class TestRoundEighteenOn105:
         assert self._v("Score 51.", channel).ok                          # control
         r = self._v(f"Score 51 {bad}.", channel)
         assert not r.ok and r.failure_class is FailureClass.FORMAT, (bad, r.reason)
+
+
+class TestRoundNineteenOn105:
+    """#105 round 19 (SOTA-A, executed): "14:00 E.S.T." named a zone the
+    letters-only token could not see, so a UTC fact accepted a contradictory
+    schedule zone. A dotted abbreviation is a zone token and is compared
+    with its dots removed."""
+
+    def _v(self, text, facts):
+        return validate(text, channel=Channel.IMESSAGE, facts=facts, **LIMITS)
+
+    @pytest.mark.parametrize("form", ["14:00 E.S.T.", "14:00 e.s.t.", "14:00 P.S.T", "14:00 C.E.T."])
+    def test_a_dotted_zone_contradicts_the_fact(self, form):
+        facts = {"t": "14:00 UTC"}
+        assert self._v("Next check 14:00 UTC.", facts).ok                # control
+        assert self._v("Next check 14:00 U.T.C.", facts).ok             # same zone, dotted
+        r = self._v(f"Next check {form}.", facts)
+        assert not r.ok and "zone" in (r.reason or ""), (form, r.reason)
+        r = self._v(f"Next check {form}.", {"t": "14:00"})              # bare fact
+        assert not r.ok and "zone" in (r.reason or ""), (form, r.reason)
+
+    def test_a_dotted_meridiem_matches_its_plain_form(self):
+        facts = {"t": "2:00 PM"}
+        assert self._v("Next check 2:00 p.m.", facts).ok
+        assert not self._v("Next check 2:00 a.m.", facts).ok

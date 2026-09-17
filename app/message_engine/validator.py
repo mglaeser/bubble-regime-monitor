@@ -803,7 +803,12 @@ _TIME_ZONE_RE = re.compile(
     # round 13, SOTA-A, executed).
     r"((?:[A-Z][A-Za-z_]+(?:/[A-Z][A-Za-z_+\-]+){1,2}"
     r"|(?:(?:[A-Z][A-Za-z]+|local|standard|daylight|summer)\s+){1,3}[Tt]ime"
-    r"|[AaPp]\.[Mm]\.?|[A-Za-z]{2,5}|[Zz])\b"
+    # A DOTTED abbreviation is the same zone: "14:00 E.S.T." named a zone the
+    # letters-only token could not see, so a UTC fact accepted it (#105
+    # round 19, SOTA-A, executed). The token may end on its final dot, so
+    # the boundary is a lookahead rather than \b.
+    r"|(?:[A-Za-z]\.){1,4}[A-Za-z]\.?"
+    r"|[AaPp]\.[Mm]\.?|[A-Za-z]{2,5}|[Zz])(?![A-Za-z0-9_])"
     r"(?:\s*[-+−]\s*\d{1,2}(?::?\d{2})?(?!\d))?)?")
 
 #: Spellings that name a zone even bare and lowercase: the library's own "utc",
@@ -849,7 +854,7 @@ def _zone_token(token: str) -> str | None:
     """The zone a time is given, or None when the word after it is prose."""
     if not token:
         return None
-    token = re.sub(r"\s+", "", token)  # "UTC + 1" is the zone "UTC+1"
+    token = re.sub(r"[\s.]+", "", token)  # "UTC + 1" is "UTC+1"; "E.S.T." is "EST"
     if _NAMED_ZONE_RE.fullmatch(token):
         return token.upper()
     if token.islower() and token in _PROSE_AFTER_A_TIME:
