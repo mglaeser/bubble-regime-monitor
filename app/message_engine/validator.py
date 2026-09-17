@@ -358,12 +358,22 @@ _IMPERATIVE_OBJECT_RE = re.compile(
     r"(?:^|(?<=[.;:!?])\s*|^bubblegauge:\s*)"
     r"(?!(?:the|a|an|this|that|these|those|its|their|our|both|all|each|every|"
     r"no|not|and|or|but|with|without|at|in|on|by|as|than|then|now|next|"
-    r"more|less|most|least|band|score|flag|breadth|trend|level|reading)\b)"
+    # A POSITION NOUN in the verb slot is a subject, not a verb: "Gold lifts
+    # cash reserves higher." is an observation, and once the object may run
+    # on (below) only this exclusion keeps it one (#105 round 17).
+    rf"more|less|most|least|band|score|flag|breadth|trend|level|reading|{_POSITION_OBJECT})\b)"
     r"[A-Za-z]+"                        # the imperative verb, whatever it is
     r"(?:\s+(?:for|to|into|toward|towards|out\s+of|in))?"
     rf"\s+{_OBJECT_MODIFIER}"
     rf"(?:{_POSITION_OBJECT})"
-    r"\s*(?:[.;:!?,]|$)",              # and the clause ENDS on that object
+    # The object may run on as a NOUN PHRASE ("cash reserves", "gold coins")
+    # and the clause may continue with a time or a condition: "Keep cash
+    # reserves high this week." ended nowhere near the position noun and so
+    # escaped a rule that wanted the clause to stop there (#105 round 17,
+    # SOTA-C, executed).
+    r"(?:\s+[A-Za-z]+){0,2}"
+    r"\s*(?:[.;:!?,]|$|\s+(?:before|after|until|till|by|for|at|when|while|"
+    r"now|today|tonight|this|next|ahead|as|if|once)\b)",
     re.IGNORECASE | re.MULTILINE,
 )
 
@@ -686,6 +696,36 @@ def _is_foreign_dash(ch: str) -> bool:
     if category == "Pd" and ch != "-":
         return True
     return category == "Sm" and not ch.isascii()
+
+
+def _fold_latin(text: str) -> str:
+    """Latin letters with their diacritics removed, for the directive scans.
+
+    "Emaíl your password." and "Séll holdings." wore accents that the script
+    check admits (English needs no letter beyond Latin Extended-A) and that
+    the word-based scans could not see through (#105 round 17, SOTA-A,
+    executed). Grounding, zones, emoji and the not-English word list judge
+    the text as written; advice, the lexicon and the imperative shapes judge
+    the folded text.
+    """
+    # Only a precomposed Latin letter whose base is ASCII is folded (é, í, ñ,
+    # ý); everything else stays as written, so an emoji, its variation
+    # selector, ß or a non-Latin letter is not turned into something the
+    # scans would misread (NFKD mapped the allowlisted ℹ️ to a plain "i").
+    # NFC first, so a letter written with a combining mark folds the same.
+    out: list[str] = []
+    for ch in unicodedata.normalize("NFC", text):
+        if ch.isascii():
+            out.append(ch)
+            continue
+        parts = unicodedata.normalize("NFD", ch)
+        base = parts[0]
+        if (len(parts) > 1 and base.isascii() and base.isalpha()
+                and all(unicodedata.category(c) == "Mn" for c in parts[1:])):
+            out.append(base)
+        else:
+            out.append(ch)
+    return "".join(out)
 
 
 def _is_emoji(ch: str, *, presented: bool = False) -> bool:
@@ -1104,7 +1144,7 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
             pattern = r"\s+".join(re.escape(word) for word in phrase.split())
             # Inflections too: the ban is on the CONCEPT, and "Probabilities
             # changed." walked past an exact-word match (round 29, SOTA-A).
-            if re.search(rf"\b{pattern}(?:y|s|es|ies|ity|ities)?\b", lowered):
+            if re.search(rf"\b{pattern}(?:y|s|es|ies|ity|ities)?\b", _fold_latin(lowered)):
                 return ValidationResult(False, FailureClass.CONTENT,
                                         f"banned lexicon: {phrase!r}")
         # A word SIGN is the recombination class in prose form: the fact is 51,
@@ -1294,7 +1334,8 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
         if foreign:
             return ValidationResult(False, FailureClass.CONTENT,
                                     f"not English: {sorted(foreign)}")
-        if _ADVICE_RE.search(text):
+        judged = _fold_latin(text)        # accents cannot hide a directive (round 17)
+        if _ADVICE_RE.search(judged):
             return ValidationResult(False, FailureClass.CONTENT,
                                     "reads as advice, not an observation")
         # Checked BEFORE the band-verb pass, which reads "trim"/"hold" as states
@@ -1310,18 +1351,18 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
         # never judged (#105 round 15, SOTA-A, executed). A word after the
         # mark opens a clause; a digit does not, so "51.5" and "14:00" stay
         # whole, and a single letter does not, so "p.m." stays whole.
-        for _clause in re.split(_CLAUSE_BOUNDARY_RE, text):
+        for _clause in re.split(_CLAUSE_BOUNDARY_RE, judged):
             if _looks_imperative(_clause, _grounded_words):
                 return ValidationResult(
                     False, FailureClass.CONTENT,
                     f"{_clause.strip()!r} opens a short clause with a word this "
                     "monitor never uses as a subject - it reads as an instruction")
-        if _IMPERATIVE_OBJECT_RE.search(text):
+        if _IMPERATIVE_OBJECT_RE.search(judged):
             return ValidationResult(False, FailureClass.CONTENT,
                                     "reads as an instruction about a position, "
                                     "not an observation")
-        for match in re.finditer(rf"\b(?:{_BAND_VERBS})\b", text, re.IGNORECASE):
-            if not _reads_as_state(text, match):
+        for match in re.finditer(rf"\b(?:{_BAND_VERBS})\b", judged, re.IGNORECASE):
+            if not _reads_as_state(judged, match):
                 return ValidationResult(
                     False, FailureClass.CONTENT,
                     "reads as an instruction, not an observation")

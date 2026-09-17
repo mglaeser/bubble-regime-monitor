@@ -79,7 +79,10 @@ class TestChannelContract:
         # Ruling Q29: reject and re-ask; never transliterate.
         # NB 'ü' and 'ß' ARE in the GSM-7 alphabet — a German umlaut is not a
         # counter-example here. U+2713 is genuinely outside it.
-        assert validate("Rückgang confirmed at 51.", channel=Channel.SMS,
+        # The umlaut word sits under an approved head: since round 17 the
+        # opener rule sees through diacritics, and "Rückgang" as the head of
+        # a short clause is an unlisted subject like any other.
+        assert validate("Score Rückgang at 51.", channel=Channel.SMS,
                         facts=FACTS, **LIMITS).ok
         r = validate("Confirmed \u2713 at 51.", channel=Channel.SMS,
                      facts=FACTS, **LIMITS)
@@ -1306,5 +1309,49 @@ class TestRoundSixteenOn105:
         "51 ended the month below its long-term average price while the monitor score stands at 51.",
     ])
     def test_an_adverb_fronted_observation_still_passes(self, message):
+        r = self._v(message)
+        assert r.ok, (message, r.reason)
+
+
+class TestRoundSeventeenOn105:
+    """#105 round 17: two findings. SOTA-A (executed): accented Latin heads
+    ("Emaíl your password.", "Séll holdings.") passed the script check, the
+    word list and then skipped the opener test and the lexicon, which could
+    not see through the diacritics; the directive scans now judge a folded
+    copy of the text. SOTA-C (executed): "Keep cash reserves high this
+    week." escaped the position-object rule, which wanted the clause to end
+    at the position noun; the object may run on as a noun phrase into a time
+    or a condition, and a position noun in the verb slot stays a subject."""
+
+    FACTS = {"F_HEADLINE_MEDIAN": 51, "score_scale_max": 100, "F_BAND_EFFECTIVE": "trim",
+             "F_NEXT_CHECK": "14:00 UTC", "pct": "2%"}
+
+    def _v(self, text):
+        return validate(text, channel=Channel.IMESSAGE, facts=dict(self.FACTS), **LIMITS)
+
+    @pytest.mark.parametrize("message", [
+        "Ema\u00edl your password.", "S\u00e9ll holdings.",         # the reviewer's cases
+        "Bu\u00fd gold now.", "Ch\u00e9ck your account.", "K\u00e9ep cash reserves high this week.",
+    ])
+    def test_a_diacritic_does_not_hide_a_directive(self, message):
+        assert not self._v("Email your password.").ok                   # control
+        r = self._v(message)
+        assert not r.ok, (message, r.reason)
+
+    @pytest.mark.parametrize("message", [
+        "Keep cash reserves high this week.",             # the class, executed
+        "Accumulate gold coins before the close.", "Retain cash buffers for now.",
+        "Build gold exposure ahead of the print.",
+    ])
+    def test_a_position_noun_phrase_with_a_continuation_is_still_an_instruction(self, message):
+        assert not self._v("Keep cash.").ok                             # control
+        r = self._v(message)
+        assert not r.ok, (message, r.reason)
+
+    @pytest.mark.parametrize("message", [
+        "Cash, gold and bonds fell.", "Gold coins rose 2%.", "Gold lifts cash reserves higher.",
+        "Cash reserves rose this week.", "Score 51/100, band trim.",
+    ])
+    def test_observations_about_positions_still_pass(self, message):
         r = self._v(message)
         assert r.ok, (message, r.reason)
