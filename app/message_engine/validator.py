@@ -833,6 +833,9 @@ _PROSE_AFTER_A_TIME = frozenset(
 _CLAUSE_BOUNDARY_RE = re.compile(
     r"(?<=[.;:!?])\s*(?=[A-Za-z]{2}|[\"'(\[\u201c\u2018][A-Za-z])|(?<=[.;:!?])\s+")
 
+#: Code points that are not text: surrogates, private use, unassigned.
+_NOT_TEXT = frozenset({"Cs", "Co", "Cn"})
+
 #: Binary, octal and hex literals: digits that read as one number to a
 #: programmer and as two grounded numerals to the scan (#105 round 14).
 _CODED_NUMERAL_RE = re.compile(r"\b0[bB][01]+\b|\b0[oO][0-7]+\b|\b0[xX][0-9a-fA-F]+\b")
@@ -1113,6 +1116,14 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
     # "Score ninety-nine." asserted a value no fact contains and no numeral
     # scanner could see (round 7, SOTA-A). Small words that are also ordinary
     # English ("one more", "second reading") are deliberately absent.
+    # A LONE SURROGATE is not a character: it validated as text and then
+    # failed to encode as UTF-8 on the wire (#105 round 18, SOTA-A, executed).
+    # Private-use and unassigned code points are refused with it, on either
+    # channel, before anything else is judged.
+    for ch in text:
+        if unicodedata.category(ch) in _NOT_TEXT:
+            return ValidationResult(False, FailureClass.FORMAT,
+                                    f"U+{ord(ch):04X} is not a text character")
     lowered = text.lower()
     for match in re.finditer(r"[a-z]+(?:-[a-z]+)?", lowered):
         word = match.group(0)
@@ -1319,22 +1330,32 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
     if prose_rules:
         # script, language, advice, imperatives and band-verb grammar are
         # meaning-of-prose rules (decision 12).
-        for i, ch in enumerate(text):
-            if not ch.isalpha() or ord(ch) <= 0x024F:
+        # ENGLISH FOLDS TO ASCII. The scans judge the folded text (round 17),
+        # but 154 letters in the admitted range have no decomposition to fold
+        # - ł, ø, đ, ı, ß, æ and the whole of Latin Extended-B - so "Sełl
+        # holdings." and "Emaił your password." walked through every scan
+        # (#105 round 18, SOTA-A, executed). A letter the fold cannot reduce
+        # is not an English letter and is refused here, whatever its block.
+        judged = _fold_latin(text)
+        for i, ch in enumerate(judged):
+            if not ch.isalpha() or ch.isascii():
                 continue
             # U+2139, the base of the allowlisted 'ℹ️', is a LETTER by category —
             # the emoji check below owns those, not the script check.
-            presented = i + 1 < len(text) and text[i + 1] == _VS16
+            presented = i + 1 < len(judged) and judged[i + 1] == _VS16
             if _is_emoji(ch, presented=presented):
                 continue
+            if ord(ch) > 0x024F:
+                return ValidationResult(
+                    False, FailureClass.CONTENT,
+                    f"non-Latin script U+{ord(ch):04X}: messages are English")
             return ValidationResult(
                 False, FailureClass.CONTENT,
-                f"non-Latin script U+{ord(ch):04X}: messages are English")
+                f"letter U+{ord(ch):04X} does not fold to English")
         foreign = {w for w in re.findall(r"[a-zà-ÿ]+", lowered)} & _NON_ENGLISH_WORDS
         if foreign:
             return ValidationResult(False, FailureClass.CONTENT,
                                     f"not English: {sorted(foreign)}")
-        judged = _fold_latin(text)        # accents cannot hide a directive (round 17)
         if _ADVICE_RE.search(judged):
             return ValidationResult(False, FailureClass.CONTENT,
                                     "reads as advice, not an observation")

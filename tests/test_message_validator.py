@@ -1355,3 +1355,40 @@ class TestRoundSeventeenOn105:
     def test_observations_about_positions_still_pass(self, message):
         r = self._v(message)
         assert r.ok, (message, r.reason)
+
+
+class TestRoundEighteenOn105:
+    """#105 round 18 (SOTA-A, executed): Latin letters with no decomposition
+    (ł, ø, đ, ı, ß and the whole of Latin Extended-B) walked through every
+    scan the round-17 fold protects, so "Sełl holdings." validated; a letter
+    the fold cannot reduce to ASCII is now refused by the script check. And
+    a lone surrogate validated as text and then failed to encode on the
+    wire; surrogates, private-use and unassigned code points are refused as
+    FORMAT before anything else."""
+
+    FACTS = {"F_HEADLINE_MEDIAN": 51, "score_scale_max": 100, "F_BAND_EFFECTIVE": "trim",
+             "F_NEXT_CHECK": "14:00 UTC"}
+
+    def _v(self, text, channel=Channel.IMESSAGE):
+        return validate(text, channel=channel, facts=dict(self.FACTS), **LIMITS)
+
+    @pytest.mark.parametrize("message", [
+        "Se\u0142l holdings.", "Emai\u0142 your password.",             # the reviewer's cases
+        "Ema\u0131l your password.", "Se\u00f8ll holdings.", "\u00d0elete your account.",
+        "Stra\u00dfe rising.", "Se\u0180l holdings.",
+    ])
+    def test_a_letter_that_does_not_fold_is_not_english(self, message):
+        r = self._v(message)
+        assert not r.ok and "English" in (r.reason or ""), (message, r.reason)
+
+    @pytest.mark.parametrize("message", ["Score R\u00fcckgang at 51.", "Score caf\u00e9 at 51."])
+    def test_a_decomposable_accent_still_folds_and_passes(self, message):
+        r = self._v(message)
+        assert r.ok, (message, r.reason)
+
+    @pytest.mark.parametrize("bad", ["\ud800", "\udfff", "\ue000"])
+    @pytest.mark.parametrize("channel", [Channel.IMESSAGE, Channel.SMS])
+    def test_a_code_point_that_is_not_text_is_a_format_failure(self, bad, channel):
+        assert self._v("Score 51.", channel).ok                          # control
+        r = self._v(f"Score 51 {bad}.", channel)
+        assert not r.ok and r.failure_class is FailureClass.FORMAT, (bad, r.reason)
