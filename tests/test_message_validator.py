@@ -1874,3 +1874,46 @@ class TestRoundThirtySixOn105:
 
     def test_the_plural_noun_is_not_the_separator(self):
         assert self._v("Score 51 points to 2 flags.").ok
+
+
+class TestRoundThirtySevenOn105:
+    """#105 round 37 (SOTA-A, executed): the zone token took 2-5 letters, so
+    a bare long name - "Pacific", "Eastern", "Berlin" - was no zone at all: a
+    UTC fact accepted "Next check 14:00 Pacific." and a "14:00 Pacific" fact
+    bound no zone, so "14:00 UTC" passed as a bare fact. A bare word of any
+    length after a time is a zone unless it is lowercase prose."""
+
+    UTC = {"F_BAND_EFFECTIVE": "hold", "F_NEXT_CHECK": "14:00 UTC"}
+    BARE = {"F_BAND_EFFECTIVE": "hold", "F_NEXT_CHECK": "14:00"}
+    PACIFIC = {"F_BAND_EFFECTIVE": "hold", "F_NEXT_CHECK": "14:00 Pacific"}
+
+    def _v(self, text, facts):
+        return validate(text, channel=Channel.IMESSAGE, facts=facts, **LIMITS)
+
+    def test_the_ledger_scenario(self):
+        assert self._v("Next check 14:00 UTC.", self.UTC).ok               # control
+        r = self._v("Next check 14:00 Pacific.", self.UTC)
+        assert not r.ok and "contradicts the grounded time zone" in (r.reason or ""), r.reason
+
+    @pytest.mark.parametrize("zone", [
+        "Eastern", "Central", "Mountain", "London", "Berlin", "Greenwich", "Universal",
+        "pacific", "PACIFIC", "(Pacific)", "UTC (Pacific)", "UTC Pacific"])
+    def test_a_bare_long_name_is_a_zone_in_every_position(self, zone):
+        r = self._v(f"Next check 14:00 {zone}.", self.UTC)
+        assert not r.ok and "time zone" in (r.reason or ""), (zone, r.reason)
+
+    def test_a_bare_fact_may_not_be_given_a_long_name(self):
+        r = self._v("Next check 14:00 Pacific.", self.BARE)
+        assert not r.ok and "gives a bare time a zone" in (r.reason or ""), r.reason
+        assert self._v("Next check 14:00 UTC.", self.BARE).ok              # the library's own word
+
+    def test_a_long_name_in_the_fact_binds_the_time(self):
+        assert self._v("Next check 14:00 Pacific.", self.PACIFIC).ok
+        assert self._v("Next check 14:00.", self.PACIFIC).ok
+        r = self._v("Next check 14:00 UTC.", self.PACIFIC)
+        assert not r.ok and "contradicts the grounded time zone" in (r.reason or ""), r.reason
+
+    @pytest.mark.parametrize("word", ["today", "tomorrow", "tonight", "sharp", "onwards"])
+    def test_lowercase_prose_after_a_time_is_the_sentence_going_on(self, word):
+        assert self._v(f"Next check 14:00 {word}.", self.UTC).ok
+        assert self._v(f"Next check 14:00 UTC {word}.", self.UTC).ok

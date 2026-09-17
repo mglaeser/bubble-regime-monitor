@@ -869,7 +869,13 @@ _TIME_ZONE_RE = re.compile(
     # token saw it, so a fact of 14:00 EST5 gave the time no zone at all and
     # "14:00 UTC" passed as a bare fact (#105 round 30, SOTA-A, executed).
     r"|[A-Za-z]{3,5}[+-]?\d{1,2}(?:[A-Za-z]{3,5}(?:[+-]?\d{1,2})?)?"
-    r"|[AaPp]\.[Mm]\.?|[A-Za-z]{2,5}|[Zz])(?![A-Za-z0-9_])"
+    # A BARE LONG NAME is a zone too: "Pacific", "Eastern", "Berlin" are
+    # written without "Time" or a slash, and a 2-5-letter token saw none of
+    # them, so a UTC fact accepted "14:00 Pacific" and a "14:00 Pacific"
+    # fact bound no zone at all (#105 round 37, SOTA-A, executed). A bare
+    # word of any length after a time is a zone unless it is lowercase prose
+    # from _PROSE_AFTER_A_TIME.
+    r"|[AaPp]\.[Mm]\.?|[A-Za-z]{2,}|[Zz])(?![A-Za-z0-9_])"
     r"(?:\s*[-+−]\s*\d{1,2}(?::?\d{2})?(?!\d))?)?")
 
 #: The zone spellings, for the tokens that FOLLOW the first one after a time.
@@ -884,7 +890,7 @@ _ZONE_FORMS = (
     # token saw it, so a fact of 14:00 EST5 gave the time no zone at all and
     # "14:00 UTC" passed as a bare fact (#105 round 30, SOTA-A, executed).
     r"|[A-Za-z]{3,5}[+-]?\d{1,2}(?:[A-Za-z]{3,5}(?:[+-]?\d{1,2})?)?"
-    r"|[AaPp]\.[Mm]\.?|[A-Za-z]{2,5}|[Zz])")
+    r"|[AaPp]\.[Mm]\.?|[A-Za-z]{2,}|[Zz])")
 _TRAILING_ZONE_RE = re.compile(
     # The first zone may have been wrapped - "14:00 (UTC) EST" - so a closing
     # bracket or quote may precede the next token.
@@ -930,7 +936,9 @@ def _zones_after(text: str, match: re.Match[str]) -> list[tuple[str, str]]:
 #: Spellings that name a zone even bare and lowercase: the library's own "utc",
 #: the meridiem, and the names earlier rounds saw written that way.
 _NAMED_ZONE_RE = re.compile(
-    r"(?i:UTC|GMT|Z|[ECMP][SD]T|CET|CEST|BST|IST|JST|AEST|[AP]\.?M\.?)")
+    r"(?i:UTC|GMT|Z|[ECMP][SD]T|CET|CEST|BST|IST|JST|AEST|[AP]\.?M\.?"
+    # The bare long names are zones even trailing and lowercase (#105 round 37).
+    r"|Eastern|Central|Mountain|Pacific|Atlantic|Alaska|Hawaii|Zulu)")
 
 #: The SAFE side of the zone rule: a bare lowercase word after a time that is
 #: the sentence going on ("14:00 today"), taken from the corpus and the
@@ -944,7 +952,13 @@ _PROSE_AFTER_A_TIME = frozenset(
     "every daily again sharp today local hour hours hrs min mins later now "
     "once only still yet over after before since this that these those here "
     "there also too not no all any both done due just two onto run check mark "
-    "slot time cycle sweep".split())
+    "slot time cycle sweep "
+    # Words of any length reach this list since #105 round 37 (a bare long
+    # name is a zone); the long prose that follows a time is listed here.
+    "tomorrow tonight morning evening afternoon midnight midday minutes "
+    "seconds onward onwards latest earliest exactly roughly around unless "
+    "because instead during within without between through whether although "
+    "though however otherwise meanwhile afterwards already".split())
 
 
 #: Where one clause ends and the next begins: a sentence mark followed by a
