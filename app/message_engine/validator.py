@@ -427,6 +427,10 @@ _IMPERATIVE_OBJECT_RE = re.compile(
     rf"more|less|most|least|band|score|flag|breadth|trend|level|reading|{_POSITION_OBJECT}|"
     rf"{'|'.join(sorted(_APPROVED_OPENERS - _VERB_OPENERS))})\b)"
     r"[A-Za-z]+"                        # the imperative verb, whatever it is
+    # A LABEL'S COLON may follow the verb: "Review: positions now." put the
+    # mark where the rule wanted whitespace (#105 round 40, SOTA-A, executed
+    # on the sibling clause split).
+    r":?"
     r"(?:\s+(?:for|to|into|toward|towards|out\s+of|in))?"
     rf"\s+{_OBJECT_MODIFIER}"
     rf"(?:{_POSITION_OBJECT})"
@@ -1610,7 +1614,17 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
         # never judged (#105 round 15, SOTA-A, executed). A word after the
         # mark opens a clause; a digit does not, so "51.5" and "14:00" stay
         # whole, and a single letter does not, so "p.m." stays whole.
-        for _clause in re.split(_CLAUSE_BOUNDARY_RE, judged):
+        _clauses = re.split(_CLAUSE_BOUNDARY_RE, judged)
+        # A ONE-WORD clause is a LABEL, and the label may be the verb of the
+        # clause it labels: "Text: the code to me now." split into "Text:"
+        # and "the code to me now.", and no part showed the verb with its
+        # object (#105 round 40, SOTA-A, executed on the article, compound
+        # and pronoun objects). The label is judged glued to what it labels
+        # as well as apart from it.
+        _clauses += [f"{_label} {_rest}"
+                     for _label, _rest in zip(_clauses, _clauses[1:], strict=False)
+                     if len(_label.split()) == 1 and _rest.strip()]
+        for _clause in _clauses:
             if _looks_imperative(_clause, _grounded_words):
                 return ValidationResult(
                     False, FailureClass.CONTENT,
