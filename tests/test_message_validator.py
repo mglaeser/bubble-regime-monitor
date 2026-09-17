@@ -1542,3 +1542,21 @@ class TestRoundTwentyThreeOn105:
     def test_a_folded_zone_name_is_the_zone_it_spells(self):
         assert self._v("Next check 14:00 \u00dcTC.", {"t": "14:00 UTC"}).ok
         assert not self._v("Next check 14:00 \u00c9ST.", {"t": "14:00 UTC"}).ok
+
+
+class TestRoundTwentyFourOn105:
+    """#105 round 24 (SOTA-A, executed): the banned concept "certain" was
+    matched with the suffixes -y/-s/-es/-ies/-ity/-ities, and "certainty"
+    is "certain" + "ty"; the noun and the adverb now count as the concept."""
+
+    def _v(self, text):
+        return validate(text, channel=Channel.IMESSAGE, facts={"a": 51}, **LIMITS)
+
+    @pytest.mark.parametrize("message", [
+        "Score 51 with certainty.",                       # the reviewer's case
+        "Score 51 with certainties.", "Score 51 will certainly fall.",
+    ])
+    def test_the_banned_concept_in_its_noun_and_adverb(self, message):
+        assert self._v("Score 51 today.").ok                              # control
+        r = self._v(message)
+        assert not r.ok and "banned" in (r.reason or ""), (message, r.reason)

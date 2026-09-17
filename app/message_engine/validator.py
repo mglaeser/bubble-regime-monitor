@@ -1221,7 +1221,10 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
             pattern = r"\s+".join(re.escape(word) for word in phrase.split())
             # Inflections too: the ban is on the CONCEPT, and "Probabilities
             # changed." walked past an exact-word match (round 29, SOTA-A).
-            if re.search(rf"\b{pattern}(?:y|s|es|ies|ity|ities)?\b", judged_lower):
+            # "certainty" is "certain" + "ty", which the -ity form did not
+            # cover, so the banned concept reached the wire in its noun and
+            # its adverb (#105 round 24, SOTA-A, executed).
+            if re.search(rf"\b{pattern}(?:y|s|es|ies|ity|ities|ty|ties|ly)?\b", judged_lower):
                 return ValidationResult(False, FailureClass.CONTENT,
                                         f"banned lexicon: {phrase!r}")
         # A word SIGN is the recombination class in prose form: the fact is 51,
