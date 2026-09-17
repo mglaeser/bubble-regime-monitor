@@ -1660,3 +1660,21 @@ class TestRoundTwentyEightOn105:
         assert self._v("Score 51, 2 flags.").ok                          # control
         r = self._v(message)
         assert not r.ok and "arithmetic" in (r.reason or ""), (message, r.reason)
+
+
+class TestRoundTwentyNineOn105:
+    """#105 round 29 (SOTA-A, executed): the forecast branch of the advice
+    rule knew "will" but not "shall", so "Equity markets shall fall next
+    week." validated; "shall" and the contractions count as the forecast."""
+
+    def _v(self, text):
+        return validate(text, channel=Channel.IMESSAGE, facts={"a": 51}, **LIMITS)
+
+    @pytest.mark.parametrize("message", [
+        "Equity markets shall fall next week.",           # the reviewer's case
+        "Score shall stay at 51.", "Markets won't recover this week.", "Markets shan't recover this week.",
+    ])
+    def test_shall_is_a_forecast(self, message):
+        assert self._v("Score 51 today.").ok                              # control
+        r = self._v(message)
+        assert not r.ok and "advice" in (r.reason or ""), (message, r.reason)

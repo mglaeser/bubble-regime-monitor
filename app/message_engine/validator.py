@@ -384,7 +384,10 @@ _ADVICE_RE = re.compile(
     # Forecasting is advice in the other direction — it tells the operator
     # what WILL happen rather than what IS (round 6, SOTA-A). The banned
     # lexicon caught "will crash" only; "will fall" sailed through.
-    r"|\b(?:will|expect\w*|forecast\w*|anticipat\w+|predict\w*|"
+    # "shall" is "will" in another register, and the contractions are the
+    # same forecast: "Equity markets shall fall next week." validated (#105
+    # round 29, SOTA-A, executed).
+    r"|\b(?:will|shall|won'?t|shan'?t|expect\w*|forecast\w*|anticipat\w+|predict\w*|"
     r"project\w*|set\s+to|going\s+to|due\s+to\s+\w+)\b"
     # Modal forecasts are forecasts: "Markets may fall." tells the operator
     # what might happen, which is the thing this monitor does not do
