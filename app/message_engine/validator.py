@@ -843,6 +843,13 @@ def _is_emoji(ch: str, *, presented: bool = False) -> bool:
     category-only test cannot see it — and an emoji the counter cannot see is
     an emoji cap that can be walked straight past.
     """
+    if not ch:
+        # An EMPTY neighbour is no glyph: the format-control loop asks about
+        # the character before a leading joiner and after a trailing one, and
+        # unicodedata.category("") raised TypeError out of validate() for a
+        # message that opened or closed with U+200D or U+FE0F (#105 round 41,
+        # SOTA-B, executed).
+        return False
     if ch in {_VS16, _ZWJ}:  # selectors and joiners are not glyphs
         return False
     if presented:
@@ -1238,7 +1245,10 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
                 continue
             if prev and _is_emoji(prev) and not prev.isalpha():
                 continue
-            if prev in "0123456789#*":
+            # `"" in "0123456789#*"` is True, so a message-INITIAL selector
+            # passed as a keycap base and the stray control reached the wire
+            # (#105 round 41, SOTA-B, executed).
+            if prev and prev in "0123456789#*":
                 continue  # keycap base, checked again at U+20E3 below
         if ch == "\u20e3":
             # A keycap is legitimate ONLY as <base><VS16><U+20E3>. Allowing it
