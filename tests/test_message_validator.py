@@ -1740,3 +1740,19 @@ class TestRoundThirtyOneOn105:
     def test_a_subject_and_its_verb_still_pass(self, message):
         r = self._v(message)
         assert r.ok, (message, r.reason)
+
+
+class TestRoundThirtyTwoOn105:
+    """#105 round 32 (SOTA-A, executed): the spelled-sign grounding check sat
+    inside the prose block with the lexicon, so a rendered owner template
+    (prose_rules=False) could carry "minus 51" against a positive fact of
+    51. A sign changes the value: it is grounding, not prose, and runs on
+    every message."""
+
+    @pytest.mark.parametrize("prose", [True, False])
+    @pytest.mark.parametrize("message", ["Score minus 51.", "Score negative 51."])
+    def test_a_spelled_sign_is_grounding_under_either_setting(self, message, prose):
+        limits = {**LIMITS, "prose_rules": prose}
+        assert validate("Score 51.", channel=Channel.IMESSAGE, facts={"a": 51}, **limits).ok
+        r = validate(message, channel=Channel.IMESSAGE, facts={"a": 51}, **limits)
+        assert not r.ok, (message, prose, r.reason)

@@ -1266,16 +1266,20 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
             if re.search(rf"\b{pattern}(?:y|s|es|ies|ity|ities|ty|ties|ly|tic|tically|t|ts)?\b", judged_lower):
                 return ValidationResult(False, FailureClass.CONTENT,
                                         f"banned lexicon: {phrase!r}")
-        # A word SIGN is the recombination class in prose form: the fact is 51,
-        # the message says "minus 51", and the reported value is -51 — which no
-        # fact supports (round 27, SOTA-A). Digits carry their own sign and are
-        # grounded as written; a spelled sign is not.
-        if re.search(r"\b(?:minus|negative|less\s+than\s+zero)\s+\d", judged_lower):
-            return ValidationResult(False, FailureClass.CONTENT,
-                                    "a spelled sign changes a grounded value")
+    # A SIGN IS GROUNDING, NOT PROSE. This check sat inside the prose block
+    # with the lexicon, so a rendered owner template (prose_rules=False)
+    # could carry "minus 51" against a positive fact of 51 (#105 round 32,
+    # SOTA-A, executed). It runs on every message now.
+    # A word SIGN is the recombination class in prose form: the fact is 51,
+    # the message says "minus 51", and the reported value is -51 — which no
+    # fact supports (round 27, SOTA-A). Digits carry their own sign and are
+    # grounded as written; a spelled sign is not.
+    if re.search(r"\b(?:minus|negative|less\s+than\s+zero)\s+\d", judged_lower):
+        return ValidationResult(False, FailureClass.CONTENT,
+                                "a spelled sign changes a grounded value")
 
-        # Arithmetic in WORDS is still arithmetic: "51 divided by 2" denotes an
-        # ungrounded 25.5 while carrying no operator at all (round 21, SOTA-A).
+    # Arithmetic in WORDS is still arithmetic: "51 divided by 2" denotes an
+    # ungrounded 25.5 while carrying no operator at all (round 21, SOTA-A).
     if _PROSE_ARITHMETIC_RE.search(lowered_probe := judged_lower):
         return ValidationResult(False, FailureClass.CONTENT,
                                 "arithmetic in words denotes an ungrounded "
