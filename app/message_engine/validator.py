@@ -813,6 +813,10 @@ _TIME_ZONE_RE = re.compile(
     # round 19, SOTA-A, executed). The token may end on its final dot, so
     # the boundary is a lookahead rather than \b.
     r"|(?:[A-Za-z][.\-]){1,4}[A-Za-z][.\-]?"
+    # A POSIX zone is letters followed by digits, "EST5" or "CET-1CEST": no
+    # token saw it, so a fact of 14:00 EST5 gave the time no zone at all and
+    # "14:00 UTC" passed as a bare fact (#105 round 30, SOTA-A, executed).
+    r"|[A-Za-z]{3,5}[+-]?\d{1,2}(?:[A-Za-z]{3,5}(?:[+-]?\d{1,2})?)?"
     r"|[AaPp]\.[Mm]\.?|[A-Za-z]{2,5}|[Zz])(?![A-Za-z0-9_])"
     r"(?:\s*[-+−]\s*\d{1,2}(?::?\d{2})?(?!\d))?)?")
 
@@ -824,6 +828,10 @@ _ZONE_FORMS = (
     r"(?:[A-Z][A-Za-z_]+(?:/[A-Z][A-Za-z_+\-]+){1,2}"
     r"|(?:(?:[A-Z][A-Za-z]+|local|standard|daylight|summer)\s+){1,3}[Tt]ime"
     r"|(?:[A-Za-z][.\-]){1,4}[A-Za-z][.\-]?"
+    # A POSIX zone is letters followed by digits, "EST5" or "CET-1CEST": no
+    # token saw it, so a fact of 14:00 EST5 gave the time no zone at all and
+    # "14:00 UTC" passed as a bare fact (#105 round 30, SOTA-A, executed).
+    r"|[A-Za-z]{3,5}[+-]?\d{1,2}(?:[A-Za-z]{3,5}(?:[+-]?\d{1,2})?)?"
     r"|[AaPp]\.[Mm]\.?|[A-Za-z]{2,5}|[Zz])")
 _TRAILING_ZONE_RE = re.compile(
     # The first zone may have been wrapped - "14:00 (UTC) EST" - so a closing

@@ -1678,3 +1678,30 @@ class TestRoundTwentyNineOn105:
         assert self._v("Score 51 today.").ok                              # control
         r = self._v(message)
         assert not r.ok and "advice" in (r.reason or ""), (message, r.reason)
+
+
+class TestRoundThirtyOn105:
+    """#105 round 30 (SOTA-A, executed): a POSIX zone - letters followed by
+    digits, "EST5" - was no token, so a fact of "14:00 EST5" gave the time
+    no zone and "14:00 UTC" passed as a bare fact. The POSIX form is a zone
+    token on both sides now."""
+
+    def _v(self, text, facts):
+        return validate(text, channel=Channel.IMESSAGE, facts=facts, **LIMITS)
+
+    def test_a_posix_zone_fact_binds_its_time(self):
+        facts = {"t": "14:00 EST5"}
+        assert self._v("Next check 14:00 EST5.", facts).ok
+        assert not self._v("Next check 14:00 UTC.", facts).ok              # the reviewer's case
+        assert not self._v("Next check 14:00 EST.", facts).ok
+
+    # ("CET-1CEST" is refused too, but by the not-English list: French "cet".)
+    @pytest.mark.parametrize("form", ["14:00 EST5", "14:00 PST8PDT", "14:00 UTC0"])
+    def test_a_posix_zone_in_the_message_is_held_to_the_fact(self, form):
+        r = self._v(f"Next check {form}.", {"t": "14:00 UTC", "n": 2})
+        assert not r.ok and "zone" in (r.reason or ""), (form, r.reason)
+        r = self._v(f"Next check {form}.", {"t": "14:00"})
+        assert not r.ok and "zone" in (r.reason or ""), (form, r.reason)
+
+    def test_a_number_after_the_zone_is_still_prose(self):
+        assert self._v("Next check 14:00 UTC, 2 flags.", {"t": "14:00 UTC", "n": 2}).ok
