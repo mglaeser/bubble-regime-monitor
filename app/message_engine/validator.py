@@ -326,7 +326,9 @@ _IMPERATIVE_OBJECT_RE = re.compile(
     # that position. A declarative puts its verb AFTER the subject
     # ("Cash is 20%.", "Gold rose 2%."), so the object is not in second place
     # and the clause does not end at it.
-    r"(?:^|(?<=[.;:!?])\s+|^bubblegauge:\s*)"
+    # The clause may start right after the mark, without a space (#105
+    # round 15, SOTA-A: "Band trim.Keep cash." hid its imperative).
+    r"(?:^|(?<=[.;:!?])\s*|^bubblegauge:\s*)"
     r"(?!(?:the|a|an|this|that|these|those|its|their|our|both|all|each|every|"
     r"no|not|and|or|but|with|without|at|in|on|by|as|than|then|now|next|"
     r"more|less|most|least|band|score|flag|breadth|trend|level|reading)\b)"
@@ -756,6 +758,13 @@ _PROSE_AFTER_A_TIME = frozenset(
     "there also too not no all any both done due just two onto run check mark "
     "slot time cycle sweep".split())
 
+
+#: Where one clause ends and the next begins: a sentence mark followed by a
+#: word, with or without whitespace between (#105 round 15). A quote or a
+#: bracket may open the next clause; a digit or a lone letter after the mark
+#: continues the current one ("51.5", "14:00", "p.m.").
+_CLAUSE_BOUNDARY_RE = re.compile(
+    r"(?<=[.;:!?])\s*(?=[A-Za-z]{2}|[\"'(\[\u201c\u2018][A-Za-z])|(?<=[.;:!?])\s+")
 
 #: Binary, octal and hex literals: digits that read as one number to a
 #: programmer and as two grounded numerals to the scan (#105 round 14).
@@ -1268,7 +1277,13 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
         # what to refuse, so the open-set problem the deny-lists below keep hitting
         # cannot reach the operator through it.
         _grounded_words = {str(v).casefold() for v in facts.values()}
-        for _clause in re.split(r"(?<=[.;:!?])\s+|(?<=:)\s+", text):
+        # A CLAUSE ENDS AT ITS PUNCTUATION WHETHER OR NOT A SPACE FOLLOWS.
+        # "Band trim.Text your password." was one clause to a split that
+        # wanted whitespace after the full stop, so the second sentence was
+        # never judged (#105 round 15, SOTA-A, executed). A word after the
+        # mark opens a clause; a digit does not, so "51.5" and "14:00" stay
+        # whole, and a single letter does not, so "p.m." stays whole.
+        for _clause in re.split(_CLAUSE_BOUNDARY_RE, text):
             if _looks_imperative(_clause, _grounded_words):
                 return ValidationResult(
                     False, FailureClass.CONTENT,

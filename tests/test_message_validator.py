@@ -1238,3 +1238,37 @@ class TestRoundFourteenOn105:
         assert self._v("Score 11.", facts).ok and self._v("Score 0.", facts).ok  # controls
         r = self._v(message, facts)
         assert not r.ok, (message, r.reason)
+
+
+class TestRoundFifteenOn105:
+    """#105 round 15 (SOTA-A, executed): the clause split wanted whitespace
+    after a sentence mark, so "Band trim.Text your password." was one clause
+    and its second sentence was never judged; the position-object rule's
+    clause anchor had the same gap. A word after the mark now opens a clause
+    with or without a space; digits and lone letters after a mark continue
+    the clause, so decimals, times and "p.m." stay whole."""
+
+    FACTS = {"F_HEADLINE_MEDIAN": 51, "score_scale_max": 100, "F_BAND_EFFECTIVE": "trim",
+             "F_NEXT_CHECK": "14:00 UTC", "x": "51.5"}
+
+    def _v(self, text):
+        return validate(text, channel=Channel.IMESSAGE, facts=dict(self.FACTS), **LIMITS)
+
+    @pytest.mark.parametrize("message", [
+        "Band trim.Text your password.",                  # the reviewer's case
+        "Band trim.text your password.", "Band trim:Keep cash.", "Band trim.Keep cash.",
+        "Band trim;Send us the code.", "Next check 14:00 UTC.Text me the code.",
+        'Band trim."Text your password."',
+    ])
+    def test_a_sentence_glued_to_the_previous_mark_is_still_judged(self, message):
+        assert not self._v("Band trim. Text your password.").ok         # control
+        r = self._v(message)
+        assert not r.ok, (message, r.reason)
+
+    @pytest.mark.parametrize("message", [
+        "Band trim. Score 51/100.", "Score 51.5 today.", "Next check 14:00 UTC.",
+        "Band trim, score 51/100.", "Score 51/100; band trim.",
+    ])
+    def test_marks_inside_values_do_not_split_them(self, message):
+        r = self._v(message)
+        assert r.ok, (message, r.reason)
