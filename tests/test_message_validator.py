@@ -1514,3 +1514,31 @@ class TestRoundTwentyTwoOn105:
     def test_an_ascending_comma_pair_is_still_a_range(self, message):
         r = self._v(message)
         assert r.ok, (message, r.reason)
+
+
+class TestRoundTwentyThreeOn105:
+    """#105 round 23 (SOTA-A, executed): the quantity scans - spelled-out
+    numbers, arithmetic in words, unit words - read the text as written
+    while the script check accepts letters that fold, so "twó", "plús" and
+    "pércent" walked past them. One fold now serves every meaning scan;
+    only the channel, emoji, not-text and not-English checks read the text
+    as written."""
+
+    def _v(self, text, facts):
+        return validate(text, channel=Channel.IMESSAGE, facts=facts, **LIMITS)
+
+    @pytest.mark.parametrize("message,facts,tell", [
+        ("Score tw\u00f3.", {}, "spelled-out"),                        # the reviewer's cases
+        ("Score 51 pl\u00fas 2.", {"a": 51, "b": 2}, "arithmetic"),
+        ("Score 51 p\u00e9rcent.", {"a": 51}, "grounded"),
+        ("Score is tw\u00edce 51.", {"a": 51}, "arithmetic"),
+        ("Score 51 m\u00ednus 2.", {"a": 51, "b": 2}, ""),           # the word-sign rule fires first
+    ])
+    def test_an_accent_does_not_hide_a_quantity_word(self, message, facts, tell):
+        assert self._v("Score 51.", {"a": 51}).ok                        # control
+        r = self._v(message, facts)
+        assert not r.ok and tell in (r.reason or ""), (message, r.reason)
+
+    def test_a_folded_zone_name_is_the_zone_it_spells(self):
+        assert self._v("Next check 14:00 \u00dcTC.", {"t": "14:00 UTC"}).ok
+        assert not self._v("Next check 14:00 \u00c9ST.", {"t": "14:00 UTC"}).ok

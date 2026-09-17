@@ -1183,7 +1183,15 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
             return ValidationResult(False, FailureClass.FORMAT,
                                     f"U+{ord(ch):04X} is not a text character")
     lowered = text.lower()
-    for match in re.finditer(r"[a-z]+(?:-[a-z]+)?", lowered):
+    # ONE FOLD FOR EVERY MEANING SCAN. The directive scans judged a folded
+    # copy since round 17 and the script check accepted letters that fold
+    # since round 18, but the quantity scans still read the text as written,
+    # so "twó", "plús" and "pércent" walked past them (#105 round 23,
+    # SOTA-A, executed). Channel, emoji, not-text and the not-English word
+    # list judge the text as written; everything about MEANING judges this.
+    judged = _fold_latin(text)
+    judged_lower = judged.lower()
+    for match in re.finditer(r"[a-z]+(?:-[a-z]+)?", judged_lower):
         word = match.group(0)
         head = word.split("-")[0]
         if head not in _NUMBER_WORDS and word not in _NUMBER_WORDS:
@@ -1213,20 +1221,20 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
             pattern = r"\s+".join(re.escape(word) for word in phrase.split())
             # Inflections too: the ban is on the CONCEPT, and "Probabilities
             # changed." walked past an exact-word match (round 29, SOTA-A).
-            if re.search(rf"\b{pattern}(?:y|s|es|ies|ity|ities)?\b", _fold_latin(lowered)):
+            if re.search(rf"\b{pattern}(?:y|s|es|ies|ity|ities)?\b", judged_lower):
                 return ValidationResult(False, FailureClass.CONTENT,
                                         f"banned lexicon: {phrase!r}")
         # A word SIGN is the recombination class in prose form: the fact is 51,
         # the message says "minus 51", and the reported value is -51 — which no
         # fact supports (round 27, SOTA-A). Digits carry their own sign and are
         # grounded as written; a spelled sign is not.
-        if re.search(r"\b(?:minus|negative|less\s+than\s+zero)\s+\d", text.lower()):
+        if re.search(r"\b(?:minus|negative|less\s+than\s+zero)\s+\d", judged_lower):
             return ValidationResult(False, FailureClass.CONTENT,
                                     "a spelled sign changes a grounded value")
 
         # Arithmetic in WORDS is still arithmetic: "51 divided by 2" denotes an
         # ungrounded 25.5 while carrying no operator at all (round 21, SOTA-A).
-    if _PROSE_ARITHMETIC_RE.search(lowered_probe := text.lower()):
+    if _PROSE_ARITHMETIC_RE.search(lowered_probe := judged_lower):
         return ValidationResult(False, FailureClass.CONTENT,
                                 "arithmetic in words denotes an ungrounded "
                                 "value")
@@ -1260,7 +1268,7 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
     # fragments were what let the legitimate "next 14:00 UTC" pass. Fixing
     # only the facts side would have rejected every message that renders a
     # time it was correctly given.
-    grounding_text = _strip_compounds(text)
+    grounding_text = _strip_compounds(judged)
     # The right operand may be BRACKETED — "51-(2)" is the same subtraction
     # written differently, and the plain digit-hyphen-digit scan missed it
     # (round 24, SOTA-A).
@@ -1272,7 +1280,7 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
     # (#105 round 6, SOTA-A, executed for -( -[ - ( −( and +( ). The
     # lookbehind keeps "51-(2)" for the subtraction rule below and leaves a
     # sign INSIDE brackets, "(-2)", to the signed-numeral scan.
-    if re.search(r"(?<![\w)\]])[-+\u2212]\s*[(\[]\s*\d", text):
+    if re.search(r"(?<![\w)\]])[-+\u2212]\s*[(\[]\s*\d", judged):
         return ValidationResult(False, FailureClass.CONTENT,
                                 "a sign before a bracketed numeral asserts a "
                                 "value that is not grounded")
@@ -1282,7 +1290,7 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
     # it as well (#105 round 8, SOTA-A, executed for -+ +- -- ++ -(+ and
     # "- +"). Two sign characters with nothing but space or a bracket between
     # them never denote a grounded value, unary or binary ("51-+2").
-    if re.search(r"[-+\u2212]\s*[(\[]?\s*[-+\u2212]\s*[(\[]?\s*\d", text):
+    if re.search(r"[-+\u2212]\s*[(\[]?\s*[-+\u2212]\s*[(\[]?\s*\d", judged):
         return ValidationResult(False, FailureClass.CONTENT,
                                 "repeated signs before a numeral assert a "
                                 "value that is not grounded")
@@ -1297,7 +1305,7 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
         return ValidationResult(False, FailureClass.CONTENT,
                                 "a spaced sign before a numeral asserts a "
                                 "value that is not grounded")
-    if re.search(r"\d\s*-\s*[(\[]\s*[-+\u2212]?\s*\d", text):
+    if re.search(r"\d\s*-\s*[(\[]\s*[-+\u2212]?\s*\d", judged):
         return ValidationResult(False, FailureClass.CONTENT,
                                 "bracketed subtraction denotes an ungrounded "
                                 "value")
@@ -1313,14 +1321,14 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
             # inner "0-2" of "51,0-2,0" read as an ascending range while the
             # text denoted 49 (#105 round 22, SOTA-A, executed).
             r"(?<![\d\-])(?<!\d[.,])(\d+(?:[.,]\d+)?)-(\d+(?:[.,]\d+)?)(?![\d\-])(?![.,]\d)",
-            text))):
+            judged))):
         left, right = match.group(1), match.group(2)
         # A component of a compound (a date) is not a range; the compound
         # check above already validated it verbatim.
         if any(start <= match.start() and match.end() <= end
-               for start, end in _compound_spans(text)):
+               for start, end in _compound_spans(judged)):
             continue
-        if _DATE_RE.fullmatch(match.group(0)) or _DATE_RE.match(text[match.start():]):
+        if _DATE_RE.fullmatch(match.group(0)) or _DATE_RE.match(judged[match.start():]):
             continue
         if float(left.replace(",", ".")) <= float(right.replace(",", ".")):
             # A range, possibly degenerate: the digest's own "range
@@ -1335,7 +1343,7 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
             False, FailureClass.CONTENT,
             f"{match.group(0)!r} reads as a subtraction, not a range")
 
-    if _ARITHMETIC_RE.search(text):
+    if _ARITHMETIC_RE.search(judged):
         return ValidationResult(False, FailureClass.CONTENT,
                                 "arithmetic between numerals denotes an "
                                 "ungrounded value")
@@ -1370,7 +1378,7 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
     # A CHAIN is never a score: "51/100/100" matched only its first pair
     # under a non-overlapping scan and sailed through (round 15, SOTA-A).
     if re.search(r"\d\s*[)\]]?\s*/+\s*[(\[]?\s*\d+(?:[.,]\d+)?\s*[)\]]?\s*/+",
-                 text):
+                 judged):
         return ValidationResult(False, FailureClass.CONTENT,
                                 "chained division denotes an ungrounded value")
     # WHOLE operands only. Matching bare digit runs took "0/4" out of the
@@ -1383,7 +1391,7 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
             # or the sentence-ending period in "Score 51.0/4.0." would
             # stop the match and the slash would never be checked at all.
             r"(?<!\d)(?<!\d\.)(\d+(?:\.\d+)?)\s*(/+)\s*(\d+(?:\.\d+)?)(?!\d)(?!\.\d)",
-            text):
+            judged):
         # Exactly ONE slash. "51//100" is floor division in most languages,
         # not the digest's score notation, and a declared scale must not
         # launder it (round 13, SOTA-A).
@@ -1408,7 +1416,6 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
         # holdings." and "Emaił your password." walked through every scan
         # (#105 round 18, SOTA-A, executed). A letter the fold cannot reduce
         # is not an English letter and is refused here, whatever its block.
-        judged = _fold_latin(text)
         for i, ch in enumerate(judged):
             if not ch.isalpha() or ch.isascii():
                 continue
@@ -1477,7 +1484,7 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
         for value in facts.values()
         for found in _COMPOUND_RE.findall(str(value))
     }
-    for compound in _COMPOUND_RE.findall(text):
+    for compound in _COMPOUND_RE.findall(judged):
         if compound not in fact_compounds:
             return ValidationResult(
                 False, FailureClass.CONTENT,
@@ -1495,9 +1502,9 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
         for found in _TIME_ZONE_RE.finditer(str(value)):
             for zone, _raw in _zones_after(str(value), found):
                 fact_zones.setdefault(found.group(1), set()).add(zone)
-    for found in _TIME_ZONE_RE.finditer(text):
+    for found in _TIME_ZONE_RE.finditer(judged):
         t = found.group(1)
-        for zone, z in _zones_after(text, found):
+        for zone, z in _zones_after(judged, found):
             if t in fact_zones:
                 if zone not in fact_zones[t]:
                     return ValidationResult(
@@ -1517,7 +1524,7 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
     # A CODED NUMERAL IS A DIFFERENT NUMBER. "0b11" tokenised as the grounded
     # 0 and the grounded 11 while denoting 3; the octal and hex spellings are
     # the same trick (#105 round 14, SOTA-A, executed).
-    if _CODED_NUMERAL_RE.search(text):
+    if _CODED_NUMERAL_RE.search(judged):
         return ValidationResult(False, FailureClass.CONTENT,
                                 "a coded numeral asserts a value that is not grounded")
     # A UNIT WORD AFTER A NUMBER IS THE NUMBER'S UNIT. "51 %" and "51 percent"
