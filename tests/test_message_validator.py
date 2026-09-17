@@ -1626,3 +1626,22 @@ class TestRoundTwentySixOn105:
         r = self._v(message)
         assert r.ok, (message, r.reason)
         assert not self._v("Data as of 9/1/2026.").ok                   # ungrounded: still refused
+
+
+class TestRoundTwentySevenOn105:
+    """#105 round 27 (SOTA-A, executed): the quotient operand guards knew
+    dot decimals only, so "51,0/2,0" was read at its inner "0/2" - the
+    declared pair (0, 2) - while the text denoted 25.5. A comma is a decimal
+    point to the quotient rule, in the operands and in their guards."""
+
+    FACTS = {"F_HEADLINE_MEDIAN": 0, "score_scale_max": 2, "a": "51,0", "b": "2,0"}
+
+    def _v(self, text):
+        return validate(text, channel=Channel.IMESSAGE, facts=dict(self.FACTS), **LIMITS)
+
+    @pytest.mark.parametrize("message", ["Score 51,0/2,0.", "Score 51,0/2.", "Score 51/2,0."])
+    def test_a_comma_decimal_quotient_is_read_whole(self, message):
+        assert self._v("Score 0/2.").ok                                  # the declared pair
+        assert not self._v("Score 51.0/2.0.").ok                        # control
+        r = self._v(message)
+        assert not r.ok and "quotient" in (r.reason or ""), (message, r.reason)

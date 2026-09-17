@@ -1403,7 +1403,10 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
             # (a digit before the dot, a digit after it) - not any dot,
             # or the sentence-ending period in "Score 51.0/4.0." would
             # stop the match and the slash would never be checked at all.
-            r"(?<!\d)(?<!\d\.)(\d+(?:\.\d+)?)\s*(/+)\s*(\d+(?:\.\d+)?)(?!\d)(?!\.\d)",
+            # A COMMA is a decimal point here too: the dot-only guards took
+            # "0/2" out of "51,0/2,0" and found the declared pair (0, 2),
+            # admitting 25.5 (#105 round 27, SOTA-A, executed).
+            r"(?<!\d)(?<!\d[.,])(\d+(?:[.,]\d+)?)\s*(/+)\s*(\d+(?:[.,]\d+)?)(?!\d)(?![.,]\d)",
             # ...with the compounds blanked, like the chain check above: a
             # grounded slash date "8/1/2026" is not a quotient either (#105
             # round 26, SOTA-A, executed).
