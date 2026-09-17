@@ -2046,3 +2046,27 @@ class TestRoundFortyOn105:
     def test_the_parts_are_still_judged_apart(self):
         r = _v("Band hold: text your password to me now.")
         assert not r.ok and "text your password" in (r.reason or ""), r.reason
+
+
+class TestRoundFortyOneSotaB:
+    """#105 round 41 (SOTA-B, executed): a format control at either EDGE of
+    the message met an empty neighbour. unicodedata.category("") raised
+    TypeError out of validate() for a leading or trailing U+200D and a
+    trailing U+FE0F, and `"" in "0123456789#*"` let a leading U+FE0F pass as
+    a keycap base. The edges are refused like every other position."""
+
+    @pytest.mark.parametrize("channel", [Channel.IMESSAGE, Channel.SMS])
+    @pytest.mark.parametrize("text, control", [
+        (chr(0x200D) + "Band trim.", "U+200D"), ("Band trim." + chr(0x200D), "U+200D"),
+        (chr(0xFE0F) + "Score 51.", "U+FE0F"), ("Score 51." + chr(0xFE0F), "U+FE0F")])
+    def test_a_format_control_at_the_edge_is_refused_not_a_crash(self, text, control, channel):
+        r = validate(text, channel=channel, facts={"a": 51}, **LIMITS)
+        assert not r.ok and f"format control {control}" in (r.reason or ""), (text, r.reason)
+
+    def test_an_empty_neighbour_is_no_glyph(self):
+        from app.message_engine.validator import _is_emoji
+        assert _is_emoji("") is False
+
+    def test_the_edges_are_otherwise_prose(self):
+        assert validate("Band trim.", channel=Channel.IMESSAGE, facts={}, **LIMITS).ok
+        assert validate("Score 51.", channel=Channel.SMS, facts={"a": 51}, **LIMITS).ok
