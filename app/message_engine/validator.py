@@ -35,7 +35,7 @@ EMOJI_ALLOWLIST: frozenset[str] = frozenset({"🔹", "▪️", "📌", "🕒", "
 #: job is to say which band it is in. The banned sense of "hold" is the
 #: imperative, caught by _INSTRUCTION_RE below.
 BANNED_LEXICON: frozenset[str] = frozenset({
-    "probabilit", "chance", "likely", "unlikely", "odds", "will crash", "crash soon",
+    "probabilit", "probabilis", "chance", "likely", "unlikely", "odds", "will crash", "crash soon",
     "buy", "sell", "guaranteed", "certain", "definitely", "recommend",
     "should invest", "advice",
 })
@@ -272,7 +272,7 @@ def _looks_imperative(clause: str, grounded: set[str]) -> bool:
         # object.
         if head in _FUNCTION_OPENERS:
             return False
-        nxt = words[1].casefold().strip(",.;:") if len(words) > 1 else ""
+        nxt = _bare(words[1]).casefold() if len(words) > 1 else ""  # "(your" is "your"
         if nxt in _OBJECT_PRONOUNS and not (long and nxt == "it"):
             return True                   # "it" is also a subject: "Overall it rose again."
         return nxt in _DETERMINERS and not (long and nxt in _DEMONSTRATIVES)
@@ -283,7 +283,7 @@ def _looks_imperative(clause: str, grounded: set[str]) -> bool:
     # noun is followed by either. A long clause whose unknown first word has
     # neither tell is the domain prose the bound protects, and the residual
     # decision 9 records (closed upstream by decision 12).
-    nxt = words[1].casefold().strip(",.;:") if len(words) > 1 else ""
+    nxt = _bare(words[1]).casefold() if len(words) > 1 else ""
     if nxt in _OBJECT_PRONOUNS and nxt != "it":
         return True
     if nxt in _DETERMINERS and not (long and nxt in _DEMONSTRATIVES) and not value_fronted:
@@ -807,7 +807,7 @@ _TIME_ZONE_RE = re.compile(
     # letters-only token could not see, so a UTC fact accepted it (#105
     # round 19, SOTA-A, executed). The token may end on its final dot, so
     # the boundary is a lookahead rather than \b.
-    r"|(?:[A-Za-z]\.){1,4}[A-Za-z]\.?"
+    r"|(?:[A-Za-z][.\-]){1,4}[A-Za-z][.\-]?"
     r"|[AaPp]\.[Mm]\.?|[A-Za-z]{2,5}|[Zz])(?![A-Za-z0-9_])"
     r"(?:\s*[-+−]\s*\d{1,2}(?::?\d{2})?(?!\d))?)?")
 
@@ -818,7 +818,7 @@ _TIME_ZONE_RE = re.compile(
 _ZONE_FORMS = (
     r"(?:[A-Z][A-Za-z_]+(?:/[A-Z][A-Za-z_+\-]+){1,2}"
     r"|(?:(?:[A-Z][A-Za-z]+|local|standard|daylight|summer)\s+){1,3}[Tt]ime"
-    r"|(?:[A-Za-z]\.){1,4}[A-Za-z]\.?"
+    r"|(?:[A-Za-z][.\-]){1,4}[A-Za-z][.\-]?"
     r"|[AaPp]\.[Mm]\.?|[A-Za-z]{2,5}|[Zz])")
 _TRAILING_ZONE_RE = re.compile(
     # The first zone may have been wrapped - "14:00 (UTC) EST" - so a closing
@@ -854,7 +854,7 @@ def _zones_after(text: str, match: re.Match[str]) -> list[tuple[str, str]]:
             break
         if trailing.group("bare") is not None:
             plain = re.sub(r"[\s.]+", "", raw)
-            if not (raw.isupper() or "/" in raw or "." in raw
+            if not (raw.isupper() or "/" in raw or "." in raw or "-" in raw
                     or raw.lower().endswith("time") or _NAMED_ZONE_RE.fullmatch(plain)):
                 break
         zones.append((zone, raw))
@@ -905,7 +905,7 @@ def _zone_token(token: str) -> str | None:
     """The zone a time is given, or None when the word after it is prose."""
     if not token:
         return None
-    token = re.sub(r"[\s.]+", "", token)  # "UTC + 1" is "UTC+1"; "E.S.T." is "EST"
+    token = re.sub(r"[\s.\-]+", "", token)  # "UTC + 1" is "UTC+1"; "E.S.T." and "E-S-T" are "EST"
     if token.upper() == "Z":
         return "UTC"                      # the ISO designator names the same zone
     if _NAMED_ZONE_RE.fullmatch(token):
@@ -1227,7 +1227,10 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
             # "certainty" is "certain" + "ty", which the -ity form did not
             # cover, so the banned concept reached the wire in its noun and
             # its adverb (#105 round 24, SOTA-A, executed).
-            if re.search(rf"\b{pattern}(?:y|s|es|ies|ity|ities|ty|ties|ly)?\b", judged_lower):
+            # "probabilistic" is "probabilis" + "tic", beyond the stem that
+            # caught probability/probabilities (#105 round 26, SOTA-A,
+            # executed): the adjective, the adverb and the agent noun count.
+            if re.search(rf"\b{pattern}(?:y|s|es|ies|ity|ities|ty|ties|ly|tic|tically|t|ts)?\b", judged_lower):
                 return ValidationResult(False, FailureClass.CONTENT,
                                         f"banned lexicon: {phrase!r}")
         # A word SIGN is the recombination class in prose form: the fact is 51,
@@ -1384,7 +1387,11 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
     # A CHAIN is never a score: "51/100/100" matched only its first pair
     # under a non-overlapping scan and sailed through (round 15, SOTA-A).
     if re.search(r"\d\s*[)\]]?\s*/+\s*[(\[]?\s*\d+(?:[.,]\d+)?\s*[)\]]?\s*/+",
-                 judged):
+                 # ...judged with the compounds blanked: a grounded slash date
+                 # "8/1/2026" is two slashes too, and was refused as a chain
+                 # (#105 round 26, SOTA-A, executed); an ungrounded one is
+                 # refused by the compound check instead.
+                 grounding_text):
         return ValidationResult(False, FailureClass.CONTENT,
                                 "chained division denotes an ungrounded value")
     # WHOLE operands only. Matching bare digit runs took "0/4" out of the
@@ -1397,7 +1404,10 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
             # or the sentence-ending period in "Score 51.0/4.0." would
             # stop the match and the slash would never be checked at all.
             r"(?<!\d)(?<!\d\.)(\d+(?:\.\d+)?)\s*(/+)\s*(\d+(?:\.\d+)?)(?!\d)(?!\.\d)",
-            judged):
+            # ...with the compounds blanked, like the chain check above: a
+            # grounded slash date "8/1/2026" is not a quotient either (#105
+            # round 26, SOTA-A, executed).
+            grounding_text):
         # Exactly ONE slash. "51//100" is floor division in most languages,
         # not the digest's score notation, and a declared scale must not
         # launder it (round 13, SOTA-A).

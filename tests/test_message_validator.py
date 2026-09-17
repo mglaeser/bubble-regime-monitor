@@ -1585,3 +1585,44 @@ class TestRoundTwentyFiveOn105:
     def test_well_formed_compounds_still_pass(self, message):
         r = self._v(message)
         assert r.ok, (message, r.reason)
+
+
+class TestRoundTwentySixOn105:
+    """#105 round 26 (SOTA-A, executed): four escapes. A parenthesised
+    determiner hid the verb shape ("Text (your password) now."); a
+    hyphenated zone was not a token ("14:00 E-S-T"); "probabilistic" lay
+    beyond the "probabilit" stem; and a grounded slash date "8/1/2026" was
+    refused as chained division - a false refusal, fixed by judging the
+    chain with the compounds blanked."""
+
+    FACTS = {"a": 51, "t": "14:00 UTC", "d": "8/1/2026", "F_BAND_EFFECTIVE": "hold"}
+
+    def _v(self, text, facts=None):
+        return validate(text, channel=Channel.IMESSAGE, facts=dict(facts or self.FACTS), **LIMITS)
+
+    @pytest.mark.parametrize("message", [
+        "Text (your password) now.", "Text 'your password' now.", 'Check "the app" now.',
+    ])
+    def test_a_wrapped_determiner_is_still_a_determiner(self, message):
+        assert not self._v("Text your password now.").ok                # control
+        r = self._v(message)
+        assert not r.ok, (message, r.reason)
+
+    @pytest.mark.parametrize("form", ["14:00 E-S-T", "14:00 e-s-t", "14:00 P-S-T."])
+    def test_a_hyphenated_zone_contradicts_the_fact(self, form):
+        assert self._v("Next check 14:00 U-T-C.").ok                    # same zone
+        r = self._v(f"Next check {form}.")
+        assert not r.ok and "zone" in (r.reason or ""), (form, r.reason)
+
+    @pytest.mark.parametrize("message", [
+        "Score is probabilistic at 51.", "Score probabilistically 51.", "Score 51, probabilists agree.",
+    ])
+    def test_the_probability_concept_in_its_other_forms(self, message):
+        r = self._v(message)
+        assert not r.ok and "banned" in (r.reason or ""), (message, r.reason)
+
+    @pytest.mark.parametrize("message", ["Data as of 8/1/2026.", "Data as of 8/1/2026, score 51."])
+    def test_a_grounded_slash_date_is_not_chained_division(self, message):
+        r = self._v(message)
+        assert r.ok, (message, r.reason)
+        assert not self._v("Data as of 9/1/2026.").ok                   # ungrounded: still refused
