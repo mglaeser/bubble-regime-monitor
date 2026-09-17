@@ -538,7 +538,7 @@ class TestRoundThirtyThreePanelDefects:
                     # first version of this test called the helper, so
                     # removing the helper's CALL SITE left the suite green —
                     # it proved the function worked and nothing used it.
-                    with session_scope() as sess:
+                    with session_scope():
                         out = composer.compose(
                             trigger=name, channel=channel, priority=gov.P1, facts=facts, settings=settings
                         )
@@ -602,7 +602,7 @@ class TestRoundThirtyThreePanelDefects:
 
     def test_a_p1_still_carries_live_metrics(self):
         # Writing nothing must not mean saying nothing useful.
-        with session_scope() as sess:
+        with session_scope():
             out = composer.compose(
                 trigger="BAND_TO_DERISK",
                 channel=Channel.IMESSAGE,
@@ -1089,7 +1089,7 @@ class TestRoundThirtyEightPanelDefects:
         facts["F_UNDECLARED_INTERNAL"] = 73
         assert "73" not in composer._prompt_for(entry, facts, Channel.IMESSAGE, self._s())
         monkeypatch.setattr(composer, "complete", lambda **kw: type("C", (), {"text": '{"phrasing": 1}'})())
-        with session_scope() as sess:
+        with session_scope():
             out = composer.compose(
                 trigger="BAND_TO_TRIM", channel=Channel.IMESSAGE, priority=2, facts=facts, settings=self._s()
             )
@@ -1422,7 +1422,7 @@ class TestRoundFortyPanelDefects:
             raise OperationalError("INSERT", {}, Exception("database is locked"))
 
         monkeypatch.setattr(gov, "reserve", boom)
-        with session_scope() as sess:
+        with session_scope():
             out = composer.compose(
                 trigger="BAND_TO_TRIM",
                 channel=Channel.IMESSAGE,
