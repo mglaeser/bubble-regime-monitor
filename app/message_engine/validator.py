@@ -1309,7 +1309,10 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
             # NB the guards exclude a DECIMAL point specifically, not any
             # dot: "(?![\d.\-])" also rejected a sentence-final period, so
             # "Score 51-2." stopped being seen at all.
-            r"(?<![\d\-])(?<!\d\.)(\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)(?![\d\-])(?!\.\d)",
+            # A COMMA is a decimal point too: the dot-only operand let the
+            # inner "0-2" of "51,0-2,0" read as an ascending range while the
+            # text denoted 49 (#105 round 22, SOTA-A, executed).
+            r"(?<![\d\-])(?<!\d[.,])(\d+(?:[.,]\d+)?)-(\d+(?:[.,]\d+)?)(?![\d\-])(?![.,]\d)",
             text))):
         left, right = match.group(1), match.group(2)
         # A component of a compound (a date) is not a range; the compound
@@ -1319,7 +1322,7 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
             continue
         if _DATE_RE.fullmatch(match.group(0)) or _DATE_RE.match(text[match.start():]):
             continue
-        if float(left) <= float(right):
+        if float(left.replace(",", ".")) <= float(right.replace(",", ".")):
             # A range, possibly degenerate: the digest's own "range
             # {iqr_lo}-{iqr_hi}" can have equal bounds, and a subtraction
             # yielding zero is not a message anyone writes. Neither end is

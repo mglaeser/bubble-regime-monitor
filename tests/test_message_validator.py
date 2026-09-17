@@ -1488,3 +1488,29 @@ class TestRoundTwentyOneOn105:
     def test_prose_after_the_zone_is_still_prose(self, message):
         r = self._v(message)
         assert r.ok, (message, r.reason)
+
+
+class TestRoundTwentyTwoOn105:
+    """#105 round 22 (SOTA-A, executed): the range rule knew dot decimals
+    only, so "51,0-2,0" was read at its inner "0-2" - an ascending range -
+    while the text denoted 49. A comma is a decimal point to the range
+    rule now, and the comparison reads it as one."""
+
+    FACTS = {"a": "51,0", "b": "2,0", "c": "51,5", "d": "2,5", "e": 51, "f": 2, "g": 0}
+
+    def _v(self, text):
+        return validate(text, channel=Channel.IMESSAGE, facts=dict(self.FACTS), **LIMITS)
+
+    @pytest.mark.parametrize("message", [
+        "Score 51,0-2,0.",                                # the reviewer's case
+        "Score 51,0-2.", "Score 51,5-2,5.", "Score 51-2,0.",
+    ])
+    def test_a_comma_decimal_subtraction_is_not_a_range(self, message):
+        assert not self._v("Score 51.0-2.0.").ok                       # control
+        r = self._v(message)
+        assert not r.ok and "subtraction" in (r.reason or ""), (message, r.reason)
+
+    @pytest.mark.parametrize("message", ["Score 2,0-51,0.", "Range 2,5-51,5 today.", "Flags 0-2 today."])
+    def test_an_ascending_comma_pair_is_still_a_range(self, message):
+        r = self._v(message)
+        assert r.ok, (message, r.reason)
