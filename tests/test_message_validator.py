@@ -1962,3 +1962,52 @@ class TestRoundThirtyEightOn105:
         "Score .51, .2.", "Score .51 to .2.", "Score .51. 2 flags.", "Score 51 plus. 2 flags."])
     def test_a_sentence_period_is_not_a_point(self, message):
         assert self._v(message).ok, message
+
+
+class TestRoundThirtyNineOn105:
+    """#105 round 39 (SOTA-A, executed), three defects: a credential noun
+    behind a modifier ("Text API keys to me now.") evaded the bare-object
+    tell, which read second place only; "can" was missing from the forecast
+    modals ("Equity markets can crash next week."); and the verb forms of
+    arithmetic were missing from the prose rule ("Score is 51 subtract 2.")."""
+
+    @pytest.mark.parametrize("message", [
+        "Text API keys to me now.", "Text API key to me.", "Text recovery codes to me.",
+        "Text private keys to me.", "Text broker login to me now.", "Send access tokens to me.",
+        "Send bank details to me now.", "Reply with API keys now."])
+    def test_a_credential_noun_behind_a_modifier_is_the_object(self, message):
+        r = _v(message)
+        assert not r.ok and "opens a short clause" in (r.reason or ""), (message, r.reason)
+
+    @pytest.mark.parametrize("message", [
+        "Band hold. 2 red flags.", "Score 51 with 2 red flags.", "The account balance rose.",
+        "Gold and cash funds rose.", "Cash reserves rose this week."])
+    def test_domain_prose_keeps_its_nouns(self, message):
+        assert _v(message).ok, message
+
+    @pytest.mark.parametrize("message", [
+        "Equity markets can crash next week.", "Prices can drop next week.", "Score cannot fall.",
+        "Markets can't crash.", "Markets are able to crash.", "Markets are about to crash.",
+        "Credit spreads could widen next week.", "Markets could plunge."])
+    def test_can_is_a_forecast_modal(self, message):
+        r = _v(message)
+        assert not r.ok and "advice" in (r.reason or ""), (message, r.reason)
+
+    @pytest.mark.parametrize("message", [
+        "Score 51, 2 red flags; it can change.", "Band hold; the score can be read at 14:00 UTC."])
+    def test_can_with_a_plain_verb_is_not_a_forecast(self, message):
+        assert _v(message).ok, message
+
+    @pytest.mark.parametrize("message", [
+        "Score is 51 subtract 2.", "Score 51 subtracted from 2.", "Score 51 take away 2.",
+        "Score 51 added to 2.", "Score 51 increased by 2.", "Score 51 reduced by 2.",
+        "Score 51 multiply 2.", "Score 51 divide 2.", "The sum of 51 and 2.",
+        "The difference between 51 and 2."])
+    def test_the_verb_forms_of_arithmetic(self, message):
+        r = _v(message, facts={"a": 51, "b": 2})
+        assert not r.ok and "arithmetic in words" in (r.reason or ""), (message, r.reason)
+
+    @pytest.mark.parametrize("message", [
+        "Score 51 and 2 flags.", "Score 51, 2 flags added.", "Score 51 with 2 flags added today."])
+    def test_a_change_described_is_not_an_operation(self, message):
+        assert _v(message, facts={"a": 51, "b": 2}).ok, message
