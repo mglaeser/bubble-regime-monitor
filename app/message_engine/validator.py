@@ -645,7 +645,11 @@ _PROSE_ARITHMETIC_RE = re.compile(
     r"\d[^.]{0,20}?\b(?:divided\s+by|multiplied\s+by|times|plus|minus|"
     # MODULO is arithmetic too: "51 modulo 2" denotes 1 with both operands
     # grounded (#105 round 28, SOTA-A, executed).
-    r"over\s+a\s+total\s+of|less|to\s+the\s+power\s+of|raised\s+to|mod|modulo)\b"
+    # A SPELLED DECIMAL SEPARATOR recombines two grounded numerals into an
+    # ungrounded value: "51 point 2" is 51.2 (#105 round 36, SOTA-A,
+    # executed); "dot" and "comma" spell the same thing.
+    r"over\s+a\s+total\s+of|less|to\s+the\s+power\s+of|raised\s+to|mod|modulo|"
+    r"point|dot|comma)\b"
     r"[^.]{0,10}?\d"
     # ...and the unary forms, which take no second number at all.
     r"|\d\s*(?:squared|cubed)\b"

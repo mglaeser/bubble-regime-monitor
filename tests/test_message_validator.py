@@ -1856,3 +1856,21 @@ class TestRoundThirtyFiveOn105:
     def test_observations_still_pass(self, message):
         r = self._v(message)
         assert r.ok, (message, r.reason)
+
+
+class TestRoundThirtySixOn105:
+    """#105 round 36 (SOTA-A, executed): "Score 51 point 2." passed with 51
+    and 2 grounded while asserting 51.2; a spelled decimal separator is a
+    recombination and joins the arithmetic spelled out in words."""
+
+    def _v(self, text):
+        return validate(text, channel=Channel.IMESSAGE, facts={"a": 51, "b": 2, "c": "51.2"}, **LIMITS)
+
+    @pytest.mark.parametrize("message", ["Score 51 point 2.", "Score 51 dot 2.", "Score 51 comma 2."])
+    def test_a_spelled_decimal_separator_is_a_recombination(self, message):
+        assert self._v("Score 51.2.").ok and self._v("Score 51, 2 flags.").ok   # controls
+        r = self._v(message)
+        assert not r.ok and "arithmetic" in (r.reason or ""), (message, r.reason)
+
+    def test_the_plural_noun_is_not_the_separator(self):
+        assert self._v("Score 51 points to 2 flags.").ok
