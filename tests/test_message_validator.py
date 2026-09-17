@@ -1705,3 +1705,38 @@ class TestRoundThirtyOn105:
 
     def test_a_number_after_the_zone_is_still_prose(self):
         assert self._v("Next check 14:00 UTC, 2 flags.", {"t": "14:00 UTC", "n": 2}).ok
+
+
+class TestRoundThirtyOneOn105:
+    """#105 round 31 (SOTA-A, executed): "Text password." carried neither
+    tell - no determiner, no object pronoun - and was the third exemption
+    round 3 had left open. A subject noun is never followed by a credential
+    or a payment word; a verb is, so such a word in second place is an
+    instruction after any head, at any length. The bare object in general
+    ("Run diagnostics.") cannot be told from a subject's verb ("Score
+    falls") and stays the residual decision 9 records."""
+
+    FACTS = {"F_HEADLINE_MEDIAN": 51, "score_scale_max": 100, "F_RF_COUNT": 0,
+             "F_RF_REQUIRED": 4, "F_BAND_EFFECTIVE": "hold", "n": 3}
+
+    def _v(self, text):
+        return validate(text, channel=Channel.IMESSAGE, facts=dict(self.FACTS), **LIMITS)
+
+    @pytest.mark.parametrize("message", [
+        "Text password.",                                 # the reviewer's case
+        "Check password.", "Text password to me now.", "Message code now.", "Flag account.",
+        "Send password to me now.", "Wire funds today.",
+    ])
+    def test_a_sensitive_object_after_the_head_is_an_instruction(self, message):
+        r = self._v(message)
+        assert not r.ok, (message, r.reason)
+
+    @pytest.mark.parametrize("message", [
+        "Score 51.", "Flags 0/4.", "Flag raised.", "Score unchanged.", "Check complete.",
+        "Text sent.", "Review pending.", "Run finished.", "Band hold.", "Level 3.",
+        "Score falls further today.", "Score rose today.", "Score is 51/100 and the band is hold.",
+        "Check window closed early today.",
+    ])
+    def test_a_subject_and_its_verb_still_pass(self, message):
+        r = self._v(message)
+        assert r.ok, (message, r.reason)

@@ -172,6 +172,18 @@ _ADVERB_HEADS = frozenset(
     "finally then here there so yet nevertheless nonetheless overall earlier "
     "later elsewhere once".split())
 
+#: Credential and payment words: a subject noun is never followed by one, a
+#: verb is ("Text password.", "Send funds now."). The bare object in general
+#: cannot be told from a subject's verb without a lexicon ("Score falls"), and
+#: stays the residual decision 9 records; this is the harm the residual was
+#: always about, closed on its own.
+_SENSITIVE_OBJECTS = frozenset(
+    "password passwords passcode passcodes pin pins code codes credential "
+    "credentials login logins account accounts key keys otp token tokens secret "
+    "secrets details detail number numbers id ids ssn card cards cvv wallet "
+    "wallets seed seeds phrase passphrase username usernames email emails "
+    "address addresses funds money transfer payment".split())
+
 #: Round 11 (SOTA-C): once a leading VALUE is skipped the way a list marker
 #: is, the composer corpus surfaced two more head words the list had never
 #: seen - "red" ("2 red flags.") and "breaker" ("24-hour breaker.") - the same
@@ -275,7 +287,13 @@ def _looks_imperative(clause: str, grounded: set[str]) -> bool:
         nxt = _bare(words[1]).casefold() if len(words) > 1 else ""  # "(your" is "your"
         if nxt in _OBJECT_PRONOUNS and not (long and nxt == "it"):
             return True                   # "it" is also a subject: "Overall it rose again."
-        return nxt in _DETERMINERS and not (long and nxt in _DEMONSTRATIVES)
+        if nxt in _DETERMINERS and not (long and nxt in _DEMONSTRATIVES):
+            return True
+        # A SENSITIVE OBJECT after the head: "Text password." carried no
+        # determiner and no pronoun, the third exemption round 3 had left
+        # open (#105 round 31, SOTA-A, executed). A subject noun is never
+        # followed by a credential or a payment word; a verb is.
+        return nxt in _SENSITIVE_OBJECTS
     # An UNLISTED head is judged in a short clause outright, and in a long
     # one by the same tells as a listed one: an object pronoun ("Send us your
     # password today.", round 13) or a determiner ("Email your password to
@@ -288,6 +306,8 @@ def _looks_imperative(clause: str, grounded: set[str]) -> bool:
         return True
     if nxt in _DETERMINERS and not (long and nxt in _DEMONSTRATIVES) and not value_fronted:
         return True
+    if nxt in _SENSITIVE_OBJECTS:
+        return True                       # "Send password to me now." (round 31)
     return not long
 
 
