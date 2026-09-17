@@ -11,6 +11,15 @@ trigger has no planning ruleset — that absence is the entire reason this
 module exists. `live_admission_blockers` asks the question that does apply to
 a trigger with no rule behind it: is this deployment authorised to deliver at
 the stage it claims.
+
+CALLERS. None on main yet, by design. Decision 1 has the engine compose
+BEFORE a delivery is queued, so its caller is the alert dispatcher, and
+wiring it is the go-live step under the operator's takeover decision - a
+separate PR. Until then this module is the engine's only path to a
+transport, and `emit` takes a `Composed`, not text: putting engine words on
+a wire without having composed them is a deliberate unwrap, not the natural
+call (#112 round 1, SOTA-A, "admission gate added but not wired to outbound
+path" - executed: no caller exists, and none is intended in this PR).
 """
 from __future__ import annotations
 
@@ -19,6 +28,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from app.logging_conf import get_logger
+from app.message_engine.composer import Composed
 
 log = get_logger(__name__)
 
@@ -65,10 +75,14 @@ def admission_blockers(session: Any, *,
                 f"authorises this send: {type(exc).__name__}"]
 
 
-def emit(session: Any, *, text: str, recipient_ref: str, sender: _Sender,
-         trigger: str, priority: int, idempotency_key: str | None = None,
+def emit(session: Any, *, composed: Composed, recipient_ref: str,
+         sender: _Sender, priority: int, idempotency_key: str | None = None,
          path: str | Path | None = None) -> EmitResult:
     """Hand a composed message to a transport, but only if admission holds.
+
+    The handoff is TYPED: `emit` takes the `Composed` the engine produced,
+    not a string, so the composer's product is the only thing this module
+    will put on a wire (#112 round 1).
 
     Checked HERE rather than once at the top of a compose, because the
     dispatcher learned the same lesson (`withdrawn_admission`): admission can
@@ -85,6 +99,7 @@ def emit(session: Any, *, text: str, recipient_ref: str, sender: _Sender,
     send its most urgent messages. `priority` is therefore recorded and never
     branched on.
     """
+    trigger, text = composed.trigger, composed.text
     blockers = admission_blockers(session, path=path)
     if blockers:
         log.warning("message_engine_admission_refused", trigger=trigger,

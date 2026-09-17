@@ -363,8 +363,10 @@ class TestAdmissionGate:
 
         monkeypatch.setattr("app.alerts.promotion.live_admission_blockers", fake)
         spy = self._SpySender()
-        out = gate.emit(session, text="Band trim, next 14:00 UTC.",
-                        recipient_ref="+100", sender=spy, trigger="BAND_TO_TRIM",
+        composed = composer.Composed(text="Band trim, next 14:00 UTC.",
+                                     source="deterministic", trigger="BAND_TO_TRIM",
+                                     channel="imessage")
+        out = gate.emit(session, composed=composed, recipient_ref="+100", sender=spy,
                         priority=priority)
         return out, spy
 
@@ -448,8 +450,9 @@ class TestAdmissionGate:
 
         monkeypatch.setattr("app.alerts.promotion.live_admission_blockers", fake)
         with session_scope() as s:
-            gate.emit(s, text="x", recipient_ref="+1", sender=Recording(),
-                      trigger="T", priority=1)
+            gate.emit(s, composed=composer.Composed(text="x", source="deterministic",
+                                                    trigger="T", channel="imessage"),
+                      recipient_ref="+1", sender=Recording(), priority=1)
         assert order == ["gate"]
 
 
@@ -747,3 +750,53 @@ class TestOfflinePassAfterRoundNine:
             outcomes = sorted(r.outcome for r in s.query(MessageEngineAttempt).all())
             assert outcomes == sorted([gov.Outcome.TECHNICAL_ERROR.value,
                                        gov.Outcome.NOT_ASKED.value]), outcomes
+
+
+class TestTheGateIsTheOnlyPathToTheWire:
+    """#112 round 1 (SOTA-A, executed): the admission gate has no production
+    call site. True, and intended: decision 1 has the engine compose BEFORE a
+    delivery is queued, so its caller is the alert dispatcher, and wiring it
+    is the go-live step under the operator's takeover decision - a separate
+    PR. These pins make the standalone state explicit: the engine has one
+    path to a transport, it takes a Composed, and nothing on main calls it."""
+
+    ENGINE = Path(composer.__file__).resolve().parent
+    APP = ENGINE.parent
+
+    def _importers(self, root: Path, needle: str, *, skip: Path | None = None) -> set[str]:
+        pattern = re.compile(rf"^\s*(?:from|import)\s+{re.escape(needle)}\b", re.MULTILINE)
+        found: set[str] = set()
+        for path in root.rglob("*.py"):
+            if skip is not None and skip in path.parents:
+                continue
+            if pattern.search(path.read_text(encoding="utf-8")):
+                found.add(str(path.relative_to(self.APP.parent)))
+        return found
+
+    def test_emit_takes_a_composed_not_text(self):
+        import inspect
+
+        from app.message_engine import gate
+
+        params = inspect.signature(gate.emit).parameters
+        assert "composed" in params and "text" not in params and "trigger" not in params
+
+    def test_no_engine_module_imports_a_transport(self):
+        assert self._importers(self.ENGINE, "app.notify") == set()
+
+    def test_compose_returns_a_composed_and_sends_nothing(self):
+        import inspect
+
+        assert inspect.signature(composer.compose).return_annotation in ("Composed", composer.Composed)
+        assert not any(name.startswith("send") for name in vars(composer.Composed))
+
+    def test_the_callers_are_the_go_live_pr(self):
+        # The go-live PR changes this set to exactly the dispatcher (decision 1)
+        # and rewrites this pin to name it.
+        callers = {
+            module
+            for needle in ("app.message_engine.gate", "app.message_engine.composer",
+                           "app.message_engine import gate", "app.message_engine import composer")
+            for module in self._importers(self.APP, needle, skip=self.ENGINE)
+        }
+        assert callers == set(), callers
