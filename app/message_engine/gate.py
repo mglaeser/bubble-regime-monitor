@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from app.logging_conf import get_logger
-from app.message_engine.composer import Composed
+from app.message_engine import composer
 
 log = get_logger(__name__)
 
@@ -75,7 +75,7 @@ def admission_blockers(session: Any, *,
                 f"authorises this send: {type(exc).__name__}"]
 
 
-def emit(session: Any, *, composed: Composed, recipient_ref: str,
+def emit(session: Any, *, composed: composer.Composed, recipient_ref: str,
          sender: _Sender, priority: int, idempotency_key: str | None = None,
          path: str | Path | None = None) -> EmitResult:
     """Hand a composed message to a transport, but only if admission holds.
@@ -100,6 +100,14 @@ def emit(session: Any, *, composed: Composed, recipient_ref: str,
     branched on.
     """
     trigger, text = composed.trigger, composed.text
+    # The library must be SIGNED before anything of the engine's reaches a
+    # wire (ruling Q34; #112 round 2, SOTA-A, executed): checked here as
+    # well as in compose(), because a Composed can be built by hand.
+    unsigned = composer.library_sign_off()
+    if unsigned is not None:
+        log.warning("message_engine_library_unsigned", trigger=trigger,
+                    priority=priority, reason=unsigned)
+        return EmitResult(sent=False, blockers=(unsigned,))
     blockers = admission_blockers(session, path=path)
     if blockers:
         log.warning("message_engine_admission_refused", trigger=trigger,

@@ -25,6 +25,17 @@ from app.models import MessageEngineAttempt
 
 pytestmark = pytest.mark.usefixtures("isolated_db")
 
+#: The real predicate, captured before the fixture below patches it.
+_REAL_SIGN_OFF = composer.library_sign_off
+
+
+@pytest.fixture(autouse=True)
+def _signed_library(monkeypatch):
+    """The shipped library is DRAFT (owner sign-off pending, ruling Q34) and
+    the engine is inert until it is signed. These tests exercise the engine as
+    it will run once it is; TestOwnerSignOff pins the unsigned behaviour."""
+    monkeypatch.setattr(composer, "library_sign_off", lambda lib=None: None)
+
 FACTS = {
     "F_HEADLINE_MEDIAN": 51,
     "F_BAND_EFFECTIVE": "trim",
@@ -800,3 +811,89 @@ class TestTheGateIsTheOnlyPathToTheWire:
             for module in self._importers(self.APP, needle, skip=self.ENGINE)
         }
         assert callers == set(), callers
+
+
+class TestPhrasingChoiceIsAnInteger:
+    """#112 round 2 (SOTA-A, executed): the integer alternative of _CHOICE_RE
+    was unanchored, so {"phrasing":0.5} matched "0", selected a phrasing and
+    recorded OK. A choice is a bare JSON integer; anything else is a format
+    rejection."""
+
+    PHRASINGS = ["Band {F_BAND_EFFECTIVE}.", "Next check {next_check_utc} UTC.", "Hold."]
+
+    @pytest.mark.parametrize("reply", [
+        '{"phrasing":0.5}', '{"phrasing": 1.0}', '{"phrasing":01}', '{"phrasing":1e3}',
+        '{"phrasing":2.9}', '{"phrasing": 1.}', '01', '1.5'])
+    def test_a_decimal_exponent_or_leading_zero_is_not_a_choice(self, reply):
+        assert composer._select_phrasing(reply, self.PHRASINGS) is None, reply
+
+    @pytest.mark.parametrize("reply, expected", [
+        ('{"phrasing": 1}', 1), ('{"phrasing":1,"why":"x"}', 1), ('1', 1), (' 2 ', 2),
+        ('{"phrasing": 0}', 0)])
+    def test_a_bare_integer_is_a_choice(self, reply, expected):
+        assert composer._select_phrasing(reply, self.PHRASINGS) == expected
+
+    def test_a_decimal_choice_is_a_format_rejection_end_to_end(self, monkeypatch):
+        monkeypatch.setattr(composer, "complete",
+                            lambda **_kw: type("C", (), {"text": '{"phrasing":0.5}'})())
+        with session_scope() as s:
+            out = composer.compose(trigger="BAND_TO_TRIM", channel=Channel.IMESSAGE, priority=2,
+                                   facts={"F_BAND_EFFECTIVE": "trim", "F_BAND_PREVIOUS": "hold",
+                                          "F_NEXT_CHECK": "14:00"},
+                                   settings=_settings())
+            assert out.source == "fallback" and "not a phrasing choice" in (out.reason or "")
+            outcomes = [r.outcome for r in s.query(MessageEngineAttempt).all()]
+            assert outcomes.count(gov.Outcome.FORMAT_REJECTED.value) == 1, outcomes
+            assert gov.Outcome.OK.value not in outcomes, outcomes
+
+
+class TestOwnerSignOff:
+    """#112 round 2 (SOTA-A, executed): the library's status - "DRAFT - owner
+    sign-off required" (ruling Q34) - was never read, so an admitted deployment
+    could have sent unsigned content. The engine is inert until the owner signs
+    the status line ("SIGNED <date> <who>") in a reviewed PR."""
+
+    UNSIGNED = "prompt library 1.0.0 is not signed off by the owner (status 'DRAFT'; ruling Q34)"
+
+    def test_the_shipped_library_is_unsigned_today(self):
+        # When the owner signs, this pin is rewritten to say so.
+        reason = _REAL_SIGN_OFF()
+        assert reason is not None and "not signed off" in reason and "DRAFT" in reason
+
+    @pytest.mark.parametrize("status, signed", [
+        ("SIGNED 2026-09-20 mglaeser", True), ("signed", True), ("Signed off 2026-09-20", True),
+        ("DRAFT - owner sign-off required", False), ("unsigned", False), ("", False),
+        ("to be SIGNED", False), (None, False)])
+    def test_the_status_line_is_the_signature(self, status, signed):
+        lib = {"version": "1.0.0"} if status is None else {"version": "1.0.0", "status": status}
+        assert (_REAL_SIGN_OFF(lib) is None) is signed, status
+
+    def test_compose_is_inert_while_unsigned(self, monkeypatch):
+        monkeypatch.setattr(composer, "library_sign_off", lambda lib=None: self.UNSIGNED)
+        monkeypatch.setattr(composer, "complete",
+                            lambda **_kw: (_ for _ in ()).throw(AssertionError("model called")))
+        with session_scope() as s:
+            out = composer.compose(trigger="BAND_TO_TRIM", channel=Channel.IMESSAGE, priority=2,
+                                   facts={"F_BAND_EFFECTIVE": "trim"}, settings=_settings())
+            assert out.source == "deterministic" and out.reason == self.UNSIGNED
+            assert out.text == "bubblegauge: BAND_TO_TRIM fired."
+            assert s.query(MessageEngineAttempt).count() == 0
+
+    def test_emit_refuses_while_unsigned_even_when_admitted(self, monkeypatch):
+        from app.message_engine import gate
+
+        monkeypatch.setattr(composer, "library_sign_off", lambda lib=None: self.UNSIGNED)
+        monkeypatch.setattr("app.alerts.promotion.live_admission_blockers",
+                            lambda _session, *, path=None: [])
+        sends: list[str] = []
+
+        class Spy:
+            def send(self, message, *, recipient_ref, idempotency_key=None):
+                sends.append(message)
+                return "SENT"
+
+        with session_scope() as s:
+            out = gate.emit(s, composed=composer.Composed(text="Band trim.", source="generated",
+                                                          trigger="BAND_TO_TRIM", channel="imessage"),
+                            recipient_ref="+1", sender=Spy(), priority=1)
+        assert out.sent is False and out.blockers == (self.UNSIGNED,) and sends == []

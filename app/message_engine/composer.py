@@ -74,6 +74,28 @@ def library() -> dict[str, Any]:
     return loaded
 
 
+_SIGNED_RE = re.compile(r"^\s*SIGNED\b", re.IGNORECASE)
+
+
+def library_sign_off(lib: dict[str, Any] | None = None) -> str | None:
+    """Why the library may not reach a wire, or None once the owner has signed.
+
+    The status line is DATA. The shipped v1.0.0 says "DRAFT - owner sign-off
+    required" (ruling Q34), and nothing read it, so an admitted deployment
+    could have sent unsigned content (#112 round 2, SOTA-A, executed). The
+    owner signs by editing the status to begin with "SIGNED" ("SIGNED
+    <date> <who>") in a reviewed PR - never a code change - and until then
+    `compose()` is inert and `gate.emit` refuses. A library with no status
+    is unsigned too.
+    """
+    lib = library() if lib is None else lib
+    status = str(lib.get("status", "")).strip()
+    if _SIGNED_RE.match(status):
+        return None
+    return (f"prompt library {lib.get('version', '?')} is not signed off by the "
+            f"owner (status {status!r}; ruling Q34)")
+
+
 #: Anything that would break one message into several, or smuggle formatting
 #: through a substituted fact.
 _CONTROL_RE = re.compile(
@@ -338,7 +360,16 @@ def compose(*, trigger: str, channel: Channel,
     """
     settings = settings or get_settings()
     moment = now or datetime.now(UTC)
-    entry = library()["prompts"].get(trigger)
+    lib = library()
+    unsigned = library_sign_off(lib)
+    if unsigned is not None:
+        # INERT until the owner signs: no model call, no attempt row, no
+        # library text. The line below is not library content, and the gate
+        # refuses to send even that while the library is unsigned.
+        return Composed(text=f"bubblegauge: {trigger} fired.",
+                        source="deterministic", trigger=trigger,
+                        channel=channel.value, reason=unsigned)
+    entry = lib["prompts"].get(trigger)
     if entry is None:
         # An unknown trigger is a programming error, but the operator still
         # gets something true rather than nothing.
@@ -516,7 +547,11 @@ def phrasings_for(entry: dict[str, Any]) -> list[str]:
 
 #: The model's reply is a CHOICE. Tolerant of surrounding prose or a bare
 #: integer; strict about the value.
-_CHOICE_RE = re.compile(r'"phrasing"\s*:\s*(\d+)|^\s*(\d+)\s*$')
+#: A choice is a bare JSON INTEGER. The integer alternative was unanchored,
+#: so {"phrasing":0.5} matched "0" and selected a phrasing while the attempt
+#: recorded OK; a decimal, an exponent or a leading zero is not a choice and
+#: is a format rejection (#112 round 2, SOTA-A, executed).
+_CHOICE_RE = re.compile(r'"phrasing"\s*:\s*(0|[1-9]\d*)(?![\d.eE])|^\s*(0|[1-9]\d*)\s*$')
 
 
 def _select_phrasing(answer: str, phrasings: list[str]) -> int | None:
