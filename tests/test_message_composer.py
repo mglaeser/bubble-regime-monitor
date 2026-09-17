@@ -897,3 +897,48 @@ class TestOwnerSignOff:
                                                           trigger="BAND_TO_TRIM", channel="imessage"),
                             recipient_ref="+1", sender=Spy(), priority=1)
         assert out.sent is False and out.blockers == (self.UNSIGNED,) and sends == []
+
+
+class TestRoundThreeOn112:
+    """#112 round 3 (SOTA-A, executed): (1) the digest declares
+    "override_fired" but the suffix read only F_OVERRIDE_FIRED, so a digest
+    composed from its declared facts dropped an active override; (2) nothing
+    enforced the library's "Never LLM-generated" contract, so test_message and
+    host_outage reached the model. The suffix resolves like any slot, and a
+    fixed trigger carries "llm": false and never leaves the deterministic path."""
+
+    DIGEST_FACTS = {"median": 51, "score_scale_max": 100, "action_band": "trim", "iqr_lo": 40,
+                    "iqr_hi": 60, "spy_trend": "up", "qqq_trend": "flat", "red_flag_count": 2,
+                    "red_flag_total": 4}
+
+    def _digest(self, **extra):
+        entry = composer.library()["prompts"]["daily_digest"]
+        return composer.render_fallback(entry["fallback"], {**self.DIGEST_FACTS, **extra})
+
+    @pytest.mark.parametrize("key", ["override_fired", "F_OVERRIDE_FIRED"])
+    def test_the_override_suffix_reads_the_declared_fact(self, key):
+        assert " OVERRIDE" in self._digest(**{key: True}), key
+        assert " OVERRIDE" not in self._digest(**{key: False}), key
+
+    def test_no_override_no_suffix(self):
+        text = self._digest()
+        assert " OVERRIDE" not in text and "51/100 trim." in text
+
+    @pytest.mark.parametrize("trigger, facts, needle", [
+        ("test_message", {"sent_at_utc": "14:00"}, "test message 14:00 UTC"),
+        ("host_outage", {"since_utc": "13:00"}, "host unreachable since 13:00 UTC")])
+    def test_a_fixed_trigger_never_reaches_the_model(self, monkeypatch, trigger, facts, needle):
+        monkeypatch.setattr(composer, "complete",
+                            lambda **_kw: (_ for _ in ()).throw(AssertionError("model called")))
+        with session_scope() as s:
+            out = composer.compose(trigger=trigger, channel=Channel.IMESSAGE, priority=2,
+                                   facts=facts, settings=_settings())
+            assert out.source == "deterministic" and "never LLM-generated" in (out.reason or "")
+            assert needle in out.text, out.text
+            assert s.query(MessageEngineAttempt).count() == 0
+
+    def test_the_contract_and_the_flag_agree(self):
+        prompts = composer.library()["prompts"]
+        by_note = {n for n, e in prompts.items() if "never llm-generated" in str(e.get("notes", "")).lower()}
+        by_flag = {n for n, e in prompts.items() if e.get("llm") is False}
+        assert by_note == by_flag == {"test_message", "host_outage"}

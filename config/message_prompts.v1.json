@@ -289,6 +289,7 @@
       "notes": "PRIMARY-PATH FALLBACK. Pairs with breaker_notify the way failure_alert_recovery pairs with failure_alert_failing: it should only ever be sent where the breaker_notify actually went out."
     },
     "test_message": {
+      "llm": false,
       "purpose": "FIXED text (no LLM): end-to-end delivery-path test. Supersedes the v3.4 TEST_MESSAGE phrase ('bubblegauge Testnachricht.').",
       "grounding_fields": [
         "sent_at_utc"
@@ -299,6 +300,7 @@
       "notes": "Never LLM-generated - a test of the pipe must not depend on any component beyond the pipe. Single ASCII template serves both channels ('No market content' keeps a stray test from being read as an all-quiet market signal). {sent_at_utc} makes each test distinguishable from a stale duplicate."
     },
     "host_outage": {
+      "llm": false,
       "purpose": "FIXED text (no LLM): sent by the external uptime watcher when the bubblegauge host itself is unreachable - by definition nothing on the host, including the LLM route, can be involved.",
       "grounding_fields": [
         "since_utc"

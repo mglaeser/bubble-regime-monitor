@@ -133,8 +133,12 @@ def _slot_value(name: str, facts: dict[str, object]) -> object | None:
         return facts[name]
     if name == "override_suffix":
         # The library's note defines it: the literal " OVERRIDE" when the
-        # override fired, else empty - a suffix, so never a dash.
-        return " OVERRIDE" if facts.get("F_OVERRIDE_FIRED") else ""
+        # override fired, else empty - a suffix, so never a dash. Resolved
+        # like any other slot: the digest DECLARES "override_fired", and
+        # reading only F_OVERRIDE_FIRED dropped an active override from a
+        # digest composed from its declared facts (#112 round 3, SOTA-A,
+        # executed).
+        return " OVERRIDE" if _slot_value("override_fired", facts) else ""
     for key in (_SLOT_ALIASES.get(name), "F_" + name.upper()):
         if key and key in facts:
             value = facts[key]
@@ -395,6 +399,18 @@ def compose(*, trigger: str, channel: Channel,
     # to build arguments for a call whose answer is already known
     # (round 32, SOTA-A defect 3). The message that must arrive does not wait
     # on the engine's bookkeeping.
+    if entry.get("llm") is False:
+        # A FIXED trigger is never LLM-generated: the library's contract for
+        # test_message ("a test of the pipe must not depend on any component
+        # beyond the pipe") and host_outage ("the subject is the host being
+        # dead"), which nothing enforced - both reached complete() (#112
+        # round 3, SOTA-A, executed). The contract is now the entry's own
+        # "llm": false, and the branch is the P1 short-circuit's shape: no
+        # model, no claim, no row.
+        return Composed(text=fallback, source="deterministic", trigger=trigger,
+                        channel=channel.value,
+                        reason="fixed trigger: never LLM-generated")
+
     short = gov.short_circuit(priority, settings)
     if short is not None:
         # NO DATABASE WORK AT ALL — not a query, and not a write. Round 32
