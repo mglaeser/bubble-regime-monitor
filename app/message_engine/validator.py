@@ -1085,6 +1085,16 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
              imessage_max_emoji: int,
              prose_rules: bool = True) -> ValidationResult:
     """The whole contract, in the order that gives the most useful reason."""
+    # THE CHANNEL IS AN ENUM, however it was spelt. The gate compared by
+    # identity, so the StrEnum's own value "sms" fell into the iMessage
+    # branch and an SMS could carry emoji, non-GSM-7 text and the wrong
+    # length limit (#105 round 33, SOTA-A, executed). An unknown channel
+    # is refused, not routed.
+    try:
+        channel = Channel(channel)
+    except ValueError:
+        return ValidationResult(False, FailureClass.FORMAT,
+                                f"unknown channel {channel!r}")
     if not text or not text.strip():
         return ValidationResult(False, FailureClass.FORMAT, "empty message")
     if text != text.strip():

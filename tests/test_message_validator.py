@@ -1756,3 +1756,30 @@ class TestRoundThirtyTwoOn105:
         assert validate("Score 51.", channel=Channel.IMESSAGE, facts={"a": 51}, **limits).ok
         r = validate(message, channel=Channel.IMESSAGE, facts={"a": 51}, **limits)
         assert not r.ok, (message, prose, r.reason)
+
+
+class TestRoundThirtyThreeOn105:
+    """#105 round 33 (SOTA-A, executed): the channel gate compared by
+    identity, so the StrEnum's own value "sms" fell into the iMessage branch
+    and an SMS could carry emoji, non-GSM-7 text and the wrong length limit.
+    The channel is normalised through the enum first; an unknown channel is
+    refused, not routed."""
+
+    def _v(self, text, channel):
+        return validate(text, channel=channel, facts={"a": 51}, **LIMITS)
+
+    @pytest.mark.parametrize("channel", ["sms", Channel.SMS])
+    def test_the_raw_value_takes_the_sms_branch(self, channel):
+        r = self._v("Score 51 \U0001F539.", channel)
+        assert not r.ok and r.failure_class is FailureClass.FORMAT, (channel, r.reason)
+        r = self._v("Score 51 " + "x" * 170 + ".", channel)
+        assert not r.ok and r.failure_class is FailureClass.FORMAT, (channel, r.reason)
+        assert self._v("Score 51.", channel).ok
+
+    def test_the_raw_imessage_value_still_allows_an_allowlisted_emoji(self):
+        assert self._v("Score 51 \U0001F539.", "imessage").ok
+
+    @pytest.mark.parametrize("channel", ["SMS", "pigeon", ""])
+    def test_an_unknown_channel_is_a_format_failure(self, channel):
+        r = self._v("Score 51.", channel)
+        assert not r.ok and r.failure_class is FailureClass.FORMAT, (channel, r.reason)
