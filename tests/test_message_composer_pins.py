@@ -22,6 +22,14 @@ from app.models import MessageEngineAttempt
 
 pytestmark = pytest.mark.usefixtures("isolated_db")
 
+
+@pytest.fixture(autouse=True)
+def _signed_library(monkeypatch):
+    """The shipped library is DRAFT (owner sign-off pending, ruling Q34) and
+    the engine is inert until it is signed (#112 round 2); these pins exercise
+    the engine as it will run once it is."""
+    monkeypatch.setattr(composer, "library_sign_off", lambda lib=None: None)
+
 FACTS = {
     "F_HEADLINE_MEDIAN": 51,
     "F_BAND_EFFECTIVE": "trim",
