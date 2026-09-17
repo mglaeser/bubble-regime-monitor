@@ -924,7 +924,10 @@ _COMPOUND_RE = re.compile(
     r"|\d{4}-\d{2}"            # a year-month
     r"|\d{1,2}:\d{2}(?::\d{2})?"  # a time
     r"|\d{1,2}/\d{1,2}/\d{2,4}"  # a slash date
-    r")(?!\d)")
+    # A compound followed by "-digit" is not that compound: "2026-08-2" is a
+    # malformed date, not the year-month 2026-08 plus a grounded -2, and it
+    # validated as exactly that (#105 round 25, SOTA-A, executed).
+    r")(?!\d)(?!-\d)")
 
 
 def _compound_spans(text: str) -> list[tuple[int, int]]:

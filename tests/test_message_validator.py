@@ -1560,3 +1560,28 @@ class TestRoundTwentyFourOn105:
         assert self._v("Score 51 today.").ok                              # control
         r = self._v(message)
         assert not r.ok and "banned" in (r.reason or ""), (message, r.reason)
+
+
+class TestRoundTwentyFiveOn105:
+    """#105 round 25 (SOTA-A, executed): the year-month compound matched
+    inside the malformed date "2026-08-2", and the trailing "-2" grounded as
+    a signed numeral, so a false date validated. A compound followed by
+    "-digit" is not that compound."""
+
+    FACTS = {"m": "2026-08", "d": -2, "full": "2026-08-16", "n": 2, "t": "14:00 UTC"}
+
+    def _v(self, text):
+        return validate(text, channel=Channel.IMESSAGE, facts=dict(self.FACTS), **LIMITS)
+
+    @pytest.mark.parametrize("message", ["Data as of 2026-08-2.", "Data as of 2026-08-16-2."])
+    def test_a_compound_followed_by_a_signed_digit_is_not_that_compound(self, message):
+        r = self._v(message)
+        assert not r.ok, (message, r.reason)
+
+    @pytest.mark.parametrize("message", [
+        "Data as of 2026-08.", "Data as of 2026-08-16.", "Data as of 2026-08, 2 flags.",
+        "Next check 14:00 UTC.",
+    ])
+    def test_well_formed_compounds_still_pass(self, message):
+        r = self._v(message)
+        assert r.ok, (message, r.reason)
