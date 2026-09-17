@@ -183,11 +183,28 @@ _SENSITIVE_OBJECTS = frozenset(
     "secrets details detail number numbers id ids ssn card cards cvv wallet "
     "wallets seed seeds phrase passphrase username usernames email emails "
     "address addresses funds money transfer payment".split())
+#: "your password", "the code": a credential phrase anywhere in the clause,
+#: not only in second place - "Reply with your password now." put a
+#: preposition in second place and the phrase later (#105 round 35, SOTA-A,
+#: executed). The possessive form is a tell after any head; the article form
+#: only after an unlisted one, so "The account balance rose." stays prose.
+_SENSITIVE_POSSESSIVE_RE = re.compile(
+    r"\b(?:your|my|our|their)\s+(?:" + "|".join(sorted(_SENSITIVE_OBJECTS)) + r")\b")
+_SENSITIVE_ARTICLE_RE = re.compile(
+    r"\b(?:the|a|an)\s+(?:" + "|".join(sorted(_SENSITIVE_OBJECTS)) + r")\b")
 
 #: Round 11 (SOTA-C): once a leading VALUE is skipped the way a list marker
 #: is, the composer corpus surfaced two more head words the list had never
 #: seen - "red" ("2 red flags.") and "breaker" ("24-hour breaker.") - the same
 #: extraction rule, applied after the value is gone.
+#: The approved openers that double as verbs: they may head an instruction
+#: ("Check cash reserves before the close.") and stay in the verb slot of
+#: the position-object rule; every other approved opener is a subject.
+_VERB_OPENERS = frozenset(
+    "text texts message messages check checks flag flags score scores level "
+    "levels run runs review reviews range spread price credit trend override "
+    "overrides".split())
+
 _APPROVED_OPENERS = frozenset("""
 bubblegauge next no none not the a an this that these those it its there their
 all both each every some any more less most fewer other another
@@ -223,6 +240,7 @@ def _looks_imperative(clause: str, grounded: set[str]) -> bool:
     # returned False before it looked at the verb (#105 round 6, SOTA-A,
     # executed for "-", "•", "*", "–", "1.", "1)" and ">"). The marker is
     # stripped and the clause judged by its first real word.
+    clause_lower = clause.casefold()
     words = _LIST_MARKER_RE.sub("", clause.strip(), count=1).split()
     # A LEADING VALUE IS NOT THE HEAD WORD EITHER. "51 Select holdings now."
     # put a grounded numeral in first place, and the numeral test below
@@ -293,7 +311,9 @@ def _looks_imperative(clause: str, grounded: set[str]) -> bool:
         # determiner and no pronoun, the third exemption round 3 had left
         # open (#105 round 31, SOTA-A, executed). A subject noun is never
         # followed by a credential or a payment word; a verb is.
-        return nxt in _SENSITIVE_OBJECTS
+        if nxt in _SENSITIVE_OBJECTS:
+            return True
+        return bool(_SENSITIVE_POSSESSIVE_RE.search(clause_lower))   # "…, text your password to us"
     # An UNLISTED head is judged in a short clause outright, and in a long
     # one by the same tells as a listed one: an object pronoun ("Send us your
     # password today.", round 13) or a determiner ("Email your password to
@@ -308,6 +328,8 @@ def _looks_imperative(clause: str, grounded: set[str]) -> bool:
         return True
     if nxt in _SENSITIVE_OBJECTS:
         return True                       # "Send password to me now." (round 31)
+    if _SENSITIVE_POSSESSIVE_RE.search(clause_lower) or _SENSITIVE_ARTICLE_RE.search(clause_lower):
+        return True                       # "Reply with your password now." (round 35)
     return not long
 
 
@@ -381,7 +403,11 @@ _IMPERATIVE_OBJECT_RE = re.compile(
     # A POSITION NOUN in the verb slot is a subject, not a verb: "Gold lifts
     # cash reserves higher." is an observation, and once the object may run
     # on (below) only this exclusion keeps it one (#105 round 17).
-    rf"more|less|most|least|band|score|flag|breadth|trend|level|reading|{_POSITION_OBJECT})\b)"
+    # ...and every approved opener that is not a verb: "Data shows cash
+    # reserves rising this week." is an observation, and once the object may
+    # run on for five words only this keeps it one (#105 round 35).
+    rf"more|less|most|least|band|score|flag|breadth|trend|level|reading|{_POSITION_OBJECT}|"
+    rf"{'|'.join(sorted(_APPROVED_OPENERS - _VERB_OPENERS))})\b)"
     r"[A-Za-z]+"                        # the imperative verb, whatever it is
     r"(?:\s+(?:for|to|into|toward|towards|out\s+of|in))?"
     rf"\s+{_OBJECT_MODIFIER}"
@@ -391,7 +417,9 @@ _IMPERATIVE_OBJECT_RE = re.compile(
     # reserves high this week." ended nowhere near the position noun and so
     # escaped a rule that wanted the clause to stop there (#105 round 17,
     # SOTA-C, executed).
-    r"(?:\s+[A-Za-z]+){0,2}"
+    # Five words, not two: "Keep cash reserves very high this week." ran on
+    # past the two the round-17 rule allowed (#105 round 35, SOTA-C, executed).
+    r"(?:\s+[A-Za-z]+){0,5}"
     r"\s*(?:[.;:!?,]|$|\s+(?:before|after|until|till|by|for|at|when|while|"
     r"now|today|tonight|this|next|ahead|as|if|once)\b)",
     re.IGNORECASE | re.MULTILINE,

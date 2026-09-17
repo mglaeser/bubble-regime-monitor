@@ -1814,3 +1814,45 @@ class TestRoundThirtyFourOn105:
         assert self._v("Next check 14:00 U-T-C.", facts).ok
         r = self._v(f"Next check {form}.", facts)
         assert not r.ok and "zone" in (r.reason or ""), (form, r.reason)
+
+
+class TestRoundThirtyFiveOn105:
+    """#105 round 35: two findings. SOTA-A (executed): "Reply with your
+    password now." put a preposition in second place and the credential
+    phrase later, so no tell fired; a possessive plus a credential word
+    anywhere in the clause is a tell after any head, and an article form
+    after an unlisted one. SOTA-C (executed): "Keep cash reserves very high
+    this week." ran on past the two words the object rule allowed; five are
+    allowed now, and every subject-only opener is kept out of the verb slot
+    so "Data shows cash reserves rising this week." stays an observation."""
+
+    FACTS = {"F_HEADLINE_MEDIAN": 51, "score_scale_max": 100, "F_BAND_EFFECTIVE": "hold", "pct": "2%"}
+
+    def _v(self, text):
+        return validate(text, channel=Channel.IMESSAGE, facts=dict(self.FACTS), **LIMITS)
+
+    @pytest.mark.parametrize("message", [
+        "Reply with your password now.",                  # the reviewer's case
+        "Reply with the code now.", "Respond with your login details today.",
+        "Score 51, text your password to us.",
+    ])
+    def test_a_credential_phrase_anywhere_in_the_clause_is_a_tell(self, message):
+        r = self._v(message)
+        assert not r.ok, (message, r.reason)
+
+    @pytest.mark.parametrize("message", [
+        "Keep cash reserves very high this week.",        # the reviewer's class
+        "Move cash reserves into gold coins today.", "Check cash reserves before the close.",
+    ])
+    def test_a_long_object_phrase_is_still_an_instruction(self, message):
+        r = self._v(message)
+        assert not r.ok, (message, r.reason)
+
+    @pytest.mark.parametrize("message", [
+        "The account balance rose 2% this week.", "Key levels held this week.",
+        "Data shows cash reserves rising this week.", "Cash reserves rose this week.",
+        "Gold lifts cash reserves higher.", "Score 51/100, band hold.",
+    ])
+    def test_observations_still_pass(self, message):
+        r = self._v(message)
+        assert r.ok, (message, r.reason)
