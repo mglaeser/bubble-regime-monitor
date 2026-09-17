@@ -519,7 +519,10 @@ _STATE_SENSE_RE = re.compile(
 #: "Value (51)/(2)." conveyed an ungrounded 25.5 while evading every scan
 #: (round 18, SOTA-A).
 _LHS = r"\d\s*[)\]]?"
-_OPERAND = r"[(\[]?\s*[-+\u2212]?\s*\d"
+#: A LEADING-DOT decimal may open an operand: ".51 plus .2" and "-(.51)"
+#: put a point where every rule demanded a digit, so facts of .51 and .2
+#: admitted the ungrounded .71 and -.51 (#105 round 38, SOTA-A, executed).
+_OPERAND = r"[(\[]?\s*[-+\u2212]?\s*\.?\d"
 
 #: EITHER side spaced counts, for EVERY operator. Round 11 taught the slash
 #: this and its sibling never learned it, so "51- 2" stayed valid while
@@ -537,10 +540,10 @@ _ARITHMETIC_RE = re.compile(
     rf"|{_LHS}{_MINUS_SPACED}{_OPERAND}"
     rf"|{_LHS}{_SLASH_SPACED}{_OPERAND}"
     rf"|\d\s*[)\]]\s*/+\s*{_OPERAND}"
-    rf"|\d\s*/+\s*[(\[]\s*\d"
+    rf"|\d\s*/+\s*[(\[]\s*\.?\d"
     # A SIGN after a tight slash is arithmetic too: "51/+2" carried no
     # whitespace and no bracket, so every branch missed it (round 23).
-    rf"|\d\s*/+\s*[-+\u2212]\s*\d")
+    rf"|\d\s*/+\s*[-+\u2212]\s*\.?\d")
 
 #: Ruling Q30 requires English. The prompt says so; this is the BACKSTOP for
 #: when the model ignores it, not a language detector. High-frequency function
@@ -650,7 +653,10 @@ _PROSE_ARITHMETIC_RE = re.compile(
     # executed); "dot" and "comma" spell the same thing.
     r"over\s+a\s+total\s+of|less|to\s+the\s+power\s+of|raised\s+to|mod|modulo|"
     r"point|dot|comma)\b"
-    r"[^.]{0,10}?\d"
+    # The right-hand operand may open with a DECIMAL POINT: ".51 plus .2"
+    # asserted .71 from facts of .51 and .2 while the digit-only slot missed
+    # it (#105 round 38, SOTA-A, executed).
+    r"[^.]{0,10}?\.?\d"
     # ...and the unary forms, which take no second number at all.
     r"|\d\s*(?:squared|cubed)\b"
     # A MULTIPLIER IN FRONT of a grounded numeral asserts a different number
@@ -658,12 +664,12 @@ _PROSE_ARITHMETIC_RE = re.compile(
     # claims 102, and no fact contains it. The trailing forms were covered
     # and the leading ones were not (round 39, SOTA-A defect 2).
     r"|\b(?:twice|double|doubled|triple|tripled|thrice|quadruple|"
-    r"half|halved|quarter|third|tenth)\s+(?:the\s+|that\s+|of\s+)?\d"
+    r"half|halved|quarter|third|tenth)\s+(?:the\s+|that\s+|of\s+)?\.?\d"
     # PERCENT-OF is multiplication in words: "51% of 2" denotes 1.02 while
     # both operands were grounded (#105 round 11, SOTA-A, executed; "51% of
     # the 2 flags" and "51 percent of 2" likewise).
     r"|\d\s*(?:%|percent|per\s+cent)\s+of\s+"
-    r"(?:(?:the|a|an|these|those|its|their)\s+)?\d")
+    r"(?:(?:the|a|an|these|those|its|their)\s+)?\.?\d")
 
 #: Units that make a spelled-out number part of the METHODOLOGY rather than a
 #: measurement ("a two-year lookback", "three months of data").
@@ -1387,7 +1393,7 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
     # (#105 round 6, SOTA-A, executed for -( -[ - ( −( and +( ). The
     # lookbehind keeps "51-(2)" for the subtraction rule below and leaves a
     # sign INSIDE brackets, "(-2)", to the signed-numeral scan.
-    if re.search(r"(?<![\w)\]])[-+\u2212]\s*[(\[]\s*\d", judged):
+    if re.search(r"(?<![\w)\]])[-+\u2212]\s*[(\[]\s*\.?\d", judged):
         return ValidationResult(False, FailureClass.CONTENT,
                                 "a sign before a bracketed numeral asserts a "
                                 "value that is not grounded")
@@ -1397,7 +1403,7 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
     # it as well (#105 round 8, SOTA-A, executed for -+ +- -- ++ -(+ and
     # "- +"). Two sign characters with nothing but space or a bracket between
     # them never denote a grounded value, unary or binary ("51-+2").
-    if re.search(r"[-+\u2212]\s*[(\[]?\s*[-+\u2212]\s*[(\[]?\s*\d", judged):
+    if re.search(r"[-+\u2212]\s*[(\[]?\s*[-+\u2212]\s*[(\[]?\s*\.?\d", judged):
         return ValidationResult(False, FailureClass.CONTENT,
                                 "repeated signs before a numeral assert a "
                                 "value that is not grounded")
@@ -1408,11 +1414,11 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
     # space, by a digit or a closing bracket is binary ("51 - 2") and belongs
     # to the arithmetic gate; compounds are already blanked in grounding_text,
     # so a dash between two times is not a sign before a numeral.
-    if re.search(r"(?:^|[^\d)\]\s])\s*[-+\u2212]\s+\d", grounding_text):
+    if re.search(r"(?:^|[^\d)\]\s])\s*[-+\u2212]\s+\.?\d", grounding_text):
         return ValidationResult(False, FailureClass.CONTENT,
                                 "a spaced sign before a numeral asserts a "
                                 "value that is not grounded")
-    if re.search(r"\d\s*-\s*[(\[]\s*[-+\u2212]?\s*\d", judged):
+    if re.search(r"\d\s*-\s*[(\[]\s*[-+\u2212]?\s*\.?\d", judged):
         return ValidationResult(False, FailureClass.CONTENT,
                                 "bracketed subtraction denotes an ungrounded "
                                 "value")
@@ -1461,7 +1467,7 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
     # TIGHT digits:digits remains there is a ratio; a colon with space after
     # it is prose punctuation ("Week 37: 51/100", the weekly digest's own
     # fallback), not a quotient.
-    if re.search(r"(?<![\d:])\d+:\d+(?![\d:])", grounding_text):
+    if re.search(r"(?<![\d:])\.?\d+:\.?\d+(?![\d:])", grounding_text):
         return ValidationResult(False, FailureClass.CONTENT,
                                 "a ratio between numerals denotes an "
                                 "ungrounded value")
@@ -1484,7 +1490,7 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
             pairs.add((str(facts[num_key]), str(facts[den_key])))
     # A CHAIN is never a score: "51/100/100" matched only its first pair
     # under a non-overlapping scan and sailed through (round 15, SOTA-A).
-    if re.search(r"\d\s*[)\]]?\s*/+\s*[(\[]?\s*\d+(?:[.,]\d+)?\s*[)\]]?\s*/+",
+    if re.search(r"\d\s*[)\]]?\s*/+\s*[(\[]?\s*(?:\d+(?:[.,]\d+)?|\.\d+)\s*[)\]]?\s*/+",
                  # ...judged with the compounds blanked: a grounded slash date
                  # "8/1/2026" is two slashes too, and was refused as a chain
                  # (#105 round 26, SOTA-A, executed); an ungrounded one is
@@ -1504,7 +1510,7 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
             # A COMMA is a decimal point here too: the dot-only guards took
             # "0/2" out of "51,0/2,0" and found the declared pair (0, 2),
             # admitting 25.5 (#105 round 27, SOTA-A, executed).
-            r"(?<!\d)(?<!\d[.,])(\d+(?:[.,]\d+)?)\s*(/+)\s*(\d+(?:[.,]\d+)?)(?!\d)(?![.,]\d)",
+            r"(?<!\d)(?<!\d[.,])(\d+(?:[.,]\d+)?|\.\d+)\s*(/+)\s*(\d+(?:[.,]\d+)?|\.\d+)(?!\d)(?![.,]\d)",
             # ...with the compounds blanked, like the chain check above: a
             # grounded slash date "8/1/2026" is not a quotient either (#105
             # round 26, SOTA-A, executed).

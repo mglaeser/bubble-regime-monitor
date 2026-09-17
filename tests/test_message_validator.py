@@ -1917,3 +1917,48 @@ class TestRoundThirtySevenOn105:
     def test_lowercase_prose_after_a_time_is_the_sentence_going_on(self, word):
         assert self._v(f"Next check 14:00 {word}.", self.UTC).ok
         assert self._v(f"Next check 14:00 UTC {word}.", self.UTC).ok
+
+
+class TestRoundThirtyEightOn105:
+    """#105 round 38 (SOTA-A, executed): every arithmetic rule demanded a
+    DIGIT where an operand opens, so a leading-dot decimal slipped every one
+    of them: facts .51 and .2 admitted "Score .51 plus .2." (asserting .71),
+    "-(.51)", ".51/.2" and ".51:.2" alike. A point may open an operand."""
+
+    FACTS = {"a": ".51", "b": ".2", "c": "51", "d": "2"}
+
+    def _v(self, text):
+        return validate(text, channel=Channel.IMESSAGE, facts=self.FACTS, **LIMITS)
+
+    def test_the_ledger_scenario(self):
+        assert self._v("Score .51.").ok and self._v("Score .51 and .2.").ok   # controls
+        r = self._v("Score .51 plus .2.")
+        assert not r.ok and "arithmetic in words" in (r.reason or ""), r.reason
+
+    @pytest.mark.parametrize("message", [
+        "Score .51 minus .2.", "Score .51 times .2.", "Score .51 divided by .2.", "Score .51 point .2.",
+        "Score 51 plus .2.", "Score twice .51.", "Score half of .51.", "Score .51% of .2."])
+    def test_a_point_opens_a_prose_operand(self, message):
+        r = self._v(message)
+        assert not r.ok and "arithmetic in words" in (r.reason or ""), (message, r.reason)
+
+    @pytest.mark.parametrize("message", [
+        "Score .51 + .2.", "Score .51+.2.", "Score .51 x .2.", "Score .51*.2.", "Score .51^.2.",
+        "Score .51 - .2.", "Score 51/(.2).", "Score 51/-.2.", "Score (.51)/(.2)."])
+    def test_a_point_opens_a_symbolic_operand(self, message):
+        r = self._v(message)
+        assert not r.ok and "arithmetic between numerals" in (r.reason or ""), (message, r.reason)
+
+    @pytest.mark.parametrize("message, reason", [
+        ("Score -(.51).", "sign before a bracketed"), ("Score 51 - (.2).", "sign before a bracketed"),
+        ("Score - .51.", "spaced sign"), ("Score - +.51.", "repeated signs"),
+        ("Score .51:.2.", "ratio"), ("Score 51:.2.", "ratio"),
+        ("Score .51/.2.", "quotient"), ("Score .51/.2/.2.", "chained division")])
+    def test_a_point_opens_a_signed_ratio_or_quotient_operand(self, message, reason):
+        r = self._v(message)
+        assert not r.ok and reason in (r.reason or ""), (message, r.reason)
+
+    @pytest.mark.parametrize("message", [
+        "Score .51, .2.", "Score .51 to .2.", "Score .51. 2 flags.", "Score 51 plus. 2 flags."])
+    def test_a_sentence_period_is_not_a_point(self, message):
+        assert self._v(message).ok, message
