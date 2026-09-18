@@ -34,6 +34,7 @@ from app.config import Settings, get_settings
 from app.llm_gateway import (
     complete,
 )
+from app.logging_conf import get_logger
 from app.message_engine import governor as gov
 from app.message_engine.validator import (
     Channel,
@@ -46,6 +47,8 @@ from app.redaction import sanitize
 #: The library ships beside the content artifact it is a sibling of.
 #: parents[2] is the repo root: this file sits at app/message_engine/, so
 #: parents[1] is app/ — an off-by-one that pointed at app/config/.
+log = get_logger(__name__)
+
 _LIBRARY = Path(__file__).resolve().parents[2] / "config" / "message_prompts.v1.json"
 
 #: A slot in a fallback template: "{F_NEXT_CHECK}".
@@ -148,6 +151,8 @@ def _slot_value(name: str, facts: dict[str, object]) -> object | None:
     for key in (_SLOT_ALIASES.get(name), "F_" + name.upper()):
         if key and key in facts:
             value = facts[key]
+            if value is None:
+                return None               # blanked by the prose screen: a dash
             if name.endswith("_utc"):
                 # The template supplies the zone itself ("{next_check_utc}
                 # UTC"), so a fact that already carries one rendered
@@ -352,6 +357,54 @@ def visible_facts(entry: dict[str, Any], facts: dict[str, object]
     return {k: v for k, v in facts.items() if k in declared}
 
 
+#: The screen judges MEANING only: the channel limits are out of the way
+#: (the fit owns length), and the format class is ignored.
+_SCREEN_LIMITS = {"sms_max_len": 100_000, "imessage_max_chars": 100_000,
+                  "imessage_max_emoji": 100_000}
+
+
+def _prose_screened(entry: dict[str, Any], facts: dict[str, object]) -> dict[str, object]:
+    """The facts, with any string the prose rules refuse blanked to a dash.
+
+    Decision 12 judges the MODEL's words and trusts the owner's template,
+    and the grounding check judges numerals - so a fact that is free text
+    from upstream (the failure alert's reason) was judged by nobody, and
+    "sell everything now" rode into the wire inside an approved template
+    (#112 round 5, SOTA-A, executed). A string fact is now judged by the
+    validator's meaning-of-prose rules before it fills a slot, grounded by
+    itself so only meaning is judged:
+
+    * a PHRASE (whitespace inside) is held to every prose rule - the
+      allow-list of clause openers included, so an upstream error string
+      that reads as nothing this monitor says becomes a dash rather than a
+      sentence nobody approved;
+    * an ATOM ("trim", "14:00", "51/100", "3h") is a value, not a sentence,
+      and is held to the banned lexicon only: alone, a band name reads as
+      an order and a score as a quotient, and neither is the atom's doing.
+
+    Fields the entry declares as `authorized_prose` are the renderer's own
+    rule-approved text and are not judged. A refused fact renders as a
+    dash, is not shown to the model, and is logged by name, never by value.
+    """
+    authorized = set(entry.get("authorized_prose") or [])
+    kept: dict[str, object] = {}
+    for key, value in facts.items():
+        if not isinstance(value, str) or key in authorized:
+            kept[key] = value
+            continue
+        result = validate(value, channel=Channel.IMESSAGE, facts={key: value},
+                          prose_rules=True, **_SCREEN_LIMITS)
+        refused = (not result.ok and result.failure_class is FailureClass.CONTENT
+                   and (len(value.split()) > 1
+                        or str(result.reason).startswith("banned lexicon")))
+        if refused:
+            log.warning("message_engine_fact_refused", fact=key, reason=result.reason)
+            kept[key] = None
+        else:
+            kept[key] = value
+    return kept
+
+
 def _prompt_for(entry: dict[str, Any], facts: dict[str, object],
                 channel: Channel, settings: Settings) -> str:
     """The trigger's prompt, plus the facts it may use and nothing else.
@@ -372,7 +425,7 @@ def _prompt_for(entry: dict[str, Any], facts: dict[str, object],
     # fallback and failing open costs a disclosure.
     visible = visible_facts(entry, facts)
     grounded = "\n".join(f"  {key} = {sanitize(value) if isinstance(value, str) else value}"
-                          for key, value in sorted(visible.items()))
+                          for key, value in sorted(visible.items()) if value is not None)
     listed = "\n".join(f"  {i}: {t}" for i, t in enumerate(phrasings_for(entry)))
     # The library's own OUTPUT FORMAT is OVERRIDDEN here, last word wins.
     # Eighteen entries ask for two labelled lines, one per channel; twenty
@@ -453,6 +506,7 @@ def compose(*, trigger: str, channel: Channel,
 
     try:
         phrasings = phrasings_for(entry)
+        facts = _prose_screened(entry, facts)
         fallback = _fit(render_fallback(phrasings[0], facts), channel, settings)
         if not isinstance(entry.get("prompt", ""), str):
             raise TypeError("'prompt' is not text")

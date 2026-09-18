@@ -213,6 +213,7 @@
       "notes": "The quiet week is handled by the same prompt and the same fallback with event_count=0 (deterministic '0 events' replaces the separate DIGEST_QUIET phrase). Per app/alerts/digest.py a quiet window creates no fabricated episode; this text is only rendered when the digest job actually plans a delivery."
     },
     "reminder": {
+      "authorized_prose": ["condition_summary"],
       "purpose": "Supersedes the STILL_ACTIVE phrase: a repeat notice wrapped around any still-firing alert - restates the condition and how long it has been active.",
       "grounding_fields": [
         "condition_summary",
