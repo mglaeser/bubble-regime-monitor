@@ -35,6 +35,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.alerts.artifacts import REPO_PHRASES
 from app.alerts.phrase_registry import JOIN, validate_phrase_set
+from app.alerts.render_context import FACT_SOURCES
 from app.config import Settings, get_settings
 from app.llm_gateway import (
     complete,
@@ -192,7 +193,15 @@ _CONTROL_RE = re.compile(
 #: 21 of the 32 shipped fallbacks use lowercase slots ("{band_effective}")
 #: while every fact is F_-keyed; a case-insensitive F_ lookup bridges those.
 #: Two are documented exceptions in the library's own notes.
-_SLOT_ALIASES = {"next_check_utc": "F_NEXT_CHECK"}
+#: The alert contract names a fact by id (F_BAND_BASE) and its source by
+#: attribute (base_action_band); a template that used the attribute name
+#: rendered a dash and left the fact out of the model's grounding while the
+#: caller supplied the id (#112 round 9, SOTA-A, executed on
+#: COVERAGE_RISK_MASKING and RECOMPUTE_OUTAGE - the library now declares
+#: the ids). The contract's own source table is the alias table, so the
+#: attribute spelling still resolves.
+_SLOT_ALIASES = {"next_check_utc": "F_NEXT_CHECK", "missed_recompute_slots": "F_MISSED_SLOTS",
+                 **{attr: fact_id for fact_id, attr in FACT_SOURCES.items()}}
 _TRAILING_ZONE_RE = re.compile(r"\s*\b(?:UTC|GMT|Z)\s*$", re.IGNORECASE)
 
 
@@ -441,8 +450,21 @@ def visible_facts(entry: dict[str, Any], facts: dict[str, object]
 
     Both callers now derive from here, so the asymmetry cannot reopen.
     """
-    declared = set(entry.get("grounding_fields") or [])
-    return {k: v for k, v in facts.items() if k in declared}
+    declared = {_canonical(name) for name in entry.get("grounding_fields") or []}
+    return {k: v for k, v in facts.items() if _canonical(k) in declared}
+
+
+def _canonical(name: str) -> str:
+    """One spelling for a fact: its contract id where it has one.
+
+    "band_base", "base_action_band" and "F_BAND_BASE" are the same fact to
+    the renderer (see _slot_value); the visibility test compared raw names,
+    so a fact supplied under its id was invisible to a template that
+    declared the attribute (#112 round 9).
+    """
+    if name in _SLOT_ALIASES:
+        return _SLOT_ALIASES[name]
+    return name if name.startswith("F_") else "F_" + name.upper()
 
 
 _REGISTRY_MATCHER: re.Pattern[str] | None = None
@@ -842,7 +864,10 @@ def phrasings_for(entry: dict[str, Any]) -> list[str]:
 #: so {"phrasing":0.5} matched "0" and selected a phrasing while the attempt
 #: recorded OK; a decimal, an exponent or a leading zero is not a choice and
 #: is a format rejection (#112 round 2, SOTA-A, executed).
-_CHOICE_RE = re.compile(r'"phrasing"\s*:\s*(0|[1-9]\d*)(?![\d.eE])|^\s*(0|[1-9]\d*)\s*$')
+#: ...and nothing may follow the integer but a non-word, non-point: the
+#: digit-and-exponent lookahead let {"phrasing":0abc} select template 0 and
+#: record OK (#112 round 9, SOTA-A, executed).
+_CHOICE_RE = re.compile(r'"phrasing"\s*:\s*(0|[1-9]\d*)(?![\w.])|^\s*(0|[1-9]\d*)\s*$')
 
 
 def _select_phrasing(answer: str, phrasings: list[str]) -> int | None:

@@ -1337,3 +1337,65 @@ class TestRoundEightOn112:
         entry = {"authorized_prose": ["s"]}
         assert composer._prose_screened(entry, {"s": "you should sell"}) == {"s": None}
         assert composer._prose_screened(entry, {"s": "no data for SPY"}) == {"s": "no data for SPY"}
+
+
+class TestRoundNineOn112:
+    """#112 round 9 (SOTA-A, executed), three defects: COVERAGE_RISK_MASKING
+    and RECOMPUTE_OUTAGE declared the contract's SOURCE attribute
+    (base_action_band, missed_recompute_slots) while the contract supplies
+    the fact id (F_BAND_BASE, F_MISSED_SLOTS), so the live value rendered as
+    a dash and was left out of the model's grounding; and the choice regex
+    let {"phrasing":0abc} select template 0."""
+
+    @pytest.mark.parametrize("trigger, facts, needle", [
+        ("COVERAGE_RISK_MASKING", {"F_BAND_BASE": "trim", "F_NEXT_CHECK": "14:00"}, "Underlying level trim. Next run 14:00 UTC."),
+        ("RECOMPUTE_OUTAGE", {"F_MISSED_SLOTS": 3}, "3 scheduled score updates missed in a row")])
+    def test_the_contracts_fact_ids_fill_the_slots(self, monkeypatch, trigger, facts, needle):
+        seen: list[str] = []
+
+        def complete(*, user, **_kw):
+            seen.append(user)
+            return type("C", (), {"text": '{"phrasing": 0}'})()
+
+        monkeypatch.setattr(composer, "complete", complete)
+        with session_scope():
+            out = composer.compose(trigger=trigger, channel=Channel.IMESSAGE, priority=2,
+                                   facts=facts, settings=_settings())
+        assert needle in out.text, out.text
+        assert seen and all(f"{k} = {v}" in seen[0] for k, v in facts.items()), seen[0]
+
+    @pytest.mark.parametrize("slot, key", [
+        ("base_action_band", "F_BAND_BASE"), ("band_base", "F_BAND_BASE"),
+        ("missed_recompute_slots", "F_MISSED_SLOTS"), ("missed_slots", "F_MISSED_SLOTS"),
+        ("effective_action_state", "F_BAND_EFFECTIVE"), ("headline_median", "F_HEADLINE_MEDIAN")])
+    def test_a_source_attribute_resolves_to_its_fact_id(self, slot, key):
+        assert composer.render_fallback("{" + slot + "}", {key: "51"}) == "51"
+
+    def test_visibility_is_by_fact_not_by_spelling(self):
+        entry = {"grounding_fields": ["base_action_band", "next_check_utc"]}
+        assert composer.visible_facts(entry, {"F_BAND_BASE": "trim", "F_NEXT_CHECK": "14:00", "F_ASSET": "SPY"}) == \
+            {"F_BAND_BASE": "trim", "F_NEXT_CHECK": "14:00"}
+
+    def test_every_rule_driven_entry_declares_contract_ids_and_renders_from_them(self):
+        import json as _json
+
+        registry = _json.loads(Path(composer.REPO_PHRASES).read_text(encoding="utf-8"))
+        contract, headlines = set(registry["facts"]), set(registry["headlines"])
+        for name, entry in composer.library()["prompts"].items():
+            if name not in headlines:
+                continue
+            # The caller supplies the contract's ids; every declared field
+            # must be one (under its canonical spelling), and the ids alone
+            # must fill every slot of the fallback.
+            ids = [composer._canonical(d) for d in entry["grounding_fields"]]
+            assert all(i in contract for i in ids), (name, ids)
+            text = composer.render_fallback(entry["fallback"], {i: "51" for i in ids})
+            assert not re.search(r"(?<![\w-])-(?![\w-])", text), (name, text)
+
+    @pytest.mark.parametrize("reply", ['{"phrasing":0abc}', '{"phrasing":1x}', '{"phrasing":1_0}', '{"phrasing":2abc,"x":1}'])
+    def test_an_identifier_suffixed_integer_is_not_a_choice(self, reply):
+        assert composer._select_phrasing(reply, ["a", "b", "c"]) is None, reply
+
+    @pytest.mark.parametrize("reply, expected", [('{"phrasing":1,"why":"x"}', 1), ('{"phrasing": 2}', 2), ('{"phrasing":0}', 0)])
+    def test_a_delimited_integer_is_still_a_choice(self, reply, expected):
+        assert composer._select_phrasing(reply, ["a", "b", "c"]) == expected
