@@ -951,8 +951,9 @@ class TestRoundFourOn112:
     could land inside a numeral and ship a different number; (3) the library
     was read outside compose()'s "never raises" boundary."""
 
-    CREDENTIAL = ("HTTPError 401 for https://user:hunter2@x.io/v1?api_key=sk-live-ABCDEF1234567890 "
-                  "Authorization: Bearer eyJhbGciOi.eyJzdWIiOiIx.abc")
+    # Planted, credential-SHAPED fixtures (the convention of tests/test_alert_foundations.py).
+    CREDENTIAL = ("HTTPError 401 for https://user:plantedpass@x.io/v1?api_key=sk-live-PLANTEDvalue0000 "  # pragma: allowlist secret
+                  "Authorization: Bearer PLANTEDbearer.eyJzdWIi.abc")  # pragma: allowlist secret
     FAILING = {"failures": 3, "first_seen_utc": "14:00", "snapshot_age": "3h"}
 
     def _s(self, **kw):
@@ -963,7 +964,7 @@ class TestRoundFourOn112:
     def test_a_credential_in_a_fact_never_reaches_the_wire(self):
         entry = composer.library()["prompts"]["failure_alert_failing"]
         text = composer.render_fallback(entry["fallback"], {**self.FAILING, "reason_plain": self.CREDENTIAL})
-        for secret in ("hunter2", "sk-live", "ABCDEF1234567890", "eyJhbGciOi"):
+        for secret in ("plantedpass", "sk-live", "PLANTEDvalue0000", "PLANTEDbearer"):
             assert secret not in text, (secret, text)
         assert "bubblegauge FAILING: compute failed x3 since 14:00" in text
 
@@ -978,7 +979,7 @@ class TestRoundFourOn112:
         with session_scope():
             composer.compose(trigger="failure_alert_failing", channel=Channel.IMESSAGE, priority=2,
                              facts={**self.FAILING, "reason_plain": self.CREDENTIAL}, settings=self._s())
-        assert seen and "hunter2" not in seen[0] and "sk-live" not in seen[0] and "eyJhbGciOi" not in seen[0]
+        assert seen and "plantedpass" not in seen[0] and "sk-live" not in seen[0] and "PLANTEDbearer" not in seen[0]
         assert "[redacted]" in seen[0]
 
     def test_the_override_flag_keeps_its_truth_through_sanitising(self):
