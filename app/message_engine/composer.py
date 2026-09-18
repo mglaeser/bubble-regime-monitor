@@ -43,6 +43,7 @@ from app.message_engine.validator import (
     Channel,
     FailureClass,
     ValidationResult,
+    count_emoji,
     validate,
 )
 from app.redaction import sanitize
@@ -117,17 +118,22 @@ _SCALARS = (str, bool, int, float, type(None))
 
 
 def _bare_event(trigger: str, channel: Channel, settings: Settings,
-                reason: str) -> Composed:
+                reason: str, *, known: bool) -> Composed:
     """The one line the engine says when it cannot say anything else.
 
     The trigger NAME is the caller's string, and it was interpolated
     verbatim, so a name carrying a newline, a control or a secret reached an
-    admitted sender (#112 round 6, SOTA-A, executed). Only an identifier's
-    characters survive, bounded, and the line is fitted to the channel.
+    admitted sender (#112 round 6, SOTA-A, executed). Filtering it to an
+    identifier's characters was not enough: "sk_live_ABC123" is an
+    identifier, and it was echoed and kept as the Composed's trigger for the
+    gate's log (#112 round 7, SOTA-A, executed). The name is echoed only
+    when it is a KEY OF THE LIBRARY - the owner's word, not the caller's;
+    otherwise the line and the record say "unknown".
     """
-    label = re.sub(r"[^A-Za-z0-9_.\-]+", "", str(trigger))[:40] or "unknown"
+    label = re.sub(r"[^A-Za-z0-9_.\-]+", "", trigger)[:40] if known else ""
+    label = label or "unknown"
     return _issue(text=_fit(f"bubblegauge: {label} fired.", channel, settings),
-                  source="deterministic", trigger=trigger, channel=channel.value,
+                  source="deterministic", trigger=label, channel=channel.value,
                   reason=reason)
 
 
@@ -223,14 +229,14 @@ def _slot_value(name: str, facts: dict[str, object]) -> object | None:
 
 def _redacted(value: object) -> object:
     """A string fact through the redaction chokepoint; a scalar as is; a
-    non-scalar as nothing (#112 round 6).
+    non-scalar (#112 round 6) or a decorated string (#112 round 7) as nothing.
 
     Applied where a fact is READ for a slot, so the public renderer is safe
     with raw facts too, and never to the literals the code composes itself
     (the override suffix keeps its leading space).
     """
     if isinstance(value, str):
-        return sanitize(value)
+        return None if count_emoji(value) else sanitize(value)
     return value if isinstance(value, _SCALARS) else None
 
 
@@ -247,6 +253,14 @@ def _sanitized(facts: dict[str, object]) -> dict[str, object]:
     admitted: dict[str, object] = {}
     for key, value in facts.items():
         if isinstance(value, str):
+            if count_emoji(value):
+                # A fact is data, and data carries no decoration. An emoji
+                # in a fact walked past the iMessage cap and allow-list on
+                # the fallback and P1 paths, which never validate (#112
+                # round 7, SOTA-A, executed). It renders as a dash.
+                log.warning("message_engine_fact_decorated", fact=key)
+                admitted[key] = None
+                continue
             admitted[key] = sanitize(value)
         elif isinstance(value, _SCALARS):
             admitted[key] = value
@@ -558,18 +572,21 @@ def compose(*, trigger: str, channel: Channel,
         # the caller, retried forever - instead of the operator getting
         # something true (#112 round 4, SOTA-A, defect 3, executed).
         return _bare_event(trigger, channel, settings,
-                           f"prompt library unreadable: {type(exc).__name__}")
+                           f"prompt library unreadable: {type(exc).__name__}",
+                           known=False)
     unsigned = library_sign_off(lib)
     if unsigned is not None:
         # INERT until the owner signs: no model call, no attempt row, no
         # library text. The line below is not library content, and the gate
         # refuses to send even that while the library is unsigned.
-        return _bare_event(trigger, channel, settings, unsigned)
+        return _bare_event(trigger, channel, settings, unsigned,
+                           known=trigger in prompts)
     entry = prompts.get(trigger)
     if entry is None:
         # An unknown trigger is a programming error, but the operator still
         # gets something true rather than nothing.
-        return _bare_event(trigger, channel, settings, "trigger not in library")
+        return _bare_event(trigger, channel, settings, "trigger not in library",
+                           known=False)
 
     try:
         phrasings = phrasings_for(entry)
@@ -579,7 +596,20 @@ def compose(*, trigger: str, channel: Channel,
             raise TypeError("'prompt' is not text")
     except Exception as exc:  # noqa: BLE001 - a malformed entry is the same class
         return _bare_event(trigger, channel, settings,
-                           f"library entry is malformed: {type(exc).__name__}")
+                           f"library entry is malformed: {type(exc).__name__}",
+                           known=True)
+    # THE FALLBACK IS HELD TO THE CHANNEL CONTRACT. The generated path is
+    # validated and rejected when it breaks it; the fallback and the P1
+    # path were fitted for length only, so what the validator would have
+    # refused as FORMAT - the emoji cap, the allow-list - went out on those
+    # paths unjudged (#112 round 7, SOTA-A, executed). Grounded by itself,
+    # so only the format class is judged here.
+    contract = validate(fallback, channel=channel, facts={"rendered": fallback},
+                        prose_rules=False, **_channel_limits(settings))
+    if not contract.ok and contract.failure_class is FailureClass.FORMAT:
+        return _bare_event(trigger, channel, settings,
+                           f"fallback breaks the channel contract: {contract.reason}",
+                           known=True)
     limits = _channel_limits(settings)
 
     # ONE model attempt per invocation, deliberately. A retry loop here would
@@ -784,15 +814,29 @@ def _select_phrasing(answer: str, phrasings: list[str]) -> int | None:
     return n if 0 <= n < len(phrasings) else None
 
 
+#: Negation AFTER the mandated phrase, within the clause. The first list
+#: held "not/never/no longer" and a few resolutions; "data gaps: none",
+#: "the data gaps have closed", "data gaps don't exist" and "incomplete data
+#: is nothing to worry about" all satisfied a mandate to say the data IS
+#: incomplete (#112 round 7, SOTA-C, executed). The contractions, the bare
+#: "no/none/nil/zero/false", and the verbs of ending count.
 _POST_NEGATOR_RE = re.compile(
-    r"^[^.;!?]{0,40}?\b(?:is|are|was|were|has|have|had)?\s*"
-    r"(?:not|never|no longer)\b"
-    r"|^[^.;!?]{0,40}?\b(?:ruled\s+out|absent|resolved|cleared|"
-    r"corrected|fixed|complete)\b")
+    r"^[^.;!?]{0,40}?(?:"
+    r"\b(?:is|are|was|were|has|have|had|do|does|did|can|could|will|would|"
+    r"should|must)?n't\b"
+    r"|\b(?:is|are|was|were|has|have|had|do|does|did)?\s*"
+    r"(?:not|never|no longer|no|none|nil|nothing|zero|false)\b"
+    r"|\b(?:ruled\s+out|absent|resolved|cleared|corrected|fixed|complete|"
+    r"closed|ended|over|gone|vanished|disappeared|ceased|stopped|lifted|"
+    r"cleared\s+up|filled|healed)\b)")
 
+#: Negation BEFORE the phrase, within the clause: "no data gaps remain" put
+#: the denial first, and "no" was not a negator (#112 round 7, SOTA-C).
 _NEGATOR_RE = re.compile(
-    r"\b(?:not|never|no longer|isn't|is not|aren't|are not|without|"
-    r"ceased to be|stopped being|nothing)\b[^.;!?]*$")
+    r"\b(?:not|never|no longer|no|zero|isn't|is not|aren't|are not|wasn't|"
+    r"weren't|don't|doesn't|didn't|hasn't|haven't|without|free of|free from|"
+    r"lack of|lacks|lacking|ceased to be|stopped being|nothing|none of)\b"
+    r"[^.;!?]*$")
 
 
 def _unmet_mandate(entry: dict[str, Any], text: str) -> str | None:

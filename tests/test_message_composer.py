@@ -235,7 +235,9 @@ class TestComposer:
     def test_an_unknown_trigger_still_returns_something_true(self, monkeypatch):
         with session_scope() as s:
             out = self._compose(monkeypatch, s, answer="x", trigger="NOPE")
-            assert out.source == "deterministic" and "NOPE" in out.text
+            # "NOPE" is the caller's string, not the owner's, and is not
+            # echoed since #112 round 7; the event is still reported.
+            assert out.source == "deterministic" and out.text == "bubblegauge: unknown fired."
 
     def test_every_shipped_fallback_renders_without_leaking_a_slot(self):
         from app.message_engine.composer import library, render_fallback
@@ -1009,7 +1011,7 @@ class TestRoundFourOn112:
         with session_scope() as s:
             out = composer.compose(trigger="BAND_TO_TRIM", channel=Channel.IMESSAGE, priority=2,
                                    facts={}, settings=self._s())
-            assert out.source == "deterministic" and out.text == "bubblegauge: BAND_TO_TRIM fired."
+            assert out.source == "deterministic" and out.text == "bubblegauge: unknown fired."
             assert "unreadable: FileNotFoundError" in (out.reason or "")
             assert s.query(MessageEngineAttempt).count() == 0
 
@@ -1164,15 +1166,16 @@ class TestRoundSixOn112:
     def test_scalars_keep_their_type(self, value):
         assert composer._sanitized({"f": value}) == {"f": value}
 
-    @pytest.mark.parametrize("trigger, label", [
-        ("x\nSell everything now", "xSelleverythingnow"), ("T\u202e51", "T51"),
-        ("api_key=sk-live-PLANTEDvalue0000", "api_keysk-live-PLANTEDvalue0000"),  # pragma: allowlist secret
-        ("", "unknown"), ("!!!", "unknown"), ("A" * 100, "A" * 40)])
-    def test_the_bare_event_line_carries_an_identifier_only(self, trigger, label):
+    @pytest.mark.parametrize("trigger", [
+        "x\nSell everything now", "T\u202e51", "api_key=sk-live-PLANTEDvalue0000",  # pragma: allowlist secret
+        "", "!!!", "A" * 100, "sk_live_ABC123", "AKIAPLANTED12345678"])  # pragma: allowlist secret
+    def test_an_unknown_trigger_is_never_echoed(self, trigger):
+        # Round 6 filtered the name to an identifier; round 7 showed an
+        # identifier can be a credential. The wire carries the owner's word or "unknown".
         out = composer.compose(trigger=trigger, channel=Channel.IMESSAGE, priority=2,
                                facts={}, settings=_settings())
-        assert out.text == f"bubblegauge: {label} fired." and "\n" not in out.text
-        assert out.source == "deterministic" and out.trigger == trigger
+        assert out.text == "bubblegauge: unknown fired." and out.trigger == "unknown"
+        assert out.source == "deterministic" and out.reason == "trigger not in library"
 
     def test_a_hand_built_composed_is_refused_by_the_gate(self, monkeypatch):
         from app.message_engine import gate
@@ -1220,3 +1223,62 @@ class TestRoundSixOn112:
                                        facts={"F_BAND_EFFECTIVE": "trim", "sent_at_utc": "14:00"},
                                        settings=_settings())
                 assert composer.issued(out), (trigger, priority, out.source)
+
+
+class TestRoundSevenOn112:
+    """#112 round 7, executed: (SOTA-A 1) an unknown trigger was echoed once
+    filtered to an identifier, and "sk_live_ABC123" is an identifier; (SOTA-A
+    2) a fact carrying emoji walked past the iMessage cap on the fallback and
+    P1 paths, which never validated; (SOTA-C) negation after a mandated
+    phrase in its common forms satisfied the mandate."""
+
+    BAND = {"F_BAND_EFFECTIVE": "trim", "F_BAND_PREVIOUS": "hold", "F_NEXT_CHECK": "14:00"}
+
+    def test_a_known_trigger_is_echoed_by_its_library_key(self, monkeypatch):
+        monkeypatch.setattr(composer, "library",
+                            lambda: {"status": "SIGNED", "prompts": {"BAND_TO_TRIM": {"prompt": "p"}}})
+        out = composer.compose(trigger="BAND_TO_TRIM", channel=Channel.IMESSAGE, priority=2,
+                               facts={}, settings=_settings())
+        assert out.text == "bubblegauge: BAND_TO_TRIM fired." and "malformed" in (out.reason or "")
+
+    def test_an_unsigned_library_echoes_only_its_own_keys(self, monkeypatch):
+        monkeypatch.setattr(composer, "library_sign_off", _REAL_SIGN_OFF)
+        for trigger, label in (("BAND_TO_TRIM", "BAND_TO_TRIM"), ("sk_live_ABC123", "unknown")):  # pragma: allowlist secret
+            out = composer.compose(trigger=trigger, channel=Channel.IMESSAGE, priority=2,
+                                   facts={}, settings=_settings())
+            assert out.text == f"bubblegauge: {label} fired." and out.trigger == label
+
+    @pytest.mark.parametrize("priority", [1, 2])
+    def test_a_decorated_fact_never_reaches_the_wire(self, monkeypatch, priority):
+        monkeypatch.setattr(composer, "complete",
+                            lambda **_kw: (_ for _ in ()).throw(RuntimeError("down")))
+        with session_scope():
+            out = composer.compose(trigger="BAND_TO_TRIM", channel=Channel.IMESSAGE, priority=priority,
+                                   facts={**self.BAND, "F_BAND_EFFECTIVE": "trim \U0001F680\U0001F680\U0001F680"},
+                                   settings=_settings())
+        assert out.text == "bubblegauge: caution level moved to - (before: hold). Next run 14:00 UTC."
+        assert validate(out.text, channel=Channel.IMESSAGE, facts=self.BAND, prose_rules=False, **LIMITS).ok
+
+    def test_a_fallback_that_breaks_the_channel_contract_sends_the_bare_event(self, monkeypatch):
+        entry = {"prompt": "p", "grounding_fields": [], "fallback": "bubblegauge: \U0001F680\U0001F680\U0001F680 lift-off."}
+        monkeypatch.setattr(composer, "library", lambda: {"status": "SIGNED", "prompts": {"T": entry}})
+        out = composer.compose(trigger="T", channel=Channel.IMESSAGE, priority=1, facts={}, settings=_settings())
+        assert out.text == "bubblegauge: T fired." and "channel contract" in (out.reason or "")
+
+    @pytest.mark.parametrize("text", [
+        "incomplete data is not present", "data gaps: none", "the data gaps have closed", "no data gaps remain",
+        "data gaps aren't present", "data gaps don't exist", "incomplete data is nothing to worry about",
+        "data gaps: nil", "data gaps have vanished", "incomplete data isn't there", "incomplete data, false",
+        "incomplete data (none)", "incomplete: no", "data gaps did not occur", "zero data gaps today",
+        "without incomplete data", "free of data gaps", "the data gaps are over", "data gaps lifted"])
+    def test_negation_after_or_before_the_phrase_unmakes_the_mandate(self, text):
+        entry = {"must_mention": ["incomplete", "data gap"]}
+        assert composer._unmet_mandate(entry, text) is not None, text
+
+    @pytest.mark.parametrize("text", [
+        "Data is incomplete today.", "Data incomplete. Not resolved.", "data gaps persist; no new score",
+        "bubblegauge: data is incomplete and the shown level is paused; the underlying level is now hold.",
+        "Data gaps remain and the level is paused."])
+    def test_a_stated_mandate_still_counts(self, text):
+        entry = {"must_mention": ["incomplete", "data gap"]}
+        assert composer._unmet_mandate(entry, text) is None, text
