@@ -20,9 +20,12 @@ Two invariants shape this file:
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import re
-from dataclasses import dataclass
+import secrets
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from time import monotonic
@@ -61,7 +64,17 @@ _DEADLINE_S = 60.0
 
 @dataclass(frozen=True)
 class Composed:
-    """What the engine produced, and how."""
+    """What the engine produced, and how.
+
+    PROVENANCE IS PROVED, NOT DECLARED. `gate.emit` takes a Composed rather
+    than text so that the composer's product is the only thing it puts on a
+    wire - but the class is public, and a Composed built by hand carried
+    any text past every control the composer applies (#112 round 6, SOTA-A,
+    executed). The token is a keyed digest over the fields, minted only by
+    `_issue` with a key this process draws at import; `issued()` is the
+    gate's check. Building the object is still a deliberate act of the
+    codebase, not a message.
+    """
 
     text: str
     #: generated | fallback | deterministic
@@ -70,6 +83,52 @@ class Composed:
     channel: str
     #: Why the model's text was not used, when it was not.
     reason: str | None = None
+    #: Minted by `_issue`; see the class docstring.
+    token: str = field(default="", repr=False, compare=False)
+
+
+_PROVENANCE_KEY = secrets.token_bytes(32)
+
+
+def _digest(text: str, source: str, trigger: str, channel: str) -> str:
+    parts = "\x1f".join((text, source, trigger, channel)).encode("utf-8")
+    return hmac.new(_PROVENANCE_KEY, parts, hashlib.sha256).hexdigest()
+
+
+def _issue(*, text: str, source: str, trigger: str, channel: str,
+           reason: str | None = None) -> Composed:
+    """A Composed the gate will accept: the composer's own product."""
+    return Composed(text=text, source=source, trigger=trigger, channel=channel,
+                    reason=reason, token=_digest(text, source, trigger, channel))
+
+
+def issued(composed: Composed) -> bool:
+    """Did this process's composer produce exactly this Composed?"""
+    expected = _digest(composed.text, composed.source, composed.trigger, composed.channel)
+    return hmac.compare_digest(composed.token, expected)
+
+
+#: What may fill a slot: a scalar. Anything else - a dict, a list, an object
+#: - rendered as its repr, and a nested credential rode into the fallback
+#: and the prompt past the redaction that only saw strings (#112 round 6,
+#: SOTA-A, executed). A non-scalar fact is no fact: it renders as a dash and
+#: is logged by name.
+_SCALARS = (str, bool, int, float, type(None))
+
+
+def _bare_event(trigger: str, channel: Channel, settings: Settings,
+                reason: str) -> Composed:
+    """The one line the engine says when it cannot say anything else.
+
+    The trigger NAME is the caller's string, and it was interpolated
+    verbatim, so a name carrying a newline, a control or a secret reached an
+    admitted sender (#112 round 6, SOTA-A, executed). Only an identifier's
+    characters survive, bounded, and the line is fitted to the channel.
+    """
+    label = re.sub(r"[^A-Za-z0-9_.\-]+", "", str(trigger))[:40] or "unknown"
+    return _issue(text=_fit(f"bubblegauge: {label} fired.", channel, settings),
+                  source="deterministic", trigger=trigger, channel=channel.value,
+                  reason=reason)
 
 
 def library() -> dict[str, Any]:
@@ -163,13 +222,16 @@ def _slot_value(name: str, facts: dict[str, object]) -> object | None:
 
 
 def _redacted(value: object) -> object:
-    """A string fact through the redaction chokepoint; anything else as is.
+    """A string fact through the redaction chokepoint; a scalar as is; a
+    non-scalar as nothing (#112 round 6).
 
     Applied where a fact is READ for a slot, so the public renderer is safe
     with raw facts too, and never to the literals the code composes itself
     (the override suffix keeps its leading space).
     """
-    return sanitize(value) if isinstance(value, str) else value
+    if isinstance(value, str):
+        return sanitize(value)
+    return value if isinstance(value, _SCALARS) else None
 
 
 def _sanitized(facts: dict[str, object]) -> dict[str, object]:
@@ -182,7 +244,17 @@ def _sanitized(facts: dict[str, object]) -> dict[str, object]:
     the grounding check all see the same values. Non-strings carry no
     credential and keep their type: the override flag is read for truth.
     """
-    return {k: sanitize(v) if isinstance(v, str) else v for k, v in facts.items()}
+    admitted: dict[str, object] = {}
+    for key, value in facts.items():
+        if isinstance(value, str):
+            admitted[key] = sanitize(value)
+        elif isinstance(value, _SCALARS):
+            admitted[key] = value
+        else:
+            log.warning("message_engine_fact_not_scalar", fact=key,
+                        kind=type(value).__name__)
+            admitted[key] = None
+    return admitted
 
 
 def render_fallback(template: str, facts: dict[str, object]) -> str:
@@ -425,7 +497,8 @@ def _prompt_for(entry: dict[str, Any], facts: dict[str, object],
     # fallback and failing open costs a disclosure.
     visible = visible_facts(entry, facts)
     grounded = "\n".join(f"  {key} = {sanitize(value) if isinstance(value, str) else value}"
-                          for key, value in sorted(visible.items()) if value is not None)
+                          for key, value in sorted(visible.items())
+                          if value is not None and isinstance(value, _SCALARS))
     listed = "\n".join(f"  {i}: {t}" for i, t in enumerate(phrasings_for(entry)))
     # The library's own OUTPUT FORMAT is OVERRIDDEN here, last word wins.
     # Eighteen entries ask for two labelled lines, one per channel; twenty
@@ -484,25 +557,19 @@ def compose(*, trigger: str, channel: Channel,
         # unparsable artifact raised out of compose() - a technical error to
         # the caller, retried forever - instead of the operator getting
         # something true (#112 round 4, SOTA-A, defect 3, executed).
-        return Composed(text=f"bubblegauge: {trigger} fired.",
-                        source="deterministic", trigger=trigger,
-                        channel=channel.value,
-                        reason=f"prompt library unreadable: {type(exc).__name__}")
+        return _bare_event(trigger, channel, settings,
+                           f"prompt library unreadable: {type(exc).__name__}")
     unsigned = library_sign_off(lib)
     if unsigned is not None:
         # INERT until the owner signs: no model call, no attempt row, no
         # library text. The line below is not library content, and the gate
         # refuses to send even that while the library is unsigned.
-        return Composed(text=f"bubblegauge: {trigger} fired.",
-                        source="deterministic", trigger=trigger,
-                        channel=channel.value, reason=unsigned)
+        return _bare_event(trigger, channel, settings, unsigned)
     entry = prompts.get(trigger)
     if entry is None:
         # An unknown trigger is a programming error, but the operator still
         # gets something true rather than nothing.
-        return Composed(text=f"bubblegauge: {trigger} fired.",
-                        source="deterministic", trigger=trigger,
-                        channel=channel.value, reason="trigger not in library")
+        return _bare_event(trigger, channel, settings, "trigger not in library")
 
     try:
         phrasings = phrasings_for(entry)
@@ -511,10 +578,8 @@ def compose(*, trigger: str, channel: Channel,
         if not isinstance(entry.get("prompt", ""), str):
             raise TypeError("'prompt' is not text")
     except Exception as exc:  # noqa: BLE001 - a malformed entry is the same class
-        return Composed(text=f"bubblegauge: {trigger} fired.",
-                        source="deterministic", trigger=trigger,
-                        channel=channel.value,
-                        reason=f"library entry is malformed: {type(exc).__name__}")
+        return _bare_event(trigger, channel, settings,
+                           f"library entry is malformed: {type(exc).__name__}")
     limits = _channel_limits(settings)
 
     # ONE model attempt per invocation, deliberately. A retry loop here would
@@ -539,7 +604,7 @@ def compose(*, trigger: str, channel: Channel,
         # round 3, SOTA-A, executed). The contract is now the entry's own
         # "llm": false, and the branch is the P1 short-circuit's shape: no
         # model, no claim, no row.
-        return Composed(text=fallback, source="deterministic", trigger=trigger,
+        return _issue(text=fallback, source="deterministic", trigger=trigger,
                         channel=channel.value,
                         reason="fixed trigger: never LLM-generated")
 
@@ -564,7 +629,7 @@ def compose(*, trigger: str, channel: Channel,
         # writer - the governor's no-session short-circuit defeated by its own
         # caller (offline pass after #106 round 9, executed). The governor's
         # `short_circuit` is now the one place these verdicts live.
-        return Composed(text=fallback, source="deterministic", trigger=trigger,
+        return _issue(text=fallback, source="deterministic", trigger=trigger,
                         channel=channel.value, reason=short.reason)
 
     # The iteration and the last failure class are derived from the rows BY
@@ -670,7 +735,7 @@ def compose(*, trigger: str, channel: Channel,
             # one the governor has accounted for.
             return _fallback(trigger, channel, priority, fallback,
                              "reply arrived after the claim expired", finished)
-        return Composed(text=text, source="generated", trigger=trigger,
+        return _issue(text=text, source="generated", trigger=trigger,
                         channel=channel.value)
 
     _close(claim_id,
@@ -819,7 +884,7 @@ def _fallback(trigger: str, channel: Channel, priority: int,
         # Recording is bookkeeping; the text is the promise. A locked database
         # loses this row, never the message.
         pass
-    return Composed(text=text, source="fallback", trigger=trigger,
+    return _issue(text=text, source="fallback", trigger=trigger,
                     channel=channel.value, reason=reason)
 
 

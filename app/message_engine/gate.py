@@ -100,6 +100,12 @@ def emit(session: Any, *, composed: composer.Composed, recipient_ref: str,
     branched on.
     """
     trigger, text = composed.trigger, composed.text
+    if not composer.issued(composed):
+        # A Composed built by hand is not the composer's product, whatever
+        # its fields say (#112 round 6, SOTA-A, executed).
+        log.warning("message_engine_unissued_composed", trigger=trigger,
+                    priority=priority)
+        return EmitResult(sent=False, blockers=("not issued by the composer",))
     # The library must be SIGNED before anything of the engine's reaches a
     # wire (ruling Q34; #112 round 2, SOTA-A, executed): checked here as
     # well as in compose(), because a Composed can be built by hand.

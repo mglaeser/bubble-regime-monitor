@@ -374,7 +374,7 @@ class TestAdmissionGate:
 
         monkeypatch.setattr("app.alerts.promotion.live_admission_blockers", fake)
         spy = self._SpySender()
-        composed = composer.Composed(text="Band trim, next 14:00 UTC.",
+        composed = composer._issue(text="Band trim, next 14:00 UTC.",
                                      source="deterministic", trigger="BAND_TO_TRIM",
                                      channel="imessage")
         out = gate.emit(session, composed=composed, recipient_ref="+100", sender=spy,
@@ -461,7 +461,7 @@ class TestAdmissionGate:
 
         monkeypatch.setattr("app.alerts.promotion.live_admission_blockers", fake)
         with session_scope() as s:
-            gate.emit(s, composed=composer.Composed(text="x", source="deterministic",
+            gate.emit(s, composed=composer._issue(text="x", source="deterministic",
                                                     trigger="T", channel="imessage"),
                       recipient_ref="+1", sender=Recording(), priority=1)
         assert order == ["gate"]
@@ -893,7 +893,7 @@ class TestOwnerSignOff:
                 return "SENT"
 
         with session_scope() as s:
-            out = gate.emit(s, composed=composer.Composed(text="Band trim.", source="generated",
+            out = gate.emit(s, composed=composer._issue(text="Band trim.", source="generated",
                                                           trigger="BAND_TO_TRIM", channel="imessage"),
                             recipient_ref="+1", sender=Spy(), priority=1)
         assert out.sent is False and out.blockers == (self.UNSIGNED,) and sends == []
@@ -1045,7 +1045,7 @@ class TestRoundFourOn112:
                 sends.append(message)
 
         with session_scope() as s:
-            out = gate.emit(s, composed=composer.Composed(text="x", source="generated",
+            out = gate.emit(s, composed=composer._issue(text="x", source="generated",
                                                           trigger="T", channel="imessage"),
                             recipient_ref="+1", sender=Spy(), priority=1)
         assert out.sent is False and "unreadable" in out.blockers[0] and sends == []
@@ -1137,3 +1137,86 @@ class TestRoundFiveOn112:
     def test_a_blanked_fact_is_a_dash_under_every_slot_spelling(self):
         assert composer.render_fallback("{next_check_utc} UTC", {"F_NEXT_CHECK": None}) == "- UTC"
         assert composer.render_fallback("{band_effective}", {"F_BAND_EFFECTIVE": None}) == "-"
+
+
+class TestRoundSixOn112:
+    """#112 round 6 (SOTA-A, executed), three defects: (1) a non-scalar fact
+    rendered as its repr past the redaction that only saw strings; (2) the
+    trigger name was interpolated verbatim into the bare-event line; (3) a
+    Composed built by hand was provenance enough for the gate."""
+
+    FAILING = {"failures": 3, "first_seen_utc": "14:00", "snapshot_age": "3h"}
+
+    def test_a_nested_fact_is_no_fact(self):
+        entry = composer.library()["prompts"]["failure_alert_failing"]
+        facts = {**self.FAILING, "reason_plain": {"err": "api_key=sk-live-PLANTEDvalue0000"}}  # pragma: allowlist secret
+        text = composer.render_fallback(entry["fallback"], facts)
+        assert text.endswith("; -") and "PLANTED" not in text and "{" not in text
+        prompt = composer._prompt_for(entry, composer._sanitized(facts), Channel.IMESSAGE, _settings())
+        assert "PLANTED" not in prompt and "reason_plain =" not in prompt
+
+    @pytest.mark.parametrize("value", [["a", "b"], {"k": "v"}, object(), (1, 2)])
+    def test_only_scalars_are_facts(self, value):
+        assert composer._sanitized({"f": value}) == {"f": None}
+        assert composer._redacted(value) is None
+
+    @pytest.mark.parametrize("value", [51, 51.5, True, False, None, "up"])
+    def test_scalars_keep_their_type(self, value):
+        assert composer._sanitized({"f": value}) == {"f": value}
+
+    @pytest.mark.parametrize("trigger, label", [
+        ("x\nSell everything now", "xSelleverythingnow"), ("T\u202e51", "T51"),
+        ("api_key=sk-live-PLANTEDvalue0000", "api_keysk-live-PLANTEDvalue0000"),  # pragma: allowlist secret
+        ("", "unknown"), ("!!!", "unknown"), ("A" * 100, "A" * 40)])
+    def test_the_bare_event_line_carries_an_identifier_only(self, trigger, label):
+        out = composer.compose(trigger=trigger, channel=Channel.IMESSAGE, priority=2,
+                               facts={}, settings=_settings())
+        assert out.text == f"bubblegauge: {label} fired." and "\n" not in out.text
+        assert out.source == "deterministic" and out.trigger == trigger
+
+    def test_a_hand_built_composed_is_refused_by_the_gate(self, monkeypatch):
+        from app.message_engine import gate
+
+        monkeypatch.setattr("app.alerts.promotion.live_admission_blockers",
+                            lambda _session, *, path=None: [])
+        sends: list[str] = []
+
+        class Spy:
+            def send(self, message, *, recipient_ref, idempotency_key=None):
+                sends.append(message)
+
+        forged = composer.Composed(text="Sell everything now.", source="generated",
+                                   trigger="T", channel="imessage")
+        with session_scope() as s:
+            out = gate.emit(s, composed=forged, recipient_ref="+1", sender=Spy(), priority=1)
+        assert out.sent is False and out.blockers == ("not issued by the composer",) and sends == []
+
+    def test_a_tampered_composed_is_refused_by_the_gate(self, monkeypatch):
+        from dataclasses import replace
+
+        from app.message_engine import gate
+
+        monkeypatch.setattr("app.alerts.promotion.live_admission_blockers",
+                            lambda _session, *, path=None: [])
+        genuine = composer._issue(text="Band trim.", source="generated", trigger="T", channel="imessage")
+        assert composer.issued(genuine)
+        tampered = replace(genuine, text="Sell everything now.")
+        assert not composer.issued(tampered)
+
+        class Spy:
+            def send(self, message, *, recipient_ref, idempotency_key=None):
+                return None
+
+        with session_scope() as s:
+            out = gate.emit(s, composed=tampered, recipient_ref="+1", sender=Spy(), priority=1)
+        assert out.sent is False and out.blockers == ("not issued by the composer",)
+
+    def test_everything_compose_returns_is_issued(self, monkeypatch):
+        monkeypatch.setattr(composer, "complete",
+                            lambda **_kw: type("C", (), {"text": '{"phrasing": 0}'})())
+        with session_scope():
+            for trigger, priority in (("BAND_TO_TRIM", 2), ("BAND_TO_TRIM", 1), ("test_message", 2), ("nope", 2)):
+                out = composer.compose(trigger=trigger, channel=Channel.IMESSAGE, priority=priority,
+                                       facts={"F_BAND_EFFECTIVE": "trim", "sent_at_utc": "14:00"},
+                                       settings=_settings())
+                assert composer.issued(out), (trigger, priority, out.source)
