@@ -41,6 +41,7 @@ from app.message_engine.validator import (
     ValidationResult,
     validate,
 )
+from app.redaction import sanitize
 
 #: The library ships beside the content artifact it is a sibling of.
 #: parents[2] is the repo root: this file sits at app/message_engine/, so
@@ -88,7 +89,12 @@ def library_sign_off(lib: dict[str, Any] | None = None) -> str | None:
     `compose()` is inert and `gate.emit` refuses. A library with no status
     is unsigned too.
     """
-    lib = library() if lib is None else lib
+    if lib is None:
+        try:
+            lib = library()
+        except Exception as exc:  # noqa: BLE001 - an unreadable library is unsigned
+            return (f"prompt library unreadable, so nothing is signed off: "
+                    f"{type(exc).__name__} (ruling Q34)")
     status = str(lib.get("status", "")).strip()
     if _SIGNED_RE.match(status):
         return None
@@ -130,7 +136,7 @@ def _slot_value(name: str, facts: dict[str, object]) -> object | None:
     resolves to nothing still degrades to a readable dash.
     """
     if name in facts:
-        return facts[name]
+        return _redacted(facts[name])
     if name == "override_suffix":
         # The library's note defines it: the literal " OVERRIDE" when the
         # override fired, else empty - a suffix, so never a dash. Resolved
@@ -147,8 +153,31 @@ def _slot_value(name: str, facts: dict[str, object]) -> object | None:
                 # UTC"), so a fact that already carries one rendered
                 # "14:00 UTC UTC". A *_utc slot is the bare time.
                 value = _TRAILING_ZONE_RE.sub("", str(value))
-            return value
+            return _redacted(value)
     return None
+
+
+def _redacted(value: object) -> object:
+    """A string fact through the redaction chokepoint; anything else as is.
+
+    Applied where a fact is READ for a slot, so the public renderer is safe
+    with raw facts too, and never to the literals the code composes itself
+    (the override suffix keeps its leading space).
+    """
+    return sanitize(value) if isinstance(value, str) else value
+
+
+def _sanitized(facts: dict[str, object]) -> dict[str, object]:
+    """The facts with every string value passed through the redaction
+    chokepoint. A fact can be an upstream error verbatim - the failure
+    alert's `reason_plain` is one - and four of this service's upstreams put
+    their key in the query string, so an unconstrained fact put credentials
+    on their way to the model and to a phone (#112 round 4, SOTA-A, defect
+    1, executed). Sanitised ONCE, here, so the rendered text, the prompt and
+    the grounding check all see the same values. Non-strings carry no
+    credential and keep their type: the override flag is read for truth.
+    """
+    return {k: sanitize(v) if isinstance(v, str) else v for k, v in facts.items()}
 
 
 def render_fallback(template: str, facts: dict[str, object]) -> str:
@@ -258,15 +287,40 @@ def _fit_sms(text: str, cap: int) -> str:
     cut = text
     while cut and septets(cut) > room:
         cut = cut[:-1]
+    cut = text[:_before_numeral(text, len(cut))]
     space = cut.rfind(" ")
     if space >= len(cut) // 2:
         cut = cut[:space]
     return cut.rstrip(" ,;:-") + marker
 
 
+#: One numeral as a reader sees it: sign, digits, and the joined forms - a
+#: decimal, a thousands group, a time, a ratio, a date or a range - with an
+#: optional percent.
+_NUMERAL_TOKEN_RE = re.compile(r"[-+\u2212]?\d+(?:[.,:/\-]\d+)*%?")
+
+
+def _before_numeral(text: str, pos: int) -> int:
+    """`pos`, or the start of the numeral it falls inside.
+
+    A cut that lands inside a numeral ships a DIFFERENT number: "Flags
+    123456789/4" clipped after five digits reads 12345. The facts are
+    unbounded, so the clip backs off to the start of the numeral it would
+    have split, and the marker takes its place (#112 round 4, SOTA-A, defect
+    2, executed). A numeral that is itself longer than the room leaves
+    nothing but the marker, which is the honest message.
+    """
+    for found in _NUMERAL_TOKEN_RE.finditer(text):
+        if found.start() >= pos:
+            break
+        if pos < found.end():
+            return found.start()
+    return pos
+
+
 def _clip(text: str, room: int) -> str:
     """Cut on a word boundary where one is available without gutting it."""
-    cut = text[:room]
+    cut = text[:_before_numeral(text, room)]
     space = cut.rfind(" ")
     if space >= room // 2:
         cut = cut[:space]
@@ -317,7 +371,8 @@ def _prompt_for(entry: dict[str, Any], facts: dict[str, object],
     # gets nothing rather than everything, because failing closed here costs a
     # fallback and failing open costs a disclosure.
     visible = visible_facts(entry, facts)
-    grounded = "\n".join(f"  {key} = {value}" for key, value in sorted(visible.items()))
+    grounded = "\n".join(f"  {key} = {sanitize(value) if isinstance(value, str) else value}"
+                          for key, value in sorted(visible.items()))
     listed = "\n".join(f"  {i}: {t}" for i, t in enumerate(phrasings_for(entry)))
     # The library's own OUTPUT FORMAT is OVERRIDDEN here, last word wins.
     # Eighteen entries ask for two labelled lines, one per channel; twenty
@@ -364,7 +419,22 @@ def compose(*, trigger: str, channel: Channel,
     """
     settings = settings or get_settings()
     moment = now or datetime.now(UTC)
-    lib = library()
+    facts = _sanitized(facts)
+    try:
+        lib = library()
+        prompts = lib["prompts"]
+        if not isinstance(prompts, dict):
+            raise TypeError("'prompts' is not a mapping")
+    except Exception as exc:  # noqa: BLE001 - the promise is "never raises"
+        # THE LIBRARY IS DATA, AND DATA CAN BE MISSING OR MALFORMED. It was
+        # read outside the boundary this function promises, so a missing or
+        # unparsable artifact raised out of compose() - a technical error to
+        # the caller, retried forever - instead of the operator getting
+        # something true (#112 round 4, SOTA-A, defect 3, executed).
+        return Composed(text=f"bubblegauge: {trigger} fired.",
+                        source="deterministic", trigger=trigger,
+                        channel=channel.value,
+                        reason=f"prompt library unreadable: {type(exc).__name__}")
     unsigned = library_sign_off(lib)
     if unsigned is not None:
         # INERT until the owner signs: no model call, no attempt row, no
@@ -373,7 +443,7 @@ def compose(*, trigger: str, channel: Channel,
         return Composed(text=f"bubblegauge: {trigger} fired.",
                         source="deterministic", trigger=trigger,
                         channel=channel.value, reason=unsigned)
-    entry = lib["prompts"].get(trigger)
+    entry = prompts.get(trigger)
     if entry is None:
         # An unknown trigger is a programming error, but the operator still
         # gets something true rather than nothing.
@@ -381,8 +451,16 @@ def compose(*, trigger: str, channel: Channel,
                         source="deterministic", trigger=trigger,
                         channel=channel.value, reason="trigger not in library")
 
-    phrasings = phrasings_for(entry)
-    fallback = _fit(render_fallback(phrasings[0], facts), channel, settings)
+    try:
+        phrasings = phrasings_for(entry)
+        fallback = _fit(render_fallback(phrasings[0], facts), channel, settings)
+        if not isinstance(entry.get("prompt", ""), str):
+            raise TypeError("'prompt' is not text")
+    except Exception as exc:  # noqa: BLE001 - a malformed entry is the same class
+        return Composed(text=f"bubblegauge: {trigger} fired.",
+                        source="deterministic", trigger=trigger,
+                        channel=channel.value,
+                        reason=f"library entry is malformed: {type(exc).__name__}")
     limits = _channel_limits(settings)
 
     # ONE model attempt per invocation, deliberately. A retry loop here would

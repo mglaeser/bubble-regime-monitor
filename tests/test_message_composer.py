@@ -942,3 +942,110 @@ class TestRoundThreeOn112:
         by_note = {n for n, e in prompts.items() if "never llm-generated" in str(e.get("notes", "")).lower()}
         by_flag = {n for n, e in prompts.items() if e.get("llm") is False}
         assert by_note == by_flag == {"test_message", "host_outage"}
+
+
+class TestRoundFourOn112:
+    """#112 round 4 (SOTA-A, executed), three defects: (1) a fact is rendered
+    and shown to the model unconstrained, and the failure alert's reason_plain
+    is an upstream error verbatim - credentials reached the wire; (2) a clip
+    could land inside a numeral and ship a different number; (3) the library
+    was read outside compose()'s "never raises" boundary."""
+
+    CREDENTIAL = ("HTTPError 401 for https://user:hunter2@x.io/v1?api_key=sk-live-ABCDEF1234567890 "
+                  "Authorization: Bearer eyJhbGciOi.eyJzdWIiOiIx.abc")
+    FAILING = {"failures": 3, "first_seen_utc": "14:00", "snapshot_age": "3h"}
+
+    def _s(self, **kw):
+        base = {"sms_max_len": 150, "message_engine_imessage_max_chars": 200}
+        base.update(kw)
+        return _settings(**base)
+
+    def test_a_credential_in_a_fact_never_reaches_the_wire(self):
+        entry = composer.library()["prompts"]["failure_alert_failing"]
+        text = composer.render_fallback(entry["fallback"], {**self.FAILING, "reason_plain": self.CREDENTIAL})
+        for secret in ("hunter2", "sk-live", "ABCDEF1234567890", "eyJhbGciOi"):
+            assert secret not in text, (secret, text)
+        assert "bubblegauge FAILING: compute failed x3 since 14:00" in text
+
+    def test_a_credential_in_a_fact_never_reaches_the_model(self, monkeypatch):
+        seen: list[str] = []
+
+        def complete(*, user, **_kw):
+            seen.append(user)
+            return type("C", (), {"text": '{"phrasing": 0}'})()
+
+        monkeypatch.setattr(composer, "complete", complete)
+        with session_scope():
+            composer.compose(trigger="failure_alert_failing", channel=Channel.IMESSAGE, priority=2,
+                             facts={**self.FAILING, "reason_plain": self.CREDENTIAL}, settings=self._s())
+        assert seen and "hunter2" not in seen[0] and "sk-live" not in seen[0] and "eyJhbGciOi" not in seen[0]
+        assert "[redacted]" in seen[0]
+
+    def test_the_override_flag_keeps_its_truth_through_sanitising(self):
+        facts = composer._sanitized({"override_fired": False, "n": 51, "s": "up"})
+        assert facts == {"override_fired": False, "n": 51, "s": "up"}
+
+    @pytest.mark.parametrize("channel", [Channel.SMS, Channel.IMESSAGE])
+    def test_a_clip_never_lands_inside_a_numeral(self, channel):
+        head = "bubblegauge " + "x" * 118 + " Flags "        # the numeral starts at 137
+        text = head + "123456789012345/4."                    # 155 chars: the cut lands in the numeral
+        assert len(text) > 150
+        out = composer._fit(text, channel, self._s(sms_max_len=150, message_engine_imessage_max_chars=150))
+        digits = re.findall(r"\d+(?:[.,:/\-]\d+)*", out)
+        assert digits == [], (out, digits)               # no partial numeral shipped
+        assert out.startswith("bubblegauge x")
+
+    def test_a_clip_after_a_whole_numeral_keeps_it(self):
+        text = "Score 51.75 and " + "y" * 200
+        out = composer._clip(text, 150)
+        assert out.startswith("Score 51.75 and")
+
+    def test_a_numeral_longer_than_the_room_leaves_only_the_marker(self):
+        assert composer._clip("9" * 300, 150) == ""
+        assert composer._fit("9" * 300, Channel.IMESSAGE, self._s()) == "\u2026"
+
+    def test_a_missing_library_is_a_deterministic_message_not_a_raise(self, monkeypatch):
+        monkeypatch.setattr(composer, "_LIBRARY", Path("/nonexistent/message_prompts.v1.json"))
+        with session_scope() as s:
+            out = composer.compose(trigger="BAND_TO_TRIM", channel=Channel.IMESSAGE, priority=2,
+                                   facts={}, settings=self._s())
+            assert out.source == "deterministic" and out.text == "bubblegauge: BAND_TO_TRIM fired."
+            assert "unreadable: FileNotFoundError" in (out.reason or "")
+            assert s.query(MessageEngineAttempt).count() == 0
+
+    @pytest.mark.parametrize("body, exc", [
+        ("{not json", "JSONDecodeError"), ('{"status": "SIGNED", "prompts": "no"}', "TypeError"),
+        ('{"status": "SIGNED"}', "KeyError")])
+    def test_a_malformed_library_is_a_deterministic_message_not_a_raise(self, monkeypatch, tmp_path, body, exc):
+        bad = tmp_path / "message_prompts.v1.json"
+        bad.write_text(body, encoding="utf-8")
+        monkeypatch.setattr(composer, "_LIBRARY", bad)
+        out = composer.compose(trigger="BAND_TO_TRIM", channel=Channel.IMESSAGE, priority=2,
+                               facts={}, settings=self._s())
+        assert out.source == "deterministic" and exc in (out.reason or ""), out.reason
+
+    def test_a_malformed_entry_is_a_deterministic_message_not_a_raise(self, monkeypatch):
+        monkeypatch.setattr(composer, "library",
+                            lambda: {"status": "SIGNED", "prompts": {"BAND_TO_TRIM": {"prompt": "p"}}})
+        out = composer.compose(trigger="BAND_TO_TRIM", channel=Channel.IMESSAGE, priority=2,
+                               facts={}, settings=self._s())
+        assert out.source == "deterministic" and "malformed: KeyError" in (out.reason or "")
+
+    def test_an_unreadable_library_is_unsigned_and_emit_refuses(self, monkeypatch):
+        from app.message_engine import gate
+
+        monkeypatch.setattr(composer, "library_sign_off", _REAL_SIGN_OFF)
+        monkeypatch.setattr(composer, "_LIBRARY", Path("/nonexistent/message_prompts.v1.json"))
+        monkeypatch.setattr("app.alerts.promotion.live_admission_blockers",
+                            lambda _session, *, path=None: [])
+        sends: list[str] = []
+
+        class Spy:
+            def send(self, message, *, recipient_ref, idempotency_key=None):
+                sends.append(message)
+
+        with session_scope() as s:
+            out = gate.emit(s, composed=composer.Composed(text="x", source="generated",
+                                                          trigger="T", channel="imessage"),
+                            recipient_ref="+1", sender=Spy(), priority=1)
+        assert out.sent is False and "unreadable" in out.blockers[0] and sends == []
