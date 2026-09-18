@@ -1127,13 +1127,15 @@ class TestRoundFiveOn112:
         kept = composer._prose_screened({}, {"a": "breadth narrow, credit tight", "b": self.HOSTILE, "n": 51})
         assert kept == {"a": "breadth narrow, credit tight", "b": None, "n": 51}
 
-    def test_authorized_prose_is_the_renderers_and_is_not_judged(self):
+    def test_authorized_prose_is_the_registrys_own_text(self):
         # The reminder's summary is the phrase registry's own rule-approved
         # text (its library note), and that registry is not written in the
-        # validator's English.
+        # validator's English. Since round 8 the claim is checked against
+        # the registry, not trusted by key.
         entry = composer.library()["prompts"]["reminder"]
         assert entry["authorized_prose"] == ["condition_summary"]
-        facts = {"active_duration": "3d", "condition_summary": "Wochenrueckblick: keine Ereignisse."}
+        rendered = "Stufe trim (vorher hold). Regime sonst unveraendert. Naechster Lauf 14:00 UTC."
+        facts = {"active_duration": "3d", "condition_summary": rendered}
         assert composer._prose_screened(entry, facts) == facts
 
     def test_a_blanked_fact_is_a_dash_under_every_slot_spelling(self):
@@ -1282,3 +1284,56 @@ class TestRoundSevenOn112:
     def test_a_stated_mandate_still_counts(self, text):
         entry = {"must_mention": ["incomplete", "data gap"]}
         assert composer._unmet_mandate(entry, text) is None, text
+
+
+class TestRoundEightOn112:
+    """#112 round 8 (SOTA-A, executed): `authorized_prose` trusted a KEY, so a
+    caller's "sell everything now" under condition_summary was rendered and
+    sendable. Authorization is now proved against the phrase registry: the
+    value must parse as a join of its fragments with bounded slot values."""
+
+    REMINDER = {"active_duration": "3d"}
+
+    def _compose(self, monkeypatch, summary, priority=2):
+        monkeypatch.setattr(composer, "complete",
+                            lambda **_kw: type("C", (), {"text": '{"phrasing": 0}'})())
+        with session_scope():
+            return composer.compose(trigger="reminder", channel=Channel.IMESSAGE, priority=priority,
+                                    facts={**self.REMINDER, "condition_summary": summary}, settings=_settings())
+
+    @pytest.mark.parametrize("priority", [1, 2])
+    def test_the_ledger_scenario(self, monkeypatch, priority):
+        out = self._compose(monkeypatch, "sell everything now", priority)
+        assert out.text == "bubblegauge reminder, still active 3d: -"
+
+    @pytest.mark.parametrize("summary", [
+        "Stufe trim (vorher hold). Regime sonst unveraendert. Naechster Lauf 14:00 UTC.",
+        "Regime sonst unveraendert.", "Daten lueckenhaft. Kontext veraltet."])
+    def test_registry_text_is_admitted_as_it_is(self, monkeypatch, summary):
+        assert composer.registry_authored(summary)
+        out = self._compose(monkeypatch, summary)
+        assert out.text == f"bubblegauge reminder, still active 3d: {summary}"
+
+    @pytest.mark.parametrize("summary", [
+        "Stufe trim (vorher hold). Sell everything now.",        # a fragment, then not one
+        "Regime sonst unveraendert. sell", "Stufe trim (vorher hold).Regime sonst unveraendert.",
+        "Stufe " + "x" * 40 + " (vorher hold).",                # a slot value past its width
+        "", "Stufe trim (vorher hold) "])
+    def test_anything_else_under_the_key_is_not_the_registrys(self, summary):
+        assert not composer.registry_authored(summary)
+
+    def test_an_unreadable_registry_authorizes_nothing(self, monkeypatch):
+        monkeypatch.setattr(composer, "_REGISTRY_MATCHER", None)
+        monkeypatch.setattr(composer, "REPO_PHRASES", Path("/nonexistent/alert_phrases.json"))
+        try:
+            assert not composer.registry_authored("Regime sonst unveraendert.")
+            entry = composer.library()["prompts"]["reminder"]
+            kept = composer._prose_screened(entry, {"condition_summary": "Regime sonst unveraendert."})
+            assert kept == {"condition_summary": None}
+        finally:
+            monkeypatch.setattr(composer, "_REGISTRY_MATCHER", None)
+
+    def test_a_key_alone_authorizes_nothing(self):
+        entry = {"authorized_prose": ["s"]}
+        assert composer._prose_screened(entry, {"s": "you should sell"}) == {"s": None}
+        assert composer._prose_screened(entry, {"s": "no data for SPY"}) == {"s": "no data for SPY"}

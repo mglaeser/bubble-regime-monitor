@@ -33,6 +33,8 @@ from typing import Any
 
 from sqlalchemy.exc import SQLAlchemyError
 
+from app.alerts.artifacts import REPO_PHRASES
+from app.alerts.phrase_registry import JOIN, validate_phrase_set
 from app.config import Settings, get_settings
 from app.llm_gateway import (
     complete,
@@ -443,6 +445,44 @@ def visible_facts(entry: dict[str, Any], facts: dict[str, object]
     return {k: v for k, v in facts.items() if k in declared}
 
 
+_REGISTRY_MATCHER: re.Pattern[str] | None = None
+
+
+def _registry_matcher() -> re.Pattern[str]:
+    """A pattern that matches exactly what the alert renderer can produce.
+
+    The renderer joins reviewed fragments - headlines, phrases, next-checks,
+    caveats - with their slots filled from bounded facts. A text is the
+    registry's if and only if it parses as such a join; the registry's own
+    max_width bounds each slot. Read once from the shipped phrase set; an
+    unreadable set authorizes nothing.
+    """
+    global _REGISTRY_MATCHER
+    if _REGISTRY_MATCHER is None:
+        try:
+            phrase_set = validate_phrase_set(REPO_PHRASES.read_text(encoding="utf-8"))
+            fragments = []
+            for table in (phrase_set.headlines, phrase_set.phrases,
+                          phrase_set.next_checks, phrase_set.caveats):
+                for fragment in table.values():
+                    pattern = re.escape(fragment.text)
+                    for slot in fragment.slots:
+                        width = phrase_set.facts[slot].max_width if slot in phrase_set.facts else 12
+                        pattern = pattern.replace(re.escape("{" + slot + "}"), rf"\S{{1,{width}}}")
+                    fragments.append(pattern)
+            one = "(?:" + "|".join(fragments) + ")"
+            _REGISTRY_MATCHER = re.compile(rf"^{one}(?:{re.escape(JOIN)}{one})*$")
+        except Exception as exc:  # noqa: BLE001 - nothing is authorized, and that is logged
+            log.warning("message_engine_registry_unreadable", error=type(exc).__name__)
+            _REGISTRY_MATCHER = re.compile(r"(?!)")
+    return _REGISTRY_MATCHER
+
+
+def registry_authored(text: str) -> bool:
+    """Is this text something the alert renderer could have produced?"""
+    return _registry_matcher().fullmatch(text) is not None
+
+
 #: The screen judges MEANING only: the channel limits are out of the way
 #: (the fit owns length), and the format class is ignored.
 _SCREEN_LIMITS = {"sms_max_len": 100_000, "imessage_max_chars": 100_000,
@@ -469,13 +509,21 @@ def _prose_screened(entry: dict[str, Any], facts: dict[str, object]) -> dict[str
       an order and a score as a quotient, and neither is the atom's doing.
 
     Fields the entry declares as `authorized_prose` are the renderer's own
-    rule-approved text and are not judged. A refused fact renders as a
-    dash, is not shown to the model, and is logged by name, never by value.
+    rule-approved text - PROVED, not trusted by key: the value must parse as
+    a join of the phrase registry's fragments (round 5 trusted the key, and
+    a caller's "sell everything now" under it was rendered and sendable -
+    #112 round 8, SOTA-A, executed). Registry text is admitted as it is;
+    anything else under the key is judged like any other fact. A refused
+    fact renders as a dash, is not shown to the model, and is logged by
+    name, never by value.
     """
     authorized = set(entry.get("authorized_prose") or [])
     kept: dict[str, object] = {}
     for key, value in facts.items():
-        if not isinstance(value, str) or key in authorized:
+        if not isinstance(value, str):
+            kept[key] = value
+            continue
+        if key in authorized and registry_authored(value):
             kept[key] = value
             continue
         result = validate(value, channel=Channel.IMESSAGE, facts={key: value},
