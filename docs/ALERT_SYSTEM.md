@@ -267,6 +267,15 @@ stage had been reached. Capture writes one immutable evidence row per recompute
 in its own transaction; it calls no provider, alters no score and cannot roll
 back a snapshot.
 
+`MESSAGE_LANGUAGE` (`en` | `de`; unset, each artifact speaks its own language)
+selects the language of every operator message. A phrase set may carry more than one language — since v3.5
+each fragment's `text` is an object keyed by language, and `meta.languages`
+lists them — and the renderer writes the selected one; a language the promoted
+set does not carry falls back to the set's own default (`meta.language`), which
+the validation report states. Every language is held to the worst-case fit, and
+the registry stores one digest for the whole set: switching language is a
+setting, not a re-promotion. The honesty lint reads both vocabularies.
+
 `ALERTS_MODE` is the switch that decides whether the service *acts*, and it is
 the one that defaults off. Enabling alerts never implies capture, and `live` is
 never reached automatically: it needs promoted artifacts *and* a deliberate

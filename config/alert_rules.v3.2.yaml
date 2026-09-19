@@ -27,13 +27,13 @@
 # not get to be ambiguous.
 
 meta:
-  rule_version: "v3.2.2"
+  rule_version: "v3.2.3"
   alert_input_schema_version: 1
   methodology_version: "v4.1-s4-asymmetric-contested"
   methodology_manifest_sha256: "bfb3d9a536e70042ada48ab4c2ffa29ac052540171b55f158e4f2b15d7fe5483"  # pragma: allowlist secret  (public content hash of frozen_methodology.json)
   min_service_version: "3.8.0"
   max_service_version: "3.99.99"
-  phrase_set: "v3.4"
+  phrase_set: "v3.5"
   evaluator_version: "1"
   active_stage: 3
   note: >-
@@ -90,7 +90,7 @@ rules:
     group_key: regime
     quiet_hours_exempt: true
     budget_exempt: true
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     render:
       headline_code: BAND_TO_DERISK
       allowed_phrase_codes: []
@@ -128,7 +128,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: regime
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     render:
       headline_code: BAND_TO_TRIM
       allowed_phrase_codes: []
@@ -166,7 +166,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: regime
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     render:
       headline_code: BAND_TO_HOLD
       allowed_phrase_codes: []
@@ -207,7 +207,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: regime
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     render:
       headline_code: BASE_BAND_MOVED
       allowed_phrase_codes: []
@@ -250,7 +250,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: regime
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: []
 
   - rule_id: regime.score_trend_7d
@@ -288,7 +288,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: regime
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: []
 
   # A proximity warning on the MEDIAN, not a second band edge: 57 is a JUDG
@@ -331,7 +331,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: regime
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: [NOT_A_PROBABILITY]
 
   - rule_id: regime.iqr_edge_cross
@@ -363,7 +363,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: regime
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: [NOT_A_PROBABILITY]
 
   # =======================================================================
@@ -403,7 +403,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: override
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: []
 
   # "One short of the override" WITHOUT hardcoding three: the requirement is
@@ -441,7 +441,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: override
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: []
 
   - rule_id: override.fires
@@ -472,7 +472,7 @@ rules:
     group_key: override
     quiet_hours_exempt: true
     budget_exempt: true
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     render:
       headline_code: OVERRIDE_FIRES
       allowed_phrase_codes: []
@@ -506,7 +506,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: override
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     render:
       headline_code: OVERRIDE_RESOLVES
       allowed_phrase_codes: []
@@ -559,7 +559,7 @@ rules:
     group_key: legs
     quiet_hours_exempt: true
     budget_exempt: true
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     render:
       headline_code: FABER_OUT_HIGH_RISK
       allowed_phrase_codes: []
@@ -595,7 +595,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: legs
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     render:
       headline_code: FABER_OUT
       allowed_phrase_codes: []
@@ -631,7 +631,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: legs
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     render:
       headline_code: FABER_OUT
       allowed_phrase_codes: []
@@ -667,7 +667,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: legs
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     render:
       headline_code: FABER_BACK_IN
       allowed_phrase_codes: []
@@ -703,7 +703,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: legs
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     render:
       headline_code: FABER_BACK_IN
       allowed_phrase_codes: []
@@ -744,7 +744,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: legs
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: []
 
   - rule_id: legs.faber_prewarning
@@ -775,7 +775,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: legs
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: []
 
   # =======================================================================
@@ -808,7 +808,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: tripwire
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     render:
       headline_code: RF4_FIRST
       allowed_phrase_codes: []
@@ -847,7 +847,7 @@ rules:
     group_key: tripwire
     quiet_hours_exempt: true
     budget_exempt: true
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     render:
       headline_code: RF4_PERSISTENT
       allowed_phrase_codes: []
@@ -881,7 +881,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: tripwire
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     render:
       headline_code: RF4_ALL_CLEAR
       allowed_phrase_codes: []
@@ -917,7 +917,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: tripwire
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     render:
       headline_code: RF3_CREDIT_STRESS
       allowed_phrase_codes: []
@@ -953,7 +953,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: tripwire
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     render:
       headline_code: MARGIN_ROLLOVER
       allowed_phrase_codes: []
@@ -1004,7 +1004,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: credit
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: [DISPLAY_ONLY]
 
   - rule_id: credit.ig_watch
@@ -1035,7 +1035,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: credit
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: [DISPLAY_ONLY]
 
   - rule_id: credit.ig_alarm
@@ -1066,7 +1066,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: credit
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: [DISPLAY_ONLY]
 
   - rule_id: credit.ebp_sign_flip
@@ -1098,7 +1098,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: credit
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: [DISPLAY_ONLY]
 
   - rule_id: credit.leverage_escalation
@@ -1127,7 +1127,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: credit
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: []
 
   - rule_id: credit.watchlist_stale
@@ -1157,7 +1157,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: ops
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: []
 
   # =======================================================================
@@ -1193,7 +1193,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: structure
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: [NOT_A_PROBABILITY]
 
   - rule_id: structure.s2_saturation
@@ -1224,7 +1224,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: structure
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: [NOT_A_PROBABILITY]
 
   # A DIRECTED crossing, not a threshold: sitting above 100 pp forever must
@@ -1257,7 +1257,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: structure
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     render:
       headline_code: S3_TIER
       allowed_phrase_codes: []
@@ -1298,7 +1298,7 @@ rules:
     group_key: structure
     quiet_hours_exempt: true
     budget_exempt: true
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     render:
       headline_code: S3_TIER
       allowed_phrase_codes: []
@@ -1335,7 +1335,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: structure
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: []
 
   - rule_id: structure.s5_percentile_jump
@@ -1378,7 +1378,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: structure
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: []
 
   # =======================================================================
@@ -1420,7 +1420,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: dynamics
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: []
 
   - rule_id: dynamics.d3_gate_fires
@@ -1488,7 +1488,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: dynamics
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: []
 
   - rule_id: dynamics.d4_lppls_wake
@@ -1527,7 +1527,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: dynamics
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: [NOT_A_PROBABILITY]
 
   - rule_id: dynamics.d4_band_structure
@@ -1557,7 +1557,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: dynamics
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: [NOT_A_PROBABILITY]
 
   # =======================================================================
@@ -1594,7 +1594,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: vol
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     render:
       headline_code: VOL_BACKWARDATION
       allowed_phrase_codes: []
@@ -1632,7 +1632,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: vol
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: []
 
   - rule_id: vol.skew_extreme
@@ -1663,7 +1663,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: vol
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: []
 
   - rule_id: vol.v_multiplier_change
@@ -1697,7 +1697,7 @@ rules:
     supersedes: [vol.backwardation]
     cancel_unsent_superseded: false
     group_key: vol
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: []
 
   # =======================================================================
@@ -1730,7 +1730,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: ops
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     render:
       headline_code: COVERAGE_RISK_MASKING
       allowed_phrase_codes: []
@@ -1768,7 +1768,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: ops
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: [DATA_DEGRADED]
 
   - rule_id: ops.rf_input_unavailable
@@ -1805,7 +1805,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: ops
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     render:
       headline_code: RF_INPUT_UNAVAILABLE
       allowed_phrase_codes: []
@@ -1839,7 +1839,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: ops
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: []
 
   - rule_id: ops.flag_contract_mismatch
@@ -1876,7 +1876,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: ops
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     render:
       headline_code: FLAG_CONTRACT_MISMATCH
       allowed_phrase_codes: []
@@ -1910,7 +1910,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: ops
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: []
 
   - rule_id: ops.observed_at_future
@@ -1939,7 +1939,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: ops
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: []
 
   - rule_id: ops.known_issue_active
@@ -1968,7 +1968,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: ops
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: []
 
   - rule_id: ops.condition_unknown_persistent
@@ -1998,7 +1998,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: ops
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: []
 
   - rule_id: ops.missing_input_sidecar
@@ -2027,7 +2027,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: ops
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: []
 
   - rule_id: ops.stale_evaluation_abandoned
@@ -2056,7 +2056,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: ops
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: []
 
   - rule_id: ops.provider_cooldown
@@ -2085,7 +2085,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: ops
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: []
 
   - rule_id: ops.indicator_floor
@@ -2114,7 +2114,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: ops
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: []
 
   - rule_id: ops.rules_invalid
@@ -2143,7 +2143,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: ops
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: []
 
   - rule_id: ops.alerting_unavailable
@@ -2172,7 +2172,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: ops
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: []
 
   - rule_id: ops.delivery_unknown
@@ -2201,7 +2201,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: ops
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: []
 
   - rule_id: ops.recompute_outage
@@ -2232,7 +2232,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: ops
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     render:
       headline_code: RECOMPUTE_OUTAGE
       allowed_phrase_codes: []
@@ -2271,7 +2271,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: calendar
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: []
 
   - rule_id: cal.ebp_release
@@ -2301,7 +2301,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: calendar
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: []
 
   - rule_id: cal.hyperscaler_earnings
@@ -2330,7 +2330,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: calendar
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: []
 
   - rule_id: cal.ssga_holdings
@@ -2359,7 +2359,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: calendar
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: []
 
   - rule_id: cal.release_missing
@@ -2388,7 +2388,7 @@ rules:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: calendar
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: []
 
 # ===========================================================================
@@ -2442,7 +2442,7 @@ constellations:
     group_key: dynamics
     quiet_hours_exempt: true
     budget_exempt: true
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: []
 
   - rule_id: constellation.credit_channel_opens
@@ -2474,7 +2474,7 @@ constellations:
     group_key: credit
     quiet_hours_exempt: true
     budget_exempt: true
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: []
 
   - rule_id: constellation.melt_up
@@ -2513,7 +2513,7 @@ constellations:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: regime
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: [NOT_A_PROBABILITY]
 
   - rule_id: constellation.fragile_top
@@ -2550,7 +2550,7 @@ constellations:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: regime
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: [NOT_A_PROBABILITY]
 
   - rule_id: constellation.execution_armed
@@ -2591,7 +2591,7 @@ constellations:
     group_key: legs
     quiet_hours_exempt: true
     budget_exempt: true
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     render:
       headline_code: EXECUTION_ARMED
       allowed_phrase_codes: []
@@ -2635,7 +2635,7 @@ constellations:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: ops
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: [DATA_DEGRADED]
 
   - rule_id: constellation.structure_maxed
@@ -2674,7 +2674,7 @@ constellations:
     supersedes: [structure.cape_record_near, structure.s2_saturation]
     cancel_unsent_superseded: true
     group_key: structure
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: [NOT_A_PROBABILITY]
 
   - rule_id: constellation.semis_tier_jump
@@ -2706,7 +2706,7 @@ constellations:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: structure
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: []
 
   - rule_id: constellation.lppls_awakening
@@ -2742,7 +2742,7 @@ constellations:
     supersedes: [dynamics.d4_lppls_wake, dynamics.d4_band_structure]
     cancel_unsent_superseded: true
     group_key: dynamics
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: [NOT_A_PROBABILITY]
 
   - rule_id: constellation.score_trend_divergence
@@ -2779,7 +2779,7 @@ constellations:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: legs
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: []
 
   - rule_id: constellation.outage_masks_risk
@@ -2810,7 +2810,7 @@ constellations:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: ops
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: [DATA_DEGRADED]
 
   - rule_id: constellation.vol_regime_flip
@@ -2846,7 +2846,7 @@ constellations:
     supersedes: [vol.backwardation, vol.vrp_nonpositive]
     cancel_unsent_superseded: true
     group_key: vol
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: []
 
   - rule_id: constellation.monthly_truth
@@ -2877,7 +2877,7 @@ constellations:
     supersedes: [cal.finra_release, cal.ebp_release]
     cancel_unsent_superseded: false
     group_key: calendar
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: []
 
   - rule_id: constellation.override_warning
@@ -2908,7 +2908,7 @@ constellations:
     supersedes: [override.warning]
     cancel_unsent_superseded: false
     group_key: override
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: []
 
   - rule_id: constellation.falsification_event
@@ -2948,7 +2948,7 @@ constellations:
     group_key: governance
     quiet_hours_exempt: true
     budget_exempt: true
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     render:
       headline_code: FALSIFICATION_EVENT
       allowed_phrase_codes: []
@@ -2987,7 +2987,7 @@ constellations:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: tripwire
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: []
 
   - rule_id: constellation.override_all_clear
@@ -3018,7 +3018,7 @@ constellations:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: override
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: []
 
   - rule_id: constellation.trim_entry
@@ -3053,7 +3053,7 @@ constellations:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: regime
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: []
 
   - rule_id: constellation.derisk_edge
@@ -3086,7 +3086,7 @@ constellations:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: regime
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: [NOT_A_PROBABILITY]
 
   - rule_id: constellation.profile_holds
@@ -3118,7 +3118,7 @@ constellations:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: structure
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: [NOT_A_PROBABILITY]
 
   - rule_id: constellation.leverage_escalation
@@ -3148,7 +3148,7 @@ constellations:
     supersedes: [credit.leverage_escalation]
     cancel_unsent_superseded: false
     group_key: credit
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: []
 
   - rule_id: constellation.gate_plus_earnings
@@ -3178,7 +3178,7 @@ constellations:
     supersedes: [cal.hyperscaler_earnings]
     cancel_unsent_superseded: false
     group_key: calendar
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: []
 
   - rule_id: constellation.recompute_outage
@@ -3210,7 +3210,7 @@ constellations:
     supersedes: []
     cancel_unsent_superseded: false
     group_key: ops
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     required_caveat_codes: []
 
   - rule_id: constellation.coverage_degradation_real
@@ -3245,7 +3245,7 @@ constellations:
     supersedes: [ops.coverage_risk_masking]
     cancel_unsent_superseded: true
     group_key: ops
-    phrase_set: "v3.4"
+    phrase_set: "v3.5"
     render:
       headline_code: COVERAGE_RISK_MASKING
       allowed_phrase_codes: []

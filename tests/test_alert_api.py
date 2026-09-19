@@ -1346,7 +1346,7 @@ def test_send_test_queues_an_audited_memberless_test_delivery(client):
     # cancelled before render.
     if delivery_created_at.tzinfo is None:
         delivery_created_at = delivery_created_at.replace(tzinfo=UTC)
-    with open("config/alert_phrases.v3.4.json", encoding="utf-8") as fh:
+    with open("config/alert_phrases.v3.5.json", encoding="utf-8") as fh:
         phrase_set = validate_phrase_set(fh.read())
     sender = NullSender()
     clock_values = iter((

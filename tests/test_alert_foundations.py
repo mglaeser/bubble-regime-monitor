@@ -22,7 +22,7 @@ from app.alerts.registry import instance_fingerprint, unresolved_pins, validate_
 from tests.conftest import register_promoted
 
 RULES_PATH = "config/alert_rules.v3.2.yaml"
-PHRASES_PATH = "config/alert_phrases.v3.4.json"
+PHRASES_PATH = "config/alert_phrases.v3.5.json"
 
 
 # ---------------------------------------------------------------------------
@@ -683,7 +683,7 @@ def test_the_ruleset_can_disable_capture(isolated_db, monkeypatch, tmp_path):
     off.write_text(raw.replace("capture:\n  enabled: true",
                                "capture:\n  enabled: false", 1), encoding="utf-8")
     monkeypatch.setenv("ALERTS_RULES_PATH", str(off))
-    monkeypatch.setenv("ALERTS_PHRASE_PATH", "config/alert_phrases.v3.4.json")
+    monkeypatch.setenv("ALERTS_PHRASE_PATH", "config/alert_phrases.v3.5.json")
     get_settings.cache_clear()
 
     snap_id = _persist_snapshot(isolated_db)

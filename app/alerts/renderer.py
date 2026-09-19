@@ -39,9 +39,13 @@ MAX_NAMED_MEMBERS = 3
 
 #: Vocabulary an alert must never contain. The score is not a probability, the
 #: service gives no advice, and nothing here is certain.
+#: The honesty lint runs on the rendered body in EVERY language the phrase
+#: set carries (v3.5 is German and English), so both vocabularies are here.
 _FORBIDDEN = re.compile(
     r"(?i)\b(wahrscheinlich\w*|sicher\b|garantiert\w*|kaufen|verkaufen|empfehl\w*|"
-    r"crash\w*|prognos\w*)"
+    r"crash\w*|prognos\w*|"
+    r"probab\w*|certain\w*|guarantee\w*|buy\b|buying|sell\b|sells|selling|"
+    r"recommend\w*|forecast\w*|predict\w*)"
 )
 
 

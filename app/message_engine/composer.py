@@ -556,11 +556,15 @@ def _registry_matcher() -> re.Pattern[str]:
             for table in (phrase_set.headlines, phrase_set.phrases,
                           phrase_set.next_checks, phrase_set.caveats):
                 for fragment in table.values():
-                    pattern = re.escape(fragment.text)
-                    for slot in fragment.slots:
-                        width = phrase_set.facts[slot].max_width if slot in phrase_set.facts else 12
-                        pattern = pattern.replace(re.escape("{" + slot + "}"), rf"\S{{1,{width}}}")
-                    fragments.append(pattern)
+                    # Every language the set carries: the renderer writes
+                    # whichever the operator selected, and a summary in
+                    # either is the registry's own text.
+                    for _lang, text in fragment.texts or ((phrase_set.language, fragment.text),):
+                        pattern = re.escape(text)
+                        for slot in fragment.slots:
+                            width = phrase_set.facts[slot].max_width if slot in phrase_set.facts else 12
+                            pattern = pattern.replace(re.escape("{" + slot + "}"), rf"\S{{1,{width}}}")
+                        fragments.append(pattern)
             one = "(?:" + "|".join(fragments) + ")"
             _REGISTRY_MATCHER = re.compile(rf"^{one}(?:{re.escape(JOIN)}{one})*$")
         except Exception as exc:  # noqa: BLE001 - nothing is authorized, and that is logged

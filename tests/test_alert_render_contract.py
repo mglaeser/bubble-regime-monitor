@@ -29,7 +29,7 @@ from app.alerts.render_context import (
 from app.alerts.renderer import MAX_NAMED_MEMBERS, render
 
 RULES_PATH = Path("config/alert_rules.v3.2.yaml")
-PHRASES_PATH = Path("config/alert_phrases.v3.4.json")
+PHRASES_PATH = Path("config/alert_phrases.v3.5.json")
 
 
 @pytest.fixture(scope="module")
