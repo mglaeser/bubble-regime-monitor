@@ -732,7 +732,9 @@ def _prompt_for(entry: dict[str, Any], facts: dict[str, object],
     grounded = "\n".join(f"  {key} = {sanitize(value) if isinstance(value, str) else value}"
                           for key, value in sorted(visible.items())
                           if value is not None and isinstance(value, _SCALARS))
-    listed = "\n".join(f"  {i}: {t}" for i, t in enumerate(phrasings_for(entry)))
+    language = str(settings.message_language)
+    listed = "\n".join(f"  {i}: {t}" for i, t in enumerate(phrasings_for(entry, language)))
+    in_language = "" if language == LIBRARY_LANGUAGE else f" (written in {language!r})"
     # The library's own OUTPUT FORMAT is OVERRIDDEN here, last word wins.
     # Eighteen entries ask for two labelled lines, one per channel; twenty
     # spell out an "SMS: <...>" line and only eight also spell out
@@ -748,8 +750,8 @@ def _prompt_for(entry: dict[str, Any], facts: dict[str, object],
         f"CHANNEL: {channel.value}, at most {cap} characters.\n"
         f"GROUNDED FACTS — use these values verbatim and invent no others:\n"
         f"{grounded}\n"
-        f"\nAPPROVED PHRASINGS for this message (the ONLY sentences that can be "
-        f"sent; slots are filled from the facts above, verbatim):\n{listed}\n"
+        f"\nAPPROVED PHRASINGS{in_language} for this message (the ONLY sentences that "
+        f"can be sent; slots are filled from the facts above, verbatim):\n{listed}\n"
         f"OUTPUT (this instruction replaces any output format above): choose the "
         f"phrasing that fits the facts and reply with exactly one line of JSON, "
         f'{{"phrasing": N}}, and nothing else. Do not write the sentence.\n'
@@ -806,8 +808,9 @@ def compose(*, trigger: str, channel: Channel,
         return _bare_event(trigger, channel, settings, "trigger not in library",
                            known=False)
 
+    language = str(settings.message_language)
     try:
-        phrasings = phrasings_for(entry)
+        phrasings = phrasings_for(entry, language)
         # ONLY DECLARED FACTS FILL SLOTS. The prompt and the grounding check
         # already saw only the declared facts; the renderer read the whole
         # dict, so an undeclared atom supplied under a slot's own name
@@ -977,7 +980,7 @@ def compose(*, trigger: str, channel: Channel,
         # "bubblegauge: data is complete." passed as generated while
         # contradicting the one thing it was required to say (round 37,
         # SOTA-A defect 1).
-        missing = _unmet_mandate(entry, text)
+        missing = _unmet_mandate(entry, text, language)
         if missing is not None:
             result = ValidationResult(False, FailureClass.CONTENT, missing)
     if result.ok:
@@ -1002,14 +1005,35 @@ def compose(*, trigger: str, channel: Channel,
 
 
 
-def phrasings_for(entry: dict[str, Any]) -> list[str]:
-    """The owner-approved sentences this trigger may send (decision 12).
+#: The library's own language: the `fallback`/`phrasings`/`must_mention`
+#: keys are in it, and `translations.<lang>` carries the same keys for any
+#: other language the owner authored.
+LIBRARY_LANGUAGE = "en"
+
+
+def translation(entry: dict[str, Any], language: str | None) -> dict[str, Any]:
+    """The entry's keys for `language`: the entry itself for the library's
+    own language, else its authored translation. A language the entry does
+    not carry falls back to the library's own - the owner's words in one
+    language beat no words at all - and the caller can see which by
+    comparing the returned mapping to the entry."""
+    if not language or language == LIBRARY_LANGUAGE:
+        return entry
+    found = (entry.get("translations") or {}).get(language)
+    return found if isinstance(found, dict) and found.get("fallback") else entry
+
+
+def phrasings_for(entry: dict[str, Any], language: str | None = None) -> list[str]:
+    """The owner-approved sentences this trigger may send (decision 12), in
+    `language` (default: the library's own).
 
     Authored in the library under `phrasings`; absent that key, the evergreen
     fallback is the single phrasing, so a trigger with no variants behaves
-    deterministically. Variants are added by authoring, never by code.
+    deterministically. Variants are added by authoring, never by code. A
+    translation carries its own `fallback` and optional `phrasings`.
     """
-    return list(entry.get("phrasings") or [entry["fallback"]])
+    source = translation(entry, language)
+    return list(source.get("phrasings") or [source["fallback"]])
 
 
 #: The model's reply is a CHOICE. Tolerant of surrounding prose or a bare
@@ -1066,17 +1090,27 @@ _NEGATOR_RE = re.compile(
     r"[^.;!?]*$")
 
 
-def _unmet_mandate(entry: dict[str, Any], text: str) -> str | None:
+def _unmet_mandate(entry: dict[str, Any], text: str,
+                   language: str | None = None) -> str | None:
     """The trigger's own required content, or None if it is satisfied.
 
     A list rather than one phrase because the prompt asks for a MEANING ("say
     incomplete data or data gaps"), and the operator's own wording of it may
     differ; any one of the declared forms counts. Absent the key, nothing is
-    required — this is an addition to the contract, not a new default.
+    required — this is an addition to the contract, not a new default. A
+    mandate is checked in the language of the text: a translation must carry
+    its own `must_mention` when the entry has one, or the mandate cannot be
+    met in that language and the generated text is refused (fail closed).
     """
     required = entry.get("must_mention") or []
     if not required:
         return None
+    source = translation(entry, language)
+    if source is not entry:
+        required = source.get("must_mention") or []
+        if not required:
+            return (f"the trigger requires content that the {language!r} translation "
+                    "declares no words for")
     lowered = text.casefold()
     for phrase in required:
         for match in re.finditer(re.escape(phrase.casefold()), lowered):
