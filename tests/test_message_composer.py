@@ -1462,3 +1462,52 @@ class TestRoundElevenOn112:
         ("sk_live_SECRET", ("F_BAND_BASE",), "undeclared"), ("anything", (), "undeclared")])  # pragma: allowlist secret
     def test_only_a_declared_name_is_loggable(self, key, declared, expected):
         assert composer._loggable(key, frozenset(declared)) == expected
+
+
+class TestRoundTwelveOn112:
+    """#112 round 12 (SOTA-A, executed): the fit clipped the rendered text
+    from the end, so an over-long fact in the middle of the breaker notice
+    cost it "Scores and alerts unaffected." - the sentence its library note
+    calls load-bearing. The facts give way first: a phrase is shortened, an
+    atom is blanked, and the owner's sentences stay whole."""
+
+    LONG_TIME = "2026-09-18 14:00 UTC (server clock, restarted twice)"
+    ASSURANCE = "Fixed texts in use. Scores and alerts unaffected."
+
+    @pytest.mark.parametrize("channel", [Channel.SMS, Channel.IMESSAGE])
+    @pytest.mark.parametrize("facts", [
+        {"llm_failures": 5, "since_utc": "2026-09-18 14:00 UTC (server clock, restarted twice)"},
+        {"llm_failures": "5" * 30, "since_utc": "14:00"},
+        {"llm_failures": "5" * 30, "since_utc": "x" * 60}])
+    def test_the_load_bearing_clause_survives_an_overflowing_fact(self, channel, facts):
+        out = composer.compose(trigger="breaker_notify", channel=channel, priority=1,
+                               facts=facts, settings=_settings())
+        assert out.text.endswith(self.ASSURANCE), out.text
+        assert not composer._overflows(out.text, channel, _settings())
+
+    def test_a_fact_that_fits_is_kept_whole(self):
+        out = composer.compose(trigger="breaker_notify", channel=Channel.SMS, priority=1,
+                               facts={"llm_failures": 5, "since_utc": "14:00"}, settings=_settings())
+        assert out.text == ("bubblegauge notice: message wording service down since 14:00 after 5 failed "
+                            "calls. " + self.ASSURANCE)
+
+    def test_a_phrase_is_shortened_before_an_atom_is_blanked(self):
+        template = "bubblegauge FAILING: compute failed x{failures} since {first_seen_utc}; {reason_plain}"
+        reason = ("connection refused by the upstream data source after three retries and a long wait for the "
+                  "socket to open again, then a second refusal from the same host with the same code")
+        text, facts = composer._fit_render(template, {"failures": 3, "first_seen_utc": "14:00", "reason_plain": reason},
+                                           Channel.SMS, _settings())
+        assert text.startswith("bubblegauge FAILING: compute failed x3 since 14:00; connection refused")
+        assert facts["failures"] == 3 and facts["first_seen_utc"] == "14:00"
+        assert len(facts["reason_plain"]) < len(reason) and not text.endswith("...")
+
+    def test_a_template_that_overflows_on_its_own_is_still_clipped(self):
+        template = "bubblegauge notice: " + "word " * 60 + "{n}"
+        text, _ = composer._fit_render(template, {"n": 1}, Channel.SMS, _settings())
+        assert text.endswith("...") and not composer._overflows(text, Channel.SMS, _settings())
+
+    def test_every_shipped_fallback_fits_both_channels_with_its_slots_blank(self):
+        for name, entry in composer.library()["prompts"].items():
+            for channel in (Channel.SMS, Channel.IMESSAGE):
+                text = composer.render_fallback(entry["fallback"], {})
+                assert not composer._overflows(text, channel, _settings()), (name, channel, len(text))

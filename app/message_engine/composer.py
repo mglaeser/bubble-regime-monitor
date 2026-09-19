@@ -333,6 +333,60 @@ _GSM7_EQUIVALENTS = str.maketrans({
 })
 
 
+def _overflows(text: str, channel: Channel, settings: Settings) -> bool:
+    """Does this text break the channel's length contract, in its own unit?"""
+    if channel is Channel.SMS:
+        from app.alerts.gsm7 import GSM7_BASIC, GSM7_EXT, septets
+
+        carried = text.translate(_GSM7_EQUIVALENTS)
+        carried = "".join(c if (c in GSM7_BASIC or c in GSM7_EXT) else " " for c in carried)
+        return septets(carried) > settings.sms_max_len
+    return len(text) > settings.message_engine_imessage_max_chars
+
+
+def _shorter(value: str, by: int) -> str | None:
+    """A phrase fact shortened by `by` characters on a word boundary, never
+    inside a numeral; None when nothing worth keeping is left."""
+    room = len(value) - by
+    if room < 8:
+        return None
+    cut = value[:_before_numeral(value, room)]
+    space = cut.rfind(" ")
+    if space >= room // 2:
+        cut = cut[:space]
+    cut = cut.rstrip(" ,;:-")
+    return cut or None
+
+
+def _fit_render(template: str, facts: dict[str, object], channel: Channel,
+                settings: Settings) -> tuple[str, dict[str, object]]:
+    """The template rendered to fit the channel: the FACTS give way first.
+
+    The fit clipped the rendered text from the end, so an over-long fact in
+    the middle of a template cost the template its last clause - the
+    breaker notice lost "Scores and alerts unaffected.", the one sentence
+    its library note calls load-bearing (#112 round 12, SOTA-A, executed).
+    The owner's sentences are the message; a fact is a value in it. When
+    the render overflows, a phrase fact is shortened on a word boundary,
+    then the longest fact is blanked to a dash, until the text fits; only
+    a template that overflows on its own is clipped, as before.
+    """
+    facts = dict(facts)
+    text = render_fallback(template, facts)
+    while _overflows(text, channel, settings):
+        strings = {k: v for k, v in facts.items() if isinstance(v, str) and v}
+        if not strings:
+            break
+        phrases = {k: v for k, v in strings.items() if len(v.split()) > 1}
+        if phrases:
+            key = max(phrases, key=lambda k: len(phrases[k]))
+            facts[key] = _shorter(facts[key], 16)   # type: ignore[arg-type]
+        else:
+            facts[max(strings, key=lambda k: len(strings[k]))] = None
+        text = render_fallback(template, facts)
+    return _fit(text, channel, settings), facts
+
+
 def _fit(text: str, channel: Channel, settings: Settings) -> str:
     """The fallback, guaranteed to satisfy the channel's length contract.
 
@@ -696,7 +750,7 @@ def compose(*, trigger: str, channel: Channel,
         phrasings = phrasings_for(entry)
         facts = _sanitized(facts, frozenset(entry.get("grounding_fields") or []))
         facts = _prose_screened(entry, facts)
-        fallback = _fit(render_fallback(phrasings[0], facts), channel, settings)
+        fallback, facts = _fit_render(phrasings[0], facts, channel, settings)
         if not isinstance(entry.get("prompt", ""), str):
             raise TypeError("'prompt' is not text")
     except Exception as exc:  # noqa: BLE001 - a malformed entry is the same class
@@ -841,7 +895,7 @@ def compose(*, trigger: str, channel: Channel,
         return _rejected(trigger, channel, priority, fallback,
                          "rejected: reply was not a phrasing choice", finished,
                          settings)
-    text = _fit(render_fallback(phrasings[choice], facts), channel, settings)
+    text, _ = _fit_render(phrasings[choice], facts, channel, settings)
     # THE SAME SUBSET THE PROMPT SHOWED. See visible_facts().
     # prose_rules=False: this is the OWNER's approved template rendered from
     # the facts, not text the model wrote. The channel contract and the
