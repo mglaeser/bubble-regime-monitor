@@ -214,16 +214,19 @@ def _slot_value(name: str, facts: dict[str, object]) -> object | None:
     matched uppercase slots only. Resolution is now explicit, and a slot that
     resolves to nothing still degrades to a readable dash.
     """
-    if name in facts:
-        return _redacted(facts[name])
     if name == "override_suffix":
         # The library's note defines it: the literal " OVERRIDE" when the
         # override fired, else empty - a suffix, so never a dash. Resolved
         # like any other slot: the digest DECLARES "override_fired", and
         # reading only F_OVERRIDE_FIRED dropped an active override from a
         # digest composed from its declared facts (#112 round 3, SOTA-A,
+        # executed). DERIVED BEFORE ANY LOOKUP: a caller's own
+        # "override_suffix" key shadowed the derivation and wrote an active
+        # override over override_fired=False (#112 round 15, SOTA-A,
         # executed).
         return " OVERRIDE" if _slot_value("override_fired", facts) else ""
+    if name in facts:
+        return _redacted(facts[name])
     for key in (_SLOT_ALIASES.get(name), "F_" + name.upper()):
         if key and key in facts:
             value = facts[key]
@@ -748,6 +751,11 @@ def compose(*, trigger: str, channel: Channel,
 
     try:
         phrasings = phrasings_for(entry)
+        # ONLY DECLARED FACTS FILL SLOTS. The prompt and the grounding check
+        # already saw only the declared facts; the renderer read the whole
+        # dict, so an undeclared atom supplied under a slot's own name
+        # reached the wire (#112 round 15, SOTA-A, executed).
+        facts = visible_facts(entry, facts)
         facts = _sanitized(facts, frozenset(entry.get("grounding_fields") or []))
         facts = _prose_screened(entry, facts)
         fallback, facts = _fit_render(phrasings[0], facts, channel, settings)

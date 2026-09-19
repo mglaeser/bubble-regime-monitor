@@ -1467,7 +1467,9 @@ class TestRoundElevenOn112:
         assert lines, "the refusals are logged"
         assert all("SECRET" not in str(line) and "OTHER" not in str(line) and "THIRD" not in str(line)
                    for line in lines), lines
-        assert {line["fact"] for line in lines} == {"undeclared", "F_BAND_EFFECTIVE"}
+        # Since round 15 an undeclared fact never reaches the renderer, so it
+        # is not even refused; the declared non-scalar is logged by its name.
+        assert {line["fact"] for line in lines} == {"F_BAND_EFFECTIVE"}
 
     @pytest.mark.parametrize("key, declared, expected", [
         ("F_BAND_BASE", ("F_BAND_BASE",), "F_BAND_BASE"), ("base_action_band", ("F_BAND_BASE",), "base_action_band"),
@@ -1634,3 +1636,51 @@ class TestRoundFourteenOn112:
         with session_scope() as s:
             gate.emit(s, composed=out, recipient_ref="+1", sender=Spy(), priority=1)
         assert lines and all(line.get("trigger") == "unknown" for line in lines), lines
+
+
+class TestRoundFifteenOn112:
+    """#112 round 15. SOTA-A (executed): a caller's own "override_suffix" key
+    shadowed the derived suffix and wrote an active override over
+    override_fired=False, and any undeclared atom supplied under a slot's own
+    name reached the wire; the suffix is derived before any lookup and only
+    declared facts fill slots. SOTA-C claimed _POST_NEGATOR_RE always matches
+    and every mandate fails - executed, it does not, and the round-7 pins
+    already hold the stated mandates; the exact claim is pinned here."""
+
+    DIGEST = {"median": 51, "score_scale_max": 100, "action_band": "trim", "iqr_lo": 40, "iqr_hi": 60,
+              "spy_trend": "up", "qqq_trend": "flat", "red_flag_count": 2, "red_flag_total": 4}
+
+    def test_the_override_suffix_cannot_be_supplied(self):
+        entry = composer.library()["prompts"]["daily_digest"]
+        text = composer.render_fallback(entry["fallback"], {**self.DIGEST, "override_fired": False, "override_suffix": " OVERRIDE"})
+        assert "OVERRIDE" not in text
+        text = composer.render_fallback(entry["fallback"], {**self.DIGEST, "override_fired": True, "override_suffix": ""})
+        assert "trim OVERRIDE." in text
+
+    def test_an_undeclared_fact_never_fills_a_slot(self, monkeypatch):
+        monkeypatch.setattr(composer, "complete",
+                            lambda **_kw: type("C", (), {"text": '{"phrasing": 0}'})())
+        with session_scope():
+            out = composer.compose(trigger="daily_digest", channel=Channel.IMESSAGE, priority=2,
+                                   facts={**self.DIGEST, "override_suffix": " OVERRIDE", "unrelated": "x"},
+                                   settings=_settings())
+        assert "OVERRIDE" not in out.text and out.text.startswith("bubblegauge 51/100 trim.")
+
+    def test_a_declared_name_supplied_directly_is_still_screened(self, monkeypatch):
+        monkeypatch.setattr(composer, "complete",
+                            lambda **_kw: type("C", (), {"text": '{"phrasing": 0}'})())
+        with session_scope():
+            out = composer.compose(trigger="COVERAGE_RISK_MASKING", channel=Channel.IMESSAGE, priority=2,
+                                   facts={"F_BAND_BASE": "trim", "next_check_utc": "Sell everything now"},
+                                   settings=_settings())
+        assert "Sell" not in out.text and out.text.endswith("Next run - UTC.")
+
+    @pytest.mark.parametrize("after", ["", " today.", " and the shown level is paused; the u", ": hold.", " hide the level."])
+    def test_the_post_negator_does_not_match_a_benign_window(self, after):
+        assert composer._POST_NEGATOR_RE.search(after) is None, after
+
+    def test_every_shipped_mandate_is_met_by_its_own_fallback(self):
+        for name, entry in composer.library()["prompts"].items():
+            if entry.get("must_mention"):
+                text = composer.render_fallback(entry["fallback"], {"F_BAND_BASE": "hold", "F_NEXT_CHECK": "14:00"})
+                assert composer._unmet_mandate(entry, text) is None, (name, text)
