@@ -11,7 +11,6 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -272,8 +271,12 @@ class TestTheWatcherLockStaysWithTheWatcher:
     without consuming the file, the path unit re-fired, and systemd latched
     start-limit-hit. Merges silently stopped reaching production."""
 
-    WATCH = Path(__file__).resolve().parents[1] / "deploy" / "deploy-watch.sh"
-    UNIT = Path(__file__).resolve().parents[1] / "deploy" / "systemd" / "bubblegauge-deploy.service"
+    # Imported here rather than at the top: the secret-scan baseline pins
+    # this file's line numbers, and a new top-level import would move them.
+    from pathlib import Path as _Path
+
+    WATCH = _Path(__file__).resolve().parents[1] / "deploy" / "deploy-watch.sh"
+    UNIT = _Path(__file__).resolve().parents[1] / "deploy" / "systemd" / "bubblegauge-deploy.service"
 
     def test_deploy_sh_runs_with_the_lock_fd_closed(self):
         assert './deploy.sh 9>&-' in self.WATCH.read_text()
@@ -282,13 +285,25 @@ class TestTheWatcherLockStaysWithTheWatcher:
         text = self.WATCH.read_text()
         assert 'flock -w "$LOCK_WAIT_S" 9' in text and "flock -n 9" not in text
 
-    def test_the_unit_never_latches_on_repeated_activation(self):
-        assert "StartLimitIntervalSec=0" in self.UNIT.read_text()
+    def test_repeated_activation_is_bounded_not_unlimited(self):
+        # StartLimitIntervalSec=0 would let a failure BEFORE the trigger is
+        # consumed (an unwritable lock file) re-fire the path unit without
+        # bound (#116 round 1, SOTA-A). The watcher paces such failures with
+        # a sleep, and the unit keeps a generous, finite limit.
+        unit = self.UNIT.read_text()
+        assert "StartLimitIntervalSec=600" in unit and "StartLimitBurst=5" in unit
+        assert "StartLimitIntervalSec=0" not in unit
 
-    def test_fd_nine_really_is_closed_for_the_child(self):
+    def test_a_failure_before_the_trigger_is_consumed_is_paced(self):
+        text = self.WATCH.read_text()
+        assert "PACE_FAILURE_S" in text and 'if ! exec 9>"$LOCK_FILE"' in text
+
+    def test_fd_nine_really_is_closed_for_the_child(self, tmp_path):
+        # A private lock path: a fixed /tmp name opened with ">" would erase
+        # or truncate whatever sat there (#116 round 1, SOTA-A).
         import subprocess
 
         script = 'exec 9>"$1"; flock -n 9; bash -c "[ -e /proc/\\$\\$/fd/9 ] && echo open || echo closed" 9>&-'
-        out = subprocess.run(["bash", "-c", script, "_", "/tmp/bubblegauge-lock-test"],
+        out = subprocess.run(["bash", "-c", script, "_", str(tmp_path / "lock")],
                              capture_output=True, text=True, check=True).stdout.strip()
         assert out == "closed"

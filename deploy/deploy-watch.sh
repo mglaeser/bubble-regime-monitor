@@ -42,9 +42,18 @@ log() { printf '%s deploy-watch: %s\n' "$(date -uIs)" "$*"; [[ -n "${LOG_FILE:-}
 # push during a deploy causes exactly one more deploy afterwards, as
 # docs/AUTO_DEPLOY.md always promised.
 LOCK_WAIT_S="${LOCK_WAIT_S:-1800}"
-exec 9>"$LOCK_FILE"
+# A failure BEFORE the trigger is consumed leaves the file in place, and the
+# path unit re-fires the moment this exits; pacing it here keeps that from
+# being a tight loop while the unit's own limit stays finite (#116 round 1).
+PACE_FAILURE_S="${PACE_FAILURE_S:-60}"
+if ! exec 9>"$LOCK_FILE"; then
+  log "cannot open lock file $LOCK_FILE; pausing ${PACE_FAILURE_S}s before failing (trigger kept)"
+  sleep "$PACE_FAILURE_S"
+  exit 1
+fi
 if ! flock -w "$LOCK_WAIT_S" 9; then
   log "another deploy held the lock for ${LOCK_WAIT_S}s; giving up on this activation (trigger kept)"
+  sleep "$PACE_FAILURE_S"
   exit 1
 fi
 
