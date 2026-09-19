@@ -561,6 +561,27 @@ def _prose_screened(entry: dict[str, Any], facts: dict[str, object]) -> dict[str
     return kept
 
 
+#: The library's prompts were authored for an engine that WROTE the text:
+#: they end in an OUTPUT / OUTPUT FORMAT section asking for two labelled
+#: lines, and bullet the same instruction in their task. Under decision 12
+#: the model selects a phrasing, and the composer only APPENDED the new
+#: instruction - "last word wins" was an assumption, and a model that obeyed
+#: the earlier one was format-rejected until the compose fell back, so every
+#: generative trigger was deterministic in practice (#112 round 10, SOTA-C,
+#: executed on the prompt text). The writing instructions are removed before
+#: the selection instruction is given; the library is the owner's and is not
+#: rewritten here.
+_WRITING_INSTRUCTIONS_RE = re.compile(
+    r"(?ms)^(?:OUTPUT FORMAT|OUTPUT):.*\Z"
+    r"|^- (?:Write the SAME message as two variants|"
+    r"Output nothing except the two labeled lines)[^\n]*\n?")
+
+
+def selection_prompt(prompt: str) -> str:
+    """The entry's prompt with its writing instructions removed."""
+    return _WRITING_INSTRUCTIONS_RE.sub("", prompt).rstrip()
+
+
 def _prompt_for(entry: dict[str, Any], facts: dict[str, object],
                 channel: Channel, settings: Settings) -> str:
     """The trigger's prompt, plus the facts it may use and nothing else.
@@ -595,7 +616,7 @@ def _prompt_for(entry: dict[str, Any], facts: dict[str, object],
     # Composing is per-channel, so asking for both was always redundant. The
     # parser stays as a belt-and-braces reader for a model that labels anyway.
     return (
-        f"{entry['prompt']}\n\n"
+        f"{selection_prompt(entry['prompt'])}\n\n"
         f"CHANNEL: {channel.value}, at most {cap} characters.\n"
         f"GROUNDED FACTS — use these values verbatim and invent no others:\n"
         f"{grounded}\n"

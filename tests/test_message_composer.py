@@ -1399,3 +1399,38 @@ class TestRoundNineOn112:
     @pytest.mark.parametrize("reply, expected", [('{"phrasing":1,"why":"x"}', 1), ('{"phrasing": 2}', 2), ('{"phrasing":0}', 0)])
     def test_a_delimited_integer_is_still_a_choice(self, reply, expected):
         assert composer._select_phrasing(reply, ["a", "b", "c"]) == expected
+
+
+class TestRoundTenOn112:
+    """#112 round 10 (SOTA-C, executed): the library's prompts instruct the
+    model to WRITE two labelled lines ("SMS: ... || IMSG: ..."), and the
+    composer only appended the decision-12 selection instruction after them.
+    A model that obeyed the earlier instruction was format-rejected until the
+    compose fell back, so every generative trigger was deterministic in
+    practice. The writing instructions are removed before the selection
+    instruction is given."""
+
+    WRITING = ("two variants", "two labeled lines", "SMS: <", "IMSG:", "IMESSAGE: <", "OUTPUT FORMAT")
+
+    def test_every_composed_prompt_asks_for_a_choice_and_nothing_else(self):
+        for name, entry in composer.library()["prompts"].items():
+            facts = {field: "51" for field in entry.get("grounding_fields", [])}
+            prompt = composer._prompt_for(entry, facts, Channel.IMESSAGE, _settings())
+            for phrase in self.WRITING:
+                assert phrase not in prompt, (name, phrase)
+            assert len(re.findall(r"\bOUTPUT\b", prompt)) == 1, name
+            assert '{"phrasing": N}' in prompt and "APPROVED PHRASINGS" in prompt, name
+
+    def test_the_task_and_the_data_survive(self):
+        entry = composer.library()["prompts"]["MARGIN_ROLLOVER"]
+        stripped = composer.selection_prompt(entry["prompt"])
+        assert "INJECTED DATA" in stripped and "{F_D2}" in stripped and stripped.startswith("ROLE:")
+        assert "described under OUTPUT FORMAT" not in stripped
+
+    @pytest.mark.parametrize("prompt, expected", [
+        ("ROLE: x\nTASK: y\nOUTPUT: reply with exactly one line\nSMS: <a> || IMSG: <b>", "ROLE: x\nTASK: y"),
+        ("ROLE: x\n- Write the SAME message as two variants. SMS variant: ...\n- Keep it short.\nOUTPUT FORMAT: two lines\nSMS: <>\nIMESSAGE: <>",
+         "ROLE: x\n- Keep it short."),
+        ("ROLE: x\nTASK: y", "ROLE: x\nTASK: y")])
+    def test_only_the_writing_instructions_are_removed(self, prompt, expected):
+        assert composer.selection_prompt(prompt) == expected
