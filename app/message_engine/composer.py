@@ -251,7 +251,19 @@ def _redacted(value: object) -> object:
     return value if isinstance(value, _SCALARS) else None
 
 
-def _sanitized(facts: dict[str, object]) -> dict[str, object]:
+def _loggable(key: str, declared: frozenset[str]) -> str:
+    """A fact's name for the log: the library's word, or nothing of the caller's.
+
+    Fact KEYS are the caller's strings too, and a refused fact was logged by
+    its key - compose(facts={"sk_live_SECRET": []}) put the credential into
+    the log line (#112 round 11, SOTA-A, executed). Only a name the entry
+    declares is logged; any other is "undeclared".
+    """
+    return key if _canonical(key) in {_canonical(d) for d in declared} else "undeclared"
+
+
+def _sanitized(facts: dict[str, object],
+               declared: frozenset[str] = frozenset()) -> dict[str, object]:
     """The facts with every string value passed through the redaction
     chokepoint. A fact can be an upstream error verbatim - the failure
     alert's `reason_plain` is one - and four of this service's upstreams put
@@ -269,14 +281,14 @@ def _sanitized(facts: dict[str, object]) -> dict[str, object]:
                 # in a fact walked past the iMessage cap and allow-list on
                 # the fallback and P1 paths, which never validate (#112
                 # round 7, SOTA-A, executed). It renders as a dash.
-                log.warning("message_engine_fact_decorated", fact=key)
+                log.warning("message_engine_fact_decorated", fact=_loggable(key, declared))
                 admitted[key] = None
                 continue
             admitted[key] = sanitize(value)
         elif isinstance(value, _SCALARS):
             admitted[key] = value
         else:
-            log.warning("message_engine_fact_not_scalar", fact=key,
+            log.warning("message_engine_fact_not_scalar", fact=_loggable(key, declared),
                         kind=type(value).__name__)
             admitted[key] = None
     return admitted
@@ -540,6 +552,7 @@ def _prose_screened(entry: dict[str, Any], facts: dict[str, object]) -> dict[str
     name, never by value.
     """
     authorized = set(entry.get("authorized_prose") or [])
+    declared = frozenset(entry.get("grounding_fields") or [])
     kept: dict[str, object] = {}
     for key, value in facts.items():
         if not isinstance(value, str):
@@ -554,7 +567,8 @@ def _prose_screened(entry: dict[str, Any], facts: dict[str, object]) -> dict[str
                    and (len(value.split()) > 1
                         or str(result.reason).startswith("banned lexicon")))
         if refused:
-            log.warning("message_engine_fact_refused", fact=key, reason=result.reason)
+            log.warning("message_engine_fact_refused", fact=_loggable(key, declared),
+                        reason=result.reason)
             kept[key] = None
         else:
             kept[key] = value
@@ -650,7 +664,6 @@ def compose(*, trigger: str, channel: Channel,
     """
     settings = settings or get_settings()
     moment = now or datetime.now(UTC)
-    facts = _sanitized(facts)
     try:
         lib = library()
         prompts = lib["prompts"]
@@ -681,6 +694,7 @@ def compose(*, trigger: str, channel: Channel,
 
     try:
         phrasings = phrasings_for(entry)
+        facts = _sanitized(facts, frozenset(entry.get("grounding_fields") or []))
         facts = _prose_screened(entry, facts)
         fallback = _fit(render_fallback(phrasings[0], facts), channel, settings)
         if not isinstance(entry.get("prompt", ""), str):

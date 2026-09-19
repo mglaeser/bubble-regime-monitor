@@ -1434,3 +1434,31 @@ class TestRoundTenOn112:
         ("ROLE: x\nTASK: y", "ROLE: x\nTASK: y")])
     def test_only_the_writing_instructions_are_removed(self, prompt, expected):
         assert composer.selection_prompt(prompt) == expected
+
+
+class TestRoundElevenOn112:
+    """#112 round 11 (SOTA-A, executed): a refused fact was logged by its
+    KEY, and keys are the caller's strings - compose(facts={"sk_live_SECRET":
+    []}) put the credential into the log. Only a name the entry declares is
+    logged; any other is "undeclared"."""
+
+    def test_an_undeclared_key_never_reaches_the_log(self, monkeypatch):
+        lines: list[dict] = []
+        monkeypatch.setattr(composer.log, "warning", lambda event, **kw: lines.append({"event": event, **kw}))
+        monkeypatch.setattr(composer, "complete",
+                            lambda **_kw: type("C", (), {"text": '{"phrasing": 0}'})())
+        with session_scope():
+            composer.compose(trigger="BAND_TO_TRIM", channel=Channel.IMESSAGE, priority=2,
+                             facts={"sk_live_SECRET": [], "sk_live_OTHER": "x \U0001F680",  # pragma: allowlist secret
+                                    "sk_live_THIRD": "you should sell", "F_BAND_EFFECTIVE": {"k": 1}},  # pragma: allowlist secret
+                             settings=_settings())
+        assert lines, "the refusals are logged"
+        assert all("SECRET" not in str(line) and "OTHER" not in str(line) and "THIRD" not in str(line)
+                   for line in lines), lines
+        assert {line["fact"] for line in lines} == {"undeclared", "F_BAND_EFFECTIVE"}
+
+    @pytest.mark.parametrize("key, declared, expected", [
+        ("F_BAND_BASE", ("F_BAND_BASE",), "F_BAND_BASE"), ("base_action_band", ("F_BAND_BASE",), "base_action_band"),
+        ("sk_live_SECRET", ("F_BAND_BASE",), "undeclared"), ("anything", (), "undeclared")])  # pragma: allowlist secret
+    def test_only_a_declared_name_is_loggable(self, key, declared, expected):
+        assert composer._loggable(key, frozenset(declared)) == expected
