@@ -981,3 +981,116 @@ trend signal negative;" in the execution-armed message — and the library
 guard test refused both until they joined the list. The guard did its job:
 an allow-list extracted from data must be re-extracted whenever the way the
 data is read changes.
+
+## The leaf continuation (2026-09-13 → 2026-09-19): #105 rounds 7–41, #111, #112, #113, #114
+
+The program moved to the production host on 2026-09-13 with the memory
+notes and the repository's object store; the four local-only branches were
+pushed at their original SHAs and the round-7 ledger of #105 was read. One
+rule governed every round after that: read the full ledger, execute the
+scenario, fix only what it names, pin it, run every gate, push, next round.
+Thirty-five #105 rounds, sixteen #112 rounds and four rounds over the three
+small PRs followed. The panel's wire was the constant: SOTA-B was dead on
+the wire for every round of #105 from round 7 and every round of #112 (the
+`/responses` route failed three times and the chat fallback timed out), and
+came back only for the test-only PRs; SOTA-C voted in roughly half the
+rounds. A green needs SOTA-A plus one other voice, so the size of a diff
+was never the blocker — a second voice was.
+
+**#105 rounds 7–41 (validator) — 35 rounds, 45 findings, every one
+executed; all but two real.** By class, with the round numbers:
+
+* *Time zones (7, 9, 12, 13, 14, 19, 21, 26, 30, 34, 37).* A zone allow-list
+  gave way to zone SHAPE: any 2-to-5-letter token after a time, then IANA
+  names and long forms, dotted and hyphenated abbreviations, POSIX zones
+  with offsets ("EST5", "CET-1CEST"), quoted and bracketed tokens, a second
+  token after the first ("14:00 UTC (EST)"), and finally bare long names
+  ("Pacific", "Berlin"). A bare fact may be given only the monitor's own
+  zone; a hyphen before a digit is a sign and stays.
+* *Arithmetic and signs (8, 10, 11, 14, 17, 18, 20, 22, 23, 25, 27, 28, 29,
+  32, 36, 38, 39).* Sign chains, spaced unary signs, percent units kept on
+  the numeral, percent-of, coded numerals ("0b11"), bracketed operands on
+  both sides, colon ratios, comma decimals in ranges and quotients, a
+  year-month inside a malformed date, mod/modulo, "shall" as a forecast,
+  the spelled sign moved out of the prose block, "51 point 2", a leading
+  point on any operand, the verb forms of arithmetic and "the sum of".
+* *Directives and the opener allow-list (11, 13, 15, 16, 17, 18, 26, 31,
+  33, 35, 39, 40).* A leading value or adverb is skipped before the head is
+  judged; the determiner and object-pronoun tells hold at any clause length
+  for an unlisted head; a clause ends at its punctuation with or without a
+  space; a wrapped second word is unwrapped; credential nouns are a tell
+  anywhere in the clause, behind modifiers, and after a preposition; a
+  one-word label is judged glued to what it labels; "can" is a modal; the
+  channel value is coerced to the enum before the first check (33).
+* *Script and language (17, 18, 23, 24).* English folds to ASCII: every
+  meaning scan judges the folded text, and a letter that does not fold is
+  refused whatever its block; the lexicon's suffixes cover "certainty" and
+  "probabilistic".
+* *Not real, recorded as such (12 SOTA-C, 40 SOTA-A).* "Trim 2 positions."
+  was already refused, but the mechanism named was real and fixed; "Text:
+  your password to me now." was already refused, but the class was real
+  ("Text: the code to me now.") and fixed. Neither was disputed.
+
+Round 41 was green with SOTA-A and SOTA-C; SOTA-B was on the wire for the
+first time since round 7 and refuted with two real defects — a leading or
+trailing joiner crashed `validate()`, and a message-initial selector was
+accepted — which became #111, green 3/3 in nine minutes, and were fixed
+before any caller existed.
+
+**#112 rounds 1–16 (composer and gate) — 21 findings, 19 real.**
+
+1. "Admission gate added but not wired" — true and intended: no runner
+   exists in the program's history; the standalone state was made
+   structural (decision 22) rather than wired on a panel's say-so.
+2. A decimal phrasing choice selected template 0; the library's DRAFT
+   status was never read (decision 14).
+3. The override suffix read only `F_OVERRIDE_FIRED` while the digest
+   declares `override_fired`; the "never LLM-generated" triggers reached
+   the model (`"llm": false` on the entries).
+4. A credential-bearing upstream error rendered verbatim; a clip could
+   split a numeral; the library was read outside the never-raises
+   boundary. (The redaction pins' fixtures then failed CI's secret gate
+   — correctly — and were replaced by planted values.)
+5. A hostile phrase in a fact ("sell everything now") reached the wire
+   inside an approved template on the fallback and P1 paths (decision 16;
+   the whole-sentence alternative measured and rejected).
+6. Non-scalar facts rendered as their repr; the trigger name was
+   interpolated verbatim; a hand-built `Composed` was provenance enough
+   (decision 15).
+7. An identifier can be a credential (decision 19); an emoji in a fact
+   walked past the iMessage cap on the unvalidated paths; SOTA-C: negation
+   after a mandated phrase in its common forms ("data gaps: none").
+8. `authorized_prose` trusted a key (decision 16, registry proof).
+9. Two entries declared source attributes instead of contract ids
+   (decision 21); `{"phrasing":0abc}` selected template 0.
+10. SOTA-A approved for the first time; SOTA-C: the library's writing
+    instructions contradicted the selection instruction (decision 20).
+    Blocked as "no independent corroboration" with SOTA-B dead.
+11. Fact keys were logged verbatim.
+12. An over-long fact cost the breaker notice its load-bearing clause
+    (decision 18).
+13. The gate ignored the `Composed`'s channel (decision 17).
+14. The channel check logged the trigger before provenance was proved.
+15. A caller's `override_suffix` key shadowed the derivation; undeclared
+    atoms filled slots. SOTA-C claimed the negation regex always matches —
+    executed, not reproduced, pinned as false.
+16. Green: SOTA-A and SOTA-C with proof-of-check.
+
+The owner overrode the three-round hard stop for #112 after round 3, on
+the ground that every finding was real and fixed within the hour; the
+stop rule stands for the next PR.
+
+**#113 (governor pins) — round 1:** the author's `.venv` tracking pin ran
+`git ls-files` with `check=False` and no `cwd`, so outside a worktree it
+passed vacuously; fixed to fail closed. Round 2 green (SOTA-A, SOTA-B).
+**#114 (composer pins) — round 1 green** (SOTA-A, SOTA-B), with the
+signed-library fixture and four ruff fixes over the author's 172 pins.
+
+**Lessons the continuation adds to the standing regime.** Execute before
+disputing, always — the two claims that were not real were found by
+execution, not by argument, and the panel accepted the executed record.
+Judge a design alternative by measurement before adopting it (the
+rendered-sentence check). A test fixture that looks like a credential IS
+one to the secret gate; plant it. A refusal that logs the caller's string
+is a disclosure. And the only reliable second voice on a large diff was
+the one the gateway could keep alive: fix the wire before the next big PR.

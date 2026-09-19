@@ -390,3 +390,130 @@ the truce (a claim lost with the caller's transaction on a crash, the reaper
 unreachable, the write lock held for the whole call). Callers must not hold
 an open write transaction while calling `compose()`; the dispatcher already
 sends outside transactions.
+
+## Status on main (2026-09-19)
+
+Landed, in order: #104 (schema and settings), #105 (the validator,
+standalone; 41 panel rounds), #111 (format controls at the message edges),
+#106 and #109 (the governor and its tests), #112 (the composer and the
+admission gate, standalone; 16 rounds), #113 (governor pins), #114 (composer
+pins). Nothing on main calls the engine yet: decision 1 has it compose
+BEFORE a delivery is queued, so its caller is the alert dispatcher, and
+wiring it is the go-live step under the operator's takeover decision — a
+separate PR (decision 22). Two facts the go-live PR inherits: the shipped
+prompt library is UNSIGNED, so the engine is inert until the owner signs
+its status line (decision 14); and the alert phrase registry is written in
+German while the validator's language is English, so registry text reaches
+the wire only by proof against the registry itself (decision 16).
+
+## Decision 14 — the library must be signed before the wire
+
+`config/message_prompts.v1.json` carries a status line — shipped as "DRAFT -
+owner sign-off required" (ruling Q34) — and nothing read it, so an admitted
+deployment could have sent unsigned content (#112 round 2). The owner signs
+by editing the line to begin with `SIGNED` in a reviewed PR: data, never
+code. Until then `compose()` is inert (no model call, no attempt row, only
+the bare event line) and `gate.emit` refuses to put anything of the
+engine's on a wire, even when admitted. An unreadable library is unsigned.
+
+## Decision 15 — provenance is proved, not declared
+
+`gate.emit` takes a `Composed`, not text, so the composer's product is the
+only thing it puts on a wire — and the class is public, so a `Composed`
+built by hand carried any text past every control (#112 rounds 1, 6). A
+`Composed` now carries a keyed digest over its fields, minted only by the
+composer's `_issue` with a key drawn at import; the gate checks it FIRST,
+before the channel, the signature and admission, and its refusal logs
+nothing of the object (round 14) — until a `Composed` is proved the
+composer's, every field of it is the caller's string.
+
+## Decision 16 — a fact is a scalar, redacted, and judged before it fills a slot
+
+Decision 12 judges the model's words and trusts the owner's template; the
+grounding check judges numerals. A FACT was judged by nobody (#112 rounds
+4–9, 11, 15). Now, in `compose()` and again where a slot reads a fact:
+
+* only DECLARED facts fill slots (`grounding_fields`, compared by canonical
+  contract id, so `band_base`, `base_action_band` and `F_BAND_BASE` are one
+  fact); the override suffix is derived, never supplied;
+* a fact is a scalar — a dict or list renders as a dash;
+* every string passes the repository's redaction chokepoint
+  (`app.redaction.sanitize`), the one the failure alert already used;
+* a string carrying an emoji renders as a dash: data has no decoration;
+* a PHRASE (whitespace inside) is held to every meaning-of-prose rule of the
+  validator, the allow-list of clause openers included, grounded by itself
+  so only meaning is judged; an ATOM ("trim", "14:00", "51/100") is held
+  to the banned lexicon only, because alone a band name reads as an order
+  and a score as a quotient, and neither is the atom's doing;
+* a field an entry declares as `authorized_prose` is admitted only if it
+  parses as a join of the phrase registry's own fragments with each slot
+  bounded by the registry's `max_width` — exactly what the alert renderer
+  can produce (round 8 found that trusting the KEY let a caller's "sell
+  everything now" through under it);
+* a refused fact renders as a dash, is kept out of the prompt, and is
+  logged by the library's name or not at all.
+
+Why not judge the rendered sentence: the owner's templates were authored
+against `prose_rules=False`, and the validator refuses their idiom whole
+("(before: hold)" splits into a clause headed by a band word), so a
+whole-sentence judgement cannot tell a hostile fact from the template.
+Measured before it was rejected (round 5).
+
+## Decision 17 — the transport is the channel the Composed was made for
+
+A `Composed` is fitted and validated for ONE channel. A sender names its
+channel; the gate refuses a sender that does not match the `Composed`'s, or
+names none (#112 round 13). The `Composed`'s channel is bound by its token.
+
+## Decision 18 — when a render overflows, the facts give way first
+
+The fit clipped the rendered text from the end, so an over-long fact in the
+middle of the breaker notice cost it "Scores and alerts unaffected." — the
+sentence its library note calls load-bearing (#112 round 12). The owner's
+sentences are the message; a fact is a value in it. `_fit_render` shortens
+a phrase fact on a word boundary, never inside a numeral, then blanks the
+longest fact to a dash, until the text fits; only a template that overflows
+on its own is clipped. A clip never lands inside a numeral either way
+(round 4), and the fallback is held to the whole channel contract — the
+emoji cap and allow-list included — with the bare event sent in its place
+when it fails (round 7).
+
+## Decision 19 — the wire and the log carry the owner's word or "unknown"
+
+The bare-event line said "bubblegauge: {trigger} fired." with the caller's
+string; filtering it to an identifier was not enough, because a credential
+can be an identifier (#112 rounds 6, 7). The name is echoed only when it is
+a key of the library; otherwise the line and the record say "unknown". No
+log line carries a caller-supplied string: a refused fact is logged by the
+library's name, an unissued `Composed` not at all (rounds 11, 14).
+
+## Decision 20 — the library's writing instructions are removed before the choice
+
+The library's prompts were authored for an engine that WROTE the text and
+end in an output section asking for two labelled lines. The composer only
+appended the decision-12 selection instruction after them; "last word wins"
+was an assumption, and a model obeying the earlier one would be
+format-rejected until the compose fell back (#112 round 10, SOTA-C).
+`selection_prompt()` removes the output section and the writing bullets
+before the selection instruction is given; the library is not rewritten.
+
+## Decision 21 — the contract's fact ids fill the slots
+
+Two entries declared the contract's source attribute (`base_action_band`,
+`missed_recompute_slots`) while the alert contract supplies the fact id
+(`F_BAND_BASE`, `F_MISSED_SLOTS`), so the live value rendered as a dash and
+was invisible to the model (#112 round 9). Every rule-driven entry declares
+contract ids; the contract's own `FACT_SOURCES` table is the slot alias
+table; a pin sweeps every headline-keyed entry for exactly this class.
+
+## Decision 22 — standalone, and what the go-live PR must do
+
+The engine has one path to a transport, `gate.emit`; it takes an issued
+`Composed`; no engine module imports a transport; and the set of app
+modules importing the engine is empty — all pinned. The go-live PR, under
+the operator's takeover decision, will: give the dispatcher a sender that
+names its channel and wraps `app.notify.sipgate` / `app.notify.imessage`;
+call `compose()` outside any write transaction (decision 13) and hand the
+`Composed` to `gate.emit`; rewrite the caller pin to name the dispatcher;
+and land the owner's signature on the library (decision 14). Until then
+the engine is a library, reviewed as one.
