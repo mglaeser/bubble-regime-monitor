@@ -861,10 +861,12 @@ class TestOwnerSignOff:
 
     UNSIGNED = "prompt library 1.0.0 is not signed off by the owner (status 'DRAFT'; ruling Q34)"
 
-    def test_the_shipped_library_is_unsigned_today(self):
-        # When the owner signs, this pin is rewritten to say so.
-        reason = _REAL_SIGN_OFF()
-        assert reason is not None and "not signed off" in reason and "DRAFT" in reason
+    def test_the_shipped_library_is_signed(self):
+        # Signed 2026-09-19 by the owner's instruction; until then this pin
+        # said the opposite, so that an unsigned library could not be
+        # mistaken for a signed one.
+        assert _REAL_SIGN_OFF() is None
+        assert composer.library()["status"].startswith("SIGNED 2026-09-19")
 
     @pytest.mark.parametrize("status, signed", [
         ("SIGNED 2026-09-20 mglaeser", True), ("signed", True), ("Signed off 2026-09-20", True),
@@ -1256,7 +1258,10 @@ class TestRoundSevenOn112:
         assert out.text == "bubblegauge: BAND_TO_TRIM fired." and "malformed" in (out.reason or "")
 
     def test_an_unsigned_library_echoes_only_its_own_keys(self, monkeypatch):
-        monkeypatch.setattr(composer, "library_sign_off", _REAL_SIGN_OFF)
+        # The shipped library is signed since 2026-09-19; the unsigned
+        # behaviour is exercised through the predicate.
+        monkeypatch.setattr(composer, "library_sign_off",
+                            lambda lib=None: "prompt library 1.0.0 is not signed off by the owner (ruling Q34)")
         for trigger, label in (("BAND_TO_TRIM", "BAND_TO_TRIM"), ("sk_live_ABC123", "unknown")):  # pragma: allowlist secret
             out = composer.compose(trigger=trigger, channel=Channel.IMESSAGE, priority=2,
                                    facts={}, settings=_settings())
