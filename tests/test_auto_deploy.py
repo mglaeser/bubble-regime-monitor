@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -263,3 +264,31 @@ def test_admin_deploy_not_configured_without_branch(isolated_db, monkeypatch):
     get_settings.cache_clear()
     assert r.status_code == 202
     assert r.json()["data"]["status"] == "not_configured"
+
+
+class TestTheWatcherLockStaysWithTheWatcher:
+    """2026-08-30 → 2026-09-11: the lock taken on fd 9 was inherited by the
+    container's helpers, so it outlived every deploy; later triggers skipped
+    without consuming the file, the path unit re-fired, and systemd latched
+    start-limit-hit. Merges silently stopped reaching production."""
+
+    WATCH = Path(__file__).resolve().parents[1] / "deploy" / "deploy-watch.sh"
+    UNIT = Path(__file__).resolve().parents[1] / "deploy" / "systemd" / "bubblegauge-deploy.service"
+
+    def test_deploy_sh_runs_with_the_lock_fd_closed(self):
+        assert './deploy.sh 9>&-' in self.WATCH.read_text()
+
+    def test_a_second_trigger_waits_for_the_lock_instead_of_skipping(self):
+        text = self.WATCH.read_text()
+        assert 'flock -w "$LOCK_WAIT_S" 9' in text and "flock -n 9" not in text
+
+    def test_the_unit_never_latches_on_repeated_activation(self):
+        assert "StartLimitIntervalSec=0" in self.UNIT.read_text()
+
+    def test_fd_nine_really_is_closed_for_the_child(self):
+        import subprocess
+
+        script = 'exec 9>"$1"; flock -n 9; bash -c "[ -e /proc/\\$\\$/fd/9 ] && echo open || echo closed" 9>&-'
+        out = subprocess.run(["bash", "-c", script, "_", "/tmp/bubblegauge-lock-test"],
+                             capture_output=True, text=True, check=True).stdout.strip()
+        assert out == "closed"

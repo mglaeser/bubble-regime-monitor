@@ -5,6 +5,11 @@ Documentation=file://%h/playground/bubble-regime-monitor/docs/AUTO_DEPLOY.md
 # idempotent and self-locks. We only need network for git fetch + registry.
 Wants=network-online.target
 After=network-online.target
+# A trigger that arrives during a deploy re-fires the path unit as soon as
+# the service exits; without this the unit latched into start-limit-hit and
+# auto-deploy silently stopped (2026-08-30). The watcher serialises deploys
+# itself, so repeated activations are expected and harmless.
+StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot
