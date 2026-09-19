@@ -93,6 +93,62 @@ fixed with priority.
 
 | 27 | SOTA-A (B approves; C timed out) | The v1 manifest was enforced as a SUBSET — "every declared slug is present with its kind" — so an artifact carrying EXTRA undeclared blocks loaded at v1 and was published by `/content/dashboard`, and under a `gauge.` prefix rode `score`'s display deck: injected content bypassing every review pin (as_of stamps, family rules, band vocabulary — all of which are CI pins against the SHIPPED artifact, not runtime guards) | **UPHELD → fixed**: the served block set must now EQUAL the manifest (`blocks.keys() != REQUIRED_FILE_SLUG_KINDS.keys()` degrades whole), consistent with the round-18 framing that the manifest *is* the meaning of v1 completeness and must be extended in the same PR that adds content. Two pins: an injected editorial block degrades the artifact; an injected `gauge.` block never reaches the display deck. Mandatory full-control re-run (round-22 rule) — 12/14 red, and it confirmed the predicted consequence: the artifact-side **slug regex is now subsumed** by equality (a non-manifest slug can no longer appear) and stays green under deletion. Rather than claim a pin it no longer earns, the term is retained as defense-in-depth, documented as subsumed in-line, and the schema is pinned where it still bites — `test_manifest_slugs_are_structurally_valid` over the manifest itself, which is code and could otherwise canonicalize a malformed slug. The 120-char cap stays independently red (pinned as a unit test on the regex). Subsumed-but-retained controls now stand at two, both on the record: `parse_constant` (round 22) and this |
 
+| 2 | SOTA-A ×4 (B approves, high confidence; C timed out) | Four validator escapes, all operator-visible: (1) a leading adverb walks past the sentence-START imperative anchor — **"Now hold positions."** returns OK; (2) banned phrases matched a single literal space, so **"Market will  crash."** passes; (3) the trailing-dot exponent **"51.e2"** splits into the grounded `51` plus the grounded `2` while denoting 5100; (4) **bidi controls pass** — `U+202E 51 U+202C` carries grounded digits and satisfies the grounding check yet RENDERS to the operator as `15` | **UPHELD ×4 → fixed.** (1) the imperative test no longer depends on WHERE the verb sits but on whether it takes an OBJECT — the state sense is always followed by punctuation or a continuation word ("band is hold,", "moved hold to trim"), and those are pinned so the gate cannot start rejecting the monitor's own vocabulary; (2) banned phrases are whitespace-flexible; (3) exponent forms are matched first and whole, including the trailing-dot spelling, with the plain branch second so a sentence-final `51.` still yields `51`; (4) **every Cf format character is refused** except VS16 and ZWJ, which are legitimate inside an emoji sequence — the ungrounded value here was assembled purely from display order, so a grounding check on code points alone could never catch it. Deletion audit: all four go red when reverted |
+
+| 3 | SOTA-A ×4 (B and C both errored infra-side) | (1) `"now"` was exempted as a non-object, so **"Reduce now."** validated as an observation; (2) U+200D was allowed globally, so a joiner between letters renders **"Sell holdings"** to the operator while matching neither the lexicon nor the imperative gate; (3) the numeral scanner is ASCII-only — U+2212 made `\u221251` read as the grounded `51`, and `\u00bd` carries a value with no digits at all; (4) in `consecutive_technical_errors` the LIMIT was applied BEFORE in-flight rows were skipped, so a burst of unresolved claims filled the scan window, hid the strike run, and the breaker permitted ASK | **UPHELD ×4 → fixed.** (1) the verb sets are now split by what they MEAN here: only `hold`/`trim` are band names and need the object test, while `sell|buy|reduce|exit|increase|…` are never states of this monitor, so any occurrence is advice — no adverb exemption to abuse; (2) joiners are permitted only when genuinely adjacent to an emoji, refused between letters; (3) non-ASCII digits, `No`/`Nl` numerics and unicode minus signs are refused outright — none can be grounded against ASCII facts, and the deception is in the glyph rather than the value; (4) the in-flight exclusion moved INTO the query, so the limit counts resolved rows as intended. Deletion audit: all four go red. **Standing observation for later rounds:** every escape in rounds 2-3 has the same shape — text that RENDERS as one thing and MATCHES as another (bidi, joiners, unicode numerics, spacing). New validation should be written against that class, not against individual strings |
+
+| 4 | SOTA-A ×5 + SOTA-C ×2 (B approves) | (1) advice-regex grammar gaps — **"Hold 2 positions."** (object starts with a digit) and **"Consider selling."** (advice with no imperative verb) both return OK; (C) `_NON_OBJECT` contained the prepositions `on`/`in`/`at`/`to`, so **"Hold on tight."** and **"Hold in line."** pass; (2) **no English-only gate exists at all** — "Bitte kaufen." validates on both channels, against ruling Q30; (3) arithmetic escapes grounding — facts 51 and 2 admit **"51*2"**, denoting an ungrounded 102; (4) Mn/Me screening incomplete — **VS15 hides a letter**, plus a keycap claim; (5) the content cap trusts the caller's `iteration`, so a fourth attempt passing `iteration=1` gets a fresh allowance | **UPHELD ×6 → fixed; one cited case did NOT reproduce and is pinned instead.** The advice gate is **inverted from a deny-list to an ALLOW-list**: rounds 2-4 each defeated the deny-list because it must enumerate every way English attaches an object, while the STATE sense has only a few shapes ("band is hold", "moved hold to trim", band verb followed by punctuation). Anything else containing a band verb is advice, and `sell|buy|reduce|…` are advice unconditionally including gerunds. (2) an English backstop word-list (German-weighted — the phrase set this programme replaces was German); the prompt remains the primary guarantee, this is the net. (3) arithmetic between digits refused. (4) **the screen now covers Cf AND Mn/Me: VS16 is category `Mn`, not Cf, so the round-2 allowance for it inside a Cf-only scan was DEAD CODE** and VS15 sailed through — the real defect was mine, one round older than reported. (5) the cap is derived from rows via `content_attempts()`, with the caller's count still honoured when larger. **Not reproducible:** the keycap half of defect 4 — two keycaps already fail the allowlist and three fail the count; verified by executing the exact scenario, and pinned so it stays true. Deletion audit: all six go red, the allow-list turning SIX tests red |
+
+| 6 | SOTA-A ×4 + SOTA-C (B approves) | (C) **VS16 allowed unconditionally** — "Se\ufe0fll holdings." passes iMessage validation and RENDERS as "Sell holdings.", delivering unapproved advice on a live channel; (A1) `RF4_ALL_CLEAR`'s fallback asserts breadth recovery, but the flag can clear on index distance alone; (A2) a fallback never CLOSED a compose, so an exhausted trigger stayed capped and fallback-only forever; (A3) `.51` lost its leading dot and read as the grounded `51`; (A4) forecast/modal verbs absent — "Market will fall." validated (the lexicon caught only "will crash") | **UPHELD ×5 → fixed.** (C) the guard now asks whether the COMBINED glyph is allowlisted — the naive "base is not a letter" test fails both ways, since U+2139 IS a letter and the base of 'ℹ️'. ZWJ had been guarded this way since round 3; allowing its sibling unconditionally was my own inconsistency, and the reasoning in the comment ("it only makes a glyph more visible") was simply wrong. (A1) the fallback now claims only that the flag no longer meets its trigger definition. (A2) a `FALLBACK_USED` outcome closes the compose. (A3) leading-dot decimals are matched first and whole. (A4) forecasting is advice in the other direction and is refused. **Two defects the panel did NOT report, found by the new prompt-library contract test:** (i) the round-5 arithmetic guard banned `/` between digits, which would have REJECTED THE OPERATOR'S 08:00 DIGEST — its fallback is `{median}/{score_scale_max}`, i.e. "51/100", the digest's own score notation; `/` now counts only when spaced; (ii) **10 of the 32 prompts instructed the model to use an emoji set the validator rejects** (`🔸`/`🗓` vs the contract's `▪️`/`🕒`/`ℹ️`) — an obedient model would have been format-rejected every time, burning content iterations before falling back. All aligned, with a test asserting prompt text == channel contract == validator. **The deletion audit again caught what the panel could not:** three of the five fixes had NO tests, so reverting them left CI green — now pinned, and all seven controls go red |
+
+| 7 | SOTA-A ×3 + SOTA-B ×3 (convergent) | **My round-6 claim "prompt text == channel contract == validator, all aligned" was FALSE.** The round-6 fix replaced ONE exact string and the contract test matched ONE phrasing (`allowlist: …`), so three other phrasings survived across 14 prompts — `✅` in BAND_TO_HOLD/OVERRIDE_RESOLVES, a `📊 📅 🔎 ⏱ 🔧 ✅` "neutral set" in twelve more, and two prompts that shipped **literal `\u{1F4CA}` ESCAPE TEXT** in place of emoji. B spelled out the cost: FORMAT_REJECTED rows count toward `content_attempts`, so an obedient model's compose deterministically exhausts to the fallback while spending budget and pacing slots. Also (A1) the context-free terminal exemption accepted **"Now hold."**, and (A2) grounding was digit-only, so **"Score ninety-nine."** passed | **UPHELD ×3 → fixed.** Every phrasing normalised to the single channel allowlist (16 fields across the library), and **the contract test now scans actual emoji CHARACTERS rather than a phrase pattern** — the phrase-matching version is exactly why the round-6 claim was wrong — plus a new test forbidding literal escape text. (A1) the terminal shortcut is gone: a terminator is necessary but never sufficient, something must MARK the state. (A2) spelled-out numbers are refused, with `one`/`two`/`second` deliberately excluded as ordinary English. **Fixing A1 broke the operator's own digest** — `bubblegauge 51/100 trim.` puts a band name after a score with no marker — so a preceding NUMBER now counts as state context. That is the SECOND time in two rounds that hardening nearly blocked the 08:00 digest; the risk in this validator is not what it rejects deliberately but what it rejects by accident, and the prompt-library contract tests exist to catch precisely that. **Process note:** I restored the library from the pristine copy mid-round after a bulk edit damaged it (stripping emoji left sentences like "Emoji allowlist adds because…"), which silently reverted the round-6 RF4 fix — caught by its own test, re-applied |
+
+| 8 | SOTA-A ×2 (**B and C both approve**) | (1) bare `to` counted as state context, so **"Remember to hold."** validated as a marker-backed state; (2) U+FF0B (fullwidth plus) was absent from the operator checks — **`51＋2`** validated while denoting 53 | **UPHELD ×2 → fixed.** (1) `to` earns the marker role only inside a transition — a band word or a movement verb must precede it ("moved hold TO trim") — which keeps the real construction while closing the imperative; (2) the sign test is now **category-driven** (`Sm` and not ASCII) exactly as the dash test became in round 5. **This is the third time enumerating Unicode was wrong** (U+FE63 round 5, U+FF0B round 8), so the class is closed rather than the instance; ASCII operators stay with the arithmetic gate, which is what distinguishes the digest's "51/100" from "51 / 2". Deletion audit: both go red. **Convergence:** defect counts across the loop are 8 → 4 → 4 → 7 → 9 → 5 → 3+3 → 2, and this is the first round where both non-required verifiers approved |
+
+| 9 | SOTA-A ×4 + SOTA-C (fail-open) | (C) **`reserve()` has no reconciliation**: a worker that dies mid-call leaves its claim IN_FLIGHT forever, and the two halves of the governor then disagree about it in the WORST direction — `spend_today` COUNTS it (the daily budget leaks) while the strike scan SKIPS it (the technical errors that killed the worker never register, so the breaker cannot open). Fail-open plus a silent budget drain. (A1) a non-ASCII separator assembles a third value from two grounded ones — `51\uff0e2` displays 51.2; (A2) `zero` missing from the spelled-number gate; (A3) a band verb's GERUND evaded every advice gate — "Keep holding your positions." validated; (A4) FORMAT rows exhaust the iteration cap but never struck, so a model returning malformed output forever fell back with the breaker shut | **UPHELD ×5 → fixed.** (C) `reap_stale_claims()` resolves any claim older than a 900 s TTL into the technical error it almost certainly was, and `decide()` runs it BEFORE reading any state, so an abandoned claim now reaches the breaker instead of hiding from it. (A1) a non-ASCII separator between digits is refused (ASCII `.`/`,` stay inside `_NUMERAL_RE`, attached to their numeral). (A2) added. (A3) band-verb gerunds and `keep|continue|start|stop|begin + …ing` are advice — a state is NAMED, never performed. (A4) ruling Q38 counts an EXHAUSTED ATTEMPT, and format rejections exhaust the cap exactly as content rejections do; both now accumulate toward one strike. Deletion audit: all five go red |
+
+| 10 | SOTA-A ×4 + SOTA-C ×2 | (A1) reaping runs INSIDE `reserve()`'s savepoint, so a non-ASK verdict rolls it back and restores the abandoned claims just recognised as failures — the breaker then reports closed; (A2) every reaped claim was stamped `now − TTL`, so a just-expired failure skipped its backoff while a day-old one started a fresh ~24h cooldown; (A3) **`de-risk` was in NEITHER the band list nor the action list** — "De-risk your portfolio." validated as an observation; (A4) the arithmetic class matched exactly ONE operator, so `51**2` passed while denoting 2601; (C1) `trimmed`/`held` sat in the ACTION verbs, so **"The band was trimmed." was REJECTED** — a false positive I introduced in round 5; (C2) "The score is 51." was claimed to fail grounding | **UPHELD ×5 → fixed; C2 NOT REPRODUCIBLE.** (A1) `reserve()` reaps BEFORE opening the savepoint, so the reconciliation outlives a rolled-back claim. (A2) each claim now ends at its OWN expiry (`started_at + TTL`). (A3) `de-risk` joins the band vocabulary and takes the object test — the highest-severity band was the one place an instruction would carry most weight. (A4) one-or-more operators. (C1) past participles of band names belong to the STATE vocabulary; the imperative uses stay caught by the passive-framing pattern and the object test. (C2) executed exactly as cited — it validates, and `test_sentence_final_period_does_not_break_grounding` already covered it; now pinned explicitly as non-reproducible per the disputed-finding protocol. Deletion audit: all five go red. **Note:** A1 and A2 were both consequences of my own round-9 fix — a new control's INTERACTIONS need auditing, not just the control |
+
+| 11 | SOTA-A ×3 (B and C approve) | (1) `"(?:ing)?"` on an e-ending verb only ever produces *reduceing*, so **"Try reducing positions."** validated; (2) the `/` rule demanded spaces on BOTH sides, so **"51 /2"** evaded it while denoting 25.5; (3) **historical strikes were regrouped against the CURRENT cap** — widening 3→4 turned five exhausted composes into three strikes and REOPENED a breaker that had legitimately tripped | **UPHELD ×3 → fixed.** (1) gerunds are spelled out, not derived by suffix concatenation. (2) `/` is arithmetic whenever EITHER side is spaced; only the tight `51/100` digest notation stays exempt. (3) strikes are delimited by the engine's own `FALLBACK_USED` marker — the row where it records giving up, which is precisely ruling Q38's "exhausted attempt" and which no cap can re-interpret. **The first fix was incomplete and my own test caught it:** the scan WINDOW was still sized from the cap, so NARROWING it shrank the window until a tripped breaker looked closed — the same defect one layer down, which would have shipped had I only tested the widening direction. The window is now a documented constant (`_STRIKE_SCAN_ROWS`). A structural consequence: `FALLBACK_USED` must be visible to the strike scan but must NOT pace the next request (no model call happened at that step), so the scan has its own outcome set rather than reusing `_PACING_OUTCOMES`. Deletion audit: all controls go red, including both directions of the cap change |
+
+| 12 | SOTA-A ×4 (C approves) | (1) `BUDGET_SKIPPED` RESET the strike run despite making no request — four errors, a skip and a fifth error left a five-strike breaker closed; (2) the **fixed 500-row scan window** cannot serve a larger threshold, so 501 consecutive errors reported the breaker closed; (3) bare `move`/`shift` counted as transition context, so **"Move to trim."** validated as a state report; (4) the tight-slash exemption applied in EVERY context, so **"The quotient is 51/2."** passed as a computed value | **UPHELD ×4 → fixed. Two are recurrences of classes I had already "closed".** (1) a budget skip is neither a strike nor evidence of recovery — it is now skipped, matching the reasoning that keeps it out of the pacing floor. (2) last round I made the window a CONSTANT to stop the iteration cap rewriting history; that was wrong in the other direction. The window is now `max(floor, threshold × rows-per-strike)`: it may depend on the BREAKER THRESHOLD (which sets how many strikes must be visible) but never on the ITERATION CAP (which would re-interpret history), and the maximum keeps it monotonic so lowering the threshold cannot shrink it. (3) only INFLECTED movement verbs describe something that HAS happened; the bare imperatives are out. (4) the tight `a/b` exemption exists for the digest alone and now requires the denominator to be a DECLARED SCALE — a fact whose name says maximum/total/count — which the digest template provides and an arbitrary quotient does not. Deletion audit: all four go red. **Two of my own fixtures were also wrong** (no declared scale; failures placed 33h back where the cooldown had legitimately expired) — both corrected, and neither would have been caught without running the audit in both directions |
+
+| 13 | SOTA-A x4 (C approves) | (1) `BUDGET_SKIPPED` rows were skipped in PYTHON, so they still filled the query's LIMIT - 600 of them hid five real strikes and `decide` permitted ASK; (2) a bare `recommend` match missed its inflections, so **"Cash is recommended."** validated; (3) U+001C..U+001E (file/group/record separators) are line breaks a CR/LF/NEL list misses - a multiline iMessage validated; (4) **`51//100`** used the digest's scale exemption to launder floor division | **UPHELD x4 -> fixed. Defect 1 is the IDENTICAL mistake round 9 fixed in the same function:** filtering after the LIMIT means excluded rows still consume window slots. Round 9 moved the `IN_FLIGHT` exclusion into the query for exactly that reason; round 12's budget-skip fix then reintroduced it as a Python `continue`. Now excluded in the query. The standing rule earns a sharper statement: **a row that must not affect the answer must not occupy a slot in the window either.** (2) `recommend\w*`; (3) the C0 separators join the line check; (4) the scale exemption requires EXACTLY ONE slash - a declared scale must not launder an operator. Deletion audit: all four go red |
+
+| 14 | SOTA-A x3 (B and C approve) | (1) the state-marker regex matched a word SUFFIX - the alternative `at` matched the tail of "Repeat", so **"bubblegauge: Repeat de-risk."** read as a marked state; (2) `count` was accepted as a SCALE name, so a shown red-flag count of 2 legitimised **"51/2"** as a score; (3) the strike window ignored iteration WIDTH - a compose costs a row per iteration plus its fallback marker, so five 125-reject composes need 630 rows and were counted as four strikes | **UPHELD x3 -> fixed.** (1) `\\b` on both marker searches: a marker must be a whole word. (2) the digest divides BY A TOTAL, never by a count - `red_flag_count/red_flag_total` - so `count` is out of the scale-name pattern; a live counter must not become a denominator. (3) `per_strike` now takes the maximum of the row budget and `cap + 1`. **Depending on the cap for SIZE is safe where depending on it for GROUPING was not (round 11):** every term only ever WIDENS the window and the floor means no config change can shrink it, so history stays un-reinterpretable. Deletion audit: all three go red. **Two self-inflicted stumbles:** a double-escaped `\\b` briefly broke 32 tests, and I repeated round 12's fixture error of placing rows outside the cooldown window - both caught by the suite before push |
+
+| 15 | SOTA-A x3 + SOTA-C (B approves) | (1) the strike window SHRINKS with the current iteration cap - lowering 125 to 3 hides the fifth historical strike and permits ASK mid-cooldown; (2) a non-overlapping slash scan misses **chained** division, so `51/100/100` validated; (3) the advice deny-list omits plain imperatives such as **"Dump your portfolio."**; (C) the scale exemption has **no numerator/denominator PAIRING check** - "Score 51/4" passes on a median of 51 and a red-flag total of 4, denoting 12.75 | **UPHELD x4 -> fixed. Defect 1 is the SAME CLASS for the third round from a third direction** (sized by cap r11 - history re-interpretable; fixed at 500 r12 - large thresholds unreachable; widened by cap r14 - lowering it shrinks again). Every settings-derived window is wrong in one direction, so the dependency is GONE: `consecutive_strikes` reads only the rows since the last SUCCESS, because a success is the one thing that resets a run, and the constant is demoted to a pure safety valve. (2) a chain is never a score. (3) the deny-list grew, and the gerund list with it. (C) only the pairings the DIGEST WRITES are a score - `(median, score_scale_max)` and `(red_flag_count, red_flag_total)` - because a bare denominator check let any grounded numerator ride any declared scale. Deletion audit: all four go red. **Also fixed: a genuinely flaky test of my own** - the daily-budget test placed rows 60 minutes back on a floating clock, so it failed whenever the suite ran shortly after midnight UTC, which is exactly when it did. **And a false alarm I nearly reported:** three unrelated alert tests failed in a full run, purely because I had two complete suites competing (956s vs 218s); isolated, they pass 37/37, and a clean run is 2383 passed |
+
+| 16 | SOTA-A x3 (B and C approve) | (1) **"Move all funds to cash."** validated - round 12 removed `move`/`shift` from the STATE markers but never added them to the advice side, so they sat in NEITHER list; (2) the C1 block (U+0080..U+009F) is category `Cc`, which the `Cf`/`Mn`/`Me` scan never looked at; (3) **the floor had become a CEILING** - the breaker threshold is unbounded, so 20,001 consecutive errors could not be counted by a 20,000-row scan and the breaker stayed shut | **UPHELD x3 -> fixed.** (1) the movement verbs get their OWN group, without the `(?:s|ed)?` suffix the action verbs carry: adding them naively made `shift`+`ed` match and broke the legitimate "Band shifted to trim" - the same distinction round 10 drew for `trimmed`/`held`, rediscovered the hard way. (2) `Cc` joins the scan. (3) the window is `max(floor, (threshold + 1) x (cap + 2))`: large enough to SEE the required strikes, and every term only GROWS, so lowering either setting can never drop below the floor - the property rounds 11-15 kept breaking. Deletion audit: all three go red - **but only after fixing a test of mine that was green for the wrong reason.** The first C1 probe was "Band trim<C1> ok.", which an unrelated STATE gate rejects, so removing the `Cc` check left it passing; the probe now carries no band verb and asserts on the reason string |
+
+| 17 | SOTA-A x5 + SOTA-C (B approves) | (A1) the strike window still used the CURRENT cap for durable history - five 5,000-reject composes become four visible strikes once the cap drops; (A2) `breaker_is_open` never reaps, so five expired claims report the breaker CLOSED to any status reader; (A3) the arithmetic gate demanded a DIGIT right after the operator, so **"Value 51+(-2)."** evaded it while denoting 49; (A4) `close` missing from the command verbs - **"Close every position."** validated; (A5) the breaker's own reason said "after 5 technical errors" for five exhausted-CONTENT strikes - a false diagnosis handed to the operator mid-incident; (C) the tight-slash branch was said to kill the score-pair exemption, failing every `51/100` message | **UPHELD x5 -> fixed; C NOT REPRODUCIBLE.** (A1) **fourth appearance of this class** (r11/12/14/15/17): history is written under the OLD settings, so no window derived from the CURRENT ones can be guaranteed to cover it. The derivation is GONE - the window is a flat memory guard and correctness comes from bounding the run by DATA (rows since the last success). (A2) the status path reaps too. (A3) `_OPERAND` admits a bracket or sign on the right-hand side. (A4) added, with the gerunds. (A5) the reason now says "consecutive strikes (exhausted composes or technical failures)" - a breaker message is a diagnosis and must not invent a cause. (C) executed exactly as cited: BOTH slash branches require whitespace on at least one side, so a tight pair never matches, and the digest validates - pinned with an explicit regex assertion per the disputed-finding protocol. Deletion audit: all five go red |
+
+| 18 | SOTA-A x2 (B and C approve) | (1) the fixed 1,000,000-row scan makes any LARGER configured threshold unreachable - 1,000,001 consecutive errors with `BREAKER_STRIKES=1,000,001` still report the breaker closed; (2) the arithmetic and score scans required UNWRAPPED digit operands, so **"Value (51)/(2)."** conveyed an ungrounded 25.5 | **UPHELD x2 -> fixed, and the five-round argument is over.** Rounds 11/12/14/15/17/18 raised the same window from six directions, which finally says the fix was at the WRONG LAYER: derive the window from settings and history written under the OLD ones may not fit; fix the window and an UNBOUNDED setting outruns it. Both are true at once, so **no window can be correct while the inputs are arbitrary integers** - therefore the INPUTS are clamped (`_effective_strikes`, `_effective_cap`). A breaker needing a million consecutive failures is a typo, not a policy, and left unbounded it silently DISABLES the breaker: the worst possible reading of an operator's mistake. A test asserts the scan covers the worst run the clamps allow. (2) `_LHS` admits a closing bracket, matching `_OPERAND`'s opening one. Deletion audit: all three go red - **after the audit caught that nothing pinned the CAP clamp**, only the threshold clamp. Also moved a module-level `assert` into the suite: bandit forbids it in app code, and rightly, since `assert` is stripped under `-O` |
+
+| 19 | SOTA-A x4 (B and C approve) | (1) **the P1 short-circuit sat AFTER stale-claim reaping and the reservation flush**, so a locked or unavailable database could delay - or fail - the one message class that may never wait; (2) direct-object imperatives and modal forecasts passed: **"Keep your positions."** and **"Markets may fall."**; (3) the strike reset compared `started_at` with a strict `>`, so a technical error written in the SAME SQLite instant as the success it followed was invisible and the breaker reported closed; (4) **the state parser did not know the prompts' own "is now <band>" construction** - the library writes it six times, so "level is now trim." was CONTENT_REJECTED | **UPHELD x4 -> fixed.** (1) both `decide()` and `reserve()` answer a P1 BEFORE touching the database; the whole point of decision 2 in docs/MESSAGE_ENGINE.md is that this message never waits on anything slow, and putting the check after a reap quietly broke that. Pinned by a test that COUNTS reap calls. (2) modal forecasts join the forecast gate, and a direct-object imperative needs no listed verb. (3) the bound tie-breaks on `id`. (4) `(?:is|was|are|were)\\s+now` is a marker, while bare "now" still is not - round 7's finding survives, pinned. **This is the FOURTH time hardening has misfired against LEGITIMATE text** (r6 digest slash, r7 digest band-after-score, r10 'trimmed', r19 'is now'); that failure mode is more dangerous than an escape because it degrades silently - retries burn, strikes accumulate, and the operator sees only fallbacks. Deletion audit: all four go red |
+
+| 20 | SOTA-A x3 (B and C approve) | (1) `invest` in neither verb list - **"Invest all savings."** validated on both channels; (2) ASCII `x` omitted from the arithmetic gate - **"51x2"** denoted 102 while every symbol class missed the letter people actually type; (3) the cardinals `one`/`two` were excluded from the number-word gate, so **"There is one warning flag."** stated a quantity with no fact behind it | **UPHELD x3 -> fixed.** (1) added, with the gerunds. (2) `\\d[xX]\\d`, bounded by digits so it cannot touch words. (3) **A overturned a judgement I had made and documented**: I left the cardinals out as "ordinary English", which was wrong for a quantity. Adding them immediately broke a SHIPPED fallback - S3_TIER says "over two years", the lookback the methodology defines - so the rule is now sharper than either position: a cardinal before a TIME UNIT is methodology, anywhere else it is an ungrounded quantity, and ordinals stay out entirely because "second reading" counts nothing. The regression was caught by the prompt-library contract test, which is precisely the job it was added for in round 6. Deletion audit: all four go red, including the time-unit exemption |
+
+| 21 | SOTA-A x3 (C approves) | (1) arithmetic in WORDS was unhandled - "51 divided by 2" carries no operator yet denotes 25.5; (2) **the round-20 time-unit waiver was context-free**, so "The decline lasted two days." asserted an observed duration with no fact behind it; (3) the pacing row was chosen by START time while the pause is measured from COMPLETION - a claim reaped late finished after a later-STARTED success, so the success won the ordering and the technical error silently lost its 120 s backoff | **UPHELD x3 -> fixed.** (1) a prose-arithmetic gate bounded by digits on both sides, so ordinary comparisons ("the gap between 51 and 100") do not trip it. (2) the waiver is now ADJECTIVAL only: "a two-year lookback" names the rule's own window, a bare "lasted two days" is a claim - and the S3 fallback was REWORDED to match rather than widening the rule to fit the text. This is the second round running where my own fix created the next defect. (3) `last_attempt` orders by `COALESCE(finished_at, started_at)`, matching `_dwell_from`. **My test for (3) was itself wrong** and failed honestly: I asserted the reaped failure "completed last" while setting timings where it completed FIRST (start 60 min back + 15 min TTL = 45 min, versus a success starting at 40). Corrected to 16 min back, so it is recorded as finishing 1 min ago. The deletion audit tells me whether a control is PINNED; only getting the scenario physically right tells me whether it is CORRECT. Deletion audit: all three go red |
+
+| 22 | SOTA-A x2 (B approves) + SOTA-C repeat | (A1) `content_attempts` ordered only by `started_at`, so colliding boundary/rejection rows could be read in either order, undercounting spent attempts and admitting a request PAST the cap; (A2) **"Protect your portfolio."** validated - advice that names no trade; (C) the tight-slash branch was said, for the SECOND time, to reject "62/100" and make the score-pair exemption dead code | **UPHELD x2 -> fixed; C REFUTED AGAIN, on fresh evidence.** (A1) tie-break on `id` - round 19 fixed exactly this in the strike scan and I left its sibling untouched, which is the second time a fix has been applied to one of two identical call sites (cf. r14 breaker sizing). (A2) protective verbs join the advice gates: telling the operator to protect something is still telling them what to do. (C) **re-verified against the CURRENT regex rather than citing the round-17 disproof** — round 18 rewrote `_ARITHMETIC_RE`, so the earlier refutation did not carry over automatically and had to be re-run. Every slash branch requires whitespace on one side or a literal bracket, so a tight pair matches none; the digest validates, and the pin now ALSO asserts the exemption is not dead code by checking a genuine quotient is still refused. Deletion audit: both go red |
+
+| 23 | SOTA-A x2 + SOTA-C (B approves) | (A1) a SIGN after a tight slash - "51/+2" carried no whitespace and no bracket, so every branch missed it; (A2) `acquire` absent from the trade verbs; (C) the bare ASCII hyphen between digits is unmatched, so "51-2" denotes an ungrounded 49 | **UPHELD x3 -> fixed. C's EXAMPLE was already refused; C's CLASS was real** - "51-2" fails on its own because `-2` is not a grounded token, but with a NEGATIVE fact in scope (a tail beta) the identical text passes and denotes 49. Checking that surfaced a FALSE POSITIVE C had not mentioned: **"the scale runs 0-100" was being REJECTED**, and the prompt library writes exactly that notation. So the hyphen is now told apart THREE ways rather than patched in either direction: `2026-08` is a date and left alone; `0-100` ascends, so it is a range and both ends ground independently; `51-2` descends, so it is a subtraction and refused. A degenerate `51-51` counts as a range - the digest's own "range {iqr_lo}-{iqr_hi}" can have equal bounds, and a subtraction yielding zero is not a message anyone writes. **The lesson for disputed findings:** accepting or rejecting the cited example wholesale would have been wrong BOTH ways here - the example failed, the class held, and the investigation found a defect in the opposite direction. Deletion audit: all three go red |
+
+| 24 | SOTA-A x3 + SOTA-C | (A1) `avoid` absent - **"Avoid equities."** validated; (A2) a BRACKETED subtraction "51-(2)" slipped past the digit-hyphen-digit scan; (A3) the strike-run boundary used START order, so an error that started before a success but FINISHED after it was excluded and a threshold-1 breaker stayed closed; (C) the Q27 cap change (160 -> 150) was said to truncate existing failure alerts and lose tail content | **UPHELD x3 -> fixed; C REFUTED on execution.** (A1) avoidance is advice - telling the operator what NOT to do is still telling them. (A2) the bracketed form is the same subtraction written differently. (A3) **THIRD function to carry this ordering assumption** (r21 pacing row, r22 `content_attempts` tie-break, r24 the strike boundary); every one of those queries now orders by COMPLETION, since that is what `_dwell_from` measures. (C) executed rather than argued: the alert SYSTEM uses a hardcoded 160 and is untouched, and `failure_alert` COMPOSES within the limit instead of chopping afterwards - byte-identical text at either setting - with a documented truncation order that drops the error detail before the timeline. Q27 is binding regardless; the claim was that it MAIMS existing alerts, and it does not. Pinned by a test asserting the timeline survives. Deletion audit: all three go red |
+
+| 25 | SOTA-A x3 (B and C approve) | (1) multi-word commands - **"Get out now."** - which single-verb lists structurally cannot express; (2) the ASCII-x branch demanded a bare digit, so **"51x(2)"** denoted 102; (3) **grounded numerals are reduced to an UNBOUND SET**, so a next-check fact of `08:30` contributed the tokens `08` and `30`, and those alone validated the FALSE time **"08:08"** | **UPHELD x3 -> fixed. (3) is the deepest grounding hole in the loop and a CLASS, not a typo.** Flattening every fact into a bag of numeral fragments loses both BINDING (which fact a token came from) and MULTIPLICITY, so any compound value can be reassembled into a different one — here a claim about when the monitor next runs, at a time no fact supports, passing every gate. Compound forms (`HH:MM[:SS]`) must now appear VERBATIM in the facts. It is the same shape as the arithmetic defects — a new value built from grounded pieces — but applied to a FACT rather than an operator, which is exactly why no arithmetic gate caught it. (1) `_COMMAND_PHRASES` carries the multi-word forms. (2) the x branch takes `_OPERAND`, like every other operator. Deletion audit: all three go red |
+
+| 26 | SOTA-A x3 (B approves) | (1) **the round-25 class, still open on DATES** - a fact of `2026-08-01` supplies every fragment for the FALSE `2026-01-08`; (2) prose exponentiation - "51 to the power of 2" conveys 2601; (3) `trade` absent - **"Trade your holdings."** validated | **UPHELD x3 -> fixed. (1) cost a whole round to a mistake I had already named.** Round 25 identified fragment-recombination as a CLASS and then fixed it for TIMES only; the identical hole on dates was found by the panel rather than by me. The compound pattern now lives in ONE constant (`_COMPOUND_RE`: dates, year-months, times, slash-dates) with a test asserting every form is matched there, so a fourth form is ADDED rather than discovered as a fourth instance. The hyphen triage also had to learn that a date component pair is not a range. (2) prose exponentiation joins the word-arithmetic gate, including the unary "squared"/"cubed" which take no second number. (3) added. **My own fix created a false positive, caught before push:** adding `scale` to the command verbs rejected "The scale runs 0-100." - in this domain it is a NOUN far more often than a command, and the reasoning is now recorded in the source so it is not re-added. Deletion audit: all three go red |
+
+| 27 | SOTA-A x3 (C approves) | (1) `withdraw` absent - **"bubblegauge: Withdraw all funds."** validated; (2) a spelled sign flips a grounded value - fact 51 admits **"reading is minus 51"**, reporting -51; (3) **the technical backoff REPLACED the global 300 s floor**, so a request was admitted 120 s after a 5xx | **UPHELD x3 -> fixed. (3) is a rule I implemented BACKWARDS, defended by a test I wrote in round 1.** The owner's wording is "technical 4xx/5xx -> wait MIN 2 min" — an ADDITIONAL minimum on top of the 5-minute floor, not a licence to ask sooner; only the format retry is an explicit exception. The pause is now `max(floor, backoff)`, and `test_technical_backoff_clears_after_two_minutes` — which asserted the wrong behaviour and had passed for 27 rounds — is rewritten to state the rule as given. **A wrong test does not merely miss a defect; it actively defends one**, which is why the panel could not surface this until it read the spec rather than the suite. (2) is the recombination class in prose form. (1) added. **The audit also caught a no-op mutation of mine:** the `withdraw` deletion string did not match the source line, so the control was never actually tested — re-run properly, it goes red. Deletion audit: all three go red |
+
+| 28 | SOTA-A x3 + SOTA-C x2 (B approves) | (A1) the numeric-prefix state waiver accepted a BARE figure, so **"Instruction: at 51 hold."** validated; (A2) a decimal middle operand hid a chain - `51/100.0/4`; (A3 + C2, **CONVERGENT**) compound grounding used SUBSTRING membership, so a fact of `08:12:30` admitted the false `12:30` and `2026-08-01` admitted the partial `2026-08`; (C1) the digest-slash claim, for the THIRD time | **UPHELD x3 -> fixed; C1 refuted a third time.** (A3/C2 is the first time two verifiers converged independently, and it is the third variation of the RECOMBINATION class in four rounds — times (r25), dates (r26), now substrings of a compound. The facts' own compounds are enumerated with the same pattern and matched WHOLE.) (A1) was my round-7 waiver, added so the digest's "51/100 trim" would validate; a bare figure wears the same shape while carrying an instruction, so only a score-PAIR or a percentage qualifies now. (A2) the chain guard sees decimals. (C1) re-verified against the CURRENT regex rather than citing rounds 17 or 22 — the code changed twice in between, and a stale refutation would be worthless. Deletion audit: all three go red |
+
+| 29 | SOTA-A x3 (B approves) | (1) the banned lexicon matched exact words, so **"Probabilities changed."** walked past a ban on "probability"; (2) **"Take a long position."** - the direct-object gate did not know indefinite articles; (3) the minus branch demanded SYMMETRIC spacing, so **"51- 2"** passed while "51 - 2" was refused | **UPHELD x3 -> fixed. (3) is the FOURTH appearance of "fixed one of two siblings"** (r14 breaker sizing, r22 tie-break, r24 completion ordering, r29 operator spacing): round 11 taught the SLASH that either side spaced counts and its minus sibling never learned it. Every operator now shares ONE spacing rule (`_EITHER_SIDE_SPACED`) rather than each carrying a copy. (1) the ban is on the CONCEPT, so stems take an inflection suffix. (2) articles added. **Two self-inflicted delays, both recorded:** a patch aborted on a stale anchor so only part of the fix landed until I re-checked; and shortening the stem to `probabilit` broke the SINGULAR because the suffix group lacked `y` — caught by my own new test, not the panel. A round-20 comment had also left the arithmetic block's indentation malformed, now cleaned, and the regex needed restructuring because ruff targets py3.11 where an f-string expression may not contain a backslash. Deletion audit: all three go red |
+
+| 30 | SOTA-A x2 (B approves) | (1) `odds` and `go long` absent from the content lists; (2) **a DECIMAL subtraction wearing a range's clothes** - matching bare integers made "51.0-2.0" look like the ascending pair `0-2`, so it was classified a range while conveying 49 | **UPHELD x2 -> fixed.** (2) the hyphen operands are decimal-aware, and the guards exclude an adjoining DECIMAL POINT so a fractional tail cannot masquerade as a whole operand. **My first attempt created a fresh hole:** excluding ANY following dot stopped "Score 51-2." from being seen at all, because of the sentence-final period — caught by the round-23 test before push. That is the third time in this loop a fix has opened a hole the previous round closed, and each time an existing test caught it, which is the argument for the suite growing rather than being trimmed. Deletion audit: both go red |
+
 ## Reviewer guidance for subsequent rounds
 
 - The **disclaimer gate**, **last-known-good + stale labeling**, **commit
@@ -102,3 +158,939 @@ fixed with priority.
 - Everything grounded on the page hydrates from `/api/v1/content/*` or
   `/api/v1/status`; `tests/test_frontend_shallow.py` enforces the banned-literal
   list and the required wiring markers.
+
+## PR #100 (message engine foundation) — round log
+
+| # | Verifier | Finding | Resolution |
+|---|---|---|---|
+| 1 | SOTA-A ×6 + SOTA-B + SOTA-C | (A1) `decide()` has no atomic reservation — two workers both pass the gates and both call the model inside the 300 s floor or above the daily cap; (A2) the breaker scan was hard-limited to 50 rows, so any `BREAKER_STRIKES` above 50 could never be reached — a breaker configured never to open; (A3) pacing dwell anchored to `started_at`, so a slow request consumes its own backoff and can eat a 24 h cooldown; (A4) the imperative gate required "your"/"the", so **"Hold positions."** delivered operator advice; (A5) the single-line check tested only CR/LF, so U+2028/U+2029 render extra lines; (A6) the numeral regex omitted exponents, so `51e2` tokenised as grounded `51` + grounded `2` while denoting 5100; (B) **a `.venv` symlink was committed** — dangling on every fresh clone, and on the author's host it resolved site-packages from a DIFFERENT branch's venv; (C) the 30 s format pause trusted the caller's hint, so a retry could fire 30 s after an unrelated trigger's OK row, straight through the global floor | **UPHELD ×8 → all fixed.** (A1) `reserve()` makes the claim part of the checked state: the attempt row is INSERTED FIRST inside a savepoint — which is what takes the write lock — the gates are then evaluated with that row excluded, and the savepoint rolls back unless the verdict is ASK, so nothing is written unless a call really happens. A new `IN_FLIGHT` outcome paces concurrent callers and is explicitly neutral for the breaker run. (A2) both sizing call sites now derive the scan from the setting. (A3) dwell anchors to `finished_at` when present. (A4) a bare sentence-initial imperative is rejected while the STATE sense ("band is hold") still passes — band names are never banned words. (A5) U+2028/2029/VT/FF/NEL added. (A6) exponents are part of the numeral token. (B) untracked, and the root cause fixed: `.gitignore` held `.venv/` **with a trailing slash**, which matches directories only, so a symlink slipped past — now both forms are ignored and a test asserts nothing under `.venv` is tracked. (C) the short pause is earned only when the newest row IS that trigger's own format rejection. **The mandatory control-deletion audit then caught what the panel had not:** the breaker-sizing test pinned only `breaker_is_open`, leaving the independent `decide()` copy free to regress with CI green — closed, and all eight controls now go red when reverted |
+
+## PR #100 round 31 — admission gate (decision 5 had no code)
+
+Self-review finding, not a panel one. `docs/MESSAGE_ENGINE.md` decision 5
+described the engine calling `live_admission_blockers` before every send, and
+`grep -rn admission app/message_engine/` returned nothing. A documented
+control that does not exist is worse than an undocumented gap: it reads as
+covered in review.
+
+Implemented in `app/message_engine/gate.py` with three controls, each pinned
+by a mutation that turns the suite red — fail-closed evaluation (AH1), no P1
+bypass (AH2), blockers actually honoured (AH3), refusal reasons preserved
+(AH4), gate ordered before the transport (AH5).
+
+**The first run of that audit was void, and the harness bug is worth
+recording.** It restored with `git checkout -- app/`, which cannot restore an
+UNTRACKED file, and `gate.py` was new. Every mutation stayed applied and
+compounded into the next; two later mutations then failed to apply at all
+because an earlier one had already rewritten the line they matched on. The
+tell was the final line: "restored" reported 9 failures instead of the
+baseline. The harness now snapshots and restores by copy and runs a
+self-check first — mutate the untracked file, confirm red, restore, confirm
+the exact baseline count returns — so a harness that cannot restore reports
+itself instead of quietly manufacturing a clean-looking result.
+
+## PR #100 round 32 — the panel was right on all four
+
+combo/SOTA-A refuted (high) with four defects; combo/SOTA-C refuted (high) and
+landed independently on the same core one. Every one reproduced. Nothing here
+was disputed.
+
+**Defect 2 (SOTA-A) / SOTA-C — normal operation looked like a broken provider.**
+`_fallback()` wrote `FALLBACK_USED` for EVERY refusal, and `FALLBACK_USED` is a
+strike. SOTA-C's scenario, executed verbatim:
+
+    first compose  -> generated
+    paced compose 1..5 -> fallback (pacing: 300s floor)
+    outcomes: ['ok', 'fallback_used' x5]
+    consecutive_strikes = 5   (threshold 5)
+    breaker_is_open = True
+    one hour later -> fallback (breaker open ...)
+
+Five triggers inside the five-minute floor — an ordinary burst — opened the
+24-hour breaker. Three further facts came out of executing it:
+
+  * while the breaker was open, every suppressed trigger wrote another strike,
+    so the state fed itself;
+  * ONE gateway timeout cost TWO strikes (the TECHNICAL_ERROR row plus the
+    fallback row), so a five-strike breaker opened after three real failures;
+  * a paced refusal RESET the attempt budget, which is defect 2's "retries
+    reset" clause.
+
+I checked whether the lockout was permanent rather than 24h. **It is not** —
+`last_attempt()` reads only pacing outcomes, so the cooldown runs from the last
+genuine ask and the engine recovers at exactly 86400s. SOTA-C's number was
+exact; my attempted escalation was wrong.
+
+Fixed with a new outcome, `NOT_ASKED`: the engine was not PERMITTED to ask
+(pacing, disabled, P1, budget, breaker-open). It strikes nothing, closes
+nothing, and is skipped by `content_attempts`. `FALLBACK_USED` keeps its round-6
+meaning — the engine asked and gave up — and is now written only for a genuinely
+exhausted compose.
+
+**Defect 1 — compound facts leaked their fragments.** `grounded_numerals()`
+harvested `08` and `30` out of `F_NEXT_CHECK = "08:30"`, so the invented "30
+warning signs are lit." validated. `F_NEXT_CHECK` is in the live fact set, so
+this was reachable in production, not in principle. The fix had to be
+SYMMETRIC: neither side stripped compounds, and those same leaked fragments
+were what let a legitimate "next 14:00 UTC" pass — stripping only the facts
+side rejected every message rendering a time it was correctly given (11 tests
+went red and said so).
+
+**Defect 3 — lock blast radius, and a P1 fast path that wasn't.** `reserve()`
+takes SQLite's write lock at its flush and nothing committed it until the
+caller's `session_scope` exited, so the lock spanned `complete()` — up to the
+full 60s deadline — blocking every unrelated writer in the process, the alert
+dispatcher included. The claim is now committed before the model call, which is
+also what makes it visible to the concurrent worker it exists for; a process
+death mid-call leaves IN_FLIGHT for `reap_stale_claims()`, which already exists
+for exactly that. Separately `compose()` ran two SELECTs before the governor's
+P1 short-circuit, defeating it; a P1 now returns before any query.
+
+**Defect 4 — the quiet period started at the wrong instant.** `moment` is
+captured before the call and was stored as `finished_at`, so pacing ran from
+when the request was ISSUED. `_DEADLINE_S` is 60.0 and the floor is 300s, so
+SOTA-A's "only 240s of the configured 300s" is exact. The failure time is now
+measured with a monotonic clock, which stays deterministic under an injected
+clock and is truthful in production.
+
+MUTATION AUDIT (restore by copy; self-check first) — all nine red, baseline
+353 recovered: R1 every refusal writes FALLBACK_USED, R2 NOT_ASKED back in the
+strike scan, R3 NOT_ASKED counted as a spent attempt, R4 gateway error
+double-strikes, R5/R6 either side stops stripping compounds, R7 P1
+short-circuit removed, R8 write lock held across the call, R9 pre-call moment
+stored as finished_at.
+
+## PR #100 round 33 — four defects the ROUND-32 FIXES introduced
+
+combo/SOTA-C now APPROVES and names the round-32 repairs as verified.
+combo/SOTA-A refuted (high) with four new defects. All four reproduced; none
+disputed. Every one is a consequence of the previous round's fix, which is the
+argument for re-running the whole panel after a repair rather than only the
+tests that were red.
+
+**Defect 4 — the filter went behind the LIMIT.** `content_attempts()` excluded
+NOT_ASKED in Python, after `.limit()`. With 200 paced refusals on top of three
+genuine rejections it returned **0**, and `decide()` answered ASK past the
+content cap. This is round 13's defect exactly — BUDGET_SKIPPED was moved into
+the query for this precise reason, and the comment saying so sits four lines
+above the code I wrote. Now filtered in the query.
+
+**Defect 3 — the format-retry gate went dead.** Every rejection is now followed
+by the NOT_ASKED row of the fallback that same compose returns, so
+`_last_failure_class()` (newest row, LIMIT 1) never saw the rejection and
+always answered None. The configured 30-second format retry could not fire at
+all. NOT_ASKED rows are now invisible to that query: the question is "how did
+the last ATTEMPT end", and a refusal the engine issued to itself is not one.
+
+**Defect 2 — the fallback never had to satisfy the channel contract.** The
+generated path is validated and rejected on overrun; the fallback path, which
+is the one taken when something is already wrong, had no check. MY FIRST PROBE
+FOUND NOTHING because it injected hostile values into slots those templates do
+not contain. Sweeping every slot of every shipped fallback found **40**
+violations — worst a 432-character body against a 150-character SMS cap — plus
+newline injection splitting one message into several. Substituted values are
+now single-line, and the text is clipped to the channel cap with an ellipsis.
+Clipped rather than rejected: there is nothing to fall back TO from here.
+
+**Defect 1 — the P1 fast path still wrote.** Round 32 moved the QUERIES off it
+but still recorded an audit row, and `session.add()` + `flush()` takes SQLite's
+write lock, so the message that must arrive could block behind an unrelated
+writer. A P1 now touches the database not at all. Losing the row costs nothing
+real: `message_engine_attempts` records what the engine did with the MODEL, and
+a P1 never reaches it; the delivery is recorded by the alert system, where a
+P1's audit trail belongs.
+
+**A control of mine was vacuous, and the audit caught it.** The first version
+of the fallback-contract test called `composer._fit()` directly, so deleting
+its CALL SITE left the suite green — it proved the function worked and nothing
+used it. Rewritten to drive `compose()`. Same trap as the red-line-5 work
+earlier today: testing the helper instead of the wiring.
+
+MUTATION AUDIT (restore by copy, self-check first) — 13 mutations, all red,
+baseline 365 recovered: R1/R2/R4-R9 (round 32, re-run in full) and S1 filter
+behind the LIMIT, S2 failure class blinded, S3 fallback cap call site removed,
+S4 control characters pass through, S5 P1 writes a row.
+
+## PR #100 round 34 — two regressions in the round-33 repair, two older gaps
+
+combo/SOTA-C approves. combo/SOTA-A refuted (high) with four; combo/SOTA-B
+refuted (medium) and found the WORST one independently. All four reproduced.
+
+**The SMS clip I added last round broke the SMS contract, twice.** Fixing "the
+fallback violates the channel contract" with code that violates the channel
+contract is worth naming as the mistake it was.
+
+  * `_fit()` marked the cut with "…", which is not in GSM-7. `septets()`
+    RAISES on it — `Gsm7Error character '…' at position 144 is not GSM-7 (the
+    message would become UCS-2 and no longer fit one SMS)` — and the validator
+    rejects it. The "guaranteed delivery" fallback would have taken the
+    transport down or forced the exact multipart spill the 150 cap exists to
+    prevent.
+  * `_fit()` compared `len()` against `sms_max_len` while the contract counts
+    SEPTETS. The extended-GSM set costs two septets per character: 140 code
+    points of "€" measured 280 septets and passed unclipped.
+
+`app/alerts/gsm7.py` has had `is_gsm7`, `septets` and `first_non_gsm7` all
+along; the alert path uses them. Now so does this one, with an ASCII "..."
+marker for SMS and the typographic ellipsis kept for iMessage.
+
+**Only ONE of the three resolve paths had been fixed.** Round 32's defect 4
+repair went to the technical-error path; OK and the rejections still stamped
+`finished_at` with the pre-call moment, so a successful 60-second call
+shortened the next 300-second floor to 240 exactly as before. All three now
+stamp the measured finish.
+
+**Eighteen prompts mandate an output format nothing parsed.** Ten end with
+"Exactly two lines and nothing else ... SMS: <sms body> then IMESSAGE:
+<imessage body>", eight with a differently-worded equivalent, and fourteen say
+nothing at all. `compose()` took `answer.strip()` as the message, so a model
+that OBEYED was handed to the validator as one multiline over-length string
+and rejected every time — those eighteen triggers could never produce
+generated text. Parsed rather than re-authored: both shapes are legitimate and
+the library is ratified, so the model is judged on what it was asked for.
+
+**Stative directives were not directives.** "Move to cash." was refused;
+"Stay in cash.", "Stay out of the market." and "Remain in cash until the band
+clears." all validated. Telling the operator to STAY somewhere is as much an
+instruction as telling them to move. Added as a CLASS per round 29, matching
+the bare imperative only, so "The band stays hold." is untouched.
+
+I checked that against the shipped library BEFORE concluding, because round 6/7
+was exactly this mistake: hardening that silently refuses the library it ships
+with. Identical refusals before and after (two, both artifacts of the probe
+supplying "38" where the template renders "38%"). A first attempt at that check
+substituted the band name into every slot and produced ten false refusals —
+the test was wrong, not the rule.
+
+MUTATION AUDIT — six, all red, baseline 389 recovered: T1 ellipsis marker
+returns, T2 SMS measured in code points, T3 non-GSM-7 characters not dropped,
+T4 labelled reply unparsed, T5 OK path back to the pre-call moment, T6 stative
+directives allowed.
+
+## PR #100 round 35 — three vendors, and the finding was MY revert
+
+All three refuted. Defects 1, 2 and 4 were not new work at all: the branch was
+REVERTING merged main.
+
+  app/main.py            crash.klee.me restored to the CORS allowlist (#101 undone),
+                         with the comment explaining its removal deleted alongside it
+  tests/test_cors.py     the regression test that blocks re-adding it, deleted (21 lines)
+  app/alerts/cutover.py  _HEARTBEAT_FRESH deleted, collapsing the WEEKLY digest's
+                         freshness window from 8 days to 2 hours, which refuses
+                         `cutover apply` roughly 6.5 days out of 7
+  tests/test_alert_cutover.py   89 lines of the tests pinning that, deleted
+
+Cause: `git reset --soft origin/main` in a worktree that predated those merges.
+`--soft` moves HEAD and leaves the working tree alone, so `add -A && commit`
+commits the OLD tree against the NEW base and every file the merges added is
+staged as a deletion.
+
+What makes this worth writing down is not the mistake but the miss after it. I
+had already diagnosed this exact hazard an hour earlier on the same branch,
+recorded it, and repaired one instance — the two files from #102. I then saw
+deletions fall from 323 to 167 and accepted the number without asking what the
+remaining 167 were. Checking the count is not the control; checking WHAT was
+deleted is.
+
+The `_HEARTBEAT_FRESH` deletion is the same control I had found as staged
+damage in another worktree earlier the same day and correctly discarded there.
+It reached a PR anyway, by a different route.
+
+All four files restored from origin/main and verified: no klee.me entry in the
+allowlist, _HEARTBEAT_FRESH present, cors and cutover suites green. The four
+remaining deletions on this branch are deliberate and each is a single line —
+schema revision 0017 -> 0018 (the message_engine_attempts migration) and
+sms_max_len 160 -> 150 (ruling Q27).
+
+**Defect 3 was genuine and new.** 20 shipped prompts spell out an
+"SMS: <...>" output line and only 8 also spell out "IMESSAGE: <...>", so for
+twelve triggers a compliant reply carries no iMessage body and the round-34
+parser handed over the SMS one: 150 ASCII characters on a channel that allows
+200 and two emoji. Composing is per-channel, so asking for both was always
+redundant; `_prompt_for()` now ends with an explicit single-channel
+instruction that overrides the library's format, and the parser stays as a
+belt-and-braces reader for a model that labels anyway.
+
+## PR #100 round 36 — the worst defect of the whole review, and it was mine
+
+SOTA-B and SOTA-C approve; SOTA-A refuted (high) with four. All four reproduced.
+
+**Defect 3 — dropping a character changed a VALUE.** Round 34's repair made the
+SMS fallback GSM-7-safe by deleting every character outside the set. U+2212
+MINUS SIGN is outside the set, so
+
+    "Momentum -51 points."   (written with a typographic minus)
+    -> "Momentum 51 points."
+
+was transmitted: the same magnitude with the opposite meaning, by a monitor
+whose entire job is to say which way a number moved. Deleting a character is
+harmless for decoration and catastrophic for a sign, and the round-34 fix did
+not distinguish them. Meaning-bearing characters are now TRANSLITERATED to
+their exact ASCII counterparts first (minus, en/em dash, plus-minus, quotes),
+and only genuine decoration is dropped — replaced with a SPACE, so removing it
+cannot fuse "51" and "2" into "512".
+
+**Defect 1 — every fact went to the model.** `_prompt_for()` pasted the
+caller's whole dict, ignoring each entry's declared `grounding_fields`, so
+anything the caller happened to be carrying was transmitted whether the trigger
+needed it or not. Now only declared fields are visible, and it fails CLOSED: an
+entry declaring nothing sends nothing, because a missing contract costs a
+fallback while failing open costs a disclosure. Safe to restrict because every
+shipped fallback slot is already inside its trigger's declared fields — checked,
+and now asserted.
+
+**Defect 2 — separators outside C0.** U+2028 LINE SEPARATOR, U+2029 PARAGRAPH
+SEPARATOR and U+0085 NEXT LINE are not in the range the round-33 sanitiser
+matched, and renderers treat all three as newlines.
+
+**Defect 4 — a bare imperative on a position.** "Keep cash." carried no banned
+verb and no advice framing. Rounds 29 and 34 had each added one more spelling
+of a concept the verb list missed, so this keys on the OBJECT instead: a
+clause-initial verb whose object is a position or an instrument is an
+instruction about that position, whatever the verb.
+
+**Two of my own controls were wrong, and the audit caught both.**
+The decoration test spaced its probe out ("51 * 2"), so deleting the character
+could not fuse anything and the control passed while proving nothing — U2
+survived until the probe was tightened to "51*2". And the secret-gate suite failed on my own
+fixture, which paired a secret-sounding fact name with a password-shaped value.
+The repo's scanner read that as a leaked credential, which is the scanner
+working. The test needs a value it can FIND, not one that looks stolen, so it
+uses a plainly-synthetic marker.
+
+Writing THIS note failed the same gate a second time, because quoting the
+offending literal reproduces it. A description of a secret-shaped string must
+not contain one.
+
+## PR #100 round 37 — a verb list failed for the third round running
+
+SOTA-B and SOTA-C approve. SOTA-A refuted (high) with two; both reproduced.
+
+**Defect 2 — "choose cash." validated.** Round 29 added inflections to the
+banned-verb list; round 34 added the stative forms; round 36 announced it was
+keying on the OBJECT to escape the enumeration trap and then gated on an
+enumeration anyway. So `choose`, `pick`, `select`, `prefer` and `opt` all
+walked through.
+
+The rule now names NO VERBS AT ALL. What identifies an imperative is its
+SHAPE: English imperatives are subjectless, so a clause that opens with one
+word, names a position, and ends there is an instruction about that position.
+A declarative puts its verb after the subject ("Cash is 20%.", "Gold rose."),
+so the position is not in second place and the clause does not end on it. A
+test asserts the pattern contains no verb literals, because reintroducing a
+list would pass every example above while leaving the next unlisted verb open.
+
+**Defect 1 — a mandate nothing read back.** BASE_BAND_MOVED's prompt says the
+message MUST plainly state that data is incomplete. `validate()` is
+deliberately trigger-blind — it enforces the channel contract and the house
+style, which are the same for every message — so nothing checked the trigger's
+own requirement, and "bubblegauge: data is complete." passed as generated
+while contradicting the one thing it was required to say.
+
+The prompt's prose mandate now has a machine-checkable twin (`must_mention`),
+enforced after validation as a CONTENT rejection so it is retried under the
+iteration rules rather than silently sent. Three further controls: the
+trigger's own fallback must satisfy its mandate (or the mandate is
+unmeetable), a trigger without one is unaffected, and any prompt saying
+MANDATORY CAVEAT in prose must declare a checkable form — which is this defect
+generalised, so it cannot reappear in a new trigger.
+
+MUTATION AUDIT — four, all red, baseline 452 recovered: W1 the shape rule
+reverts to a verb list, W2 the clause-end anchor drops, W3 the mandate is not
+enforced, W4 the declared mandate is removed from the library.
+
+## PR #100 round 38 — two seams left by the round-36/37 fixes, and a fourth enumeration
+
+SOTA-B and SOTA-C approve. SOTA-A refuted (high) with three; all reproduced.
+
+**Defect 1 — the prompt and the validator disagreed about the facts.** Round 36
+restricted the PROMPT to each entry's declared `grounding_fields` and left
+validation reading the caller's whole dict. A numeral present only in an
+undeclared fact therefore counted as grounded: "bubblegauge: reading 73."
+validated with 73 nowhere the model could have seen it. A model cannot be
+credited for matching data it was never shown. Both halves now derive from one
+`visible_facts()`, so the asymmetry cannot reopen. Worth recording that this
+risk was NOTED while implementing round 36 and then not closed.
+
+**Defect 2 — a substring is not a claim.** Round 37's mandate check asked
+whether the required phrase appeared. "data is not incomplete" and "data is no
+longer incomplete" both contain it while saying the opposite of what the
+trigger mandates. Now negation-aware.
+
+**Defect 3 — the objects were an enumeration too.** Round 37 removed the VERB
+list and kept an OBJECT list, so "Choose safer assets." validated. The first
+repair enumerated adjective ENDINGS, which caught "safer" and missed "quality"
+— the same trap one level down. Modifiers are now COUNTED rather than
+recognised. The residual limit is written up in docs/MESSAGE_ENGINE.md
+decision 9 rather than papered over.
+
+**A control of mine was vacuous for the third time on this branch.** The
+undeclared-fact test handed the filtered dict straight to `validate()`, so
+reverting `compose()` to pass everything left the suite green — it proved the
+helper worked and that nothing used it. Every "X now happens" control has to
+exercise the entry point that is supposed to do X. The mutation to design is
+"delete the call, keep the function".
+
+MUTATION AUDIT — four, all red, baseline 481 recovered: X1 validation reads
+the full dict again, X2 the negation guard drops, X3 modifiers go back to
+adjective morphology, X4 the widened object class is removed.
+
+## PR #100 round 39 — the round-32 lock fix was committing callers' transactions
+
+SOTA-B and SOTA-C approve. SOTA-A refuted (high) with five; all reproduced.
+
+**Defect 5 — compose() committed the caller's whole session.** Round 32 stopped
+SQLite's write lock being held across a 60-second model call by committing.
+`compose()` receives the CALLER's session, so every unrelated pending write in
+that unit of work became durable and a caller that meant to roll back on a
+later error no longer could. The trade was backwards: a stuck lock DELAYS, a
+premature commit CORRUPTS. It now commits only when the caller's session was
+empty on entry, and otherwise holds the lock — bounded by the stale-claim
+reaper and the deadline.
+
+Two attempts. The first guard inspected the session at commit time, but
+`reserve()` flushes first, so the caller's pending objects had already left
+`session.new` and the guard saw a clean session. The check has to happen at
+ENTRY, before this function writes anything.
+
+**Defect 4 — a message could DISPLAY a different number than it contained.**
+U+202E RIGHT-TO-LEFT OVERRIDE survived sanitisation, so "51" renders as "15" on
+a channel that honours Unicode — the text unchanged, the reader misinformed.
+Same class as round 36's sign inversion. All bidi and invisible format controls
+are stripped now.
+
+**Defect 3 — the denial can FOLLOW the phrase.** Round 38's negation guard
+looked only backwards, so "incomplete data is not present" and "incomplete data
+has been ruled out" satisfied a mandate to say data IS incomplete.
+
+**Defect 2 — a multiplier in front of a numeral.** The binary operators were
+covered; "score is twice 51" asserts 102, which no fact contains.
+
+**Defect 1 — "Choose bitcoin."** The residual limit decision 9 recorded last
+round, in the one vocabulary this monitor actually discusses. Narrowed with the
+instrument names; NOT closed. The panel is fail-closed and will keep finding
+members of an open set, so this is what stops the PR converging rather than
+merely improving. The allowlist redesign is the owner's call.
+
+MUTATION AUDIT — five, all red, baseline 508 recovered: Y1 the caller-clean
+guard drops, Y2 the post-phrase negation check drops, Y3 bidi controls pass
+through, Y4 leading multipliers allowed, Y5 instrument names removed.
+
+## PR #100 round 40 — a fix removed rather than repaired a third time
+
+SOTA-B and SOTA-C approve. SOTA-A refuted (high) with three; all reproduced.
+
+**Defect 1 — the cleanliness guard cannot see everything.** Round 39's guard
+committed only when the caller's session was clean on entry. It misses work
+FLUSHED before `compose()` was entered, and Core DML that never appears in
+`session.new` at all. Two failed attempts at the same guard is evidence about
+the APPROACH: there is no reliable way to ask a shared Session "is anything
+here not mine". The commit is gone; docs/MESSAGE_ENGINE.md decision 10 records
+the cost (the lock is held for the model call) and the real fix (the engine
+owning its own transactions, which is a caller-visible refactor).
+
+The two tests asserting the round-32 behaviour are INVERTED rather than
+deleted, so restoring the commit fails against reasoning rather than silence.
+
+**Defect 2 — a technical failure consumed the content cap.** Ruling Q38 counts
+an exhausted content attempt and a terminal technical failure as separate
+things. Three gateway timeouts exhausted the content budget, the next compose
+then wrote FALLBACK_USED as a further strike, and a five-strike breaker opened
+after FOUR failures.
+
+**Defect 3 — a database error replaced the promised message.** `reserve()`
+flushes, and a flush can raise on lock contention — outside the gateway-only
+try block, so an `OperationalError` propagated to the caller instead of the
+evergreen text this function promises always to return. The fallback exists
+for exactly the moments when something is already wrong.
+
+MUTATION AUDIT — three, all red, baseline 512 recovered: Z1 the commit
+returns, Z2 the reservation error is not caught, Z3 technical errors count
+toward the content cap again.
+
+## The split (2026-09-06): #104 – #109
+
+#100's last two panel runs found zero defects and failed only because the
+required approver could not finish reviewing 7,490 lines inside the 180-second
+wire timeout. The code was kept and delivered as six dependency-ordered PRs.
+#104 (schema, 159 lines) passed the panel first time.
+
+**#105 (validator) round 1 — SOTA-A, real: "Text your password." validated.**
+The opener allow-list was extracted from the shipped library, and several of
+its nouns are English verbs — text, check, flag, score, level, run. Fixed with
+one shape rule rather than a word list: an approved opener followed by a
+determiner is a verb, because no noun subject is ever followed directly by one
+("Delivery the ..." is ungrammatical). Verified to add zero library refusals
+with and without the rule; disabling it turns 9 of 141 tests red. Lesson: an
+allow-list extracted from data inherits the data's ambiguities — test each
+entry in the other part of speech.
+
+**#106 (governor) round 1 — SOTA-A, real: tie-break keyed on reservation
+order.** The strike scan's `id > ok_id` tie-break assumed ids follow completion
+order; they follow reservation order, because the claim row is inserted before
+the model is called. An earlier-reserved attempt failing at the same instant a
+later one succeeded had the lower id, was dropped, and the breaker stayed
+closed. Executed: only the exact tie was affected. Fixed by including every
+other row at that instant — completion order is unknowable at a tie, so the
+breaker fails closed. All 181 governor pins, round 19's own included, still
+pass. Lesson: whenever a row id stands in for an ordering, ask which event
+assigns it.
+
+**#105 rounds 2–3, and the stop.** Round 2 (SOTA-A, SOTA-C): an object
+pronoun in the determiner slot ("Text me your password."), a slash regex
+matching digit fragments inside decimals ("51.0/4.0" → the declared pair
+0/4), and the grounded-value opener exemption — all fixed, each verified in
+both directions. Round 3 (SOTA-A): a zone token after a time ("14:00 EST"
+against a UTC fact) and a signed bracketed operand ("51-(-2)") — fixed; and
+the allow-list's own bounds as bypasses — NOT fixed. Three rounds, three new
+edges: an open set. Stopped per the rule; owner chose to bridge (merge with
+the residual documented) and close upstream (decision 12).
+
+**#105 attempt 4 and #106 attempt 4 (2026-09-06, after the edge outage) —
+what the gateway log proves about SOTA-A.** Both current heads (#105
+be26dd8, #106 c528775) had never been evaluated: three attempts died at the
+public edge (`GET /models -> Connection refused`; the reverse proxy in front
+of the gateway was down from ~16:35Z, the gateway itself healthy throughout).
+On the first attempt after the proxy returned, #105 got one complete vote —
+SOTA-C approved, no defects — while SOTA-A never delivered a verdict and
+SOTA-B's answer failed the content check. The gateway's own request log
+(`usage.jsonl`, CI key) explains SOTA-A, and refutes the remedy this log
+had assumed for it:
+
+- On every successful SOTA-A review today `firstOutputMs == durationMs`:
+  the model emits nothing until it has finished thinking. Review time is
+  thinking-bound, not diff-bound — 352 s for #104's 163 lines, 428–784 s
+  for #105/#106's 1.1–1.8k lines. Splitting a PR further does not buy a
+  verdict.
+- Three failure signatures, all present on earlier days too: `/responses`
+  502 at 901 s (the provider's 15-minute cap, nothing produced); `/responses`
+  499 at 207–258 s (the verifier's 180 s per-read timeout on a stream that
+  carried no bytes after the headers); and `chat/completions` 502 at 179 s
+  on every one of today's seven fallbacks — the chat wire is silent while
+  the model thinks, so that fallback can never succeed for SOTA-A.
+- After the proxy restart SOTA-A went 0/7 on #105; its one success (742 s)
+  belongs to #106's run.
+
+Consequence for the regime: an infrastructure failure on SOTA-A is not a
+signal about the diff and is not answered by a split. It is answered by one
+rerun, then the owner's bridge, and by owner-side changes to the wire
+(provider cap above 900 s, a heartbeat from the first byte, or a required
+approver that streams). #105 stands at three defect rounds fixed plus one
+attempt with no defects found and no required-approver vote; it merges by
+the bridge with its residual documented (decision 9) and the residual
+closed upstream (decision 12).
+
+**#106 round 5 — SOTA-A, real, and the root of rounds 2–4: "only newest
+completion's pause is enforced".** Pacing read one row, the newest
+completion, and enforced that row's pause alone. A technical error with a
+600 s backoff completed at T; a format rejection in flight across that
+instant completed at T+10 and, as the newest row, became the only row the
+gate saw: the engine answered "clear" at T+41 with the retry hint and at
+T+311 without it, in both reservation orders (executed before the fix).
+Rounds 2, 3 and 4 had each repaired one instance of this shape at a
+completion tie — the case in which "newest" is ambiguous — with a rank on
+the tied rows. The tie was the special case. Fixed with the general rule:
+every row that completed within the longest configured pause is consulted
+and the latest deadline wins; the old deadline is one term of that maximum,
+so nothing becomes looser, and the per-row pause rules moved verbatim into
+a helper. Round-5 tests red before and green after; the 181 governor pins
+and the rounds 2–4 tie tests still pass under the general rule, which is
+the proof it is a repair rather than a removal. Lesson: when three rounds
+patch the same shape at its boundary, the boundary is not the defect.
+
+**#106 round 6 — SOTA-A, real: "finite strike window counts zero-weight
+rejects before LIMIT".** The round-5 fix was accepted (SOTA-B checked the
+max-of-deadlines explicitly; SOTA-C approved). The new finding was in the
+strike scan: rejection rows were fetched only to be ignored — the pending
+counter was never read — yet each occupied a slot of the LIMIT, so enough
+rejections newer than five technical errors pushed the errors out of the
+window and the breaker reported closed. Executed at the real constant with
+the enum's own values, after a first attempt with upper-case strings that
+matched nothing and proved nothing: five technical errors under 1,000,000
+newer format rejections over distinct triggers — old scan 0 strikes, new
+scan 5. Honest boundary: in that instantiation the daily budget still
+refused the ask, and with rejections on one trigger the content cap does;
+the scan's answer was wrong regardless, and `breaker_is_open()` reported
+closed. Fixed by the code's own round-13 doctrine — a row that must not
+affect the answer must not occupy a slot in the window — applied to the
+last row class that violated it: the scan set is technical errors and
+exhausted-compose markers only, counted in SQL. Round-6 test red on the
+previous head and green after; the 181 pins unchanged. Lesson: when a
+doctrine has been applied to two row classes, list the others before the
+panel does.
+
+**#106 round 7 — SOTA-A and SOTA-C independently, both high: the breaker
+cooldown was anchored on the newest PACING row.** FALLBACK_USED, the
+exhausted-compose strike, is not a pacing outcome, so five exhausted
+composes opened the breaker at the fifth marker while the dwell was
+measured from the last rejection row, written while that compose was still
+running. Executed: a marker one day after its rejections found the cooldown
+already over at the instant the breaker opened, and five markers with no
+pacing row at all found no anchor and no cooldown — `breaker_is_open`
+False one second after the breaker opened, in both shapes. Fixed with one
+anchor, the newest strike, shared by `decide` and `breaker_is_open` and
+drawn from the same outcome set the strike scan uses, so the two can never
+disagree about what a strike is. The old anchor helper had no callers left
+and was removed; both of its duties had purpose-built replacements with
+tests. Two vendors converging on one defect in one round is the strongest
+signal the panel produces, and it arrived one round after the stop this
+log had announced. The stop rule is therefore revised below.
+
+**Stop rule, revised (2026-09-06).** "Three rounds then bridge" was written
+for an open set — the validator's directive detection, where each round
+finds another instance of an unbounded class. It is wrong for a stateful
+component where each round finds a distinct defect that executes: bridging
+then ships a known defect on the owner's signature. The rule now: a round
+earns a fix when its finding executes as described AND is a distinct defect
+from every earlier round AND the fix is a bounded, general rule rather than
+a patch at the boundary. A round that fails any of the three ends the
+iteration. Before each push, the branch is reviewed adversarially offline so
+the panel's next round is spent on what the offline review could not see.
+
+**Before #106 round 8 — an offline review, and what it changed.** The
+revised stop rule asked for an adversarial review before each push, so the
+panel's round is spent on what an offline review cannot see. Six independent
+lenses read the governor (pacing, breaker, cap, what the composer writes,
+cross-function consistency of outcome sets, settings/budget/concurrency);
+eleven raw findings were merged to seven; each was handed to two independent
+verifiers who had to reproduce it by writing and running a test. Seven
+confirmed, none refuted. Six were governor defects and are fixed with the
+executed scenario in the docstring of each: a non-UTC aware `now` stripped
+rather than converted; an in-flight claim counted as a spent content attempt
+before the reaper and as a technical error after it; the format retry
+granted on the caller's hint alone after a marker had closed the compose; a
+cap of zero floored to one; exhausted composes counted as strikes only once
+the trigger fired again and the marker was written; the cap gate answering
+before the breaker, so a marker written at refusal time restarted the
+cooldown. The review's critic predicted the panel's likely next finding — the
+half-open breaker admitted every trigger at the pacing rate — and that is
+closed too: one probe at a time. Two pins were flipped, each with its reason
+written into the pin: a zero cap now admits nothing, and the claim IS
+committed before the model call.
+
+**The seventh finding resolved a three-round argument.** Rounds 32, 39 and
+40 had argued about committing the caller's session to release the write
+lock; round 41 removed the commit and accepted a lock held across the whole
+model call. Executed: a worker dying mid-call rolled the claim back with the
+caller's transaction, so no row existed for the reaper and pacing, budget
+and breaker all missed the request. Both sides were right, and the answer is
+neither: the engine owns its transactions. `reserve()` writes the claim on a
+short transaction of its own and returns its id; `resolve()` closes it by id;
+`record_fallback()` records the evergreen text; the composer takes no
+session and holds no transaction across the call. The exhausted-compose
+marker is now written at the exhausting rejection, and a boundary is stamped
+strictly after the compose it closes, because at a tie the scan counts the
+rejection first. Two lessons from the day: a slice-replace between two `def`
+markers deleted two unrelated functions that sat between them, caught by the
+suite; and a scale test seeded with upper-case outcome strings matched
+nothing and proved nothing, caught before it was cited.
+
+**#106 round 8 — infrastructure, then three real findings.** The first
+attempt got no vote from anyone: from 22:20Z every upstream provider
+answered 502 within forty seconds and the gateway fast-failed with 503 — the
+VM's uplink dropped for the second time that evening. One rerun. SOTA-B and
+SOTA-C approved; SOTA-A refuted with three findings, all executed: (1)
+`reserve()` derived the last failure class after inserting its own claim,
+and that IN_FLIGHT row was the newest row of the trigger, so the hint was
+always None and the format retry never fired through `reserve()` — a
+regression of the round-8 refactor, fixed by excluding the claim as every
+other scan does; (2) a marker written after a success was counted after
+that success by its row time although the compose it closes was exhausted
+before the success — a pre-reset strike resurrected after the reset, fixed
+by bounding markers by their strike instant, ties counting; (3) the
+exhausted-marker writer had no guard, so two writers or an over-counted hint
+could mark one compose twice or mark a compose that had spent nothing —
+fixed by making the writer check, inside its own serialised transaction,
+that the compose has spent the cap and has no marker yet. Lesson: the
+offline review executes what it can construct; a regression introduced by
+the fix it recommended is exactly what it cannot see. Each fix now gets a
+second offline pass before the push.
+
+**The offline pass after the round-9 fixes.** Three lenses on the changed
+surfaces, two executing verifiers per finding, and the critic executed its
+own probes. Six items, all reproduced: the disabled engine — the shipped
+default — still opened a write transaction to record a NOT_ASKED row on
+every message, defeating the governor's no-session short-circuit (fixed: the
+composer asks the governor's short-circuit first and writes nothing);
+`breaker_is_open` knew nothing of the half-open probe rule and reported
+closed while `decide` refused every trigger but the probe's (fixed: one
+shared judgement, `breaker_refusal`); the second format retry of one open
+compose waited the full floor on its older sibling — one row class, two
+pauses, in one gate (fixed: every format rejection of the open compose earns
+the retry, bounded by the compose's own boundary, replacing the newest-row
+rule); a probe made at the very instant the cooldown ended was not counted
+as the probe (fixed: the bound counts the tie, like every other bound); a
+non-gateway exception from the model call escaped `compose()` and left the
+claim in flight (fixed: the never-raises boundary covers every Exception; a
+dying worker still propagates, which is the reaper's case); and an unmarked
+exhausted compose's strike is provisional under the current cap — stated as
+a deliberate policy now, because the alternative needs a cap the rows do not
+store, and the writer marks at exhaustion so the provisional state lasts only
+as long as a failed marker write.
+
+**#106 round 9 — one finding, and the offline pass had not seen it.** SOTA-A
+alone, with the other two approving: a marker closing a compose with no
+rejection rows of its own, on a trigger that had rejections in an earlier
+compose, borrowed the earlier compose's last rejection as its strike
+instant, so the cooldown was already over the moment the breaker opened.
+Executed for each boundary kind; fixed by stopping the rejection search at
+the trigger's previous boundary, with a tie at that boundary treated as
+belonging to the compose it closed so the marker anchors on itself. The
+count also taught a smaller lesson: an earlier exhausted compose closed by
+its own marker is a strike in the same run when no success intervened, and
+the first draft of the test expected five where six is right.
+
+**#106 round 10 — two approvals, a wire that would not finish, and a claim
+refuted by execution.** On the head carrying every fix from rounds 1–9 and
+the two offline reviews, SOTA-B approved twice and SOTA-C approved once;
+SOTA-A never delivered a vote on either attempt (its stream hit the
+provider's 900-second cap and both chat fallbacks died at 179 seconds, the
+chronic signature). On the rerun SOTA-C refuted with confidence high: the
+strike scan "selects the trigger column instead of the full row object,
+causing an AttributeError in `_dwell_from`". The cited line is a comment;
+the scan and the anchor select full rows; the module's one trigger-column
+select feeds trigger filters only. Executed rather than argued: every
+marker shape — with its own rejections, marker-only on a reused trigger,
+with no rejection anywhere, tied with a technical error — through every
+scan, with and without a success and an open claim; no exception, counts
+and anchors as documented. The test pins it and the refutation is written
+at the scan. Under the revised stop rule a round whose finding does not
+execute ends the iteration: #106 stands with zero open findings and joins
+#105 at the bridge. Ten rounds, thirteen offline findings, all but this one
+real; the residual is a required approver that cannot finish reviewing.
+
+**#106 round 11 and the split.** Both other vendors approved the head that
+carries the pinned refutation; SOTA-A again delivered no vote. The gateway
+log settled the question of why: the diff had grown to 2,432 lines, and the
+required approver, which finished 1,127–1,268-line reviews in 428–784
+seconds and a 2,269-line one once in three tries at 735 seconds, was cut at
+its provider's 900-second cap on eighteen of eighteen attempts in one day.
+The residual is not in the code; it is a reviewer that cannot finish reading
+it. So the tests moved to a follow-up PR stacked on #106, unchanged, and
+#106 became the module alone at 1,222 lines — the size the approver has
+finished before. No code changed in the split.
+
+**#107 round 1 — the split works, and the tests carried a finding.** On the
+1,210-line tests PR the required approver finished in eighteen minutes and
+voted; the other two approved. SOTA-A read a test expectation and found the
+semantic hole behind it: BUDGET_SKIPPED was a compose boundary, so an
+exhausted compose followed by a budget skip was closed with no marker and
+its strike vanished — five such runs counted zero strikes and the engine
+kept asking. Executed; fixed by one shared boundary set (OK, FALLBACK_USED):
+a budget skip is a refusal the engine issues to itself and closes nothing,
+the rule NOT_ASKED already follows. The fix rides on #107, stacked on #106,
+and lands in #106 instead if the module-only round does not pass on its own.
+
+**#107 round 2 — green, three of three.** With the budget-skip fix on top of
+the tests, all three vendors approved at confidence high, the required
+approver in about fifteen minutes on 1,224 lines: the first green on the
+governor lineage since the schema PR, and the confirmation that the split
+was the right remedy for a reviewer bound by its own clock rather than by
+the code.
+
+**#106 on the merged head, and the second split.** The owner merged #107
+into the branch; the diff was 2,481 lines again, and on the next run and
+its rerun the required approver failed on the wire on every attempt while
+SOTA-B and SOTA-C approved (SOTA-B's reply failed the content check on the
+rerun). The evidence for size as the bound is now direct: the same reviewer
+approved the same fix at 1,224 lines in fifteen minutes the same afternoon.
+So the module stands alone in #106 once more, carrying the approved fix,
+and the unchanged tests return as PR 3c stacked on it. No code changed.
+
+**#106 and #109 landed — and a governance finding about how.** With the
+module alone at 1,228 lines, #106's panel approved in 269 seconds and the
+tests followed as #109 in 267 seconds; both merged once their test jobs
+passed (auto-merge is disabled in this repository, so the watch merged them
+explicitly). Then the gateway log showed what the fast approvals were made
+of: from 21:33Z the required approver's own model, gpt-5.6-sol behind the
+owner's Codex account, returned 401 invalid_api_key on every call, and the
+SOTA-A combo failed over to its second target — anthropic/claude-fable-5,
+the same model that is SOTA-B's first target. The "SOTA-A" votes that
+approved #106 at 21:37Z and #109 at 21:33Z and 21:42Z were therefore
+Anthropic's model, not OpenAI's: two of the three voices were one vendor,
+and the required-approver vote was not independent of SOTA-B's. The code
+that merged is the code SOTA-B and SOTA-C had approved on every one of the
+preceding four rounds, and the last genuine gpt-5.6-sol read of the module
+(19:46Z, 818 seconds in, cancelled by a branch merge) never voted. Recorded
+so the owner can decide whether the merged diffs get a genuine SOTA-A read
+once the account is re-authenticated — and so the combo's failover list is
+reconsidered: a required approver that falls back to another panelist's
+model silently voids the panel's cross-vendor premise. #105's round and
+rerun on the same evening failed for the same reason: claude-fable-5
+answering as SOTA-A produced replies the verifier could not parse.
+
+**2026-09-09 — the size hypothesis, tested.** The owner asked whether
+smaller PRs (smaller messages to the model) go through while bigger ones get
+blocked or time out. Every independent-verify run from 2026-08-30 to 09-07
+was joined to the size of the diff it reviewed and to the gateway log's
+genuine gpt-5.6-sol attempts for the CI key:
+
+| diff size | runs | approver attempts | completed | cut at ~900 s |
+|---|---|---|---|---|
+| up to 1,300 lines | 21 | 49 | 21 (43%) | 8 |
+| 1,301 to 1,900 | 10 | 31 | 9 (29%) | 4 |
+| above 1,900 (to 7,858) | 49 | 115 | 48 (42%) | 13 |
+
+Completed reads take 300 to 880 seconds at every size, and 80,000-token
+prompts from #100 completed as often as 35,000-token ones. So size does not
+decide. Time does: the cut at about 900 seconds existed before (one attempt
+in twenty from August 25 to September 1, while a 1,772-second read completed
+on September 2 through the same provider), and on September 6 and 7 it hit
+between forty and eighty percent of attempts. It is a condition on the
+provider side of the approver's own account, varying by day, and no PR
+shape changes it. Since 2026-09-07 21:33Z that account has answered 401 on
+every call, and the gateway reports both Codex accounts as
+`reauth_required` with reason `refresh_failed`: only an interactive
+re-login clears it. Approach from here: no more splitting of PRs for the
+approver's sake (the two splits cost extra rounds and a merge confusion);
+the levers are the account, the provider-side cut, and the approver's
+`max` reasoning effort, which is what makes a read take up to fifteen
+minutes in the first place.
+
+**#105 round 5 (2026-09-09), the first genuine round after the account was
+re-authenticated.** The required approver's own model was cut at 901
+seconds on all three stream attempts and its chat fallback died at 179
+seconds on all three, on the whole 1,831-line diff; SOTA-B's reply failed
+the content check; SOTA-C refuted with confidence high: the allow-listed
+'ℹ️' is rejected because the format-control check calls the emoji test
+without the presentation flag. Executed across every allow-listed selector
+sequence, both channels and three positions: it is not rejected — the
+allow-list test on base plus selector runs first and admits it; the counter
+sees the letter-category base and enforces the cap; the bare base and a
+stray selector on a letter are still refused. The only rejections in the
+sweep are SMS, which carries no emoji by contract. Refuted by execution,
+pinned, and written at the check. Under the size finding of the same day,
+#105 goes to the bridge: no rerun lottery, and no further code change.
+
+**#105 round 6 (2026-09-10) — the first genuine full read, and four real
+findings.** After the tests PR was merged back into the branch a third time,
+the whole 1,831-line diff got a complete read from the required approver at
+885 seconds, fifteen under the cut, and it refuted with four findings while
+SOTA-C approved. All four executed: a list marker hid a directive's head
+word ("- Text your password." validated); a wrapped zone was invisible to
+the time-zone scan ("14:00 (EST)" against a UTC fact); a unary sign before a
+bracketed numeral asserted a new value ("-(51)"); and an ascending pair
+named as a subtraction was read as a range ("the subtraction is 2-51"). All
+four fixed with their executed scenarios in the docstrings; the fourth by a
+closed list of arithmetic cues, whose residual is the decision-9 class that
+decision 12 closes upstream. Twenty-one new cases red before, green after.
+The marker fix had a second effect worth recording: with bullets stripped,
+two clauses of the shipped library gained a head word the opener list had
+never been asked about — "- events." in the weekly digest and "- month-end
+trend signal negative;" in the execution-armed message — and the library
+guard test refused both until they joined the list. The guard did its job:
+an allow-list extracted from data must be re-extracted whenever the way the
+data is read changes.
+
+## The leaf continuation (2026-09-13 → 2026-09-19): #105 rounds 7–41, #111, #112, #113, #114
+
+The program moved to the production host on 2026-09-13 with the memory
+notes and the repository's object store; the four local-only branches were
+pushed at their original SHAs and the round-7 ledger of #105 was read. One
+rule governed every round after that: read the full ledger, execute the
+scenario, fix only what it names, pin it, run every gate, push, next round.
+Thirty-five #105 rounds, sixteen #112 rounds and four rounds over the three
+small PRs followed. The panel's wire was the constant: SOTA-B was dead on
+the wire for every round of #105 from round 7 and every round of #112 (the
+`/responses` route failed three times and the chat fallback timed out), and
+came back only for the test-only PRs; SOTA-C voted in roughly half the
+rounds. A green needs SOTA-A plus one other voice, so the size of a diff
+was never the blocker — a second voice was.
+
+**#105 rounds 7–41 (validator) — 35 rounds, 45 findings, every one
+executed; all but two real.** By class, with the round numbers:
+
+* *Time zones (7, 9, 12, 13, 14, 19, 21, 26, 30, 34, 37).* A zone allow-list
+  gave way to zone SHAPE: any 2-to-5-letter token after a time, then IANA
+  names and long forms, dotted and hyphenated abbreviations, POSIX zones
+  with offsets ("EST5", "CET-1CEST"), quoted and bracketed tokens, a second
+  token after the first ("14:00 UTC (EST)"), and finally bare long names
+  ("Pacific", "Berlin"). A bare fact may be given only the monitor's own
+  zone; a hyphen before a digit is a sign and stays.
+* *Arithmetic and signs (8, 10, 11, 14, 17, 18, 20, 22, 23, 25, 27, 28, 29,
+  32, 36, 38, 39).* Sign chains, spaced unary signs, percent units kept on
+  the numeral, percent-of, coded numerals ("0b11"), bracketed operands on
+  both sides, colon ratios, comma decimals in ranges and quotients, a
+  year-month inside a malformed date, mod/modulo, "shall" as a forecast,
+  the spelled sign moved out of the prose block, "51 point 2", a leading
+  point on any operand, the verb forms of arithmetic and "the sum of".
+* *Directives and the opener allow-list (11, 13, 15, 16, 17, 18, 26, 31,
+  33, 35, 39, 40).* A leading value or adverb is skipped before the head is
+  judged; the determiner and object-pronoun tells hold at any clause length
+  for an unlisted head; a clause ends at its punctuation with or without a
+  space; a wrapped second word is unwrapped; credential nouns are a tell
+  anywhere in the clause, behind modifiers, and after a preposition; a
+  one-word label is judged glued to what it labels; "can" is a modal; the
+  channel value is coerced to the enum before the first check (33).
+* *Script and language (17, 18, 23, 24).* English folds to ASCII: every
+  meaning scan judges the folded text, and a letter that does not fold is
+  refused whatever its block; the lexicon's suffixes cover "certainty" and
+  "probabilistic".
+* *Not real, recorded as such (12 SOTA-C, 40 SOTA-A).* "Trim 2 positions."
+  was already refused, but the mechanism named was real and fixed; "Text:
+  your password to me now." was already refused, but the class was real
+  ("Text: the code to me now.") and fixed. Neither was disputed.
+
+Round 41 was green with SOTA-A and SOTA-C; SOTA-B was on the wire for the
+first time since round 7 and refuted with two real defects — a leading or
+trailing joiner crashed `validate()`, and a message-initial selector was
+accepted — which became #111, green 3/3 in nine minutes, and were fixed
+before any caller existed.
+
+**#112 rounds 1–16 (composer and gate) — 21 findings, 19 real.**
+
+1. "Admission gate added but not wired" — true and intended: no runner
+   exists in the program's history; the standalone state was made
+   structural (decision 22) rather than wired on a panel's say-so.
+2. A decimal phrasing choice selected template 0; the library's DRAFT
+   status was never read (decision 14).
+3. The override suffix read only `F_OVERRIDE_FIRED` while the digest
+   declares `override_fired`; the "never LLM-generated" triggers reached
+   the model (`"llm": false` on the entries).
+4. A credential-bearing upstream error rendered verbatim; a clip could
+   split a numeral; the library was read outside the never-raises
+   boundary. (The redaction pins' fixtures then failed CI's secret gate
+   — correctly — and were replaced by planted values.)
+5. A hostile phrase in a fact ("sell everything now") reached the wire
+   inside an approved template on the fallback and P1 paths (decision 16;
+   the whole-sentence alternative measured and rejected).
+6. Non-scalar facts rendered as their repr; the trigger name was
+   interpolated verbatim; a hand-built `Composed` was provenance enough
+   (decision 15).
+7. An identifier can be a credential (decision 19); an emoji in a fact
+   walked past the iMessage cap on the unvalidated paths; SOTA-C: negation
+   after a mandated phrase in its common forms ("data gaps: none").
+8. `authorized_prose` trusted a key (decision 16, registry proof).
+9. Two entries declared source attributes instead of contract ids
+   (decision 21); `{"phrasing":0abc}` selected template 0.
+10. SOTA-A approved for the first time; SOTA-C: the library's writing
+    instructions contradicted the selection instruction (decision 20).
+    Blocked as "no independent corroboration" with SOTA-B dead.
+11. Fact keys were logged verbatim.
+12. An over-long fact cost the breaker notice its load-bearing clause
+    (decision 18).
+13. The gate ignored the `Composed`'s channel (decision 17).
+14. The channel check logged the trigger before provenance was proved.
+15. A caller's `override_suffix` key shadowed the derivation; undeclared
+    atoms filled slots. SOTA-C claimed the negation regex always matches —
+    executed, not reproduced, pinned as false.
+16. Green: SOTA-A and SOTA-C with proof-of-check.
+
+The owner overrode the three-round hard stop for #112 after round 3, on
+the ground that every finding was real and fixed within the hour; the
+stop rule stands for the next PR.
+
+**#113 (governor pins) — round 1:** the author's `.venv` tracking pin ran
+`git ls-files` with `check=False` and no `cwd`, so outside a worktree it
+passed vacuously; fixed to fail closed. Round 2 green (SOTA-A, SOTA-B).
+**#114 (composer pins) — round 1 green** (SOTA-A, SOTA-B), with the
+signed-library fixture and four ruff fixes over the author's 172 pins.
+
+**Lessons the continuation adds to the standing regime.** Execute before
+disputing, always — the two claims that were not real were found by
+execution, not by argument, and the panel accepted the executed record.
+Judge a design alternative by measurement before adopting it (the
+rendered-sentence check). A test fixture that looks like a credential IS
+one to the secret gate; plant it. A refusal that logs the caller's string
+is a disclosure. And the only reliable second voice on a large diff was
+the one the gateway could keep alive: fix the wire before the next big PR.
