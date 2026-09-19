@@ -1569,7 +1569,7 @@ class TestRoundThirteenOn112:
         out = self._emit(monkeypatch, spy, channel=channel)
         assert out.sent is True and spy.sends == ["Band trim."]
 
-    def test_the_channel_check_comes_before_provenance_and_admission(self, monkeypatch):
+    def test_provenance_comes_first_and_the_channel_check_before_admission(self, monkeypatch):
         from app.message_engine import gate
 
         order: list[str] = []
@@ -1580,6 +1580,57 @@ class TestRoundThirteenOn112:
 
         monkeypatch.setattr("app.alerts.promotion.live_admission_blockers", blockers)
         with session_scope() as s:
-            out = gate.emit(s, composed=composer.Composed(text="x", source="generated", trigger="T", channel="imessage"),
-                            recipient_ref="+1", sender=self._Spy("sms"), priority=1)
-        assert out.sent is False and "composed for imessage" in out.blockers[0] and order == []
+            forged = gate.emit(s, composed=composer.Composed(text="x", source="generated", trigger="T", channel="imessage"),
+                               recipient_ref="+1", sender=self._Spy("sms"), priority=1)
+            genuine = gate.emit(s, composed=composer._issue(text="x", source="generated", trigger="T", channel="imessage"),
+                                recipient_ref="+1", sender=self._Spy("sms"), priority=1)
+        assert forged.blockers == ("not issued by the composer",)
+        assert "composed for imessage" in genuine.blockers[0] and order == []
+
+
+class TestRoundFourteenOn112:
+    """#112 round 14 (SOTA-A, executed): the gate logged a Composed's trigger
+    in the channel-mismatch and provenance refusals BEFORE provenance was
+    proved, so a hand-built Composed put a credential into the log.
+    Provenance is checked first, and its refusal says nothing of the object."""
+
+    def test_a_forged_composed_leaves_nothing_of_itself_in_the_log(self, monkeypatch):
+        from app.message_engine import gate
+
+        lines: list[dict] = []
+        monkeypatch.setattr(gate.log, "warning", lambda event, **kw: lines.append({"event": event, **kw}))
+        monkeypatch.setattr("app.alerts.promotion.live_admission_blockers",
+                            lambda _session, *, path=None: [])
+        forged = composer.Composed(text="sk_live_TEXT", source="sk_live_SOURCE",  # pragma: allowlist secret
+                                   trigger="sk_live_TRIGGER", channel="sk_live_CHANNEL")  # pragma: allowlist secret
+
+        class Spy:
+            channel = "imessage"
+
+            def send(self, message, *, recipient_ref, idempotency_key=None):
+                raise AssertionError("must not send")
+
+        with session_scope() as s:
+            out = gate.emit(s, composed=forged, recipient_ref="+1", sender=Spy(), priority=1)
+        assert out.sent is False and out.blockers == ("not issued by the composer",)
+        assert lines == [{"event": "message_engine_unissued_composed", "priority": 1}]
+
+    def test_a_genuine_composed_logs_the_composers_label_only(self, monkeypatch):
+        from app.message_engine import gate
+
+        lines: list[dict] = []
+        monkeypatch.setattr(gate.log, "warning", lambda event, **kw: lines.append({"event": event, **kw}))
+        monkeypatch.setattr("app.alerts.promotion.live_admission_blockers",
+                            lambda _session, *, path=None: [])
+        out = composer.compose(trigger="sk_live_TRIGGER", channel=Channel.IMESSAGE, priority=1,  # pragma: allowlist secret
+                               facts={}, settings=_settings())
+
+        class Spy:
+            channel = "sms"
+
+            def send(self, message, *, recipient_ref, idempotency_key=None):
+                raise AssertionError("must not send")
+
+        with session_scope() as s:
+            gate.emit(s, composed=out, recipient_ref="+1", sender=Spy(), priority=1)
+        assert lines and all(line.get("trigger") == "unknown" for line in lines), lines

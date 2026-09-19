@@ -111,22 +111,26 @@ def emit(session: Any, *, composed: composer.Composed, recipient_ref: str,
     send its most urgent messages. `priority` is therefore recorded and never
     branched on.
     """
+    # PROVENANCE FIRST, AND THE REFUSAL SAYS NOTHING OF THE OBJECT. Until a
+    # Composed is proved the composer's, every field of it is the caller's
+    # string, and the channel-mismatch and provenance refusals logged its
+    # trigger - a hand-built Composed put a credential into the log (#112
+    # round 14, SOTA-A, executed). After this check, composed.trigger is the
+    # composer's own label: a library key or "unknown".
+    if not composer.issued(composed):
+        log.warning("message_engine_unissued_composed", priority=priority)
+        return EmitResult(sent=False, blockers=("not issued by the composer",))
     trigger, text = composed.trigger, composed.text
     sender_channel = getattr(sender, "channel", None)
     if sender_channel != composed.channel:
         # The text was fitted and validated for composed.channel; a
-        # transport of another channel has no contract it satisfies.
+        # transport of another channel has no contract it satisfies
+        # (#112 round 13, SOTA-A, executed).
         log.warning("message_engine_channel_mismatch", trigger=trigger,
                     priority=priority, composed_for=composed.channel,
                     sender=str(sender_channel))
         return EmitResult(sent=False, blockers=(
             f"composed for {composed.channel}, sender is {sender_channel or 'unnamed'}",))
-    if not composer.issued(composed):
-        # A Composed built by hand is not the composer's product, whatever
-        # its fields say (#112 round 6, SOTA-A, executed).
-        log.warning("message_engine_unissued_composed", trigger=trigger,
-                    priority=priority)
-        return EmitResult(sent=False, blockers=("not issued by the composer",))
     # The library must be SIGNED before anything of the engine's reaches a
     # wire (ruling Q34; #112 round 2, SOTA-A, executed): checked here as
     # well as in compose(), because a Composed can be built by hand.
