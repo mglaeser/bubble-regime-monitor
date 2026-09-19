@@ -42,16 +42,37 @@ RED_FLAG_TOTAL = 4
 
 class _Transport:
     """A sender that names its channel (decision 17) over the existing
-    transports, which promise never to raise."""
+    transports, which promise never to raise.
+
+    THE RECIPIENT THE GATE SAW IS THE RECIPIENT THE BYTES GO TO. The first
+    version ignored `recipient_ref` and let the transport read its own
+    configured destination, so the gate could admit and record a send to A
+    while a reloaded configuration delivered it to B (#118 round 1,
+    SOTA-A, executed). The recipient is passed through explicitly, and an
+    empty one is refused here rather than defaulted by the transport.
+    """
 
     def __init__(self, channel: str) -> None:
         self.channel = channel
 
     def send(self, message: str, *, recipient_ref: str,
              idempotency_key: str | None = None) -> Any:
+        if not recipient_ref:
+            return _Refused("no recipient bound to this send")
         if self.channel == Channel.IMESSAGE.value:
-            return send_imessage(message)
-        return send_sms(message)
+            return send_imessage(message, recipient=recipient_ref)
+        return send_sms(message, recipient=recipient_ref)
+
+
+class _Refused:
+    """A transport result for a send that never left this process."""
+
+    ok = False
+    status_code = None
+    operation_id = None
+
+    def __init__(self, error: str) -> None:
+        self.error = error
 
 
 def transport_for(settings: Settings) -> tuple[str | None, str | None]:

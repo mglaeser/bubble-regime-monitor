@@ -93,8 +93,8 @@ class TestEngineOff:
         calls: list[str] = []
         monkeypatch.setattr(digest, "generate_sms_body", lambda snap: ("old digest body", True))
         monkeypatch.setattr(digest, "send_imessage",
-                            lambda body: calls.append(body) or type("R", (), {"ok": True, "status_code": 202,
-                                                                                "operation_id": "op", "error": None})())
+                            lambda body, **_kw: calls.append(body) or type("R", (), {"ok": True, "status_code": 202,
+                                                                                      "operation_id": "op", "error": None})())
         monkeypatch.setattr(service, "deliver", lambda **_kw: (_ for _ in ()).throw(AssertionError("engine used")))
         out = digest.send_daily_digest()
         assert out["status"] == "sent" and out["message"] == "old digest body" and calls == ["old digest body"]
@@ -102,10 +102,14 @@ class TestEngineOff:
 
 
 class TestEngineOn:
-    def _sent(self, monkeypatch, sends):
-        monkeypatch.setattr(service, "send_imessage",
-                            lambda body: sends.append(body) or type("R", (), {"ok": True, "status_code": 202,
-                                                                                "operation_id": "op-1", "error": None})())
+    def _sent(self, monkeypatch, sends, recipients=None):
+        def fake(body, *, recipient=None):
+            sends.append(body)
+            if recipients is not None:
+                recipients.append(recipient)
+            return type("R", (), {"ok": True, "status_code": 202, "operation_id": "op-1", "error": None})()
+
+        monkeypatch.setattr(service, "send_imessage", fake)
 
     def test_the_digest_goes_through_the_engine_and_the_gate(self, monkeypatch, engine_on):
         with session_scope() as s:
@@ -135,7 +139,7 @@ class TestEngineOn:
                             lambda _session, *, path=None: ["nothing has been promoted"])
         sends: list[str] = []
         self._sent(monkeypatch, sends)
-        monkeypatch.setattr(digest, "send_imessage", lambda body: (_ for _ in ()).throw(AssertionError("old sender")))
+        monkeypatch.setattr(digest, "send_imessage", lambda body, **_kw: (_ for _ in ()).throw(AssertionError("old sender")))
         monkeypatch.setattr(composer, "complete",
                             lambda **_kw: type("C", (), {"text": '{"phrasing": 0}'})())
         out = digest.send_daily_digest()
@@ -175,3 +179,37 @@ class TestEngineOn:
             assert out["status"] == "skipped" and "no digest transport" in out["reason"]
         finally:
             get_settings.cache_clear()
+
+
+class TestRoundOneOn118:
+    """#118 round 1 (SOTA-A, executed): the transport ignored the recipient the
+    gate admitted and recorded, and read its own configured destination, so
+    a reloaded configuration could deliver to B what was authorised for A."""
+
+    def test_the_bytes_go_to_the_recipient_the_gate_saw(self, monkeypatch, engine_on):
+        _admitted(monkeypatch)
+        recipients: list[str | None] = []
+        sends: list[str] = []
+        TestEngineOn()._sent(monkeypatch, sends, recipients)
+        # The configuration changes between admission and the wire.
+        monkeypatch.setenv("IMESSAGE_RECIPIENT", "+499999999999")
+        composed = composer._issue(text="Band trim.", source="deterministic", trigger="daily_digest", channel="imessage")
+        from app.message_engine import gate
+        with session_scope() as s:
+            out = gate.emit(s, composed=composed, recipient_ref="+491510000000",
+                            sender=service._Transport("imessage"), priority=3)
+        assert out.sent is True and recipients == ["+491510000000"]
+
+    @pytest.mark.parametrize("channel", ["imessage", "sms"])
+    def test_an_empty_recipient_is_refused_before_any_transport(self, monkeypatch, channel):
+        monkeypatch.setattr(service, "send_imessage", lambda *a, **k: (_ for _ in ()).throw(AssertionError("sent")))
+        monkeypatch.setattr(service, "send_sms", lambda *a, **k: (_ for _ in ()).throw(AssertionError("sent")))
+        result = service._Transport(channel).send("Band trim.", recipient_ref="")
+        assert result.ok is False and "no recipient" in result.error
+
+    def test_the_sms_recipient_is_passed_through_too(self, monkeypatch):
+        seen: list[str | None] = []
+        monkeypatch.setattr(service, "send_sms",
+                            lambda body, *, recipient=None: seen.append(recipient) or type("R", (), {"ok": True})())
+        service._Transport("sms").send("Band trim.", recipient_ref="+491510000000")
+        assert seen == ["+491510000000"]
