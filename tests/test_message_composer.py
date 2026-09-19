@@ -807,16 +807,21 @@ class TestTheGateIsTheOnlyPathToTheWire:
         assert inspect.signature(composer.compose).return_annotation in ("Composed", composer.Composed)
         assert not any(name.startswith("send") for name in vars(composer.Composed))
 
-    def test_the_callers_are_the_go_live_pr(self):
-        # The go-live PR changes this set to exactly the dispatcher (decision 1)
-        # and rewrites this pin to name it.
-        callers = {
+    def test_the_callers_are_exactly_the_go_live_wiring(self):
+        # The go-live PR (decision 22) routes the service triggers through
+        # app/services/engine_delivery.py - the one application module that
+        # holds both a transport and the gate - and the only caller of that
+        # module is the daily digest. Nothing else touches the composer or
+        # the gate.
+        direct = {
             module
             for needle in ("app.message_engine.gate", "app.message_engine.composer",
                            "app.message_engine import gate", "app.message_engine import composer")
             for module in self._importers(self.APP, needle, skip=self.ENGINE)
         }
-        assert callers == set(), callers
+        assert direct == {"app/services/engine_delivery.py"}, direct
+        via_service = self._importers(self.APP, "app.services.engine_delivery", skip=self.ENGINE)
+        assert via_service == {"app/services/digest.py"}, via_service
 
 
 class TestPhrasingChoiceIsAnInteger:
