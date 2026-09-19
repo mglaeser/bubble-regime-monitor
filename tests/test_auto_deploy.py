@@ -263,3 +263,74 @@ def test_admin_deploy_not_configured_without_branch(isolated_db, monkeypatch):
     get_settings.cache_clear()
     assert r.status_code == 202
     assert r.json()["data"]["status"] == "not_configured"
+
+
+class TestTheWatcherLockStaysWithTheWatcher:
+    """2026-08-30 → 2026-09-11: the lock taken on fd 9 was inherited by the
+    container's helpers, so it outlived every deploy; later triggers skipped
+    without consuming the file, the path unit re-fired, and systemd latched
+    start-limit-hit. Merges silently stopped reaching production."""
+
+    # Imported here rather than at the top: the secret-scan baseline pins
+    # this file's line numbers, and a new top-level import would move them.
+    from pathlib import Path as _Path
+
+    WATCH = _Path(__file__).resolve().parents[1] / "deploy" / "deploy-watch.sh"
+    UNIT = _Path(__file__).resolve().parents[1] / "deploy" / "systemd" / "bubblegauge-deploy.service"
+
+    def test_the_lock_is_held_by_a_flock_child_for_the_locked_region(self):
+        # Neither inherited by deploy.sh (the 2026-08-30 leak) nor tied to
+        # the watcher process (#116 round 3): `flock -o` holds it for exactly
+        # as long as the locked re-invocation runs.
+        code = "\n".join(line for line in self.WATCH.read_text().splitlines()
+                         if not line.lstrip().startswith("#"))
+        assert 'flock -w "$LOCK_WAIT_S" -o "$LOCK_FILE" "$0" --locked' in code
+        assert "exec 9>" not in code and "9>&-" not in code and "flock -n 9" not in code
+        assert "exec flock" not in code          # exec would make the lock die with the watcher
+
+    def test_a_second_trigger_waits_for_the_lock_instead_of_skipping(self):
+        assert 'flock -w "$LOCK_WAIT_S"' in self.WATCH.read_text()
+
+    def test_repeated_activation_is_bounded_not_unlimited(self):
+        # StartLimitIntervalSec=0 would let a failure BEFORE the trigger is
+        # consumed (an unwritable lock file) re-fire the path unit without
+        # bound (#116 round 1, SOTA-A). The watcher paces such failures with
+        # a sleep, and the unit keeps a generous, finite limit.
+        unit = self.UNIT.read_text()
+        assert "StartLimitIntervalSec=600" in unit and "StartLimitBurst=5" in unit
+        assert "StartLimitIntervalSec=0" not in unit
+
+    def test_a_failure_before_the_trigger_is_consumed_is_paced(self):
+        text = self.WATCH.read_text()
+        assert "PACE_FAILURE_S" in text and 'if ! touch "$LOCK_FILE"' in text
+
+    def test_the_locked_child_inherits_no_lock_fd(self, tmp_path):
+        # A private lock path (#116 round 1): a fixed /tmp name opened with
+        # ">" would erase or truncate whatever sat there.
+        import subprocess
+
+        lock = tmp_path / "lock"
+        out = subprocess.run(["flock", "-o", str(lock), "bash", "-c", f"ls -l /proc/$$/fd | grep -c {lock} || true"],
+                             capture_output=True, text=True, check=True).stdout.strip()
+        assert out == "0"
+
+    def test_the_lock_survives_the_watcher_being_killed(self, tmp_path):
+        # The #116 round-3 scenario, executed: the parent (the watcher) dies,
+        # the flock child and its deploy go on, and a second flock must WAIT.
+        import os
+        import signal
+        import subprocess
+        import time
+
+        lock = tmp_path / "lock"
+        # The trailing `true` keeps bash from exec-ing flock in its own
+        # place: the watcher is a script with flock as a CHILD, and that is
+        # what KillMode=process kills.
+        outer = subprocess.Popen(["bash", "-c", f"flock -w 5 -o {lock} sleep 3; true"])
+        time.sleep(0.4)
+        os.kill(outer.pid, signal.SIGTERM)
+        outer.wait(timeout=5)
+        held = subprocess.run(["flock", "-n", str(lock), "true"]).returncode != 0
+        assert held, "the lock was released when the watcher died"
+        time.sleep(3.2)
+        assert subprocess.run(["flock", "-n", str(lock), "true"]).returncode == 0

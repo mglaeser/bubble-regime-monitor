@@ -29,14 +29,44 @@ log() { printf '%s deploy-watch: %s\n' "$(date -uIs)" "$*"; [[ -n "${LOG_FILE:-}
 
 # Serialize: never run two deploys at once (a trigger during a deploy re-fires
 # afterwards because the .path unit re-arms once the file is gone).
-exec 9>"$LOCK_FILE"
-if ! flock -n 9; then
-  log "another deploy is in progress; this trigger will be handled after it (skip)"
-  exit 0
+# THE LOCK LIVES AS LONG AS THE DEPLOY, AND NO LONGER. Three shapes were
+# wrong before this one. Taking the lock on fd 9 and running deploy.sh with
+# it inherited leaked the fd through podman run into the container's helpers,
+# so the lock outlived every deploy: later triggers "skipped", the path unit
+# re-fired on the file still being there, and systemd latched the service
+# into start-limit-hit - merges stopped reaching production on 2026-08-30.
+# Closing the fd for deploy.sh (9>&-) fixed the leak but tied the lock to
+# THIS process: with KillMode=process, systemd can kill the watcher on a
+# timeout while deploy.sh survives, and the released lock would let the next
+# activation deploy concurrently (#116 round 3, SOTA-A, executed). So the
+# lock is held by a `flock` child that lives exactly as long as the locked
+# region below - its own child does not inherit the fd (-o), and killing this
+# watcher does not touch it. A second trigger waits for the lock (bounded)
+# instead of skipping, so a push during a deploy causes exactly one more
+# deploy afterwards, as docs/AUTO_DEPLOY.md always promised.
+LOCK_WAIT_S="${LOCK_WAIT_S:-1800}"
+# A failure BEFORE the trigger is consumed leaves the file in place, and the
+# path unit re-fires the moment this exits; pacing it here keeps that from
+# being a tight loop while the unit's own limit stays finite (#116 round 1).
+PACE_FAILURE_S="${PACE_FAILURE_S:-60}"
+
+if [[ "${1:-}" != "--locked" ]]; then
+  if ! touch "$LOCK_FILE" 2>/dev/null; then
+    log "cannot open lock file $LOCK_FILE; pausing ${PACE_FAILURE_S}s before failing (trigger kept)"
+    sleep "$PACE_FAILURE_S"
+    exit 1
+  fi
+  # Not exec'd: the flock child must outlive this process if systemd kills it.
+  flock -w "$LOCK_WAIT_S" -o "$LOCK_FILE" "$0" --locked
+  rc=$?
+  if [[ "$rc" -eq 1 ]] && ! flock -n -o "$LOCK_FILE" true; then
+    log "another deploy held the lock for ${LOCK_WAIT_S}s; giving up on this activation (trigger kept)"
+    sleep "$PACE_FAILURE_S"
+  fi
+  exit "$rc"
 fi
 
-# Consume the trigger FIRST, so a NEW trigger arriving mid-deploy re-arms the
-# path unit and causes exactly one more deploy afterwards (no lost, no storm).
+# --- locked region: one deploy at a time from here to the end ---
 if [[ -f "$TRIGGER_FILE" ]]; then
   log "trigger: $(tr -d '\n' <"$TRIGGER_FILE" 2>/dev/null | cut -c1-300)"
   rm -f "$TRIGGER_FILE"
