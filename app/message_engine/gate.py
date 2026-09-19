@@ -34,6 +34,18 @@ log = get_logger(__name__)
 
 
 class _Sender(Protocol):
+    """A transport: it says which channel it is, and it sends.
+
+    The channel is part of the contract because a Composed is fitted and
+    validated for ONE channel - 200 code points and two emoji for iMessage,
+    150 GSM-7 septets for SMS - and the gate took any sender for any
+    Composed, so iMessage-fitted text could go out through the SMS
+    transport (#112 round 13, SOTA-A, executed). A sender that names no
+    channel is refused.
+    """
+
+    channel: str
+
     def send(self, message: str, *, recipient_ref: str,
              idempotency_key: str | None = None) -> Any: ...
 
@@ -100,6 +112,15 @@ def emit(session: Any, *, composed: composer.Composed, recipient_ref: str,
     branched on.
     """
     trigger, text = composed.trigger, composed.text
+    sender_channel = getattr(sender, "channel", None)
+    if sender_channel != composed.channel:
+        # The text was fitted and validated for composed.channel; a
+        # transport of another channel has no contract it satisfies.
+        log.warning("message_engine_channel_mismatch", trigger=trigger,
+                    priority=priority, composed_for=composed.channel,
+                    sender=str(sender_channel))
+        return EmitResult(sent=False, blockers=(
+            f"composed for {composed.channel}, sender is {sender_channel or 'unnamed'}",))
     if not composer.issued(composed):
         # A Composed built by hand is not the composer's product, whatever
         # its fields say (#112 round 6, SOTA-A, executed).

@@ -358,6 +358,8 @@ class TestAdmissionGate:
     """
 
     class _SpySender:
+
+        channel = "imessage"
         def __init__(self) -> None:
             self.sends: list[tuple[str, str]] = []
 
@@ -457,6 +459,8 @@ class TestAdmissionGate:
             return ["not admitted"]
 
         class Recording:
+
+            channel = "imessage"
             def send(self, message, *, recipient_ref, idempotency_key=None):
                 order.append("send")
                 return "SENT"
@@ -890,6 +894,8 @@ class TestOwnerSignOff:
         sends: list[str] = []
 
         class Spy:
+
+            channel = "imessage"
             def send(self, message, *, recipient_ref, idempotency_key=None):
                 sends.append(message)
                 return "SENT"
@@ -1043,6 +1049,8 @@ class TestRoundFourOn112:
         sends: list[str] = []
 
         class Spy:
+
+            channel = "imessage"
             def send(self, message, *, recipient_ref, idempotency_key=None):
                 sends.append(message)
 
@@ -1187,6 +1195,8 @@ class TestRoundSixOn112:
         sends: list[str] = []
 
         class Spy:
+
+            channel = "imessage"
             def send(self, message, *, recipient_ref, idempotency_key=None):
                 sends.append(message)
 
@@ -1209,6 +1219,8 @@ class TestRoundSixOn112:
         assert not composer.issued(tampered)
 
         class Spy:
+
+            channel = "imessage"
             def send(self, message, *, recipient_ref, idempotency_key=None):
                 return None
 
@@ -1511,3 +1523,63 @@ class TestRoundTwelveOn112:
             for channel in (Channel.SMS, Channel.IMESSAGE):
                 text = composer.render_fallback(entry["fallback"], {})
                 assert not composer._overflows(text, channel, _settings()), (name, channel, len(text))
+
+
+class TestRoundThirteenOn112:
+    """#112 round 13 (SOTA-A, executed): the gate took any sender for any
+    Composed, so text fitted and validated for iMessage could go out through
+    the SMS transport. A sender names its channel, and it must be the one
+    the Composed was made for."""
+
+    class _Spy:
+        def __init__(self, channel):
+            self.channel = channel
+            self.sends: list[str] = []
+
+        def send(self, message, *, recipient_ref, idempotency_key=None):
+            self.sends.append(message)
+            return "SENT"
+
+    def _emit(self, monkeypatch, sender, channel="imessage"):
+        from app.message_engine import gate
+
+        monkeypatch.setattr("app.alerts.promotion.live_admission_blockers",
+                            lambda _session, *, path=None: [])
+        composed = composer._issue(text="Band trim.", source="generated", trigger="T", channel=channel)
+        with session_scope() as s:
+            return gate.emit(s, composed=composed, recipient_ref="+1", sender=sender, priority=1)
+
+    def test_the_ledger_scenario(self, monkeypatch):
+        sms = self._Spy("sms")
+        out = self._emit(monkeypatch, sms, channel="imessage")
+        assert out.sent is False and out.blockers == ("composed for imessage, sender is sms",)
+        assert sms.sends == []
+
+    def test_a_sender_without_a_channel_is_refused(self, monkeypatch):
+        class Nameless:
+            def send(self, message, *, recipient_ref, idempotency_key=None):
+                raise AssertionError("must not send")
+
+        out = self._emit(monkeypatch, Nameless())
+        assert out.sent is False and "sender is unnamed" in out.blockers[0]
+
+    @pytest.mark.parametrize("channel", ["imessage", "sms"])
+    def test_the_matching_transport_sends(self, monkeypatch, channel):
+        spy = self._Spy(channel)
+        out = self._emit(monkeypatch, spy, channel=channel)
+        assert out.sent is True and spy.sends == ["Band trim."]
+
+    def test_the_channel_check_comes_before_provenance_and_admission(self, monkeypatch):
+        from app.message_engine import gate
+
+        order: list[str] = []
+
+        def blockers(_session, *, path=None):
+            order.append("admission")
+            return []
+
+        monkeypatch.setattr("app.alerts.promotion.live_admission_blockers", blockers)
+        with session_scope() as s:
+            out = gate.emit(s, composed=composer.Composed(text="x", source="generated", trigger="T", channel="imessage"),
+                            recipient_ref="+1", sender=self._Spy("sms"), priority=1)
+        assert out.sent is False and "composed for imessage" in out.blockers[0] and order == []
