@@ -297,8 +297,12 @@ class TestTheWatcherLockStaysWithTheWatcher:
         # bound (#116 round 1, SOTA-A). The watcher paces such failures with
         # a sleep, and the unit keeps a generous, finite limit.
         unit = self.UNIT.read_text()
-        assert "StartLimitIntervalSec=600" in unit and "StartLimitBurst=5" in unit
+        assert "StartLimitIntervalSec=600" in unit and "StartLimitBurst=60" in unit
         assert "StartLimitIntervalSec=0" not in unit
+        # A merge burst is valid traffic (#116 round 4): with ~12 s deploys,
+        # six merges in ten minutes must not latch the unit.
+        burst = int(unit.split("StartLimitBurst=")[1].split()[0])
+        assert burst >= 30
 
     def test_a_failure_before_the_trigger_is_consumed_is_paced(self):
         text = self.WATCH.read_text()

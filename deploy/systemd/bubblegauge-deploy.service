@@ -8,11 +8,13 @@ After=network-online.target
 # A trigger that arrives during a deploy re-fires the path unit as soon as
 # the service exits; systemd's default limit (5 starts in 10 s) latched the
 # unit into start-limit-hit and auto-deploy silently stopped (2026-08-30).
-# The watcher serialises deploys and paces its own failures, so a generous
-# but FINITE limit is right: unlimited would let a failure before the
-# trigger is consumed re-fire without bound.
+# The watcher serialises deploys and paces its own failures (60 s before any
+# exit that keeps the trigger), so the limit only has to stop a runaway: a
+# cached-layer deploy takes ~12 s, and a burst of merges is a VALID reason
+# for several starts in a few minutes (#116 round 4). Sixty starts in ten
+# minutes is beyond any burst and well below a runaway paced at one a minute.
 StartLimitIntervalSec=600
-StartLimitBurst=5
+StartLimitBurst=60
 
 [Service]
 Type=oneshot
