@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.alerts.canonical import canonical_json, sha256_hex, sha256_of
-from app.alerts.errors import PhraseSetInvalid
+from app.alerts.errors import MessageLanguageInvalid, PhraseSetInvalid
 from app.alerts.gsm7 import SINGLE_SMS_SEPTETS, first_non_gsm7, septets
 
 PHRASE_VALIDATOR_VERSION = "1"
@@ -195,16 +195,45 @@ def _widest(fragment: FragmentSpec, facts: dict[str, FactSpec],
 
 
 def _requested_language(explicit: str | None) -> str | None:
-    """The operator's language, from the setting when the caller gave none."""
+    """The operator's language, from the setting when the caller gave none.
+
+    The validator works without a settings context - a script or a test
+    outside the app's environment - but a MALFORMED setting is refused,
+    not masked: one broad fallback let MESSAGE_LANGUAGE=fr validate the
+    shipped set as German, wrong-language alerts instead of a rejected
+    configuration (#119 round 6, SOTA-A, executed).
+    """
     if explicit is not None:
         return explicit
     try:
         from app.config import get_settings
 
         chosen = get_settings().message_language
-        return None if chosen is None else str(chosen)
-    except Exception:  # noqa: BLE001 - a validator must work without settings
+    except ImportError:
         return None
+    except Exception as exc:  # noqa: BLE001 - only the language is ours to judge
+        complaint = _complaint_about(exc, "message_language")
+        if complaint is not None:
+            raise MessageLanguageInvalid(f"MESSAGE_LANGUAGE is malformed: {complaint}") from exc
+        return None
+    return None if chosen is None else str(chosen)
+
+
+def _complaint_about(exc: BaseException, field: str) -> str | None:
+    """The settings validator's own message about `field`, if the failure
+    names it; None when the settings failed for reasons that are not this
+    field's (no environment at all, another field)."""
+    errors = getattr(exc, "errors", None)
+    if not callable(errors):
+        return None
+    try:
+        details = errors()
+    except Exception:  # noqa: BLE001 - an unreadable failure is not ours
+        return None
+    for detail in details or ():
+        if isinstance(detail, dict) and field in tuple(detail.get("loc") or ()):
+            return str(detail.get("msg") or "invalid value")
+    return None
 
 
 def validate_phrase_set(raw_json: str, *, language: str | None = None) -> ValidatedPhraseSet:

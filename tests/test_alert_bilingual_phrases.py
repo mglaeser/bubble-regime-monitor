@@ -283,6 +283,66 @@ class TestRoundFiveOn119:
         assert ps.language == "de" and ps.languages == ("de",)
 
 
+class TestRoundSixOn119:
+    """A malformed MESSAGE_LANGUAGE is refused where the language is
+    resolved; only a MISSING settings context takes the set's default
+    (#119 round 6, SOTA-A, executed: fr validated v3.5 as German)."""
+
+    def test_the_ledger_scenario(self, monkeypatch):
+        from app.alerts.errors import MessageLanguageInvalid
+        from app.config import get_settings
+
+        monkeypatch.setenv("MESSAGE_LANGUAGE", "fr")
+        get_settings.cache_clear()
+        try:
+            with pytest.raises(MessageLanguageInvalid, match="MESSAGE_LANGUAGE is malformed"):
+                validate_phrase_set(V35.read_text(encoding="utf-8"))
+            with pytest.raises(PhraseSetInvalid):        # every fail-closed caller catches it
+                validate_phrase_set(V34.read_text(encoding="utf-8"))
+            # A caller that names the language never consults the setting.
+            assert validate_phrase_set(V35.read_text(encoding="utf-8"), language="en").language == "en"
+        finally:
+            get_settings.cache_clear()
+
+    def test_the_composers_registry_authorizes_nothing_under_it(self, monkeypatch):
+        from app.config import get_settings
+        from app.message_engine import composer
+
+        monkeypatch.setenv("MESSAGE_LANGUAGE", "fr")
+        get_settings.cache_clear()
+        monkeypatch.setattr(composer, "_REGISTRY_MATCHERS", None)
+        try:
+            assert not composer.registry_authored("Regime sonst unveraendert.")
+        finally:
+            get_settings.cache_clear()
+            composer._REGISTRY_MATCHERS = None
+
+    def test_a_missing_settings_context_still_takes_the_default(self, monkeypatch):
+        import app.config
+
+        def no_environment():
+            raise RuntimeError("no settings here")
+
+        monkeypatch.setattr(app.config, "get_settings", no_environment)
+        assert validate_phrase_set(V35.read_text(encoding="utf-8")).language == "de"
+
+    def test_another_fields_failure_is_not_the_languages(self, monkeypatch):
+        from pydantic import BaseModel, ValidationError
+
+        import app.config
+
+        class Other(BaseModel):
+            alerts_mode: int
+
+        def other_field_fails():
+            Other(alerts_mode="not a number")
+
+        monkeypatch.setattr(app.config, "get_settings", other_field_fails)
+        with pytest.raises(ValidationError):
+            other_field_fails()
+        assert validate_phrase_set(V35.read_text(encoding="utf-8")).language == "de"
+
+
 class TestTheSettingReachesTheRenderPath:
     @pytest.mark.parametrize("language, expected", [("de", "Stufe"), ("en", "Level")])
     def test_validate_from_disk_renders_the_operator_language(self, monkeypatch, language, expected):

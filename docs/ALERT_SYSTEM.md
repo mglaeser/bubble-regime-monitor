@@ -274,7 +274,11 @@ lists them — and the renderer writes the selected one; a language the promoted
 set does not carry falls back to the set's own default (`meta.language`), which
 the validation report states. Every language is held to the worst-case fit, and
 the registry stores one digest for the whole set: switching language is a
-setting, not a re-promotion. The honesty lint reads both vocabularies.
+setting, not a re-promotion. A value the settings do not admit (`fr`) is
+refused where the language is resolved, never masked as the default: the
+service does not start on it, and a validation run without a settings context
+of its own reports `MESSAGE_LANGUAGE_INVALID`. The honesty lint reads both
+vocabularies.
 
 `ALERTS_MODE` is the switch that decides whether the service *acts*, and it is
 the one that defaults off. Enabling alerts never implies capture, and `live` is
