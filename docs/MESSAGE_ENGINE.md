@@ -620,8 +620,12 @@ German (decision 23), so German is judged by the language-agnostic rules
 arithmetic, format) plus a German set: a banned lexicon (probability,
 advice, certainty, forecast, crash talk), an advice/forecast grammar
 (reader-directed modals, impersonal recommendations, future or modal
-movements), the formal imperative ("Kaufen Sie"), German number words and
-compounds, and a POSITIVE check that the text is German at all (a
+movements), the formal imperative ("Kaufen Sie") and the informal one (a
+bare verb stem opening a clause: "Bleib in SPY.", "Halt Abstand.", from
+an enumerated list of the verbs an instruction to an investor uses -
+the shape of the English action-verb list, with its known limit), German
+number words and compounds, and a POSITIVE check that the text is German
+at all (a
 function word or monitor noun no German sentence of this register does
 without; a compliant English reply had passed as German, #121 round 1).
 The English shape rules are not consulted on German: German puts its

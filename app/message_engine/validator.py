@@ -781,6 +781,26 @@ _ADVICE_DE_RE = re.compile(
 #: head of a clause ("Kaufen Sie", "Halten Sie", "Bleiben Sie ruhig").
 _IMPERATIVE_DE_RE = re.compile(r"(?:^|[.!?;:,]\s*|\s-\s)([A-ZÄÖÜ][a-zäöüß]+(?:en|n))\s+Sie\b")
 
+#: The informal imperative has no "Sie" to key on: "Bleib in SPY." passed
+#: the formal pattern and the advice grammar (#121 round 2, SOTA-A,
+#: executed). German du/ihr imperatives are a bare verb stem (optional -e,
+#: plural -t) at the head of a clause, so the stems of the verbs an
+#: instruction to an investor uses are enumerated - the shape of English
+#: `_ACTION_VERBS`, with the same known limit (decision 9): a stem outside
+#: the list is the residual the German validator program owns.
+_ACTION_STEMS_DE = (
+    r"bleib|kauf|verkauf|halt|reduzier|verringer|erh[oö]h|sicher|steig|geh|nimm|wart|"
+    r"setz|streich|meid|vermeid|behalt|verlass|wechsl|wechsel|schicht|bau|stock|nutz|"
+    r"greif|hedg|verkleiner|vergr[oö][sß]er|senk|heb|zieh|pack|lass|hol|verschieb|"
+    r"investier|desinvestier|liquidier|shorte|short|kassier|realisier|mach")
+_IMPERATIVE_DU_RE = re.compile(
+    r"(?:^|[.!?;:]\s*|\s-\s)((?:" + _ACTION_STEMS_DE + r")(?:e|t)?)\b"
+    # ...followed by the object, an adverb or a particle, not by a subject
+    # that would make it a declarative ("Halt und Kauf sind ..." is rare in
+    # this register and the cost of a false positive is one fallback).
+    r"(?=\s|[.!?]|$)",
+    re.IGNORECASE)
+
 #: German number words: a spelled-out number bypasses the grounding of
 #: numerals exactly as an English one does. Articles (ein, eine) are not
 #: numbers here.
@@ -1728,6 +1748,10 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
             if ordered:
                 return ValidationResult(False, FailureClass.CONTENT,
                                         f"{ordered.group(1)!r} Sie: reads as an instruction (de)")
+            told = _IMPERATIVE_DU_RE.search(lowered)
+            if told:
+                return ValidationResult(False, FailureClass.CONTENT,
+                                        f"{told.group(1)!r} opens a clause as an instruction (de)")
             # NOT the English shape rules. German puts its verb second, so
             # "Langfristig sind SPY und QQQ IN." has the shape the English
             # position-instruction pattern keys on (a word, then a position

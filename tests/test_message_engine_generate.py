@@ -431,3 +431,37 @@ class TestRoundOneOn121:
         out, _ = _compose(monkeypatch, '{"phrasing": 0}', message_engine_mode="select", now=LATER)
         assert out.source == "generated" and "NameError" not in (out.reason or "")
 
+
+class TestRoundTwoOn121:
+    """The informal German imperative has no "Sie" to key on: "Bleib in
+    SPY." passed (SOTA-A, executed). A bare verb stem at the head of a
+    clause is an instruction; a declarative with the same verb is not."""
+
+    @pytest.mark.parametrize("text", [
+        "Der Wert liegt bei 59 von 100. Bleib in SPY.",
+        "Der Wert liegt bei 59 von 100. Halt Abstand von QQQ.",
+        "Der Wert liegt bei 59 von 100. Steig aus QQQ aus.",
+        "Der Wert liegt bei 59 von 100. Bleibt ruhig investiert.",
+        "Der Wert liegt bei 59 von 100; nimm Gewinne mit.",
+        "Der Wert liegt bei 59 von 100. Reduziere QQQ.",
+        "Der Wert liegt bei 59 von 100 - geh raus aus Aktien.",
+    ])
+    def test_an_informal_imperative_is_an_instruction(self, text):
+        result = validate(text, channel=Channel.IMESSAGE, facts=DIGEST_FACTS, prose_rules=True, language="de", **LIMITS)
+        assert not result.ok and "opens a clause as an instruction (de)" in (result.reason or ""), result.reason
+
+    @pytest.mark.parametrize("text", [
+        "Der Wert bleibt bei 59 von 100. Die Spanne liegt bei 57-61.",
+        "Der Wert steht bei 59 von 100; SPY und QQQ bleiben IN. Die Spanne 57-61 hält.",
+        "Der Halt der Bewertungen liegt bei 59 von 100.",
+        "Der Stand liegt bei 59 von 100 im Band trim. Haupttreiber sind hohe Bewertungen. "
+        "Spanne: 57-61. Warnflaggen: 1 von 4. Langfristiger Trend: SPY IN, QQQ IN.",
+    ])
+    def test_a_declarative_with_the_same_verbs_is_not(self, text):
+        result = validate(text, channel=Channel.IMESSAGE, facts=DIGEST_FACTS, prose_rules=True, language="de", **LIMITS)
+        assert result.ok, result.reason
+
+    def test_the_ledger_scenario_end_to_end(self, monkeypatch):
+        out, _ = _compose(monkeypatch, "Der Wert liegt bei 59 von 100 im Band trim, Spanne 57-61. Bleib in SPY.", language="de")
+        assert out.source == "fallback" and "'bleib' opens a clause" in (out.reason or "")
+
