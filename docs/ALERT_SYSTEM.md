@@ -267,6 +267,21 @@ stage had been reached. Capture writes one immutable evidence row per recompute
 in its own transaction; it calls no provider, alters no score and cannot roll
 back a snapshot.
 
+`MESSAGE_LANGUAGE` (`en` | `de`; unset, each artifact speaks its own language)
+selects the language of every operator message. A phrase set may carry more than one language — since v3.5
+each fragment's `text` is an object keyed by language, and `meta.languages`
+lists them — and the renderer writes the selected one; a language the promoted
+set does not carry falls back to the set's own default (`meta.language`), which
+the validation report states. Every language is held to the worst-case fit, and
+the registry stores one digest for the whole set: switching language is a
+setting, not a re-promotion. A value the settings do not admit (`fr`) is
+refused where the language is resolved, never masked as the default: the
+service does not start on it, and a validation run without a settings context
+of its own reports `MESSAGE_LANGUAGE_INVALID`. The honesty lint reads both
+vocabularies, and validation applies it to every fragment in every language
+the set carries, not only the active one: a translation that would make the
+renderer refuse every message using it cannot be promoted and then switched to.
+
 `ALERTS_MODE` is the switch that decides whether the service *acts*, and it is
 the one that defaults off. Enabling alerts never implies capture, and `live` is
 never reached automatically: it needs promoted artifacts *and* a deliberate
@@ -852,9 +867,12 @@ create the real events, dates, or sources that Stage 2 still requires.
 The headline is a structured 0–100 regime heuristic. It is **not a
 probability**, it is uncalibrated, and the reference class is far too small for
 honest probability calibration. Alert text never states crash odds, certainty,
-buy/sell instructions or guaranteed outcomes — phrase validation constrains
-the reviewed fragments and the final renderer applies the honesty lint before
-anything can reach a wire. A model may only select reviewed codes.
+buy/sell instructions or guaranteed outcomes — phrase validation applies the
+honesty lint to every fragment in every language, and the final renderer
+applies the same lint to the body before anything can reach a wire. Denying
+the noun ("keine Wahrscheinlichkeit", "not a probability") is the one honest
+use of it and passes; the same stem anywhere else does not. A model may only
+select reviewed codes.
 
 Exactly-once SMS delivery is not promised. Ambiguous delivery outcomes are made
 visible and handled conservatively rather than retried into duplicates.

@@ -1,0 +1,753 @@
+{
+  "meta": {
+    "phrase_set_version": "v3.5",
+    "language": "de",
+    "validator_version": "1",
+    "note": "Reviewed German fragments. The model SELECTS codes from this file; it never writes prose and never writes a number. Every {SLOT} is a fact id the renderer fills from typed, persisted values. No probability language, no advice, no certainty. max_width values are REVIEWED bounds used by the worst-case fit test, not measurements of current values. v3.4 adds rule-bound operations headlines, compact caveats, and the bounded trigger/current disclosure required when an active condition materially changes before send. v3.3 is left byte-identical because phrase versions are immutable registry identities. v3.5 carries every fragment in two languages, German (the reviewed v3.4 text, byte-for-byte) and English; the operator selects the rendered language with MESSAGE_LANGUAGE and both languages are held to the worst-case fit. Codes, slots, priorities and facts are unchanged from v3.4.",
+    "languages": [
+      "de",
+      "en"
+    ]
+  },
+  "facts": {
+    "F_HEADLINE_MEDIAN": {
+      "label": "Median",
+      "unit": "",
+      "max_width": 5,
+      "description": "Monte-Carlo-Median des Regime-Heuristik-Werts (0-100). Keine Wahrscheinlichkeit."
+    },
+    "F_POINT_SCORE": {
+      "label": "Punkt",
+      "unit": "",
+      "max_width": 5,
+      "description": "Deterministischer Punktwert bei Basisgewichten. Nicht der Median."
+    },
+    "F_IQR_LO": {
+      "label": "Q1",
+      "unit": "",
+      "max_width": 5,
+      "description": "25. Perzentil der MC-Verteilung."
+    },
+    "F_IQR_HI": {
+      "label": "Q3",
+      "unit": "",
+      "max_width": 5,
+      "description": "75. Perzentil der MC-Verteilung."
+    },
+    "F_BAND_EFFECTIVE": {
+      "label": "Stufe",
+      "unit": "",
+      "max_width": 10,
+      "description": "Wirksamer Handlungszustand inkl. Coverage-Unterdrueckung."
+    },
+    "F_BAND_BASE": {
+      "label": "Basis",
+      "unit": "",
+      "max_width": 7,
+      "description": "Entscheidung nach Override, vor Coverage-Unterdrueckung."
+    },
+    "F_BAND_SCORE": {
+      "label": "Median-Stufe",
+      "unit": "",
+      "max_width": 7,
+      "description": "Stufe allein aus dem Median."
+    },
+    "F_BAND_PREVIOUS": {
+      "label": "vorher",
+      "unit": "",
+      "max_width": 10,
+      "description": "Vorheriger wirksamer Handlungszustand."
+    },
+    "F_ASSET": {
+      "label": "Titel",
+      "unit": "",
+      "max_width": 4,
+      "description": "SPY oder QQQ."
+    },
+    "F_RF_COUNT": {
+      "label": "Flags",
+      "unit": "",
+      "max_width": 1,
+      "description": "Aktive feuerfaehige rote Flaggen."
+    },
+    "F_RF_REQUIRED": {
+      "label": "noetig",
+      "unit": "",
+      "max_width": 1,
+      "description": "Vom Override geforderte Anzahl."
+    },
+    "F_RF3_DISTANCE": {
+      "label": "HY-Abstand",
+      "unit": "bp",
+      "max_width": 7,
+      "description": "Signierter Abstand von rf3 zur Schwelle."
+    },
+    "F_HY_OAS": {
+      "label": "HY OAS",
+      "unit": "bp",
+      "max_width": 6,
+      "description": "HY-OAS-Niveau. Nur Anzeige, nie Ersatz fuer rf3."
+    },
+    "F_IG_ABOVE_TIGHTS": {
+      "label": "IG ueber Tiefs",
+      "unit": "bp",
+      "max_width": 6,
+      "description": "IG OAS ueber den Punkt-in-Zeit-Tiefs."
+    },
+    "F_EBP": {
+      "label": "EBP",
+      "unit": "",
+      "max_width": 6,
+      "description": "Excess Bond Premium, monatlich."
+    },
+    "F_BREADTH": {
+      "label": "Breite",
+      "unit": "%",
+      "max_width": 5,
+      "description": "Anteil ueber 200-Tage-Linie."
+    },
+    "F_CAPE": {
+      "label": "CAPE",
+      "unit": "",
+      "max_width": 5,
+      "description": "Shiller CAPE."
+    },
+    "F_TOP10": {
+      "label": "Top10",
+      "unit": "%",
+      "max_width": 5,
+      "description": "Top-10-Anteil an der Marktkapitalisierung."
+    },
+    "F_S3": {
+      "label": "Halbleiter",
+      "unit": "pp",
+      "max_width": 6,
+      "description": "Halbleiter-Zweijahres-Vorlauf gegen den Markt."
+    },
+    "F_D4": {
+      "label": "LPPLS",
+      "unit": "",
+      "max_width": 5,
+      "description": "LPPLS-Endpunkt-Konfidenz."
+    },
+    "F_D4_LONG": {
+      "label": "LPPLS lang",
+      "unit": "",
+      "max_width": 5,
+      "description": "Konfidenz des langen LPPLS-Bands."
+    },
+    "F_D2": {
+      "label": "Margin",
+      "unit": "",
+      "max_width": 4,
+      "description": "FINRA-Margin-Rollover-Multiplikator."
+    },
+    "F_VRP": {
+      "label": "VRP",
+      "unit": "",
+      "max_width": 6,
+      "description": "Varianz-Risikopraemie."
+    },
+    "F_SKEW": {
+      "label": "SKEW",
+      "unit": "",
+      "max_width": 5,
+      "description": "CBOE-SKEW-Index."
+    },
+    "F_MISSED_SLOTS": {
+      "label": "Slots",
+      "unit": "",
+      "max_width": 2,
+      "description": "Ausgefallene Rechenlaeufe in Folge."
+    },
+    "F_NEXT_CHECK": {
+      "label": "naechste Pruefung",
+      "unit": "",
+      "max_width": 5,
+      "description": "Uhrzeit des naechsten planmaessigen Laufs, UTC."
+    },
+    "F_MORE_COUNT": {
+      "label": "weitere",
+      "unit": "",
+      "max_width": 2,
+      "description": "Anzahl gebuendelter Punkte, die nicht in die SMS passen."
+    },
+    "F_DIGEST_COUNT": {
+      "label": "Ereignisse",
+      "unit": "",
+      "max_width": 3,
+      "description": "Anzahl der Ereignisse im abgeschlossenen Wochenfenster. Reine Zaehlung, keine Bewertung."
+    },
+    "F_TRIGGER_VALUE": {
+      "label": "Ausloesewert",
+      "unit": "",
+      "max_width": 10,
+      "description": "Der bereits formatierte, regelautorisierte Wert am Ausloesezeitpunkt. Nur fuer MATERIAL_CHANGE."
+    },
+    "F_CURRENT_VALUE": {
+      "label": "aktueller Wert",
+      "unit": "",
+      "max_width": 10,
+      "description": "Der kompatible, bereits formatierte Wert am Sendezeitpunkt. Nur fuer MATERIAL_CHANGE."
+    }
+  },
+  "headlines": {
+    "BAND_TO_DERISK": {
+      "text": {
+        "de": "Stufe {F_BAND_EFFECTIVE} erreicht (vorher {F_BAND_PREVIOUS}).",
+        "en": "Level {F_BAND_EFFECTIVE} reached (before {F_BAND_PREVIOUS})."
+      },
+      "slots": [
+        "F_BAND_EFFECTIVE",
+        "F_BAND_PREVIOUS"
+      ]
+    },
+    "BAND_TO_TRIM": {
+      "text": {
+        "de": "Stufe {F_BAND_EFFECTIVE} (vorher {F_BAND_PREVIOUS}).",
+        "en": "Level {F_BAND_EFFECTIVE} (before {F_BAND_PREVIOUS})."
+      },
+      "slots": [
+        "F_BAND_EFFECTIVE",
+        "F_BAND_PREVIOUS"
+      ]
+    },
+    "BAND_TO_HOLD": {
+      "text": {
+        "de": "Zurueck auf {F_BAND_EFFECTIVE} (vorher {F_BAND_PREVIOUS}).",
+        "en": "Back to {F_BAND_EFFECTIVE} (before {F_BAND_PREVIOUS})."
+      },
+      "slots": [
+        "F_BAND_EFFECTIVE",
+        "F_BAND_PREVIOUS"
+      ]
+    },
+    "BASE_BAND_MOVED": {
+      "text": {
+        "de": "Basisstufe {F_BAND_BASE} bei unterdrueckter Anzeige.",
+        "en": "Base level {F_BAND_BASE}, display suppressed."
+      },
+      "slots": [
+        "F_BAND_BASE"
+      ]
+    },
+    "OVERRIDE_FIRES": {
+      "text": {
+        "de": "Override aktiv: {F_RF_COUNT} von {F_RF_REQUIRED} Flaggen.",
+        "en": "Override active: {F_RF_COUNT} of {F_RF_REQUIRED} flags."
+      },
+      "slots": [
+        "F_RF_COUNT",
+        "F_RF_REQUIRED"
+      ]
+    },
+    "OVERRIDE_RESOLVES": {
+      "text": {
+        "de": "Override nicht mehr aktiv.",
+        "en": "Override no longer active."
+      },
+      "slots": []
+    },
+    "OVERRIDE_WARNING": {
+      "text": {
+        "de": "Eine Flagge vor dem Override ({F_RF_COUNT} von {F_RF_REQUIRED}).",
+        "en": "One flag short of the override ({F_RF_COUNT} of {F_RF_REQUIRED})."
+      },
+      "slots": [
+        "F_RF_COUNT",
+        "F_RF_REQUIRED"
+      ]
+    },
+    "RF3_CREDIT_STRESS": {
+      "text": {
+        "de": "Kreditflagge rf3 aktiv, {F_RF3_DISTANCE} bp zur Schwelle.",
+        "en": "Credit flag rf3 active, {F_RF3_DISTANCE} bp to the threshold."
+      },
+      "slots": [
+        "F_RF3_DISTANCE"
+      ]
+    },
+    "RF4_FIRST": {
+      "text": {
+        "de": "Breitenflagge rf4 erstmals aktiv, Breite {F_BREADTH}%.",
+        "en": "Breadth flag rf4 first active, breadth {F_BREADTH}%."
+      },
+      "slots": [
+        "F_BREADTH"
+      ]
+    },
+    "RF4_PERSISTENT": {
+      "text": {
+        "de": "Breitenflagge rf4 bestaetigt, Breite {F_BREADTH}%.",
+        "en": "Breadth flag rf4 confirmed, breadth {F_BREADTH}%."
+      },
+      "slots": [
+        "F_BREADTH"
+      ]
+    },
+    "RF4_ALL_CLEAR": {
+      "text": {
+        "de": "Breitenflagge rf4 nicht mehr aktiv.",
+        "en": "Breadth flag rf4 no longer active."
+      },
+      "slots": []
+    },
+    "FABER_OUT_HIGH_RISK": {
+      "text": {
+        "de": "{F_ASSET} Faber OUT bei Median {F_HEADLINE_MEDIAN}.",
+        "en": "{F_ASSET} Faber OUT at median {F_HEADLINE_MEDIAN}."
+      },
+      "slots": [
+        "F_ASSET",
+        "F_HEADLINE_MEDIAN"
+      ]
+    },
+    "FABER_OUT": {
+      "text": {
+        "de": "{F_ASSET} Faber OUT zum Monatsende.",
+        "en": "{F_ASSET} Faber OUT at month-end."
+      },
+      "slots": [
+        "F_ASSET"
+      ]
+    },
+    "FABER_BACK_IN": {
+      "text": {
+        "de": "{F_ASSET} Faber wieder IN.",
+        "en": "{F_ASSET} Faber back IN."
+      },
+      "slots": [
+        "F_ASSET"
+      ]
+    },
+    "SMA200_FLIP": {
+      "text": {
+        "de": "{F_ASSET} 200-Tage-Zustand gewechselt.",
+        "en": "{F_ASSET} 200-day state flipped."
+      },
+      "slots": [
+        "F_ASSET"
+      ]
+    },
+    "S3_TIER": {
+      "text": {
+        "de": "Halbleiter-Vorlauf ueber Stufe, {F_S3} pp.",
+        "en": "Semiconductor lead above tier, {F_S3} pp."
+      },
+      "slots": [
+        "F_S3"
+      ]
+    },
+    "LPPLS_AWAKENING": {
+      "text": {
+        "de": "LPPLS erwacht: {F_D4}.",
+        "en": "LPPLS awakening: {F_D4}."
+      },
+      "slots": [
+        "F_D4"
+      ]
+    },
+    "D3_GATE_FIRES": {
+      "text": {
+        "de": "Hyperscaler-Gate ausgeloest.",
+        "en": "Hyperscaler gate triggered."
+      },
+      "slots": []
+    },
+    "MARGIN_ROLLOVER": {
+      "text": {
+        "de": "Margin-Rollover erkannt ({F_D2}).",
+        "en": "Margin rollover detected ({F_D2})."
+      },
+      "slots": [
+        "F_D2"
+      ]
+    },
+    "VOL_BACKWARDATION": {
+      "text": {
+        "de": "Terminstruktur in Backwardation.",
+        "en": "Term structure in backwardation."
+      },
+      "slots": []
+    },
+    "VOL_REGIME_FLIP": {
+      "text": {
+        "de": "Vol-Regime gedreht, VRP {F_VRP}.",
+        "en": "Vol regime flipped, VRP {F_VRP}."
+      },
+      "slots": [
+        "F_VRP"
+      ]
+    },
+    "CREDIT_IG_ALARM": {
+      "text": {
+        "de": "IG-Spreads {F_IG_ABOVE_TIGHTS} bp ueber den Tiefs.",
+        "en": "IG spreads {F_IG_ABOVE_TIGHTS} bp above the tights."
+      },
+      "slots": [
+        "F_IG_ABOVE_TIGHTS"
+      ]
+    },
+    "CREDIT_EBP_FLIP": {
+      "text": {
+        "de": "EBP-Vorzeichen gedreht: {F_EBP}.",
+        "en": "EBP sign flipped: {F_EBP}."
+      },
+      "slots": [
+        "F_EBP"
+      ]
+    },
+    "STRUCTURE_MAXED": {
+      "text": {
+        "de": "Struktur ausgereizt: CAPE {F_CAPE}, Top10 {F_TOP10}%.",
+        "en": "Structure maxed out: CAPE {F_CAPE}, top 10 {F_TOP10}%."
+      },
+      "slots": [
+        "F_CAPE",
+        "F_TOP10"
+      ]
+    },
+    "FRAGILE_TOP": {
+      "text": {
+        "de": "Fragiles Hoch: Median {F_HEADLINE_MEDIAN}, Breite {F_BREADTH}%.",
+        "en": "Fragile top: median {F_HEADLINE_MEDIAN}, breadth {F_BREADTH}%."
+      },
+      "slots": [
+        "F_HEADLINE_MEDIAN",
+        "F_BREADTH"
+      ]
+    },
+    "D_BLOCK_CONFIRMED": {
+      "text": {
+        "de": "Block D bestaetigt schwach, Breite {F_BREADTH}%.",
+        "en": "Block D confirmed weak, breadth {F_BREADTH}%."
+      },
+      "slots": [
+        "F_BREADTH"
+      ]
+    },
+    "EXECUTION_ARMED": {
+      "text": {
+        "de": "Ausfuehrung scharf: {F_ASSET} OUT, Median {F_HEADLINE_MEDIAN}.",
+        "en": "Execution armed: {F_ASSET} OUT, median {F_HEADLINE_MEDIAN}."
+      },
+      "slots": [
+        "F_ASSET",
+        "F_HEADLINE_MEDIAN"
+      ]
+    },
+    "FALSIFICATION_EVENT": {
+      "text": {
+        "de": "Falsifikationskriterium ausgeloest.",
+        "en": "Falsification criterion triggered."
+      },
+      "slots": []
+    },
+    "COVERAGE_RISK_MASKING": {
+      "text": {
+        "de": "Coverage unterdrueckt die Stufe, Basis {F_BAND_BASE}.",
+        "en": "Coverage suppresses the level, base {F_BAND_BASE}."
+      },
+      "slots": [
+        "F_BAND_BASE"
+      ]
+    },
+    "RECOMPUTE_OUTAGE": {
+      "text": {
+        "de": "Kein Rechenlauf seit {F_MISSED_SLOTS} Slots.",
+        "en": "No compute run for {F_MISSED_SLOTS} slots."
+      },
+      "slots": [
+        "F_MISSED_SLOTS"
+      ]
+    },
+    "WEEKLY_DIGEST": {
+      "text": {
+        "de": "Woechentliche Uebersicht.",
+        "en": "Weekly overview."
+      },
+      "slots": []
+    },
+    "TEST_MESSAGE": {
+      "text": {
+        "de": "bubblegauge Testnachricht.",
+        "en": "bubblegauge test message."
+      },
+      "slots": []
+    },
+    "DIGEST_SUMMARY": {
+      "text": {
+        "de": "Wochenrueckblick: {F_DIGEST_COUNT} Ereignisse.",
+        "en": "Weekly review: {F_DIGEST_COUNT} events."
+      },
+      "slots": [
+        "F_DIGEST_COUNT"
+      ]
+    },
+    "DIGEST_QUIET": {
+      "text": {
+        "de": "Wochenrueckblick: keine Ereignisse.",
+        "en": "Weekly review: no events."
+      },
+      "slots": []
+    },
+    "RF_INPUT_UNAVAILABLE": {
+      "text": {
+        "de": "Red-Flag-Eingaben unvollstaendig.",
+        "en": "Red-flag inputs incomplete."
+      },
+      "slots": []
+    },
+    "FLAG_CONTRACT_MISMATCH": {
+      "text": {
+        "de": "Schwelle und persistierte Flagge widersprechen sich.",
+        "en": "Threshold and persisted flag disagree."
+      },
+      "slots": []
+    }
+  },
+  "phrases": {
+    "REGIME_UNCHANGED": {
+      "text": {
+        "de": "Regime sonst unveraendert.",
+        "en": "Regime otherwise unchanged."
+      },
+      "slots": [],
+      "priority": 40
+    },
+    "MEDIAN_CONTEXT": {
+      "text": {
+        "de": "Median {F_HEADLINE_MEDIAN}, IQR {F_IQR_LO}-{F_IQR_HI}.",
+        "en": "Median {F_HEADLINE_MEDIAN}, IQR {F_IQR_LO}-{F_IQR_HI}."
+      },
+      "slots": [
+        "F_HEADLINE_MEDIAN",
+        "F_IQR_LO",
+        "F_IQR_HI"
+      ],
+      "priority": 60
+    },
+    "POINT_SCORE_CONTEXT": {
+      "text": {
+        "de": "Punktwert {F_POINT_SCORE}.",
+        "en": "Point score {F_POINT_SCORE}."
+      },
+      "slots": [
+        "F_POINT_SCORE"
+      ],
+      "priority": 30
+    },
+    "BAND_CONTEXT": {
+      "text": {
+        "de": "Stufe {F_BAND_EFFECTIVE}.",
+        "en": "Level {F_BAND_EFFECTIVE}."
+      },
+      "slots": [
+        "F_BAND_EFFECTIVE"
+      ],
+      "priority": 70
+    },
+    "BASE_BAND_CONTEXT": {
+      "text": {
+        "de": "Basis {F_BAND_BASE}.",
+        "en": "Base {F_BAND_BASE}."
+      },
+      "slots": [
+        "F_BAND_BASE"
+      ],
+      "priority": 50
+    },
+    "LPPLS_LONG_LEADS": {
+      "text": {
+        "de": "Langes Band fuehrt ({F_D4_LONG}).",
+        "en": "Long band leads ({F_D4_LONG})."
+      },
+      "slots": [
+        "F_D4_LONG"
+      ],
+      "priority": 50
+    },
+    "BREADTH_CONTEXT": {
+      "text": {
+        "de": "Breite {F_BREADTH}%.",
+        "en": "Breadth {F_BREADTH}%."
+      },
+      "slots": [
+        "F_BREADTH"
+      ],
+      "priority": 50
+    },
+    "CREDIT_CONTEXT": {
+      "text": {
+        "de": "HY OAS {F_HY_OAS} bp.",
+        "en": "HY OAS {F_HY_OAS} bp."
+      },
+      "slots": [
+        "F_HY_OAS"
+      ],
+      "priority": 40
+    },
+    "SEMIS_CONTEXT": {
+      "text": {
+        "de": "Halbleiter {F_S3} pp.",
+        "en": "Semiconductors {F_S3} pp."
+      },
+      "slots": [
+        "F_S3"
+      ],
+      "priority": 40
+    },
+    "SKEW_CONTEXT": {
+      "text": {
+        "de": "SKEW {F_SKEW}.",
+        "en": "SKEW {F_SKEW}."
+      },
+      "slots": [
+        "F_SKEW"
+      ],
+      "priority": 30
+    },
+    "ESCALATION_OF_EARLIER": {
+      "text": {
+        "de": "Eskalation der frueheren Meldung.",
+        "en": "Escalation of the earlier notice."
+      },
+      "slots": [],
+      "priority": 80
+    },
+    "MORE_IN_DASHBOARD": {
+      "text": {
+        "de": "+{F_MORE_COUNT} mehr im Dashboard.",
+        "en": "+{F_MORE_COUNT} more in the dashboard."
+      },
+      "slots": [
+        "F_MORE_COUNT"
+      ],
+      "priority": 90
+    },
+    "STILL_ACTIVE": {
+      "text": {
+        "de": "Weiterhin aktiv.",
+        "en": "Still active."
+      },
+      "slots": [],
+      "priority": 60
+    },
+    "TRIGGER_VALUES_SHOWN": {
+      "text": {
+        "de": "Werte vom Ausloesezeitpunkt.",
+        "en": "Values as of the trigger."
+      },
+      "slots": [],
+      "priority": 70
+    }
+  },
+  "next_check": {
+    "NEXT_RECOMPUTE": {
+      "text": {
+        "de": "Naechster Lauf {F_NEXT_CHECK} UTC.",
+        "en": "Next run {F_NEXT_CHECK} UTC."
+      },
+      "slots": [
+        "F_NEXT_CHECK"
+      ]
+    },
+    "NEXT_MONTH_END": {
+      "text": {
+        "de": "Naechste Pruefung zum Monatsende.",
+        "en": "Next check at month-end."
+      },
+      "slots": []
+    },
+    "NEXT_RELEASE": {
+      "text": {
+        "de": "Naechste Pruefung bei Release.",
+        "en": "Next check at release."
+      },
+      "slots": []
+    },
+    "NO_NEXT_CHECK": {
+      "text": {
+        "de": "Keine automatische Nachpruefung.",
+        "en": "No automatic re-check."
+      },
+      "slots": []
+    },
+    "NEXT_WEEKLY": {
+      "text": {
+        "de": "Naechster Rueckblick Montag.",
+        "en": "Next review Monday."
+      },
+      "slots": []
+    }
+  },
+  "caveats": {
+    "DATA_DEGRADED": {
+      "text": {
+        "de": "Daten lueckenhaft.",
+        "en": "Data incomplete."
+      },
+      "slots": [],
+      "priority": 10
+    },
+    "CONTEXT_STALE": {
+      "text": {
+        "de": "Kontext veraltet.",
+        "en": "Context stale."
+      },
+      "slots": [],
+      "priority": 10
+    },
+    "MATERIAL_CHANGE": {
+      "text": {
+        "de": "Ausloeser {F_TRIGGER_VALUE}, jetzt {F_CURRENT_VALUE}.",
+        "en": "Trigger {F_TRIGGER_VALUE}, now {F_CURRENT_VALUE}."
+      },
+      "slots": [
+        "F_TRIGGER_VALUE",
+        "F_CURRENT_VALUE"
+      ],
+      "priority": 5
+    },
+    "UNKNOWN_AT_RENDER": {
+      "text": {
+        "de": "Zustand unklar.",
+        "en": "State unclear."
+      },
+      "slots": [],
+      "priority": 5
+    },
+    "KNOWN_ISSUE": {
+      "text": {
+        "de": "Datenfehler aktiv.",
+        "en": "Data issue active."
+      },
+      "slots": [],
+      "priority": 10
+    },
+    "DISPLAY_ONLY": {
+      "text": {
+        "de": "Nur Anzeige, keine Flagge.",
+        "en": "Display only, no flag."
+      },
+      "slots": [],
+      "priority": 20
+    },
+    "RESEARCH_ONLY": {
+      "text": {
+        "de": "Forschung, keine Anlageberatung.",
+        "en": "Research, not investment advice."
+      },
+      "slots": [],
+      "priority": 20
+    },
+    "NOT_A_PROBABILITY": {
+      "text": {
+        "de": "Wert ist keine Wahrscheinlichkeit.",
+        "en": "Value is a heuristic score only."
+      },
+      "slots": [],
+      "priority": 20
+    }
+  }
+}

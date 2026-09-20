@@ -161,6 +161,14 @@ class Settings(BaseSettings):
     # so this is a reviewable artifact decision rather than a bare default.
     alert_input_capture: bool = True
     alerts_mode: Literal["disabled", "shadow", "live"] = "disabled"
+    #: The language of every operator message: the alert phrase set renders
+    #: the fragments of this language (a set may carry several; a language it
+    #: lacks falls back to the set's own default), and the message engine
+    #: selects among this language's phrasings. One switch, both paths.
+    #: Unset, each artifact speaks its own language - the phrase set's
+    #: `meta.language`, the prompt library's - which is what shipped before
+    #: the switch existed; setting it makes both paths agree.
+    message_language: Literal["en", "de"] | None = None
     alerts_live_profile: str = "default"
 
     # Immutable artifacts. The *_lkg_* pair is the last-known-good ruleset used

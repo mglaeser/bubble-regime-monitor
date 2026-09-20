@@ -424,7 +424,7 @@ def test_a_late_run_never_digests_the_week_it_is_standing_in(monkeypatch):
 
 def _phrase_set():
     from app.alerts.artifacts import validate_phrase_set
-    with open("config/alert_phrases.v3.4.json", encoding="utf-8") as fh:
+    with open("config/alert_phrases.v3.5.json", encoding="utf-8") as fh:
         return validate_phrase_set(fh.read())
 
 

@@ -150,7 +150,7 @@ jobs:
       - name: Alert artifacts — validate the shipped ruleset + phrase set (BLOCKING)
         # The rule inventory is DATA. A ruleset that no longer validates is a
         # silently-dark alert system, so this gates the same as a test failure.
-        run: python -m app.alerts.cli validate --rules config/alert_rules.v3.2.yaml --phrases config/alert_phrases.v3.4.json
+        run: python -m app.alerts.cli validate --rules config/alert_rules.v3.2.yaml --phrases config/alert_phrases.v3.5.json
         env:
           TESTING: "true"
       - name: Alert OpenAPI artifact — no drift (BLOCKING)

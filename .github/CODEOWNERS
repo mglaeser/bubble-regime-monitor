@@ -40,6 +40,7 @@
 /config/alert_phrases.v3.2.json     @mglaeser
 /config/alert_phrases.v3.3.json     @mglaeser
 /config/alert_phrases.v3.4.json     @mglaeser
+/config/alert_phrases.v3.5.json     @mglaeser
 
 # The frozen-methodology governance surfaces (F-01/L-07)
 /frozen_methodology.json            @mglaeser

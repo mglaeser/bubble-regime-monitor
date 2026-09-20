@@ -446,10 +446,13 @@ grounding check judges numerals. A FACT was judged by nobody (#112 rounds
   to the banned lexicon only, because alone a band name reads as an order
   and a score as a quotient, and neither is the atom's doing;
 * a field an entry declares as `authorized_prose` is admitted only if it
-  parses as a join of the phrase registry's own fragments with each slot
-  bounded by the registry's `max_width` — exactly what the alert renderer
-  can produce (round 8 found that trusting the KEY let a caller's "sell
-  everything now" through under it);
+  parses as a join of the phrase registry's own fragments, in one
+  language, with each slot holding its fact's TYPED domain — a band enum,
+  the rule's asset label, an HH:MM next check, else a number — exactly
+  what the alert renderer can produce (round 8 found that trusting the
+  KEY let a caller's "sell everything now" through under it; #119 round 4
+  found that bounding a slot by width alone proved "Execution armed: SELL
+  OUT, median 99." through the asset slot);
 * a refused fact renders as a dash, is kept out of the prompt, and is
   logged by the library's name or not at all.
 

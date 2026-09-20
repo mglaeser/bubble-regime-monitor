@@ -22,12 +22,13 @@ Three things are checked at validation time, not at send time:
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from app.alerts.canonical import canonical_json, sha256_hex, sha256_of
-from app.alerts.errors import PhraseSetInvalid
+from app.alerts.errors import MessageLanguageInvalid, PhraseSetInvalid
 from app.alerts.gsm7 import SINGLE_SMS_SEPTETS, first_non_gsm7, septets
+from app.alerts.honesty import honesty_lint
 
 PHRASE_VALIDATOR_VERSION = "1"
 
@@ -59,10 +60,15 @@ class FragmentSpec:
     """One reviewed text fragment."""
 
     code: str
+    #: In the set's ACTIVE language - the one the operator selected
+    #: (MESSAGE_LANGUAGE) among those the set carries - so every reader of a
+    #: fragment renders one language without knowing there are others.
     text: str
     slots: tuple[str, ...]
     kind: str                      # headline | phrase | next_check | caveat
     priority: int = 100            # lower is dropped LAST when fitting
+    #: (language, text) for every language the set was reviewed in.
+    texts: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -77,6 +83,13 @@ class ValidatedPhraseSet:
     next_checks: dict[str, FragmentSpec]
     caveats: dict[str, FragmentSpec]
     worst_case: dict[str, int]
+    #: The language the fragments' `text` is in, and every language the set
+    #: carries. The bytes (sha256, canonical_json) cover all of them: one
+    #: promotion admits the whole reviewed set, and the operator picks the
+    #: language by setting, not by re-promotion.
+    language: str = "de"
+    languages: tuple[str, ...] = ("de",)
+    worst_case_by_language: dict[str, dict[str, int]] = field(default_factory=dict)
 
     def fragment(self, code: str) -> FragmentSpec | None:
         for table in (self.headlines, self.phrases, self.next_checks, self.caveats):
@@ -92,23 +105,78 @@ def _slots_of(text: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(_SLOT_RE.findall(text)))
 
 
+def _texts_of(entry: dict[str, Any], kind: str, code: str, languages: tuple[str, ...],
+              default_language: str, problems: list[str]) -> dict[str, str] | None:
+    """The fragment's text in every declared language, or None with a problem.
+
+    A fragment's `text` is either one string - the set's default language,
+    the form every set before v3.5 used - or an object keyed by language.
+    A multilingual set must carry EVERY declared language for EVERY
+    fragment: a missing translation is a message that cannot be rendered in
+    the operator's language, and a fragment is reviewed as a whole.
+    """
+    raw = entry["text"]
+    if isinstance(raw, str):
+        texts = {default_language: raw}
+    elif isinstance(raw, dict) and raw and all(isinstance(v, str) for v in raw.values()):
+        texts = dict(raw)
+    else:
+        problems.append(f"{kind} {code!r}: 'text' must be a string or a language-to-text object")
+        return None
+    missing = [lang for lang in languages if not texts.get(lang, "").strip()]
+    extra = [lang for lang in texts if lang not in languages]
+    if missing or extra:
+        problems.append(
+            f"{kind} {code!r}: text must cover exactly the declared languages "
+            f"{list(languages)} (missing {missing}, undeclared {extra})")
+        return None
+    return texts
+
+
 def _load_fragments(
-    raw: dict[str, Any], kind: str, facts: dict[str, FactSpec], problems: list[str]
+    raw: dict[str, Any], kind: str, facts: dict[str, FactSpec], problems: list[str],
+    *, languages: tuple[str, ...] = ("de",), default_language: str = "de",
+    language: str = "de",
 ) -> dict[str, FragmentSpec]:
     out: dict[str, FragmentSpec] = {}
     for code, entry in sorted(raw.items()):
         if not isinstance(entry, dict) or "text" not in entry:
             problems.append(f"{kind} {code!r}: missing 'text'")
             continue
-        text = entry["text"]
-        offender = first_non_gsm7(text)
-        if offender is not None:
-            problems.append(
-                f"{kind} {code!r}: character {offender[0]!r} is not GSM-7 — the message would "
-                "become UCS-2 and no longer fit one SMS"
-            )
+        texts = _texts_of(entry, kind, code, languages, default_language, problems)
+        if texts is None:
             continue
-        slots = _slots_of(text)
+        bad = False
+        slots_by_language: dict[str, tuple[str, ...]] = {}
+        for lang, text in texts.items():
+            offender = first_non_gsm7(text)
+            if offender is not None:
+                problems.append(
+                    f"{kind} {code!r} [{lang}]: character {offender[0]!r} is not GSM-7 — the "
+                    "message would become UCS-2 and no longer fit one SMS"
+                )
+                bad = True
+                continue
+            # Every language, not only the active one: the operator may
+            # switch by setting alone, and the renderer's lint would then
+            # refuse every message this fragment is part of (#119 round 7).
+            forbidden = honesty_lint(text)
+            if forbidden is not None:
+                problems.append(
+                    f"{kind} {code!r} [{lang}]: contains forbidden vocabulary {forbidden!r} — "
+                    "the score is not a probability and this service gives no advice"
+                )
+                bad = True
+                continue
+            slots_by_language[lang] = _slots_of(text)
+        if bad:
+            continue
+        slots = slots_by_language[language]
+        if any(set(other) != set(slots) for other in slots_by_language.values()):
+            problems.append(
+                f"{kind} {code!r}: every language must use the same slots "
+                f"({ {lang: sorted(v) for lang, v in slots_by_language.items()} })")
+            continue
         unknown = [s for s in slots if s not in facts]
         if unknown:
             problems.append(f"{kind} {code!r}: references undeclared facts {unknown}")
@@ -121,22 +189,74 @@ def _load_fragments(
             )
             continue
         out[code] = FragmentSpec(
-            code=code, text=text, slots=slots, kind=kind,
+            code=code, text=texts[language], slots=slots, kind=kind,
             priority=int(entry.get("priority", 100)),
+            texts=tuple((lang, texts[lang]) for lang in languages),
         )
     return out
 
 
-def _widest(fragment: FragmentSpec, facts: dict[str, FactSpec]) -> int:
-    """Septets of a fragment with every slot at its reviewed maximum width."""
-    filled = fragment.text
+def _widest(fragment: FragmentSpec, facts: dict[str, FactSpec],
+            language: str | None = None) -> int:
+    """Septets of a fragment with every slot at its reviewed maximum width,
+    in `language` (default: the active one)."""
+    filled = fragment.text if language is None else dict(fragment.texts)[language]
     for slot in fragment.slots:
         filled = filled.replace("{" + slot + "}", "W" * facts[slot].max_width)
     return septets(filled)
 
 
-def validate_phrase_set(raw_json: str) -> ValidatedPhraseSet:
-    """Parse, check and hash a phrase set. Raises `PhraseSetInvalid`."""
+def _requested_language(explicit: str | None) -> str | None:
+    """The operator's language, from the setting when the caller gave none.
+
+    The validator works without a settings context - a script or a test
+    outside the app's environment - but a MALFORMED setting is refused,
+    not masked: one broad fallback let MESSAGE_LANGUAGE=fr validate the
+    shipped set as German, wrong-language alerts instead of a rejected
+    configuration (#119 round 6, SOTA-A, executed).
+    """
+    if explicit is not None:
+        return explicit
+    try:
+        from app.config import get_settings
+
+        chosen = get_settings().message_language
+    except ImportError:
+        return None
+    except Exception as exc:  # noqa: BLE001 - only the language is ours to judge
+        complaint = _complaint_about(exc, "message_language")
+        if complaint is not None:
+            raise MessageLanguageInvalid(f"MESSAGE_LANGUAGE is malformed: {complaint}") from exc
+        return None
+    return None if chosen is None else str(chosen)
+
+
+def _complaint_about(exc: BaseException, field: str) -> str | None:
+    """The settings validator's own message about `field`, if the failure
+    names it; None when the settings failed for reasons that are not this
+    field's (no environment at all, another field)."""
+    errors = getattr(exc, "errors", None)
+    if not callable(errors):
+        return None
+    try:
+        details = errors()
+    except Exception:  # noqa: BLE001 - an unreadable failure is not ours
+        return None
+    for detail in details or ():
+        if isinstance(detail, dict) and field in tuple(detail.get("loc") or ()):
+            return str(detail.get("msg") or "invalid value")
+    return None
+
+
+def validate_phrase_set(raw_json: str, *, language: str | None = None) -> ValidatedPhraseSet:
+    """Parse, check and hash a phrase set. Raises `PhraseSetInvalid`.
+
+    `language` selects which of the set's languages the fragments' `text`
+    is in; None means the operator's setting (MESSAGE_LANGUAGE). A language
+    the set does not carry falls back to the set's default, and the result
+    says so in `language` - the promoted bytes are the authority, the
+    setting is a preference. Every language is held to the worst-case fit.
+    """
     import json
 
     try:
@@ -151,6 +271,23 @@ def validate_phrase_set(raw_json: str) -> ValidatedPhraseSet:
     version = meta.get("phrase_set_version")
     if not version:
         raise PhraseSetInvalid("phrase set has no meta.phrase_set_version")
+    # Absent keys take the legacy defaults (a German-only set); a key that
+    # is PRESENT must be well-formed. `or` conflated the two, so an explicit
+    # empty inventory was normalized to the default instead of refused
+    # (#119 round 5, SOTA-A, executed).
+    default_language = meta.get("language", "de")
+    if not isinstance(default_language, str) or not default_language:
+        raise PhraseSetInvalid("meta.language must be a non-empty language code")
+    declared = meta.get("languages", [default_language])
+    if (not isinstance(declared, list) or not declared
+            or any(not isinstance(lang, str) or not lang for lang in declared)):
+        raise PhraseSetInvalid("meta.languages must be a non-empty list of language codes")
+    languages = tuple(dict.fromkeys(str(lang) for lang in declared))
+    if default_language not in languages:
+        raise PhraseSetInvalid(
+            f"meta.language {default_language!r} is not among meta.languages {list(languages)}")
+    wanted = _requested_language(language)
+    active = wanted if wanted in languages else default_language
 
     facts: dict[str, FactSpec] = {}
     for fact_id, entry in sorted((raw.get("facts") or {}).items()):
@@ -175,10 +312,15 @@ def validate_phrase_set(raw_json: str) -> ValidatedPhraseSet:
                 f"fact {banned!r} is forbidden — name the median and the point score separately"
             )
 
-    headlines = _load_fragments(raw.get("headlines") or {}, "headline", facts, problems)
-    phrases = _load_fragments(raw.get("phrases") or {}, "phrase", facts, problems)
-    next_checks = _load_fragments(raw.get("next_check") or {}, "next_check", facts, problems)
-    caveats = _load_fragments(raw.get("caveats") or {}, "caveat", facts, problems)
+    def load(section: str, kind: str) -> dict[str, FragmentSpec]:
+        return _load_fragments(raw.get(section) or {}, kind, facts, problems,
+                               languages=languages, default_language=default_language,
+                               language=active)
+
+    headlines = load("headlines", "headline")
+    phrases = load("phrases", "phrase")
+    next_checks = load("next_check", "next_check")
+    caveats = load("caveats", "caveat")
 
     if not headlines:
         problems.append("phrase set declares no headlines")
@@ -188,40 +330,48 @@ def validate_phrase_set(raw_json: str) -> ValidatedPhraseSet:
     if problems:
         raise PhraseSetInvalid("; ".join(problems))
 
-    # --- worst-case fit ----------------------------------------------------
-    widest_headline = max(_widest(f, facts) for f in headlines.values())
-    widest_phrase = max((_widest(f, facts) for f in phrases.values()), default=0)
-    widest_next = max((_widest(f, facts) for f in next_checks.values()), default=0)
-    widest_caveat = max(_widest(f, facts) for f in caveats.values())
+    # --- worst-case fit, in EVERY language --------------------------------
+    # The operator may switch language by setting alone, so a set is only as
+    # safe as its widest language: each is held to the limit, and the digest
+    # the registry stores is over the maximum across languages.
     sep = septets(JOIN)
-
-    # MINIMAL: headline + the worst caveat. This is the floor that must always
-    # fit; if it does not, no message from this set can be trusted to send.
-    minimal = widest_headline + sep + widest_caveat
-    # FULL: headline + one phrase + next-check + one caveat.
-    full = widest_headline + sep + widest_phrase + sep + widest_next + sep + widest_caveat
-
-    if minimal > SINGLE_SMS_SEPTETS:
-        problems.append(
-            f"minimal worst-case assembly is {minimal} septets, over {SINGLE_SMS_SEPTETS}: "
-            "shorten the longest headline or caveat"
-        )
-    if full > SINGLE_SMS_SEPTETS:
-        problems.append(
-            f"full worst-case assembly is {full} septets, over {SINGLE_SMS_SEPTETS}: "
-            "shorten a fragment rather than relying on runtime omission"
-        )
+    by_language: dict[str, dict[str, int]] = {}
+    for lang in languages:
+        widest_headline = max(_widest(f, facts, lang) for f in headlines.values())
+        widest_phrase = max((_widest(f, facts, lang) for f in phrases.values()), default=0)
+        widest_next = max((_widest(f, facts, lang) for f in next_checks.values()), default=0)
+        widest_caveat = max(_widest(f, facts, lang) for f in caveats.values())
+        # MINIMAL: headline + the worst caveat. This is the floor that must
+        # always fit; if it does not, no message from this set can be trusted
+        # to send.
+        minimal = widest_headline + sep + widest_caveat
+        # FULL: headline + one phrase + next-check + one caveat.
+        full = widest_headline + sep + widest_phrase + sep + widest_next + sep + widest_caveat
+        tag = f" [{lang}]" if len(languages) > 1 else ""
+        if minimal > SINGLE_SMS_SEPTETS:
+            problems.append(
+                f"minimal worst-case assembly{tag} is {minimal} septets, over "
+                f"{SINGLE_SMS_SEPTETS}: shorten the longest headline or caveat"
+            )
+        if full > SINGLE_SMS_SEPTETS:
+            problems.append(
+                f"full worst-case assembly{tag} is {full} septets, over {SINGLE_SMS_SEPTETS}: "
+                "shorten a fragment rather than relying on runtime omission"
+            )
+        by_language[lang] = {
+            "widest_headline": widest_headline,
+            "widest_phrase": widest_phrase,
+            "widest_next_check": widest_next,
+            "widest_caveat": widest_caveat,
+            "minimal_assembly": minimal,
+            "full_assembly": full,
+            "limit": SINGLE_SMS_SEPTETS,
+        }
     if problems:
         raise PhraseSetInvalid("; ".join(problems))
-
     worst_case = {
-        "widest_headline": widest_headline,
-        "widest_phrase": widest_phrase,
-        "widest_next_check": widest_next,
-        "widest_caveat": widest_caveat,
-        "minimal_assembly": minimal,
-        "full_assembly": full,
-        "limit": SINGLE_SMS_SEPTETS,
+        key: max(values[key] for values in by_language.values())
+        for key in next(iter(by_language.values()))
     }
     canonical = canonical_json(raw)
     return ValidatedPhraseSet(
@@ -235,4 +385,7 @@ def validate_phrase_set(raw_json: str) -> ValidatedPhraseSet:
         next_checks=next_checks,
         caveats=caveats,
         worst_case=worst_case,
+        language=active,
+        languages=languages,
+        worst_case_by_language=by_language,
     )

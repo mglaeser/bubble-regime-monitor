@@ -574,7 +574,7 @@ def test_an_unknown_condition_renders_with_its_caveat(isolated_db):
     from app.alerts.render_context import build_member_context
     from app.alerts.renderer import render_with_cascade
 
-    with open("config/alert_phrases.v3.4.json", encoding="utf-8") as fh:
+    with open("config/alert_phrases.v3.5.json", encoding="utf-8") as fh:
         phrase_set = validate_phrase_set(fh.read())
 
     from tests.test_alert_evaluation import make_input

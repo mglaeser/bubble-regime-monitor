@@ -47,6 +47,7 @@ from app.alerts.enums import (
 )
 from app.alerts.errors import RenderRejected, sanitize
 from app.alerts.gsm7 import SINGLE_SMS_SEPTETS, first_non_gsm7, septets
+from app.alerts.honesty import honesty_lint
 from app.alerts.models import (
     AlertDelivery,
     AlertDeliveryMember,
@@ -57,7 +58,7 @@ from app.alerts.models import (
     AlertRulesetRegistry,
 )
 from app.alerts.phrase_registry import JOIN
-from app.alerts.renderer import RenderResult, honesty_lint
+from app.alerts.renderer import RenderResult
 from app.alerts.repository import utc_ms
 from app.logging_conf import get_logger
 

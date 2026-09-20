@@ -20,6 +20,7 @@ from app.alerts.enums import (
     SuppressionReason,
 )
 from app.alerts.errors import RenderRejected
+from app.alerts.honesty import honesty_lint
 from app.alerts.phrase_registry import validate_phrase_set
 from app.alerts.planner import (
     NotificationMemory,
@@ -29,7 +30,7 @@ from app.alerts.planner import (
 )
 from app.alerts.quiet_hours import release_time_for, would_be_held
 from app.alerts.render_context import MemberContext, RenderContext, build_member_context
-from app.alerts.renderer import honesty_lint, render, render_with_cascade
+from app.alerts.renderer import render, render_with_cascade
 from app.alerts.rulespec import RuleSpec
 from app.alerts.sender import NullSender, SipgateSender, classify_response
 from app.alerts.state_machine import StateDecision
@@ -41,7 +42,7 @@ NIGHT = datetime(2026, 8, 15, 23, 30, tzinfo=UTC)       # 01:30 Berlin — quiet
 
 @pytest.fixture(scope="module")
 def phrase_set():
-    with open("config/alert_phrases.v3.4.json", encoding="utf-8") as fh:
+    with open("config/alert_phrases.v3.5.json", encoding="utf-8") as fh:
         return validate_phrase_set(fh.read())
 
 
@@ -1235,7 +1236,7 @@ def test_a_test_delivery_dispatches_its_reviewed_fragment(isolated_db):
             created_at=now, updated_at=now, attempts=0,
             duplicate_risk_acknowledged=False, recipient_ref="default"))
 
-    with open("config/alert_phrases.v3.4.json", encoding="utf-8") as fh:
+    with open("config/alert_phrases.v3.5.json", encoding="utf-8") as fh:
         phrase_set = validate_phrase_set(fh.read())
     sender = NullSender()
     render_finished = now + timedelta(seconds=1)
@@ -1526,7 +1527,7 @@ def test_a_test_probe_is_not_parked_by_quiet_hours(isolated_db):
             created_at=night, updated_at=night, attempts=0,
             duplicate_risk_acknowledged=False, recipient_ref="default"))
 
-    with open("config/alert_phrases.v3.4.json", encoding="utf-8") as fh:
+    with open("config/alert_phrases.v3.5.json", encoding="utf-8") as fh:
         phrase_set = validate_phrase_set(fh.read())
     sender = NullSender()
     report = dispatch_once(session_scope, phrase_set=phrase_set, mode="shadow",

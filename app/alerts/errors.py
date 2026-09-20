@@ -26,6 +26,7 @@ __all__ = [
     "EvaluationConflict",
     "EvaluationDeadlineExceeded",
     "NotEvaluable",
+    "MessageLanguageInvalid",
     "PhraseSetInvalid",
     "PinMissing",
     "RenderRejected",
@@ -55,6 +56,14 @@ class RulesetInvalid(AlertError):
 
 class PhraseSetInvalid(AlertError):
     code = "PHRASE_SET_INVALID"
+
+
+class MessageLanguageInvalid(PhraseSetInvalid):
+    """MESSAGE_LANGUAGE names a language the settings do not admit. Raised
+    where the set's language is resolved, as a PhraseSetInvalid so every
+    caller that fails closed on an invalid set fails closed on this too."""
+
+    code = "MESSAGE_LANGUAGE_INVALID"
 
 
 class AlertingUnavailable(AlertError):

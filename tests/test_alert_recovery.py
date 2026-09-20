@@ -443,7 +443,7 @@ def test_removed_rule_closes_under_its_origin_and_cancels_unsent_delivery(
     new_rules.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
     new = validate_from_disk(
         rules_path=new_rules,
-        phrase_path=Path("config/alert_phrases.v3.4.json"),
+        phrase_path=Path("config/alert_phrases.v3.5.json"),
         service_version="3.8.0",
     )
     assert new.ruleset.rule(removed_id) is None
@@ -548,7 +548,7 @@ def test_lkg_fallback_never_escalates_the_mode(isolated_db, tmp_path, monkeypatc
 
     monkeypatch.setenv("ALERTS_RULES_PATH", str(broken))
     monkeypatch.setenv("ALERTS_LKG_PATH", str(lkg))
-    monkeypatch.setenv("ALERTS_PHRASE_PATH", "config/alert_phrases.v3.4.json")
+    monkeypatch.setenv("ALERTS_PHRASE_PATH", "config/alert_phrases.v3.5.json")
     monkeypatch.setenv("ALERTS_MODE", "disabled")
     from app.config import get_settings
 
@@ -570,7 +570,7 @@ def test_alerting_unavailable_when_nothing_is_valid(isolated_db, tmp_path, monke
     broken.write_text("meta: {this: is not a ruleset}\n", encoding="utf-8")
     monkeypatch.setenv("ALERTS_RULES_PATH", str(broken))
     monkeypatch.setenv("ALERTS_LKG_PATH", str(broken))
-    monkeypatch.setenv("ALERTS_PHRASE_PATH", "config/alert_phrases.v3.4.json")
+    monkeypatch.setenv("ALERTS_PHRASE_PATH", "config/alert_phrases.v3.5.json")
     from app.config import get_settings
 
     get_settings.cache_clear()

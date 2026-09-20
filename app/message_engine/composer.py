@@ -37,6 +37,7 @@ from app.alerts.artifacts import REPO_PHRASES
 from app.alerts.phrase_registry import JOIN, validate_phrase_set
 from app.alerts.render_context import FACT_SOURCES
 from app.config import Settings, get_settings
+from app.engine.snapshot_contract import ACTION_BANDS, ACTION_STATES
 from app.llm_gateway import (
     complete,
 )
@@ -536,42 +537,98 @@ def _canonical(name: str) -> str:
     return name if name.startswith("F_") else "F_" + name.upper()
 
 
-_REGISTRY_MATCHER: re.Pattern[str] | None = None
+_REGISTRY_MATCHERS: dict[str, re.Pattern[str]] | None = None
+
+#: What the alert renderer can put into a slot, per fact: its TYPED domain,
+#: within the fact's REVIEWED width. The renderer copies the typed band
+#: enums, the rule's asset label and the next check as HH:MM, and formats
+#: every other fact as a number (digits, a sign, a decimal point). A slot
+#: used to admit any non-blank run up to the reviewed width, so the F_ASSET
+#: slot proved "Execution armed: SELL OUT, median 99." as registry text
+#: (#119 round 4, SOTA-A, executed); typed without the width, a number of
+#: any length was proved (round 5). A fact without an entry here is a
+#: number: the strictest domain, so a new fact fails closed rather than
+#: open.
+_STATE = "|".join(re.escape(state) for state in ACTION_STATES)
+_BAND = "|".join(re.escape(band) for band in ACTION_BANDS)
+#: The rule labels the shipped ruleset carries; pinned against it.
+_ASSET = "SPY|QQQ"
+_SLOT_DOMAINS: dict[str, str] = {
+    "F_BAND_EFFECTIVE": _STATE, "F_BAND_PREVIOUS": _STATE,
+    "F_BAND_BASE": _BAND, "F_BAND_SCORE": _BAND,
+    "F_ASSET": _ASSET,
+    "F_NEXT_CHECK": r"\d{2}:\d{2}",
+}
+#: MATERIAL_CHANGE shows a fact's two values, and that fact may be a band.
+_TWO_VALUED = frozenset({"F_TRIGGER_VALUE", "F_CURRENT_VALUE"})
 
 
-def _registry_matcher() -> re.Pattern[str]:
-    """A pattern that matches exactly what the alert renderer can produce.
+def _numeral(width: int) -> str:
+    """A number of at most `width` characters as the renderer formats one:
+    an optional sign, digits, an optional decimal part - bounded by
+    construction, because a lookahead cannot tell the value's own point
+    from the fragment's full stop after it."""
+    alternatives = []
+    for sign, used in (("", 0), ("[-+]", 1)):
+        for digits in range(1, width - used + 1):
+            room = width - used - digits - 1   # decimals after the point
+            tail = rf"(?:\.\d{{1,{room}}})?" if room >= 1 else ""
+            alternatives.append(rf"{sign}\d{{{digits}}}{tail}")
+    return "(?:" + "|".join(alternatives) + ")"
+
+
+def _slot_domain(fact_id: str, width: int) -> str:
+    """The pattern a slot of `fact_id` may hold: what the renderer writes
+    there, no wider than the registry reviewed."""
+    if fact_id in _SLOT_DOMAINS:
+        return "(?:" + _SLOT_DOMAINS[fact_id] + ")"
+    if fact_id in _TWO_VALUED:
+        return "(?:" + _numeral(width) + "|" + _STATE + ")"
+    return _numeral(width)
+
+
+def _registry_matchers() -> dict[str, re.Pattern[str]]:
+    """One pattern per language, each matching exactly what the alert
+    renderer can produce IN THAT LANGUAGE.
 
     The renderer joins reviewed fragments - headlines, phrases, next-checks,
-    caveats - with their slots filled from bounded facts. A text is the
-    registry's if and only if it parses as such a join; the registry's own
-    max_width bounds each slot. Read once from the shipped phrase set; an
-    unreadable set authorizes nothing.
+    caveats - with their slots filled from typed facts, and it writes one
+    language per message. A text is the registry's if and only if it parses
+    as such a join in ONE language; a first cut pooled every language into
+    one alternation, so a German-and-English mixture no renderer could
+    produce passed as registry text (#119 round 2, SOTA-A, executed). Each
+    slot admits its fact's typed domain only, within the fact's reviewed
+    max_width (see _slot_domain). Read once from the shipped phrase set;
+    an unreadable set authorizes nothing.
     """
-    global _REGISTRY_MATCHER
-    if _REGISTRY_MATCHER is None:
+    global _REGISTRY_MATCHERS
+    if _REGISTRY_MATCHERS is None:
         try:
             phrase_set = validate_phrase_set(REPO_PHRASES.read_text(encoding="utf-8"))
-            fragments = []
+            by_language: dict[str, list[str]] = {}
             for table in (phrase_set.headlines, phrase_set.phrases,
                           phrase_set.next_checks, phrase_set.caveats):
                 for fragment in table.values():
-                    pattern = re.escape(fragment.text)
-                    for slot in fragment.slots:
-                        width = phrase_set.facts[slot].max_width if slot in phrase_set.facts else 12
-                        pattern = pattern.replace(re.escape("{" + slot + "}"), rf"\S{{1,{width}}}")
-                    fragments.append(pattern)
-            one = "(?:" + "|".join(fragments) + ")"
-            _REGISTRY_MATCHER = re.compile(rf"^{one}(?:{re.escape(JOIN)}{one})*$")
+                    for lang, text in fragment.texts or ((phrase_set.language, fragment.text),):
+                        pattern = re.escape(text)
+                        for slot in fragment.slots:
+                            domain = _slot_domain(slot, phrase_set.facts[slot].max_width)
+                            pattern = pattern.replace(re.escape("{" + slot + "}"), domain)
+                        by_language.setdefault(lang, []).append(pattern)
+            _REGISTRY_MATCHERS = {}
+            for lang, fragments in by_language.items():
+                one = "(?:" + "|".join(fragments) + ")"
+                _REGISTRY_MATCHERS[lang] = re.compile(rf"^{one}(?:{re.escape(JOIN)}{one})*$")
         except Exception as exc:  # noqa: BLE001 - nothing is authorized, and that is logged
             log.warning("message_engine_registry_unreadable", error=type(exc).__name__)
-            _REGISTRY_MATCHER = re.compile(r"(?!)")
-    return _REGISTRY_MATCHER
+            _REGISTRY_MATCHERS = {}
+    return _REGISTRY_MATCHERS
 
 
 def registry_authored(text: str) -> bool:
-    """Is this text something the alert renderer could have produced?"""
-    return _registry_matcher().fullmatch(text) is not None
+    """Is this text something the alert renderer could have produced, in one
+    of the registry's languages?"""
+    return any(matcher.fullmatch(text) is not None for matcher in _registry_matchers().values())
 
 
 #: The screen judges MEANING only: the channel limits are out of the way

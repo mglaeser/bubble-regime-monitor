@@ -2,10 +2,10 @@
   "artifact": "alert-stage1-gate",
   "artifacts": {
     "digests": "carried GROUPED above — the full sha256 split into eight-character runs, so an entropy detector does not read it as a credential. The promotion gate binds evidence to bytes with them; per-run summaries still omit bare digests. See app.alerts.promotion.group_digest",
-    "phrase_set_sha256_grouped": "96d915f5-1a8fb496-aded9c1d-907abe76-b5d9be96-e23b8fc1-fab525fc-567d3196",
-    "phrase_set_version": "v3.4",
-    "rule_version": "v3.2.2",
-    "rules_sha256_grouped": "93efd9c8-58cceff1-3b45778e-13f9496b-64990cda-9a4f169a-85abf8c6-a9978e1d"
+    "phrase_set_sha256_grouped": "25d82b6a-0f45233c-ee228ee2-f964a8cd-ea7f40b4-3bdd48a9-8a333393-a9c96c87",
+    "phrase_set_version": "v3.5",
+    "rule_version": "v3.2.3",
+    "rules_sha256_grouped": "95366a21-b9e8bc6d-e0bc6a85-6cfc703a-b89a87d5-b2a7c143-1c57b26d-c0c6b50f"
   },
   "gate": "deterministic replay; no PII; no scoring regression",
   "generation": {
