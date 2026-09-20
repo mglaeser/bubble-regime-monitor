@@ -596,6 +596,14 @@ narrowing is undone:
   a rejection ends the wait at once.
 * Select mode is unchanged and pinned; the existing selection pins name
   it explicitly.
+* **Background facts are read, never printed.** An entry may declare
+  `background_fields` (a subset of its `grounding_fields`): they fill the
+  prompt's DATA lines so the model can draw on them, and they are kept out
+  of the grounded table and out of the grounding the validator judges by,
+  so a numeral from them is an ungrounded numeral and the message is
+  refused. The digest's gauge summaries and its plain-language note are
+  declared so; "never print these values" had been prose only, and a
+  printed sub-score validated (#121 round 1, SOTA-A, executed).
 
 What decision 12 closed by construction — the open set of decision 9 — is
 open again on the generate path, by the owner's choice and with the
@@ -613,9 +621,13 @@ arithmetic, format) plus a German set: a banned lexicon (probability,
 advice, certainty, forecast, crash talk), an advice/forecast grammar
 (reader-directed modals, impersonal recommendations, future or modal
 movements), the formal imperative ("Kaufen Sie"), German number words and
-compounds, and the English instruction-about-a-position pattern, which
-is inert on German words. `validate(..., language="de")` selects it; a
-language without rules is refused outright.
+compounds, and a POSITIVE check that the text is German at all (a
+function word or monitor noun no German sentence of this register does
+without; a compliant English reply had passed as German, #121 round 1).
+The English shape rules are not consulted on German: German puts its
+verb second, and "Langfristig sind SPY und QQQ IN." read to them as an
+instruction on the first real digest. `validate(..., language="de")`
+selects the set; a language without rules is refused outright.
 
 This is the interim the owner accepted so German is enriched at all
 (option (c) of the coherence review). It is weaker than the English set:

@@ -524,6 +524,31 @@ def visible_facts(entry: dict[str, Any], facts: dict[str, object]
     return {k: v for k, v in facts.items() if _canonical(k) in declared}
 
 
+def background_fields(entry: dict[str, Any]) -> frozenset[str]:
+    """The declared facts the model may READ but never PRINT, by canonical
+    id: shown in the prompt's DATA as background, kept out of the grounded
+    table and out of the grounding the validator judges by, so a numeral
+    from them is an ungrounded numeral. The digest's gauge summaries were
+    marked "never print these values" in prose only, and a sub-score the
+    model printed validated because it was in the facts (#121 round 1,
+    SOTA-A, executed). A background field must be a declared one."""
+    declared = {_canonical(name) for name in entry.get("grounding_fields") or []}
+    raw = entry.get("background_fields") or []
+    if not isinstance(raw, list) or any(not isinstance(name, str) for name in raw):
+        raise TypeError("'background_fields' is not a list of fact names")
+    background = {_canonical(name) for name in raw}
+    if not background <= declared:
+        raise TypeError("'background_fields' names an undeclared fact")
+    return frozenset(background)
+
+
+def grounding_facts(entry: dict[str, Any], facts: dict[str, object]) -> dict[str, object]:
+    """The visible facts the message may quote: the declared ones less the
+    background ones. What the validator grounds numerals against."""
+    background = background_fields(entry)
+    return {k: v for k, v in visible_facts(entry, facts).items() if _canonical(k) not in background}
+
+
 def _canonical(name: str) -> str:
     """One spelling for a fact: its contract id where it has one.
 
@@ -803,7 +828,7 @@ def writing_prompt(entry: dict[str, Any], facts: dict[str, object],
                     f"set the rules allow; emoji are optional. {punctuation}")
     visible = visible_facts(entry, facts)
     grounded = "\n".join(f"  {key} = {sanitize(value) if isinstance(value, str) else value}"
-                          for key, value in sorted(visible.items())
+                          for key, value in sorted(grounding_facts(entry, facts).items())
                           if value is not None and isinstance(value, _SCALARS))
     body = _with_house_rules(selection_prompt(entry["prompt"]),
                              house_rules() if rules is None else rules, language)
@@ -811,7 +836,9 @@ def writing_prompt(entry: dict[str, Any], facts: dict[str, object],
     return (
         f"{body}\n\n"
         f"{contract}\n"
-        f"GROUNDED FACTS - the only values the message may contain, verbatim:\n"
+        f"GROUNDED FACTS - the only values the message may contain, verbatim "
+        f"(the DATA lines marked background are for understanding only and must "
+        f"not be printed):\n"
         f"{grounded}\n"
         f"OUTPUT (this instruction replaces any output format above): reply with "
         f"exactly one line - the message body for this channel - and nothing else: "
@@ -861,9 +888,8 @@ def _prompt_for(entry: dict[str, Any], facts: dict[str, object],
     # defect 1). `grounding_fields` is the contract; an entry that omits it
     # gets nothing rather than everything, because failing closed here costs a
     # fallback and failing open costs a disclosure.
-    visible = visible_facts(entry, facts)
     grounded = "\n".join(f"  {key} = {sanitize(value) if isinstance(value, str) else value}"
-                          for key, value in sorted(visible.items())
+                          for key, value in sorted(grounding_facts(entry, facts).items())
                           if value is not None and isinstance(value, _SCALARS))
     language = settings.message_language or LIBRARY_LANGUAGE
     listed = "\n".join(f"  {i}: {t}" for i, t in enumerate(phrasings_for(entry, language)))
@@ -956,6 +982,7 @@ def compose(*, trigger: str, channel: Channel,
         if not isinstance(entry.get("prompt", ""), str):
             raise TypeError("'prompt' is not text")
         rules = house_rules(lib)
+        grounding = grounding_facts(entry, facts)
     except Exception as exc:  # noqa: BLE001 - a malformed entry is the same class
         return _bare_event(trigger, channel, settings,
                            f"library entry is malformed: {type(exc).__name__}",
@@ -1098,7 +1125,7 @@ def compose(*, trigger: str, channel: Channel,
         # repaired; a refusal is a rejection the governor paces (Q29, Q38),
         # and the evergreen template goes out meanwhile.
         text = written(answer, channel)
-        result = validate(text, channel=channel, facts=visible_facts(entry, facts),
+        result = validate(text, channel=channel, facts=grounding,
                           prose_rules=True, language=language, **limits)
     else:
         choice = _select_phrasing(answer, phrasings)
@@ -1117,7 +1144,7 @@ def compose(*, trigger: str, channel: Channel,
         # the facts, not text the model wrote. The channel contract and the
         # grounding checks still run on it; the meaning-of-prose rules exist to
         # judge model text, of which there is none on this path (decision 12).
-        result = validate(text, channel=channel, facts=visible_facts(entry, facts),
+        result = validate(text, channel=channel, facts=grounding,
                           prose_rules=False, **limits)
     if result.ok:
         # TRIGGER-SPECIFIC MANDATE. `validate()` is deliberately trigger-blind

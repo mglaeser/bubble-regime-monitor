@@ -799,6 +799,22 @@ _COMPOUND_NUMBER_DE_RE = re.compile(
 #: ß has no decomposition and is admitted as itself.
 _GERMAN_LETTERS = frozenset("ßẞ")
 
+#: The POSITIVE check that a German message is German: at least one of the
+#: function words and monitor nouns no German sentence of this register
+#: does without. Without it a compliant English reply was accepted and sent
+#: under MESSAGE_LANGUAGE=de (#121 round 1, SOTA-A, executed). Words that
+#: are also English (band, in, an, war, die as a verb aside) are left out.
+_GERMAN_MARKERS: frozenset[str] = frozenset("""
+der die das den dem des ein eine einem einen einer eines und oder aber ist sind
+wird werden bleibt bleiben liegt liegen steht stehen bei von vom beim zum zur mit
+ohne nicht kein keine keinen noch jetzt heute derzeit aktuell weiterhin zuletzt
+sowie über ueber unter zwischen gegenüber gegenueber nach vor seit wert werte
+stufe spanne flaggen warnsignale warnflaggen treiber haupttreiber nächster
+naechster nächste naechste prüfung pruefung lauf daten unvollständig
+unvollstaendig datenlücke datenluecke datenlücken bewertung bewertungen markt
+aktien signal trendsignal monatsende erneut wieder weiter
+""".split())
+
 
 #: The only numerator/denominator pairings that read as a score rather than
 #: a quotient. Taken from the daily-digest template itself:
@@ -1698,6 +1714,9 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
             # THE GERMAN RULES (decision 25). The English grammar below would
             # misread German either way, so it is not consulted; the lexicon
             # above still was, since its words are not German words.
+            if not (set(re.findall(r"[a-zäöüß]+", lowered)) & _GERMAN_MARKERS):
+                return ValidationResult(False, FailureClass.CONTENT,
+                                        "not German: no German word in the message")
             banned = _BANNED_DE_RE.search(lowered)
             if banned:
                 return ValidationResult(False, FailureClass.CONTENT,

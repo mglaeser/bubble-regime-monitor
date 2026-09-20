@@ -247,6 +247,12 @@
         "d_block_summary",
         "judgment"
       ],
+      "background_fields": [
+        "s_block_summary",
+        "d_block_summary",
+        "judgment"
+      ],
+      "background_fields_note": "Shown to the model as background (DATA) and never printable: their numerals are not grounded, so a sub-score or a number from the note is an ungrounded numeral and the message is refused (#121 round 1, SOTA-A).",
       "context_endpoints": [
         "/api/v1/score",
         "/api/v1/legs/trend",

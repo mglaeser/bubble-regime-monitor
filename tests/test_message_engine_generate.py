@@ -129,8 +129,11 @@ class TestTheWritingPrompt:
         assert "- Write in ENGLISH only, as full declarative sentences" in prompt
         assert "headline score (median of the model runs): 59 out of 100" in prompt     # the slots are filled
         assert "{median}" not in prompt
-        assert "GROUNDED FACTS - the only values the message may contain, verbatim:" in prompt
-        assert "  median = 59" in prompt and "  judgment = Valuations are stretched while credit stays calm." in prompt
+        assert "GROUNDED FACTS - the only values the message may contain, verbatim" in prompt
+        assert "  median = 59" in prompt
+        # Background fields stay in DATA (to draw on) and out of the grounded table (never printed).
+        assert "plain-language note you may draw on: Valuations are stretched while credit stays calm." in prompt
+        assert "  judgment = " not in prompt and "  s_block_summary = " not in prompt
         assert "CHANNEL: imessage - at most 200 characters" in prompt
         assert "APPROVED PHRASINGS" not in prompt and '"phrasing"' not in prompt
         assert prompt.rstrip().endswith("no label, no quotes, no line break, no commentary.")
@@ -373,3 +376,58 @@ class TestWritten:
     ])
     def test_the_body_in_the_reply(self, answer, channel, body):
         assert composer.written(answer, channel) == body
+
+
+class TestRoundOneOn121:
+    """Two SOTA-A defects executed and fixed; one SOTA-C claim executed and
+    not reproduced."""
+
+    @pytest.mark.parametrize("reply, numeral", [
+        ("bubblegauge is at 59 out of 100 in band trim. The fragility sub-score s1 is 0.80. The range is 57-61.", "0.80"),
+        ("bubblegauge is at 59 out of 100 in band trim. The note says the CAPE sits near 38. The range is 57-61.", "38"),
+    ])
+    def test_a_background_value_the_model_prints_is_an_ungrounded_numeral(self, monkeypatch, reply, numeral):
+        facts = {**DIGEST_FACTS, "judgment": "Valuations are stretched; the CAPE sits near 38."}
+        out, prompts = _compose(monkeypatch, reply, facts=facts)
+        assert out.source == "fallback" and numeral in (out.reason or ""), out.reason
+        assert "never print these values): s1=0.80,s2=0.61" in prompts[0]      # still shown, as background
+
+    def test_the_library_declares_the_digests_background_fields(self):
+        entry = composer.library()["prompts"]["daily_digest"]
+        assert composer.background_fields(entry) == frozenset({"F_S_BLOCK_SUMMARY", "F_D_BLOCK_SUMMARY", "F_JUDGMENT"})
+        assert set(composer.grounding_facts(entry, DIGEST_FACTS)) == set(DIGEST_FACTS) - {
+            "s_block_summary", "d_block_summary", "judgment"}
+        with pytest.raises(TypeError):
+            composer.background_fields({"grounding_fields": ["a"], "background_fields": ["b"]})
+        with pytest.raises(TypeError):
+            composer.background_fields({"grounding_fields": ["a"], "background_fields": "a"})
+        assert composer.background_fields({"grounding_fields": ["a"]}) == frozenset()
+
+    def test_select_mode_grounds_the_same_way(self, monkeypatch):
+        out, prompts = _compose(monkeypatch, '{"phrasing": 0}', message_engine_mode="select")
+        assert out.source == "generated" and "  judgment = " not in prompts[0]
+
+    @pytest.mark.parametrize("reply", [
+        "bubblegauge reports 59 out of 100 in band trim. The range is 57-61. Flags are 1 of 4. SPY and QQQ are IN.",
+        "bubblegauge 59/100 trim. 57-61. 1/4. SPY IN, QQQ IN.",
+    ])
+    def test_an_english_or_wordless_reply_is_not_german(self, monkeypatch, reply):
+        out, _ = _compose(monkeypatch, reply, language="de")
+        assert out.source == "fallback" and "not German" in (out.reason or ""), out.reason
+
+    @pytest.mark.parametrize("text", [
+        "bubblegauge 59/100 trim. Spanne 57-61. SPY IN, QQQ IN. Flaggen 1/4.",
+        "59 von 100, Band trim. Treiber: hohe Bewertungen. Spanne 57-61, Warnsignale 1 von 4. Langfristtrend: SPY IN, QQQ IN.",
+    ])
+    def test_a_terse_german_message_is_german(self, text):
+        result = validate(text, channel=Channel.IMESSAGE, facts=DIGEST_FACTS, prose_rules=True, language="de", **LIMITS)
+        assert result.ok, result.reason
+
+    def test_compose_reaches_the_model_in_both_modes(self, monkeypatch):
+        # SOTA-C claimed a NameError on 'lib' in compose(): executed, not
+        # reproduced - both modes compose to a generated message.
+        out, _ = _compose(monkeypatch, GOOD_EN)
+        assert out.source == "generated" and "NameError" not in (out.reason or "")
+        out, _ = _compose(monkeypatch, '{"phrasing": 0}', message_engine_mode="select", now=LATER)
+        assert out.source == "generated" and "NameError" not in (out.reason or "")
+
