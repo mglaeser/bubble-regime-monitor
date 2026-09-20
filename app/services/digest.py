@@ -113,7 +113,10 @@ def send_daily_digest(*, force: bool = False) -> dict[str, Any]:
         # refusal, not a fall-through to the old sender.
         from app.services.engine_delivery import deliver
 
+        # The digest can wait for a second attempt (decision 24): it is the
+        # one message a day, and the operator reads it hours later.
         outcome = deliver(trigger="daily_digest", facts=facts, priority=DIGEST_PRIORITY,
+                          patience_s=settings.message_engine_retry_patience_s,
                           settings=settings)
         return {**outcome, "snapshot_computed_at": computed_at.isoformat(),
                 "llm_used": outcome.get("source") == "generated"}

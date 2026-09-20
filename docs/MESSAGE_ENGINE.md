@@ -586,14 +586,22 @@ narrowing is undone:
   paces exactly as before (FORMAT: the 30 s retry; CONTENT: the floor and
   the cap of Q38), and the evergreen template goes out meanwhile
   (decision 7).
-* **The delivery of one message is patient.** The composer makes one
+* **The delivery of one message can be patient.** The composer makes one
   attempt per invocation and counts iterations in the rows, so a trigger
   that fires once a day spent one content iteration per DAY. The delivery
-  service now waits for the governor's next admission, up to
-  `MESSAGE_ENGINE_RETRY_PATIENCE_S` (330 s: a format retry, or one
-  content retry at the floor), and never past the cap, the breaker or the
-  budget, because it only asks the governor when. A refusal that was not
-  a rejection ends the wait at once.
+  service can wait for the governor's next admission, up to the patience
+  the CALLER grants - the digest passes `MESSAGE_ENGINE_RETRY_PATIENCE_S`
+  (330 s: a format retry, or one content retry at the floor) - and never
+  past the cap, the breaker or the budget, because it only asks the
+  governor when. A refusal that was not a rejection ends the wait at once.
+  `deliver()` itself grants none: a ready fallback is never withheld by
+  default, so an alert routed through the engine is not held for minutes
+  behind a rejected reply (#121 round 3, SOTA-A).
+* **Background facts are read, never printed**, and the gauge labels are
+  not printable either: a background numeral that equals a grounded one
+  is grounded (provenance is not tracked), so the raw summary syntax
+  (`s1=`) and the bare internal labels (`s1`, `d4`) are refused as content
+  in any language (#121 round 3, SOTA-A).
 * Select mode is unchanged and pinned; the existing selection pins name
   it explicitly.
 * **Background facts are read, never printed.** An entry may declare
@@ -628,10 +636,16 @@ number words and compounds, and a POSITIVE check that the text is German
 at all (a
 function word or monitor noun no German sentence of this register does
 without; a compliant English reply had passed as German, #121 round 1).
-The English shape rules are not consulted on German: German puts its
-verb second, and "Langfristig sind SPY und QQQ IN." read to them as an
-instruction on the first real digest. `validate(..., language="de")`
-selects the set; a language without rules is refused outright.
+The English shape rules are not consulted on German clauses: German
+puts its verb second, and "Langfristig sind SPY und QQQ IN." read to them
+as an instruction on the first real digest. A clause WITHOUT a German
+word in it is not German, though: "Move to cash. Die Spanne liegt bei
+57-61." satisfied the marker with "die" and the German grammar with
+nothing (#121 round 3), so such a clause is judged by the English advice
+rule and - when it carries an English function word, so it is prose and
+not a German label like "Langfristtrend:" - by the English imperative
+shapes. `validate(..., language="de")` selects the set; a language
+without rules is refused outright.
 
 This is the interim the owner accepted so German is enriched at all
 (option (c) of the coherence review). It is weaker than the English set:

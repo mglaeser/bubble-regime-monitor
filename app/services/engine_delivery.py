@@ -113,6 +113,7 @@ def _next_attempt_in(trigger: str, priority: int, settings: Settings,
 
 def compose_with_patience(*, trigger: str, channel: Channel, priority: int,
                           facts: dict[str, object], settings: Settings,
+                          patience_s: float,
                           sleep: Any = time.sleep,
                           clock: Any = None) -> composer.Composed:
     """compose(), and when the model's text was REJECTED, again as soon as
@@ -122,17 +123,23 @@ def compose_with_patience(*, trigger: str, channel: Channel, priority: int,
     count to the rows, so a trigger that fires once a day - the digest -
     spent one of its content iterations (Q38) per DAY and the evergreen
     template went out on every rejection. The delivery of one message may
-    now wait `MESSAGE_ENGINE_RETRY_PATIENCE_S` in total for the governor's
-    next admission: the format retry pause (30 s), the pacing floor (300 s)
-    - and never longer, never past the content cap, never while the breaker
-    is open or the budget spent, because the governor decides all of that
-    and this loop only asks it when. A refusal that was not a rejection (not
-    asked, exhausted) ends the loop at once.
+    wait `patience_s` in total for the governor's next admission (the digest
+    passes MESSAGE_ENGINE_RETRY_PATIENCE_S, 330 s: the format retry pause of
+    30 s, or the pacing floor of 300 s) - and never longer, never past the
+    content cap, never while the breaker is open or the budget spent,
+    because the governor decides all of that and this loop only asks it
+    when. A refusal that was not a rejection (not asked, exhausted) ends
+    the loop at once.
+
+    THE PATIENCE IS THE CALLER'S. A ready fallback is never withheld by
+    default: `deliver()` makes one attempt unless the caller says the
+    message can wait, so an alert routed through the engine is not held
+    for minutes behind a rejected reply (#121 round 3, SOTA-A).
     """
     clock = clock or (lambda: datetime.now(UTC))
     composed = composer.compose(trigger=trigger, channel=channel, priority=priority,
                                 facts=facts, settings=settings, now=clock())
-    budget = float(settings.message_engine_retry_patience_s)
+    budget = float(patience_s)
     while _was_rejected(composed) and budget > 0:
         try:
             wait = _next_attempt_in(trigger, priority, settings, clock())
@@ -153,15 +160,20 @@ def compose_with_patience(*, trigger: str, channel: Channel, priority: int,
 
 
 def deliver(*, trigger: str, facts: dict[str, object], priority: int,
-            settings: Settings | None = None) -> dict[str, Any]:
-    """Compose one message for `trigger` and hand it to the gate. Never raises."""
+            settings: Settings | None = None, patience_s: float = 0) -> dict[str, Any]:
+    """Compose one message for `trigger` and hand it to the gate. Never raises.
+
+    `patience_s`: how long this send may wait for a second attempt after a
+    rejected reply (0: one attempt, the default - see compose_with_patience).
+    """
     settings = settings or get_settings()
     channel, recipient = transport_for(settings)
     if channel is None:
         return {"status": "skipped", "reason": recipient, "engine": True, "trigger": trigger}
 
     composed = compose_with_patience(trigger=trigger, channel=Channel(channel),
-                                     priority=priority, facts=facts, settings=settings)
+                                     priority=priority, facts=facts, settings=settings,
+                                     patience_s=patience_s)
     with session_scope() as session:
         out = gate.emit(session, composed=composed, recipient_ref=recipient or "",
                         sender=_Transport(channel), priority=priority)

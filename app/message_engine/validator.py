@@ -815,6 +815,14 @@ _COMPOUND_NUMBER_DE_RE = re.compile(
     r"(?:ein|zwei|drei|vier|fünf|fuenf|sechs|sieben|acht|neun|zehn|elf|zwölf|zwoelf)"
     r"\w{0,3}(?:und\w+|zig|ßig|ssig|hundert|tausend)\w*")
 
+#: The digest's gauge summaries reach the model as background ("s1=0.81,
+#: s2=0.64"). Their numerals are not grounded (composer, background
+#: fields), but a numeral that happens to equal a grounded one is grounded
+#: - provenance is not tracked - and the labels carry digits of their own
+#: that are (1, 4). The raw syntax and the bare internal labels are
+#: refused as content in any language (#121 round 3, SOTA-A).
+_GAUGE_LABEL_RE = re.compile(r"(?<![A-Za-z])[sdSD][1-6]\s*=|\b[sdSD][1-6]\b(?!\s*[/%:])")
+
 #: Letters German needs that English does not: the fold reduces the umlauts,
 #: ß has no decomposition and is admitted as itself.
 _GERMAN_LETTERS = frozenset("ßẞ")
@@ -1290,6 +1298,38 @@ def _reads_as_state(text: str, match: re.Match[str]) -> bool:
     return bool(re.search(r"\d+\s*/\s*\d+$|\d%$", before))
 
 
+#: English function words that mark a clause of a German message as
+#: English prose rather than a German label ("Langfristtrend: SPY IN")
+#: that merely lacks a German marker. "in" is left out: it is German too,
+#: and the trend state is written IN.
+_ENGLISH_MARKERS: frozenset[str] = frozenset(
+    "the a an to of your you now into out with for from should must is are this that "
+    "and or at by on".split())
+
+
+def _english_offence(judged: str, grounded_words: set[str]) -> str | None:
+    """The English advice rule on a clause of a German message that has no
+    German word in it, and - when the clause has an English function word,
+    so it is English prose rather than a German label - the English
+    imperative shapes too. The band-verb state test is not applied: German
+    compounds end in "band" ("Aktionsband trim") and the German rules own
+    the band words there."""
+    if _ADVICE_RE.search(judged):
+        return "reads as advice, not an observation"
+    if not (set(re.findall(r"[a-z]+", judged.lower())) & _ENGLISH_MARKERS):
+        return None
+    clauses = re.split(_CLAUSE_BOUNDARY_RE, judged)
+    clauses += [f"{label} {rest}" for label, rest in zip(clauses, clauses[1:], strict=False)
+                if len(label.split()) == 1 and rest.strip()]
+    for clause in clauses:
+        if _looks_imperative(clause, grounded_words):
+            return (f"{clause.strip()!r} opens a short clause with a word this "
+                    "monitor never uses as a subject - it reads as an instruction")
+    if _IMPERATIVE_OBJECT_RE.search(judged):
+        return "reads as an instruction about a position, not an observation"
+    return None
+
+
 def validate(text: str, *, channel: Channel, facts: dict[str, object],
              sms_max_len: int, imessage_max_chars: int,
              imessage_max_emoji: int,
@@ -1461,6 +1501,10 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
     # list judge the text as written; everything about MEANING judges this.
     judged = _fold_latin(text)
     judged_lower = judged.lower()
+    label = _GAUGE_LABEL_RE.search(text)
+    if label:
+        return ValidationResult(False, FailureClass.CONTENT,
+                                f"{label.group(0).strip()!r} is an internal gauge label, never printed")
     if german:
         for match in re.finditer(r"[a-zäöüß]+", lowered):
             word = match.group(0)
@@ -1759,6 +1803,22 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
             # first real digest (the gateway probe before the PR). An
             # English instruction smuggled into a German message still meets
             # the English lexicon above (buy, sell, ...).
+    if prose_rules and german:
+        # AN ENGLISH CLAUSE INSIDE A GERMAN MESSAGE is judged by the English
+        # rules: "Move to cash. Die Spanne liegt bei 57-61." satisfied the
+        # German marker with "die" and the German grammar with nothing
+        # (#121 round 3, SOTA-A, executed). A clause with no German word in
+        # it is not German, and the English advice, imperative and band-verb
+        # rules read it as English; a clause with one is German and was
+        # judged above.
+        _grounded_words = {str(v).casefold() for v in facts.values()}
+        for _clause in re.split(_CLAUSE_BOUNDARY_RE, judged):
+            if not _clause.strip() or set(re.findall(r"[a-zäöüß]+", _clause.lower())) & _GERMAN_MARKERS:
+                continue
+            offence = _english_offence(_clause, _grounded_words)
+            if offence is not None:
+                return ValidationResult(False, FailureClass.CONTENT,
+                                        f"{offence} (an English clause in a German message)")
     if prose_rules and not german:
         foreign = {w for w in re.findall(r"[a-zà-ÿ]+", lowered)} & _NON_ENGLISH_WORDS
         if foreign:

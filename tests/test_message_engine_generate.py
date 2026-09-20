@@ -275,9 +275,10 @@ class TestTheDeliveryIsPatient:
         state, clock, sleep = self._clock()
         long = GOOD_EN + " " + "More words about the reading. " * 6
         prompts = _replies(monkeypatch, long, GOOD_EN)
-        settings = _settings(message_engine_retry_patience_s=330)
+        settings = _settings()
         out = service.compose_with_patience(trigger="daily_digest", channel=Channel.IMESSAGE, priority=3,
-                                            facts=dict(DIGEST_FACTS), settings=settings, sleep=sleep, clock=clock)
+                                            facts=dict(DIGEST_FACTS), settings=settings, patience_s=330,
+                                            sleep=sleep, clock=clock)
         assert out.source == "generated" and out.text == GOOD_EN
         assert state["slept"] == [pytest.approx(30, abs=2)] and len(prompts) == 2   # the format retry pause, once
         with session_scope() as s:
@@ -288,9 +289,10 @@ class TestTheDeliveryIsPatient:
         state, clock, sleep = self._clock()
         bad = "bubblegauge 59/100 trim; a crash is likely. Range 57-61. Flags 1/4."
         prompts = _replies(monkeypatch, bad, bad, bad, bad)
-        settings = _settings(message_engine_retry_patience_s=1000)
+        settings = _settings()
         out = service.compose_with_patience(trigger="daily_digest", channel=Channel.IMESSAGE, priority=3,
-                                            facts=dict(DIGEST_FACTS), settings=settings, sleep=sleep, clock=clock)
+                                            facts=dict(DIGEST_FACTS), settings=settings, patience_s=1000,
+                                            sleep=sleep, clock=clock)
         assert out.source == "fallback"
         assert len(prompts) == 3                                        # the content cap (Q38)
         assert state["slept"] == [pytest.approx(300, abs=2)] * 2          # the floor after a content rejection
@@ -299,8 +301,7 @@ class TestTheDeliveryIsPatient:
         state, clock, sleep = self._clock()
         prompts = _replies(monkeypatch, "bubblegauge 59/100 trim; a crash is likely.", GOOD_EN)
         out = service.compose_with_patience(trigger="daily_digest", channel=Channel.IMESSAGE, priority=3,
-                                            facts=dict(DIGEST_FACTS),
-                                            settings=_settings(message_engine_retry_patience_s=0),
+                                            facts=dict(DIGEST_FACTS), settings=_settings(), patience_s=0,
                                             sleep=sleep, clock=clock)
         assert out.source == "fallback" and len(prompts) == 1 and state["slept"] == []
 
@@ -308,8 +309,7 @@ class TestTheDeliveryIsPatient:
         state, clock, sleep = self._clock()
         prompts = _replies(monkeypatch, "bubblegauge 59/100 trim; a crash is likely.", GOOD_EN)
         out = service.compose_with_patience(trigger="daily_digest", channel=Channel.IMESSAGE, priority=3,
-                                            facts=dict(DIGEST_FACTS),
-                                            settings=_settings(message_engine_retry_patience_s=60),
+                                            facts=dict(DIGEST_FACTS), settings=_settings(), patience_s=60,
                                             sleep=sleep, clock=clock)
         assert out.source == "fallback" and len(prompts) == 1 and state["slept"] == []
 
@@ -318,8 +318,7 @@ class TestTheDeliveryIsPatient:
         prompts = _replies(monkeypatch, GOOD_EN)
         out = service.compose_with_patience(trigger="daily_digest", channel=Channel.IMESSAGE, priority=3,
                                             facts=dict(DIGEST_FACTS),
-                                            settings=_settings(message_engine_enabled=False,
-                                                               message_engine_retry_patience_s=330),
+                                            settings=_settings(message_engine_enabled=False), patience_s=330,
                                             sleep=sleep, clock=clock)
         assert out.source == "deterministic" and prompts == [] and state["slept"] == []
 
@@ -383,7 +382,7 @@ class TestRoundOneOn121:
     not reproduced."""
 
     @pytest.mark.parametrize("reply, numeral", [
-        ("bubblegauge is at 59 out of 100 in band trim. The fragility sub-score s1 is 0.80. The range is 57-61.", "0.80"),
+        ("bubblegauge is at 59 out of 100 in band trim. The fragility sub-score is 0.80. The range is 57-61.", "0.80"),
         ("bubblegauge is at 59 out of 100 in band trim. The note says the CAPE sits near 38. The range is 57-61.", "38"),
     ])
     def test_a_background_value_the_model_prints_is_an_ungrounded_numeral(self, monkeypatch, reply, numeral):
@@ -464,4 +463,71 @@ class TestRoundTwoOn121:
     def test_the_ledger_scenario_end_to_end(self, monkeypatch):
         out, _ = _compose(monkeypatch, "Der Wert liegt bei 59 von 100 im Band trim, Spanne 57-61. Bleib in SPY.", language="de")
         assert out.source == "fallback" and "'bleib' opens a clause" in (out.reason or "")
+
+
+class TestRoundThreeOn121:
+    """Three SOTA-A defects, executed."""
+
+    @pytest.mark.parametrize("text, language", [
+        ("bubblegauge is at 59 out of 100 in band trim; the gauges read s1=0.81. The range is 57-61.", "en"),
+        ("bubblegauge is at 59 out of 100 in band trim; gauge s1 is 1. The range is 57-61.", "en"),
+        ("Der Wert liegt bei 59 von 100; die Anzeige d4 steht bei 1 von 4.", "de"),
+    ])
+    def test_the_raw_gauge_syntax_and_labels_are_refused_whatever_the_numeral(self, text, language):
+        # A background numeral equal to a grounded one is grounded (provenance
+        # is not tracked); the internal label it comes with is not printable.
+        result = validate(text, channel=Channel.IMESSAGE, facts=DIGEST_FACTS, prose_rules=True,
+                          language=language, **LIMITS)
+        assert not result.ok and "internal gauge label" in (result.reason or ""), result.reason
+
+    def test_a_score_out_of_100_is_not_a_gauge_label(self):
+        result = validate("bubblegauge is at 59 out of 100 in band trim. The range is 57-61.",
+                          channel=Channel.IMESSAGE, facts=DIGEST_FACTS, prose_rules=True, language="en", **LIMITS)
+        assert result.ok, result.reason
+
+    @pytest.mark.parametrize("text", [
+        "Move to cash. Die Spanne liegt bei 57-61.",
+        "Der Wert liegt bei 59 von 100. Consider selling. Die Spanne liegt bei 57-61.",
+        "Der Wert liegt bei 59 von 100. Hold cash now. Die Spanne liegt bei 57-61.",
+        "Der Wert liegt bei 59 von 100. Reduce your exposure. Die Spanne liegt bei 57-61.",
+    ])
+    def test_an_english_clause_in_a_german_message_is_judged_as_english(self, text):
+        result = validate(text, channel=Channel.IMESSAGE, facts=DIGEST_FACTS, prose_rules=True, language="de", **LIMITS)
+        assert not result.ok and "an English clause in a German message" in (result.reason or ""), result.reason
+
+    @pytest.mark.parametrize("text", [
+        # German labels without a German function word are not English prose
+        "Der Stand liegt bei 59 von 100 im Band trim. Haupttreiber sind hohe Bewertungen. Spanne: 57-61. "
+        "Warnflaggen: 1 von 4. Langfristiger Trend: SPY IN, QQQ IN.",
+        "59 von 100, Band trim. Treiber: hohe Bewertungen und starke Konzentration. Spanne 57-61, Warnflaggen 1 von 4. "
+        "Langfristtrend: SPY IN, QQQ IN.",
+        "Bubble-Monitor: 59 von 100, Aktionsband trim. Haupttreiber: hohe Bewertungen. Grobe Spanne: 57-61. "
+        "Warnsignale: 1 von 4. Langfristiger Trend: SPY IN, QQQ IN.",
+    ])
+    def test_german_label_clauses_stay_german(self, text):
+        result = validate(text, channel=Channel.IMESSAGE, facts=DIGEST_FACTS, prose_rules=True, language="de", **LIMITS)
+        assert result.ok, result.reason
+
+    def test_a_ready_fallback_is_never_withheld_by_default(self, monkeypatch):
+        state, clock, sleep = TestTheDeliveryIsPatient()._clock()
+        monkeypatch.setattr(service.time, "sleep", sleep)
+        monkeypatch.setattr(service, "transport_for", lambda _s: ("imessage", "+491510000000"))
+        monkeypatch.setattr("app.alerts.promotion.live_admission_blockers", lambda _s, *, path=None: [])
+        sends: list[str] = []
+        monkeypatch.setattr(service, "send_imessage",
+                            lambda body, *, recipient=None: sends.append(body) or type("R", (), {
+                                "ok": True, "status_code": 202, "operation_id": "op", "error": None})())
+        prompts = _replies(monkeypatch, "bubblegauge 59/100 trim; a crash is likely.", GOOD_EN)
+        out = service.deliver(trigger="daily_digest", facts=dict(DIGEST_FACTS), priority=3, settings=_settings())
+        assert out["status"] == "sent" and out["source"] == "fallback"
+        assert len(prompts) == 1 and state["slept"] == []                # one attempt, the template went out
+
+    def test_the_digest_passes_its_patience_and_an_alert_would_not(self):
+        import inspect
+
+        from app.services import digest as digest_service
+
+        source = inspect.getsource(digest_service.send_daily_digest)
+        assert "patience_s=settings.message_engine_retry_patience_s" in source
+        assert inspect.signature(service.deliver).parameters["patience_s"].default == 0
 
