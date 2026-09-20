@@ -186,3 +186,44 @@ class TestComposeInGerman:
                 assert [r.outcome for r in s.query(MessageEngineAttempt).all()] == ["ok"]
         finally:
             get_settings.cache_clear()
+
+
+class TestRoundOneOn120:
+    """The SMS wire contract is GSM-7 (3GPP 23.038), not ASCII: ä ö ü Ä Ö Ü
+    ß are basic-table characters, one septet each, and never force UCS-2.
+    The ledger's scenario - a German SMS with umlauts violating an "ASCII
+    contract" and segmenting - was executed and not reproduced; a character
+    outside GSM-7 IS refused by the validator, in either language."""
+
+    def test_the_ledger_scenario_a_german_sms_with_umlauts(self, monkeypatch):
+        from app.alerts.gsm7 import first_non_gsm7, septets
+
+        monkeypatch.setattr(composer, "complete", lambda **_kw: type("C", (), {"text": '{"phrasing": 0}'})())
+        with session_scope():
+            out = composer.compose(trigger="BAND_TO_TRIM", channel=Channel.SMS, priority=2,
+                                   facts={"F_BAND_EFFECTIVE": "trim", "F_BAND_PREVIOUS": "hold", "F_NEXT_CHECK": "14:00"},
+                                   settings=_settings(message_language="de"))
+        assert out.source == "generated" and "Nächster Lauf" in out.text
+        assert first_non_gsm7(out.text) is None                  # nothing outside GSM-7
+        assert septets(out.text) == len(out.text) <= 150         # every umlaut is ONE septet: no UCS-2
+        assert validate(out.text, channel=Channel.SMS, facts={"F_BAND_EFFECTIVE": "trim", "F_BAND_PREVIOUS": "hold", "F_NEXT_CHECK": "14:00"},
+                        prose_rules=False, **LIMITS).ok
+
+    def test_every_german_template_is_gsm7_in_every_character(self):
+        from app.alerts.gsm7 import GSM7_BASIC, first_non_gsm7
+
+        for name, entry in composer.library()["prompts"].items():
+            de = entry["translations"]["de"]
+            for text in (de["fallback"], *(de.get("phrasings") or [])):
+                assert first_non_gsm7(text) is None, (name, text)
+                assert all(ch in GSM7_BASIC for ch in text if not ch.isascii()), (name, text)
+
+    @pytest.mark.parametrize("text", [
+        "bubblegauge: Stufe \u201etrim\u201c erreicht.",            # German quotation marks
+        "bubblegauge: Stufe trim \u2013 vorher hold.",               # en dash
+        "bubblegauge: Stufe trim\u2026",                             # ellipsis
+    ])
+    def test_a_character_outside_gsm7_is_refused_on_sms_in_german_too(self, text):
+        result = validate(text, channel=Channel.SMS, facts={}, prose_rules=False, **LIMITS)
+        assert not result.ok and result.failure_class is FailureClass.FORMAT
+        assert "not GSM-7" in result.reason

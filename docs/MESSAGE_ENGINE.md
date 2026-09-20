@@ -134,8 +134,13 @@ evergreen fallback is used and the exhaustion is reported in the next digest).
 
 ## Channel contract (rulings Q27, Q29, Q30)
 
-English only. SMS: <=150 characters, GSM-7-safe, no emoji, septet-accurate
-counting. iMessage: <=200 code points, at most 2 emoji from the allowlist.
+The model's words are English only (Q30); the WIRE language is the
+operator's `MESSAGE_LANGUAGE` since decision 23 (owner instruction
+2026-09-19, amending Q30's "English only" for the wire). SMS: <=150
+characters, GSM-7-safe, no emoji, septet-accurate counting. GSM-7 (3GPP
+23.038) is the contract, not ASCII: the German letters ä ö ü Ä Ö Ü ß are
+basic-table characters, one septet each, and never force UCS-2; a character
+outside the table is refused in either language. iMessage: <=200 code points, at most 2 emoji from the allowlist.
 Rejected output is retried, never transliterated. Numerals must appear
 verbatim from the grounded facts; the banned lexicon (probability, chance,
 likely, buy, sell, guaranteed, ...) is rejected — with band names such as
