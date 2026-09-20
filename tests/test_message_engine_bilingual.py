@@ -128,6 +128,25 @@ class TestComposeInGerman:
         assert ("written in 'de'" in prompts[0]) is (language == "de")
         assert expected.split(".")[1].strip().split()[0] in prompts[0]   # the phrasing shown is the language's
 
+    def test_an_unset_language_is_the_librarys_own_and_the_prompt_says_nothing_about_it(self, monkeypatch):
+        # MESSAGE_LANGUAGE unset is what shipped before the switch existed:
+        # English phrasings, and no "(written in ...)" clause. Before this
+        # pin the prompt read "written in 'None'": str(None).
+        prompts: list[str] = []
+
+        def complete(*, user, **_kw):
+            prompts.append(user)
+            return type("C", (), {"text": '{"phrasing": 0}'})()
+
+        monkeypatch.setattr(composer, "complete", complete)
+        with session_scope():
+            out = composer.compose(trigger="daily_digest", channel=Channel.IMESSAGE, priority=3,
+                                   facts=digest.digest_facts(self._snapshot()),
+                                   settings=_settings(message_language=None))
+        assert out.source == "generated"
+        assert out.text == "bubblegauge 51/100 trim. range 40-61. SPY IN, QQQ IN. Flags 2/4."
+        assert "written in" not in prompts[0] and "None" not in prompts[0]
+
     def test_the_fallback_is_the_selected_languages_too(self, monkeypatch):
         monkeypatch.setattr(composer, "complete", lambda **_kw: (_ for _ in ()).throw(RuntimeError("down")))
         with session_scope():

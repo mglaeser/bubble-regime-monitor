@@ -732,7 +732,7 @@ def _prompt_for(entry: dict[str, Any], facts: dict[str, object],
     grounded = "\n".join(f"  {key} = {sanitize(value) if isinstance(value, str) else value}"
                           for key, value in sorted(visible.items())
                           if value is not None and isinstance(value, _SCALARS))
-    language = str(settings.message_language)
+    language = settings.message_language or LIBRARY_LANGUAGE
     listed = "\n".join(f"  {i}: {t}" for i, t in enumerate(phrasings_for(entry, language)))
     in_language = "" if language == LIBRARY_LANGUAGE else f" (written in {language!r})"
     # The library's own OUTPUT FORMAT is OVERRIDDEN here, last word wins.
@@ -808,7 +808,7 @@ def compose(*, trigger: str, channel: Channel,
         return _bare_event(trigger, channel, settings, "trigger not in library",
                            known=False)
 
-    language = str(settings.message_language)
+    language = settings.message_language or LIBRARY_LANGUAGE
     try:
         phrasings = phrasings_for(entry, language)
         # ONLY DECLARED FACTS FILL SLOTS. The prompt and the grounding check
