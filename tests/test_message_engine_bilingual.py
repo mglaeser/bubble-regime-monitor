@@ -22,7 +22,8 @@ LIMITS = {"sms_max_len": 150, "imessage_max_chars": 200, "imessage_max_emoji": 2
 
 
 def _settings(**overrides) -> Settings:
-    base = {"message_engine_enabled": True, "message_engine_min_interval_s": 300,
+    base = {"message_engine_enabled": True, "message_engine_mode": "select",
+            "message_engine_min_interval_s": 300,
             "message_engine_format_retry_s": 30, "message_engine_max_content_iterations": 3,
             "message_engine_technical_backoff_s": 120, "message_engine_breaker_strikes": 5,
             "message_engine_breaker_cooldown_s": 86400, "message_engine_daily_budget": 100}
@@ -168,6 +169,8 @@ class TestComposeInGerman:
         monkeypatch.setenv("IMESSAGE_RECIPIENT", "+491510000000")
         monkeypatch.setenv("SMS_ENABLED", "false")
         monkeypatch.setenv("MESSAGE_ENGINE_ENABLED", "true")
+        monkeypatch.setenv("MESSAGE_ENGINE_MODE", "select")
+        monkeypatch.setenv("MESSAGE_ENGINE_RETRY_PATIENCE_S", "0")
         monkeypatch.setenv("MESSAGE_LANGUAGE", "de")
         get_settings.cache_clear()
         try:

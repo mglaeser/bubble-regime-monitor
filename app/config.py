@@ -302,6 +302,20 @@ class Settings(BaseSettings):
     message_engine_enabled: bool = False
     # Reuses the existing LLM_* gateway route and model (ruling Q26); it has
     # no model/provider settings of its own by design.
+    #
+    # What the model does with a trigger (docs/MESSAGE_ENGINE.md, decision
+    # 24). `generate`: the model WRITES the message from the library's prompt
+    # and the grounded facts, and the validator judges every word of it with
+    # the prose rules on - Phase C as ruled, restored by the owner on
+    # 2026-09-20 ("generate mode, that's the whole point"). `select`: the
+    # model chooses one of the library's owner-approved phrasings and writes
+    # nothing (decision 12), kept as the conservative mode.
+    message_engine_mode: Literal["generate", "select"] = "generate"
+    # How long the DELIVERY of one message may wait for the governor to
+    # admit the next attempt after a rejection, so a one-shot trigger (the
+    # daily digest) can spend its content iterations (Q38) inside one send
+    # rather than across days. 0: one attempt per send.
+    message_engine_retry_patience_s: int = 330
 
     # The six pacing constants. Defaults are the rules as given, expressed as
     # settings so an operator can widen them without a code change (Q42).
@@ -415,6 +429,8 @@ class Settings(BaseSettings):
 #: working, which can conceal that inference was never armed.
 _TYPO_PRONE = (
     "MESSAGE_ENGINE_ENABLED",
+    "MESSAGE_ENGINE_MODE",
+    "MESSAGE_LANGUAGE",
     "IMESSAGE_ENABLED",
     "IMESSAGE_API_BASE_URL",
     "IMESSAGE_API_KEY",

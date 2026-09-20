@@ -499,7 +499,7 @@ def _clip(text: str, room: int) -> str:
     return cut.rstrip(" ,;:-")
 
 
-def _channel_limits(settings: Settings) -> dict[str, int]:
+def _channel_limits(settings: Settings) -> dict[str, Any]:
     return {
         "sms_max_len": settings.sms_max_len,
         "imessage_max_chars": settings.message_engine_imessage_max_chars,
@@ -633,7 +633,7 @@ def registry_authored(text: str) -> bool:
 
 #: The screen judges MEANING only: the channel limits are out of the way
 #: (the fit owns length), and the format class is ignored.
-_SCREEN_LIMITS = {"sms_max_len": 100_000, "imessage_max_chars": 100_000,
+_SCREEN_LIMITS: dict[str, Any] = {"sms_max_len": 100_000, "imessage_max_chars": 100_000,
                   "imessage_max_emoji": 100_000}
 
 
@@ -710,6 +710,122 @@ def selection_prompt(prompt: str) -> str:
     return _WRITING_INSTRUCTIONS_RE.sub("", prompt).rstrip()
 
 
+#: The rule of the language the model writes in (decision 24, after 23):
+#: the first house rule of every prompt.
+_LANGUAGE_RULES = {
+    "en": "Write in ENGLISH only.",
+    "de": ("Write in GERMAN (Deutsch), in full sentences a German reader expects; "
+           "ä ö ü ß are fine. Keep the monitor's own state labels exactly as they "
+           "appear in DATA (hold, trim, de-risk, IN, OUT) and the ticker symbols; "
+           "everything else in German."),
+}
+
+_DATA_HEADING_RE = re.compile(r"(?m)^(?:INJECTED )?DATA\b")
+
+
+def house_rules(lib: dict[str, Any] | None = None) -> list[str]:
+    """The rules every message shares, authored once in the library.
+
+    The owner's prompts each carried the same six rules in their own words -
+    five wordings of the numeral rule, four of the register - and drifted;
+    the owner asked for one authoring (2026-09-20). A library that carries
+    the key with anything but a list of sentences is malformed; one without
+    the key has no shared rules (the wire is guarded by the validator either
+    way; the rules are the model's briefing). The shipped library's six are
+    pinned."""
+    lib = lib or library()
+    rules = lib.get("house_rules", [])
+    if (not isinstance(rules, list)
+            or any(not isinstance(rule, str) or not rule.strip() for rule in rules)):
+        raise TypeError("'house_rules' is not a list of sentences")
+    return list(rules)
+
+
+def _with_house_rules(prompt: str, rules: list[str], language: str) -> str:
+    """The entry's prompt with the shared rules - the language first -
+    inserted ahead of its DATA section, where its own rules end."""
+    block = "HOUSE RULES (every message):\n" + "".join(
+        f"- {rule}\n" for rule in (_LANGUAGE_RULES[language], *rules))
+    match = _DATA_HEADING_RE.search(prompt)
+    if match is None:
+        return prompt.rstrip() + "\n" + block
+    return prompt[:match.start()].rstrip() + "\n" + block + prompt[match.start():]
+
+
+def _render_prompt(template: str, facts: dict[str, object]) -> str:
+    """The prompt's DATA lines with the grounded facts in their slots; a
+    missing value reads '?', which the library's prompts already tell the
+    model to omit. Only declared, sanitized facts reach here (see compose)."""
+    def _sub(match: re.Match[str]) -> str:
+        value = _slot_value(match.group(1), facts)
+        text = "?" if value is None else str(value)
+        return _CONTROL_RE.sub(" ", text)
+
+    return _SLOT_RE.sub(_sub, template)
+
+
+def writing_prompt(entry: dict[str, Any], facts: dict[str, object],
+                   channel: Channel, settings: Settings, language: str,
+                   rules: list[str] | None = None) -> str:
+    """The trigger's prompt for a model that WRITES the message (decision 24).
+
+    The owner's prompt is used as authored - role, task, its own rules, data
+    - with what the library cannot know supplied here: the house rules with
+    the operator's language first (decision 23), this channel's own contract
+    (composing is per channel, decision 17), the grounded facts in the DATA
+    slots and once more as a bare table, verbatim: the only numbers the
+    reply may contain.
+    """
+    limits = _channel_limits(settings)
+    if channel is Channel.SMS:
+        contract = (f"CHANNEL: sms - at most {limits['sms_max_len']} characters, plain text "
+                    "(GSM-7), no emoji.")
+    else:
+        contract = (f"CHANNEL: imessage - at most {limits['imessage_max_chars']} characters, "
+                    f"at most {limits['imessage_max_emoji']} emoji and only from the neutral "
+                    "set the rules allow; emoji are optional.")
+    visible = visible_facts(entry, facts)
+    grounded = "\n".join(f"  {key} = {sanitize(value) if isinstance(value, str) else value}"
+                          for key, value in sorted(visible.items())
+                          if value is not None and isinstance(value, _SCALARS))
+    body = _with_house_rules(selection_prompt(entry["prompt"]),
+                             house_rules() if rules is None else rules, language)
+    body = _render_prompt(body, visible)
+    return (
+        f"{body}\n\n"
+        f"{contract}\n"
+        f"GROUNDED FACTS - the only values the message may contain, verbatim:\n"
+        f"{grounded}\n"
+        f"OUTPUT (this instruction replaces any output format above): reply with "
+        f"exactly one line - the message body for this channel - and nothing else: "
+        f"no label, no quotes, no line break, no commentary.\n"
+    )
+
+
+_LABEL_RE = re.compile(r"^\s*(?:SMS|IMSG|IMESSAGE|MESSAGE|BODY)\s*:\s*", re.IGNORECASE)
+
+
+def written(answer: str, channel: Channel) -> str:
+    """The message body in the model's reply.
+
+    Tolerant of the two things a model trained on the library's own OUTPUT
+    format does anyway - a channel label, or both variants on one line
+    separated by '||' - and of one pair of surrounding quotes. Nothing else
+    is repaired: what remains is judged by the validator as written, and a
+    reply with a line break in it fails the format there (ruling Q29).
+    """
+    text = answer.strip()
+    if "||" in text:
+        wanted = "SMS" if channel is Channel.SMS else "IMSG"
+        parts = [part.strip() for part in text.split("||")]
+        chosen = [part for part in parts if part.upper().startswith(wanted)]
+        text = (chosen or parts)[0]
+    text = _LABEL_RE.sub("", text, count=1)
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+        text = text[1:-1]
+    return text.strip()
+
+
 def _prompt_for(entry: dict[str, Any], facts: dict[str, object],
                 channel: Channel, settings: Settings) -> str:
     """The trigger's prompt, plus the facts it may use and nothing else.
@@ -745,8 +861,9 @@ def _prompt_for(entry: dict[str, Any], facts: dict[str, object],
     #
     # Composing is per-channel, so asking for both was always redundant. The
     # parser stays as a belt-and-braces reader for a model that labels anyway.
+    body = _with_house_rules(selection_prompt(entry["prompt"]), house_rules(), language)
     return (
-        f"{selection_prompt(entry['prompt'])}\n\n"
+        f"{body}\n\n"
         f"CHANNEL: {channel.value}, at most {cap} characters.\n"
         f"GROUNDED FACTS — use these values verbatim and invent no others:\n"
         f"{grounded}\n"
@@ -821,6 +938,7 @@ def compose(*, trigger: str, channel: Channel,
         fallback, facts = _fit_render(phrasings[0], facts, channel, settings)
         if not isinstance(entry.get("prompt", ""), str):
             raise TypeError("'prompt' is not text")
+        rules = house_rules(lib)
     except Exception as exc:  # noqa: BLE001 - a malformed entry is the same class
         return _bare_event(trigger, channel, settings,
                            f"library entry is malformed: {type(exc).__name__}",
@@ -919,10 +1037,12 @@ def compose(*, trigger: str, channel: Channel,
     # visible to a concurrent worker, which is its whole purpose — and the
     # write lock is released. If the process dies during the call the row
     # stays IN_FLIGHT and `reap_stale_claims()` collects it after its TTL.
+    generate = settings.message_engine_mode == "generate"
     started = monotonic()
     try:
-        answer = complete(user=_prompt_for(entry, facts, channel, settings),
-                          deadline_s=_DEADLINE_S, settings=settings).text
+        prompt = (writing_prompt(entry, facts, channel, settings, language, rules) if generate
+                  else _prompt_for(entry, facts, channel, settings))
+        answer = complete(user=prompt, deadline_s=_DEADLINE_S, settings=settings).text
     except Exception as exc:  # noqa: BLE001 - the promise is "never raises"
         # The gateway's error boundary is deliberate: only the class name
         # crosses it, never a response body (app/llm_gateway.py). The same
@@ -953,24 +1073,35 @@ def compose(*, trigger: str, channel: Channel,
     # 300-second floor to 240 (round 34, SOTA-A defect 2). Pacing reads
     # finished_at; every path that closes a claim owes it the truth.
     finished = moment + timedelta(seconds=monotonic() - started)
-    choice = _select_phrasing(answer, phrasings)
-    if choice is None:
-        # Not a valid choice: the model wrote instead of choosing, or chose
-        # out of range. A FORMAT failure, so the governor grants the short
-        # retry, and NOTHING the model wrote is used.
-        _close(claim_id, gov.Outcome.FORMAT_REJECTED,
-               "reply was not a phrasing choice", finished)
-        return _rejected(trigger, channel, priority, fallback,
-                         "rejected: reply was not a phrasing choice", finished,
-                         settings)
-    text, _ = _fit_render(phrasings[choice], facts, channel, settings)
-    # THE SAME SUBSET THE PROMPT SHOWED. See visible_facts().
-    # prose_rules=False: this is the OWNER's approved template rendered from
-    # the facts, not text the model wrote. The channel contract and the
-    # grounding checks still run on it; the meaning-of-prose rules exist to
-    # judge model text, of which there is none on this path (decision 12).
-    result = validate(text, channel=channel, facts=visible_facts(entry, facts),
-                      prose_rules=False, **limits)
+    if generate:
+        # THE MODEL WROTE THE MESSAGE (decision 24). Every word of it is
+        # judged: the channel contract, the grounding of every numeral, and
+        # the meaning-of-prose rules of the language it was written in - the
+        # full English set, or the German set of decision 25. Nothing is
+        # repaired; a refusal is a rejection the governor paces (Q29, Q38),
+        # and the evergreen template goes out meanwhile.
+        text = written(answer, channel)
+        result = validate(text, channel=channel, facts=visible_facts(entry, facts),
+                          prose_rules=True, language=language, **limits)
+    else:
+        choice = _select_phrasing(answer, phrasings)
+        if choice is None:
+            # Not a valid choice: the model wrote instead of choosing, or chose
+            # out of range. A FORMAT failure, so the governor grants the short
+            # retry, and NOTHING the model wrote is used.
+            _close(claim_id, gov.Outcome.FORMAT_REJECTED,
+                   "reply was not a phrasing choice", finished)
+            return _rejected(trigger, channel, priority, fallback,
+                             "rejected: reply was not a phrasing choice", finished,
+                             settings)
+        text, _ = _fit_render(phrasings[choice], facts, channel, settings)
+        # THE SAME SUBSET THE PROMPT SHOWED. See visible_facts().
+        # prose_rules=False: this is the OWNER's approved template rendered from
+        # the facts, not text the model wrote. The channel contract and the
+        # grounding checks still run on it; the meaning-of-prose rules exist to
+        # judge model text, of which there is none on this path (decision 12).
+        result = validate(text, channel=channel, facts=visible_facts(entry, facts),
+                          prose_rules=False, **limits)
     if result.ok:
         # TRIGGER-SPECIFIC MANDATE. `validate()` is deliberately trigger-blind
         # — it enforces the channel contract and the house style, which are

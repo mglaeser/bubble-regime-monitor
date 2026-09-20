@@ -134,9 +134,10 @@ evergreen fallback is used and the exhaustion is reported in the next digest).
 
 ## Channel contract (rulings Q27, Q29, Q30)
 
-The model's words are English only (Q30); the WIRE language is the
-operator's `MESSAGE_LANGUAGE` since decision 23 (owner instruction
-2026-09-19, amending Q30's "English only" for the wire). SMS: <=150
+The language of every message is the operator's `MESSAGE_LANGUAGE`
+(decision 23, owner instruction 2026-09-19, amending Q30's "English only");
+since decision 24 the model writes in it, and the validator judges the text
+in that language (decision 25). SMS: <=150
 characters, GSM-7-safe, no emoji, septet-accurate counting. GSM-7 (3GPP
 23.038) is the contract, not ASCII: the German letters ä ö ü Ä Ö Ü ß are
 basic-table characters, one septet each, and never force UCS-2; a character
@@ -336,6 +337,10 @@ set, and the owner chose to stop narrowing it:
 
 ## Decision 12 — the model selects a phrasing; it does not write the wire text
 
+**OVERRULED by the owner on 2026-09-20 (decision 24): `generate` is the
+shipped mode again; selection is kept as the conservative mode.** The
+text below is the record of what was built and why.
+
 Closes the open set from decision 9 by construction. Each trigger's library
 entry carries `phrasings`: owner-approved sentence templates with fact slots,
 starting as the single evergreen fallback. The model is shown the phrasings
@@ -504,6 +509,9 @@ was an assumption, and a model obeying the earlier one would be
 format-rejected until the compose fell back (#112 round 10, SOTA-C).
 `selection_prompt()` removes the output section and the writing bullets
 before the selection instruction is given; the library is not rewritten.
+(Since decision 26 the library carries neither: the channel, language and
+output instructions are the composer's, and `selection_prompt()` is a
+no-op on the shipped prompts, kept for a library that still has them.)
 
 ## Decision 21 — the contract's fact ids fill the slots
 
@@ -553,3 +561,80 @@ admitted by proof against the registry rather than by judgement
 (decision 16). An entry without a translation for the selected language
 renders in the library's own language: the owner's words in one language
 beat no words at all, and the case is pinned.
+
+## Decision 24 — the model writes the message (owner, 2026-09-20; decision 12 overruled)
+
+The owner, read back the specification and the built engine (the coherence
+review of 2026-09-20), ruled: *"generate mode, that's the whole point, I
+want a bit explaining of what the data in the bubble gauge actually mean"*.
+Phase C as ruled (Q24–Q32) had the model write the sentence and the
+validator judge it; decision 12 narrowed that to a choice among owner
+templates, every entry shipped with exactly one, and the deployed digest
+was the deterministic template with a model call in front of it. That
+narrowing is undone:
+
+* `MESSAGE_ENGINE_MODE` (`generate` | `select`), default `generate`. In
+  generate mode `compose()` gives the model the owner's prompt for the
+  trigger with the grounded facts in its DATA slots (and once more as a
+  bare table), this channel's own contract and the language rule, and
+  reads the reply as the message body (`written()`: a label, one pair of
+  quotes and a two-variant reply are tolerated; nothing else is repaired).
+* The reply is validated with the **prose rules on**, in the language it
+  was written in (decision 25): the channel contract, the grounding of
+  every numeral, the lexicon, advice and forecast grammar, imperatives,
+  the mandate (`must_mention`). A refusal is a rejection the governor
+  paces exactly as before (FORMAT: the 30 s retry; CONTENT: the floor and
+  the cap of Q38), and the evergreen template goes out meanwhile
+  (decision 7).
+* **The delivery of one message is patient.** The composer makes one
+  attempt per invocation and counts iterations in the rows, so a trigger
+  that fires once a day spent one content iteration per DAY. The delivery
+  service now waits for the governor's next admission, up to
+  `MESSAGE_ENGINE_RETRY_PATIENCE_S` (330 s: a format retry, or one
+  content retry at the floor), and never past the cap, the breaker or the
+  budget, because it only asks the governor when. A refusal that was not
+  a rejection ends the wait at once.
+* Select mode is unchanged and pinned; the existing selection pins name
+  it explicitly.
+
+What decision 12 closed by construction — the open set of decision 9 — is
+open again on the generate path, by the owner's choice and with the
+owner's reason. The validator's 41 rounds exist for exactly this path.
+
+## Decision 25 — German is judged by a reduced rule set, for now
+
+The meaning-of-prose rules are English: the lexicon, the advice and
+forecast grammar, the imperative shapes, the not-English backstop. A
+German message would have failed the backstop every time and the operator
+would never have seen an enriched German text. The owner's default is
+German (decision 23), so German is judged by the language-agnostic rules
+(script, grounding of every numeral, spelled-out numbers, zones,
+arithmetic, format) plus a German set: a banned lexicon (probability,
+advice, certainty, forecast, crash talk), an advice/forecast grammar
+(reader-directed modals, impersonal recommendations, future or modal
+movements), the formal imperative ("Kaufen Sie"), German number words and
+compounds, and the English instruction-about-a-position pattern, which
+is inert on German words. `validate(..., language="de")` selects it; a
+language without rules is refused outright.
+
+This is the interim the owner accepted so German is enriched at all
+(option (c) of the coherence review). It is weaker than the English set:
+the German clause-opener allow-list and the full imperative grammar do
+not exist yet, and the residual of decision 9 applies to German until the
+German validator program - the shape of #105 - lands.
+
+## Decision 26 — the shared rules are authored once
+
+Each of the library's prompts carried the same six rules in its own
+words - five wordings of the numeral rule, four of the register - and
+drifted (the composer already had to strip two spellings of the same
+output bullet). On the owner's instruction (2026-09-20) the library
+carries them once as `house_rules`; each prompt keeps ROLE, TASK, its own
+rules (`RULES FOR THIS MESSAGE`) and its DATA; and the composer assembles
+`HOUSE RULES` - the language rule first - ahead of the DATA section, then
+the channel contract, the grounded facts and the output instruction, in
+both modes. The owner's sentences were kept where they carry something
+of their own; a present-but-malformed `house_rules` is a malformed
+library (the bare event); an absent key is no shared rules. The status
+line records the restructuring under the owner's signature.
+

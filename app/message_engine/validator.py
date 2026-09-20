@@ -730,6 +730,76 @@ _NUMBER_WORDS: frozenset[str] = frozenset({
 })
 
 
+# --- German (decision 25) -----------------------------------------------------
+# The meaning-of-prose rules above are English: the lexicon, the advice and
+# forecast grammar, the imperative shapes and the not-English backstop. A
+# German message the model wrote is judged by the language-agnostic rules
+# (script, grounding, numerals, zones, arithmetic, format) plus the German
+# rules below - a REDUCED set, accepted by the owner as the interim so
+# German is enriched at all, with the residual of decision 9 for German
+# until the German validator program lands. Every pattern reads the text as
+# written, lowercased (umlauts intact), with the ASCII transliterations a
+# model may use (ue, ae, oe).
+
+#: Words the German text may not carry: probability, advice, certainty,
+#: forecast, crash talk. Stems, at a word boundary.
+BANNED_LEXICON_DE: tuple[str, ...] = (
+    r"wahrscheinlich\w*", r"chancen?", r"vermutlich", r"voraussichtlich", r"wom[oö]glich",
+    r"d[uü]rfte[ns]?", r"vielleicht", r"eventuell",
+    r"kauf(?:en|t|e|st)?", r"k[aä]ufe[nrs]?", r"verkauf(?:en|t|e|st|s)?", r"verk[aä]ufe[nrs]?",
+    r"empf(?:ie|eh|oh)l\w*", r"empfehlung\w*", r"ratsam", r"anlagetipp\w*", r"bitte",
+    r"sicher(?:lich|e|er|es|en|em)?", r"garantiert\w*", r"definitiv\w*", r"zweifellos",
+    r"unausweichlich", r"unvermeidlich",
+    r"prognos\w*", r"vorhersag\w*", r"voraussag\w*", r"erwart\w*", r"kursziel\w*",
+    r"crash\w*", r"abst[uü]rz\w*", r"absturz\w*", r"platz(?:t|en)",
+)
+_BANNED_DE_RE = re.compile(r"\b(?:" + "|".join(BANNED_LEXICON_DE) + r")\b")
+
+#: Advice and forecasts in German grammar: a modal aimed at the reader, an
+#: impersonal recommendation, a future or modal movement.
+_MOVEMENT_DE = (r"steig\w*|f[aä]ll\w*|sink\w*|crash\w*|abst[uü]rz\w*|platz\w*|einbr\w*|"
+                r"kipp\w*|dreh\w*|erhol\w*|anzieh\w*|nachgeb\w*|korrigier\w*|weitergeh\w*|"
+                r"anhalt\w*|zur[uü]ckkomm\w*|verschlechter\w*|verbesser\w*|kollabier\w*|"
+                r"explodier\w*|einsetz\w*|ausweit\w*")
+_ADVICE_DE_RE = re.compile(
+    # "sollten Sie", "man sollte", "Anleger müssen", "Sie könnten"
+    r"\b(?:sollte[nst]?|m[uü]ss(?:en|t)|muss|musst|k[oö]nnte[nst]?|k[oö]nn(?:en|t))\s+"
+    r"(?:man|sie|du|ihr|anleger\w*|investor\w*|leser\w*)\b"
+    r"|\b(?:man|sie|du|anleger\w*|investor\w*|leser\w*)\s+"
+    r"(?:sollte[nst]?|m[uü]ss(?:en|t)|muss|musst|k[oö]nnte[nst]?)\b"
+    # "es empfiehlt sich", "es lohnt sich", "ist ratsam", "an der Zeit"
+    r"|\b(?:empfiehlt|lohnt)\s+(?:es\s+)?sich\b"
+    r"|\b(?:ist|w[aä]re)\s+(?:es\s+)?(?:ratsam|empfehlenswert|zeit|an\s+der\s+zeit|h[oö]chste\s+zeit)\b"
+    # "jetzt verkaufen", "nun absichern"
+    r"|\b(?:jetzt|nun|sofort)\s+(?:kaufen|verkaufen|aussteigen|einsteigen|absichern|"
+    r"reduzieren|umschichten|nachkaufen|halten|abbauen|aufstocken)\b"
+    # "wird fallen", "dürften steigen", "kann einbrechen" - a forecast
+    r"|\b(?:wird|werden|d[uü]rfte[n]?|k[oö]nnte[n]?|kann|k[oö]nnen|soll|sollen|muss|m[uü]ssen|mag)\s+"
+    r"(?:(?!sie\b)[a-zäöüß]+\s+){0,3}?(?:" + _MOVEMENT_DE + r")\b"
+)
+#: The formal imperative: a capitalised -en verb followed by "Sie" at the
+#: head of a clause ("Kaufen Sie", "Halten Sie", "Bleiben Sie ruhig").
+_IMPERATIVE_DE_RE = re.compile(r"(?:^|[.!?;:,]\s*|\s-\s)([A-ZÄÖÜ][a-zäöüß]+(?:en|n))\s+Sie\b")
+
+#: German number words: a spelled-out number bypasses the grounding of
+#: numerals exactly as an English one does. Articles (ein, eine) are not
+#: numbers here.
+_NUMBER_WORDS_DE: frozenset[str] = frozenset({
+    "null", "eins", "zwei", "drei", "vier", "fünf", "fuenf", "sechs", "sieben", "acht", "neun",
+    "zehn", "elf", "zwölf", "zwoelf", "dreizehn", "vierzehn", "fünfzehn", "fuenfzehn", "sechzehn",
+    "siebzehn", "achtzehn", "neunzehn", "zwanzig", "dreißig", "dreissig", "vierzig", "fünfzig",
+    "fuenfzig", "sechzig", "siebzig", "achtzig", "neunzig", "hundert", "tausend", "million",
+    "millionen", "milliarde", "milliarden", "dutzend", "hälfte", "haelfte", "drittel", "viertel",
+})
+_COMPOUND_NUMBER_DE_RE = re.compile(
+    r"(?:ein|zwei|drei|vier|fünf|fuenf|sechs|sieben|acht|neun|zehn|elf|zwölf|zwoelf)"
+    r"\w{0,3}(?:und\w+|zig|ßig|ssig|hundert|tausend)\w*")
+
+#: Letters German needs that English does not: the fold reduces the umlauts,
+#: ß has no decomposition and is admitted as itself.
+_GERMAN_LETTERS = frozenset("ßẞ")
+
+
 #: The only numerator/denominator pairings that read as a score rather than
 #: a quotient. Taken from the daily-digest template itself:
 #: "bubblegauge {median}/{score_scale_max} … Flags {red_flag_count}/{red_flag_total}".
@@ -1187,8 +1257,19 @@ def _reads_as_state(text: str, match: re.Match[str]) -> bool:
 def validate(text: str, *, channel: Channel, facts: dict[str, object],
              sms_max_len: int, imessage_max_chars: int,
              imessage_max_emoji: int,
-             prose_rules: bool = True) -> ValidationResult:
-    """The whole contract, in the order that gives the most useful reason."""
+             prose_rules: bool = True,
+             language: str = "en") -> ValidationResult:
+    """The whole contract, in the order that gives the most useful reason.
+
+    `language` is the language the text was WRITTEN in and selects which
+    meaning-of-prose rules judge it: English (the full set) or German (the
+    reduced set, decision 25). The language-agnostic rules - the channel
+    contract, grounding, numerals, zones, arithmetic - are the same for both.
+    """
+    if language not in ("en", "de"):
+        return ValidationResult(False, FailureClass.CONTENT,
+                                f"no prose rules for language {language!r}")
+    german = language == "de"
     # THE CHANNEL IS AN ENUM, however it was spelt. The gate compared by
     # identity, so the StrEnum's own value "sms" fell into the iMessage
     # branch and an SMS could carry emoji, non-GSM-7 text and the wrong
@@ -1344,6 +1425,13 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
     # list judge the text as written; everything about MEANING judges this.
     judged = _fold_latin(text)
     judged_lower = judged.lower()
+    if german:
+        for match in re.finditer(r"[a-zäöüß]+", lowered):
+            word = match.group(0)
+            if word in _NUMBER_WORDS_DE or _COMPOUND_NUMBER_DE_RE.fullmatch(word):
+                return ValidationResult(
+                    False, FailureClass.CONTENT,
+                    f"spelled-out number {word!r}: numerals must come from the facts")
     for match in re.finditer(r"[a-z]+(?:-[a-z]+)?", judged_lower):
         word = match.group(0)
         head = word.split("-")[0]
@@ -1600,10 +1688,35 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
             if ord(ch) > 0x024F:
                 return ValidationResult(
                     False, FailureClass.CONTENT,
-                    f"non-Latin script U+{ord(ch):04X}: messages are English")
+                    f"non-Latin script U+{ord(ch):04X}: messages are {'German' if german else 'English'}")
+            if german and ch in _GERMAN_LETTERS:
+                continue
             return ValidationResult(
                 False, FailureClass.CONTENT,
-                f"letter U+{ord(ch):04X} does not fold to English")
+                f"letter U+{ord(ch):04X} does not fold to {'German' if german else 'English'}")
+        if german:
+            # THE GERMAN RULES (decision 25). The English grammar below would
+            # misread German either way, so it is not consulted; the lexicon
+            # above still was, since its words are not German words.
+            banned = _BANNED_DE_RE.search(lowered)
+            if banned:
+                return ValidationResult(False, FailureClass.CONTENT,
+                                        f"banned lexicon (de): {banned.group(0)!r}")
+            if _ADVICE_DE_RE.search(lowered):
+                return ValidationResult(False, FailureClass.CONTENT,
+                                        "reads as advice or a forecast, not an observation (de)")
+            ordered = _IMPERATIVE_DE_RE.search(text)
+            if ordered:
+                return ValidationResult(False, FailureClass.CONTENT,
+                                        f"{ordered.group(1)!r} Sie: reads as an instruction (de)")
+            # An English instruction about a position smuggled into a German
+            # message is still an instruction; the pattern is English verbs
+            # and objects, inert on German words.
+            if _IMPERATIVE_OBJECT_RE.search(judged):
+                return ValidationResult(False, FailureClass.CONTENT,
+                                        "reads as an instruction about a position, "
+                                        "not an observation")
+    if prose_rules and not german:
         foreign = {w for w in re.findall(r"[a-zà-ÿ]+", lowered)} & _NON_ENGLISH_WORDS
         if foreign:
             return ValidationResult(False, FailureClass.CONTENT,

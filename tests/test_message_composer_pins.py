@@ -44,6 +44,7 @@ LIMITS = {"sms_max_len": 150, "imessage_max_chars": 200, "imessage_max_emoji": 2
 def _settings(**overrides) -> Settings:
     base = {
         "message_engine_enabled": True,
+        "message_engine_mode": "select",   # these are the selection pins (decision 12)
         "message_engine_min_interval_s": 300,
         "message_engine_format_retry_s": 30,
         "message_engine_max_content_iterations": 3,

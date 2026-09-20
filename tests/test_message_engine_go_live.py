@@ -40,6 +40,8 @@ def imessage_env(monkeypatch):
 @pytest.fixture
 def engine_on(monkeypatch, imessage_env):
     monkeypatch.setenv("MESSAGE_ENGINE_ENABLED", "true")
+    monkeypatch.setenv("MESSAGE_ENGINE_MODE", "select")           # the selection pins (decision 12)
+    monkeypatch.setenv("MESSAGE_ENGINE_RETRY_PATIENCE_S", "0")    # one attempt per send here
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
@@ -170,6 +172,8 @@ class TestEngineOn:
 
     def test_no_transport_configured_is_skipped_before_composing(self, monkeypatch):
         monkeypatch.setenv("MESSAGE_ENGINE_ENABLED", "true")
+        monkeypatch.setenv("MESSAGE_ENGINE_MODE", "select")
+        monkeypatch.setenv("MESSAGE_ENGINE_RETRY_PATIENCE_S", "0")
         monkeypatch.setenv("IMESSAGE_ENABLED", "false")
         monkeypatch.setenv("SMS_ENABLED", "false")
         get_settings.cache_clear()
