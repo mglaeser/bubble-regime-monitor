@@ -68,7 +68,8 @@ def _compose(monkeypatch, reply, *, language="en", channel=Channel.IMESSAGE, tri
     return out, prompts
 
 
-LATER = datetime.now(UTC) + timedelta(seconds=600)   # past the pacing floor of a first compose
+T0 = datetime(2026, 9, 21, 7, 0, tzinfo=UTC)
+LATER = T0 + timedelta(seconds=600)   # past the pacing floor of a compose made at T0
 
 
 class TestTheMode:
@@ -191,7 +192,7 @@ class TestTheModelWrites:
     def test_the_mandate_is_read_back_in_generate_mode_too(self, monkeypatch):
         facts = {"F_BAND_BASE": "trim", "F_NEXT_CHECK": "14:00"}
         out, _ = _compose(monkeypatch, "bubblegauge: the underlying level is now trim. Next run 14:00 UTC.",
-                          trigger="BASE_BAND_MOVED", facts=facts)
+                          trigger="BASE_BAND_MOVED", facts=facts, now=T0)
         assert out.source == "fallback" and "incomplete" in (out.reason or "")
         out, _ = _compose(monkeypatch, "bubblegauge: data is incomplete, the shown level is paused; "
                                        "the underlying level is now trim. Next run 14:00 UTC.",
@@ -242,7 +243,7 @@ class TestTheModelWritesGerman:
     def test_the_german_mandate(self, monkeypatch):
         facts = {"F_BAND_BASE": "trim", "F_NEXT_CHECK": "14:00"}
         out, _ = _compose(monkeypatch, "bubblegauge: zugrunde liegende Stufe jetzt trim. Nächster Lauf 14:00 UTC.",
-                          trigger="BASE_BAND_MOVED", facts=facts, language="de")
+                          trigger="BASE_BAND_MOVED", facts=facts, language="de", now=T0)
         assert out.source == "fallback" and "requires" in (out.reason or "")
         out, _ = _compose(monkeypatch, "bubblegauge: Daten unvollständig, angezeigte Stufe pausiert; "
                                        "zugrunde liegende Stufe jetzt trim. Nächster Lauf 14:00 UTC.",
