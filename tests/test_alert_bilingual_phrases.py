@@ -8,8 +8,8 @@ from pathlib import Path
 
 import pytest
 
+from app.alerts.honesty import honesty_lint
 from app.alerts.phrase_registry import PhraseSetInvalid, validate_phrase_set
-from app.alerts.renderer import honesty_lint
 from app.config import get_settings
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -341,6 +341,49 @@ class TestRoundSixOn119:
         with pytest.raises(ValidationError):
             other_field_fails()
         assert validate_phrase_set(V35.read_text(encoding="utf-8")).language == "de"
+
+
+class TestRoundSevenOn119:
+    """Every language of every fragment is linted when the set is validated,
+    so a translation the operator has not switched to yet cannot be promoted
+    with a word that would make the renderer refuse it (#119 round 7,
+    SOTA-A). Linting the shipped sets found the honest disclaimer itself
+    tripping the lint since v3.2; denying the noun is now the one honest
+    use of it."""
+
+    def test_the_ledger_scenario_a_darkening_translation_is_refused(self):
+        with pytest.raises(PhraseSetInvalid, match=r"headline 'H' \[en\]: contains forbidden vocabulary 'Sell'"):
+            validate_phrase_set(_tiny("Stufe {F_X}.", "Sell at {F_X}.", languages=["de", "en"]), language="de")
+
+    def test_the_default_language_is_linted_too(self):
+        with pytest.raises(PhraseSetInvalid, match=r"\[de\]: contains forbidden vocabulary 'kaufen'"):
+            validate_phrase_set(_tiny("Jetzt kaufen: {F_X}."))
+
+    def test_every_fragment_of_every_shipped_set_passes_in_every_language(self):
+        for path in sorted((ROOT / "config").glob("alert_phrases.v*.json")):
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            for section in ("headlines", "phrases", "next_check", "caveats"):
+                for code, entry in (raw.get(section) or {}).items():
+                    texts = entry["text"] if isinstance(entry["text"], dict) else {"de": entry["text"]}
+                    for lang, text in texts.items():
+                        assert honesty_lint(text) is None, (path.name, section, code, lang)
+
+    @pytest.mark.parametrize("body, offends", [
+        ("Wert ist keine Wahrscheinlichkeit.", False),           # the shipped caveat, since v3.2
+        ("Value is not a probability.", False),
+        ("The score carries no probability.", False),
+        ("Wahrscheinlichkeit 80%.", True),
+        ("Keine Wahrscheinlichkeit, aber wahrscheinlich.", True),  # the stem outside the idiom
+        ("Not a probability, but probably.", True),
+        ("keine Wahrscheinlichkeit. Kaufen.", True),
+        ("Sicher keine Wahrscheinlichkeit.", True)])
+    def test_denying_the_noun_is_the_one_honest_use_of_it(self, body, offends):
+        assert (honesty_lint(body) is not None) is offends
+
+    def test_the_renderer_and_the_registry_share_one_lint(self):
+        from app.alerts import honesty, phrase_registry, renderer
+
+        assert renderer.honesty_lint is honesty.honesty_lint is phrase_registry.honesty_lint
 
 
 class TestTheSettingReachesTheRenderPath:

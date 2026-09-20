@@ -28,6 +28,7 @@ from typing import Any
 from app.alerts.canonical import canonical_json, sha256_hex, sha256_of
 from app.alerts.errors import MessageLanguageInvalid, PhraseSetInvalid
 from app.alerts.gsm7 import SINGLE_SMS_SEPTETS, first_non_gsm7, septets
+from app.alerts.honesty import honesty_lint
 
 PHRASE_VALIDATOR_VERSION = "1"
 
@@ -153,6 +154,17 @@ def _load_fragments(
                 problems.append(
                     f"{kind} {code!r} [{lang}]: character {offender[0]!r} is not GSM-7 — the "
                     "message would become UCS-2 and no longer fit one SMS"
+                )
+                bad = True
+                continue
+            # Every language, not only the active one: the operator may
+            # switch by setting alone, and the renderer's lint would then
+            # refuse every message this fragment is part of (#119 round 7).
+            forbidden = honesty_lint(text)
+            if forbidden is not None:
+                problems.append(
+                    f"{kind} {code!r} [{lang}]: contains forbidden vocabulary {forbidden!r} — "
+                    "the score is not a probability and this service gives no advice"
                 )
                 bad = True
                 continue

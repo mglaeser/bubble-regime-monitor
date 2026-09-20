@@ -20,6 +20,7 @@ from app.alerts.enums import (
     SuppressionReason,
 )
 from app.alerts.errors import RenderRejected
+from app.alerts.honesty import honesty_lint
 from app.alerts.phrase_registry import validate_phrase_set
 from app.alerts.planner import (
     NotificationMemory,
@@ -29,7 +30,7 @@ from app.alerts.planner import (
 )
 from app.alerts.quiet_hours import release_time_for, would_be_held
 from app.alerts.render_context import MemberContext, RenderContext, build_member_context
-from app.alerts.renderer import honesty_lint, render, render_with_cascade
+from app.alerts.renderer import render, render_with_cascade
 from app.alerts.rulespec import RuleSpec
 from app.alerts.sender import NullSender, SipgateSender, classify_response
 from app.alerts.state_machine import StateDecision

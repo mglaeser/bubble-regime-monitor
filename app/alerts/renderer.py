@@ -24,29 +24,18 @@ Validation runs before a single character reaches the wire:
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from typing import Any
 
 from app.alerts.enums import RenderSource
 from app.alerts.errors import RenderRejected
 from app.alerts.gsm7 import SINGLE_SMS_SEPTETS, first_non_gsm7, septets
+from app.alerts.honesty import honesty_lint
 from app.alerts.phrase_registry import FragmentSpec, ValidatedPhraseSet
 from app.alerts.render_context import MemberContext, RenderContext
 
 JOIN = " "
 MAX_NAMED_MEMBERS = 3
-
-#: Vocabulary an alert must never contain. The score is not a probability, the
-#: service gives no advice, and nothing here is certain.
-#: The honesty lint runs on the rendered body in EVERY language the phrase
-#: set carries (v3.5 is German and English), so both vocabularies are here.
-_FORBIDDEN = re.compile(
-    r"(?i)\b(wahrscheinlich\w*|sicher\b|garantiert\w*|kaufen|verkaufen|empfehl\w*|"
-    r"crash\w*|prognos\w*|"
-    r"probab\w*|certain\w*|guarantee\w*|buy\b|buying|sell\b|sells|selling|"
-    r"recommend\w*|forecast\w*|predict\w*)"
-)
 
 
 @dataclass
@@ -60,12 +49,6 @@ class RenderResult:
     dropped_codes: list[str] = field(default_factory=list)
     represented_member_ids: list[str] = field(default_factory=list)
     validation: dict[str, Any] = field(default_factory=dict)
-
-
-def honesty_lint(body: str) -> str | None:
-    """The forbidden phrase found, or None."""
-    match = _FORBIDDEN.search(body)
-    return match.group(0) if match else None
 
 
 def _fill(fragment: FragmentSpec, member: MemberContext) -> str:
