@@ -713,7 +713,18 @@ def selection_prompt(prompt: str) -> str:
 #: The rule of the language the model writes in (decision 24, after 23):
 #: the first house rule of every prompt.
 _LANGUAGE_RULES = {
-    "en": "Write in ENGLISH only.",
+    # The English validator holds a short clause to an allow-list of openers
+    # (decision 11): "Monitor: 59 out of 100" and "Rough range: 57-61" read
+    # as instructions to it. The first real English digests fell back on
+    # exactly that (the gateway probe before the PR), so the rule says how
+    # an English message is shaped.
+    "en": ("Write in ENGLISH only, as full declarative sentences: begin the message "
+           "with the word bubblegauge (lowercase, one word) and begin every further "
+           "sentence with its subject (The score ..., The band ..., The range ..., "
+           "Flags ..., SPY ...). Never write 'Label: value' fragments such as "
+           "'Monitor: 59' or 'Range: 57-61', and never open a sentence with a label. "
+           "Name the caution band with the label AFTER the word band - 'band trim', "
+           "'the band is trim', 'moved to trim' - never 'the trim band' or 'trim mode'."),
     "de": ("Write in GERMAN (Deutsch), in full sentences a German reader expects; "
            "ä ö ü ß are fine. Keep the monitor's own state labels exactly as they "
            "appear in DATA (hold, trim, de-risk, IN, OUT) and the ticker symbols; "
@@ -777,13 +788,19 @@ def writing_prompt(entry: dict[str, Any], facts: dict[str, object],
     reply may contain.
     """
     limits = _channel_limits(settings)
+    # Typographic punctuation is refused, not repaired (Q29): the first real
+    # English digest wrote "59 out of 100 \u2014 trim" and fell back on the em
+    # dash (the gateway probe before the PR), so the contract says so.
+    punctuation = ("Punctuation: plain ASCII only - the hyphen '-' for ranges and dashes, "
+                   "straight quotes; never an en dash, em dash, ellipsis character or "
+                   "typographic quotes.")
     if channel is Channel.SMS:
         contract = (f"CHANNEL: sms - at most {limits['sms_max_len']} characters, plain text "
-                    "(GSM-7), no emoji.")
+                    f"(GSM-7), no emoji. {punctuation}")
     else:
         contract = (f"CHANNEL: imessage - at most {limits['imessage_max_chars']} characters, "
                     f"at most {limits['imessage_max_emoji']} emoji and only from the neutral "
-                    "set the rules allow; emoji are optional.")
+                    f"set the rules allow; emoji are optional. {punctuation}")
     visible = visible_facts(entry, facts)
     grounded = "\n".join(f"  {key} = {sanitize(value) if isinstance(value, str) else value}"
                           for key, value in sorted(visible.items())

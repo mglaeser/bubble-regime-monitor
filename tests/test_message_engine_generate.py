@@ -125,7 +125,7 @@ class TestTheWritingPrompt:
         out, prompts = _compose(monkeypatch, GOOD_EN)
         prompt = prompts[0]
         assert prompt.index("TASK:") < prompt.index("HOUSE RULES (every message):") < prompt.index("DATA:")
-        assert "- Write in ENGLISH only." in prompt
+        assert "- Write in ENGLISH only, as full declarative sentences" in prompt
         assert "headline score (median of the model runs): 59 out of 100" in prompt     # the slots are filled
         assert "{median}" not in prompt
         assert "GROUNDED FACTS - the only values the message may contain, verbatim:" in prompt
@@ -137,6 +137,7 @@ class TestTheWritingPrompt:
     def test_the_sms_contract_and_the_german_rule(self, monkeypatch):
         out, prompts = _compose(monkeypatch, GOOD_DE, language="de", channel=Channel.SMS)
         assert "CHANNEL: sms - at most 150 characters, plain text (GSM-7), no emoji." in prompts[0]
+        assert "never an en dash, em dash" in prompts[0]
         assert "- Write in GERMAN (Deutsch)" in prompts[0] and "ENGLISH only" not in prompts[0]
 
     def test_a_missing_fact_reads_as_a_question_mark_and_undeclared_facts_stay_out(self, monkeypatch):
@@ -225,11 +226,17 @@ class TestTheModelWritesGerman:
         assert out.text == "bubblegauge 59/100 trim. Spanne 57-61. SPY IN, QQQ IN. Flaggen 1/4."
         assert reason in (out.reason or ""), out.reason
 
-    def test_the_english_grammar_is_not_consulted_on_german_text(self):
-        # "Der Wert hält" would read to the English clause heuristic as an
-        # imperative opener; German is judged by the German rules only.
-        result = validate("bubblegauge 59/100, Stufe trim. Der Wert hält sich in der Spanne 57-61.",
-                          channel=Channel.IMESSAGE, facts=DIGEST_FACTS, prose_rules=True, language="de", **LIMITS)
+    @pytest.mark.parametrize("text", [
+        "bubblegauge 59/100, Stufe trim. Der Wert hält sich in der Spanne 57-61.",
+        # German puts the verb second: the English position-instruction shape
+        # refused this on the first real digest (the gateway probe).
+        "59 von 100 ist der aktuelle Wert im Band trim. Haupttreiber sind hohe Bewertungen. "
+        "Die grobe Spanne liegt bei 57-61, die Warnsignale bei 1 von 4. SPY und QQQ sind langfristig IN.",
+        "bubblegauge 59/100, Stufe trim. Langfristig sind SPY und QQQ IN. Spanne 57-61.",
+    ])
+    def test_the_english_grammar_is_not_consulted_on_german_text(self, text):
+        result = validate(text, channel=Channel.IMESSAGE, facts=DIGEST_FACTS, prose_rules=True,
+                          language="de", **LIMITS)
         assert result.ok, result.reason
 
     def test_the_german_mandate(self, monkeypatch):

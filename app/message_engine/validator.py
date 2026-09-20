@@ -1709,13 +1709,13 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
             if ordered:
                 return ValidationResult(False, FailureClass.CONTENT,
                                         f"{ordered.group(1)!r} Sie: reads as an instruction (de)")
-            # An English instruction about a position smuggled into a German
-            # message is still an instruction; the pattern is English verbs
-            # and objects, inert on German words.
-            if _IMPERATIVE_OBJECT_RE.search(judged):
-                return ValidationResult(False, FailureClass.CONTENT,
-                                        "reads as an instruction about a position, "
-                                        "not an observation")
+            # NOT the English shape rules. German puts its verb second, so
+            # "Langfristig sind SPY und QQQ IN." has the shape the English
+            # position-instruction pattern keys on (a word, then a position
+            # noun, then the end) and was refused as an instruction on the
+            # first real digest (the gateway probe before the PR). An
+            # English instruction smuggled into a German message still meets
+            # the English lexicon above (buy, sell, ...).
     if prose_rules and not german:
         foreign = {w for w in re.findall(r"[a-zà-ÿ]+", lowered)} & _NON_ENGLISH_WORDS
         if foreign:
