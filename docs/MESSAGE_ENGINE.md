@@ -134,8 +134,13 @@ evergreen fallback is used and the exhaustion is reported in the next digest).
 
 ## Channel contract (rulings Q27, Q29, Q30)
 
-English only. SMS: <=150 characters, GSM-7-safe, no emoji, septet-accurate
-counting. iMessage: <=200 code points, at most 2 emoji from the allowlist.
+The model's words are English only (Q30); the WIRE language is the
+operator's `MESSAGE_LANGUAGE` since decision 23 (owner instruction
+2026-09-19, amending Q30's "English only" for the wire). SMS: <=150
+characters, GSM-7-safe, no emoji, septet-accurate counting. GSM-7 (3GPP
+23.038) is the contract, not ASCII: the German letters ä ö ü Ä Ö Ü ß are
+basic-table characters, one septet each, and never force UCS-2; a character
+outside the table is refused in either language. iMessage: <=200 code points, at most 2 emoji from the allowlist.
 Rejected output is retried, never transliterated. Numerals must appear
 verbatim from the grounded facts; the banned lexicon (probability, chance,
 likely, buy, sell, guaranteed, ...) is rejected — with band names such as
@@ -520,3 +525,31 @@ call `compose()` outside any write transaction (decision 13) and hand the
 `Composed` to `gate.emit`; rewrite the caller pin to name the dispatcher;
 and land the owner's signature on the library (decision 14). Until then
 the engine is a library, reviewed as one.
+
+## Decision 23 — one language switch for both paths
+
+The operator asked for every message in either English or German, chosen
+by setting. `MESSAGE_LANGUAGE` (`en` | `de`) is that switch, and it is one
+setting because the two paths must never disagree in a single day's
+messages. The alert phrase set carries both languages since v3.5 (see
+docs/ALERT_SYSTEM.md: one promotion admits the whole reviewed set, every
+language held to the worst-case fit). The prompt library carries, per
+entry, `translations.<lang>` with the same keys as the entry - `fallback`,
+optional `phrasings`, `must_mention` where the entry has one - and the
+composer selects that language's phrasings, checks the mandate in that
+language, and tells the model which language the phrasings are written
+in. The prompts stay English: the model selects, it does not write, so
+the language of its instructions and the language of the wire are
+independent by construction (decision 12).
+
+What does not change with the language: the validator. Its meaning-of-
+prose rules are English and they judge the MODEL's words, which never
+reach the wire; the German fallbacks are the owner's templates, held to
+the same runtime contract as the English ones (grounding, format, the
+channel caps) and reviewed in the PR that added them, exactly as the
+English were signed. A fact that is a phrase is still screened by the
+English rules, which is why registry text - now in either language - is
+admitted by proof against the registry rather than by judgement
+(decision 16). An entry without a translation for the selected language
+renders in the library's own language: the owner's words in one language
+beat no words at all, and the case is pinned.
