@@ -149,3 +149,15 @@ class TestTheSettingReachesTheRenderPath:
             assert loaded.phrase_set.headlines["BAND_TO_TRIM"].text.startswith(expected)
         finally:
             get_settings.cache_clear()
+
+
+class TestReleasedArtifactsStayProtected:
+    def test_every_released_phrase_set_stays_in_the_separation_check(self):
+        # v3.4 is released and frozen - hosts hold its bytes and its version is
+        # a registry primary key - so adding v3.5 must not drop it from cover
+        # (#119 round 1, SOTA-A; the file's own comment warned about exactly this).
+        text = (ROOT / "scripts" / "regime" / "separation_check.py").read_text(encoding="utf-8")
+        for version in ("v3.2", "v3.3", "v3.4", "v3.5"):
+            assert f"config/alert_phrases.{version}.json" in text, version
+        owners = (ROOT / ".github" / "CODEOWNERS").read_text(encoding="utf-8")
+        assert "/config/alert_phrases.v3.4.json" in owners and "/config/alert_phrases.v3.5.json" in owners
