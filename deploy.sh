@@ -155,9 +155,15 @@ $ENGINE image exists "$DEPLOY_TAG" 2>/dev/null || DEPLOY_TAG="$IMAGE:latest"
 # a legacy create_all database. A migration failure aborts the deploy BEFORE
 # the new container is started, so a bad migration never takes the service down.
 banner "Running database migrations (alembic upgrade head)"
+# Every container is started with fd 9 CLOSED (9>&-). The auto-deploy watcher
+# holds its serialisation lock on fd 9 and lets this script inherit it, so the
+# lock lives as long as the deploy; a container inheriting it would hold the
+# lock for its whole life, which is how merges silently stopped reaching
+# production on 2026-08-30 (deploy/deploy-watch.sh). Run by hand, fd 9 is not
+# open and closing it is a no-op.
 $ENGINE run --rm --env-file "$ENV_FILE" \
   -v "$(realpath "$DATA_DIR")":/data"$VOL_SUFFIX" \
-  "$DEPLOY_TAG" python -m app.db_migrate
+  "$DEPLOY_TAG" python -m app.db_migrate 9>&-
 
 # ---- 4. (re)create the container ----------------------------------------
 banner "(Re)creating container $CONTAINER"
@@ -173,7 +179,7 @@ $ENGINE run -d --name "$CONTAINER" \
   -v "$(realpath "$DATA_DIR")":/data"$VOL_SUFFIX" \
   -p "$PORT":8000 \
   --restart unless-stopped \
-  "$DEPLOY_TAG" >/dev/null
+  "$DEPLOY_TAG" >/dev/null 9>&-
 echo "    started from $DEPLOY_TAG"
 
 # ---- 5. health check + auto-rollback ------------------------------------
@@ -214,7 +220,7 @@ if [[ -n "$PREV_IMAGE_ID" ]]; then
     --cap-drop=ALL --security-opt no-new-privileges \
     -v "$(realpath "$DATA_DIR")":/data"$VOL_SUFFIX" \
     -p "$PORT":8000 --restart unless-stopped \
-    "$PREV_IMAGE_ID" >/dev/null && echo "    rolled back."
+    "$PREV_IMAGE_ID" >/dev/null 9>&- && echo "    rolled back."
   die "deploy failed health check; rolled back to the previous image."
 fi
 die "deploy failed health check and no previous image was recorded to roll back to."

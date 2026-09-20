@@ -263,3 +263,84 @@ def test_admin_deploy_not_configured_without_branch(isolated_db, monkeypatch):
     get_settings.cache_clear()
     assert r.status_code == 202
     assert r.json()["data"]["status"] == "not_configured"
+
+
+class TestTheWatcherLockStaysWithTheWatcher:
+    """2026-08-30 -> 2026-09-11: the lock taken on fd 9 was inherited by the
+    container's helpers, so it outlived every deploy; later triggers skipped
+    without consuming the file, the path unit re-fired, and systemd latched
+    start-limit-hit. Merges silently stopped reaching production. The lock
+    now lives exactly as long as the deploy: the watcher holds fd 9,
+    deploy.sh inherits it, and every container is started with it closed."""
+
+    # Imported here rather than at the top: the secret-scan baseline pins
+    # this file's line numbers, and a new top-level import would move them.
+    from pathlib import Path as _Path
+
+    WATCH = _Path(__file__).resolve().parents[1] / "deploy" / "deploy-watch.sh"
+    DEPLOY = _Path(__file__).resolve().parents[1] / "deploy.sh"
+    UNIT = _Path(__file__).resolve().parents[1] / "deploy" / "systemd" / "bubblegauge-deploy.service"
+
+    @staticmethod
+    def _code(path):
+        return "\n".join(line for line in path.read_text().splitlines() if not line.lstrip().startswith("#"))
+
+    def test_the_watcher_holds_the_lock_on_fd_nine_and_deploy_inherits_it(self):
+        code = self._code(self.WATCH)
+        assert 'exec 9>"$LOCK_FILE"' in code and 'flock -w "$LOCK_WAIT_S" 9' in code
+        assert "flock -n 9" not in code and "9>&-" not in code
+        assert "--locked" not in code and "flock -o" not in code   # no sentinel, no re-exec (#116 round 5)
+
+    def test_every_container_is_started_with_fd_nine_closed(self):
+        import re
+
+        code = self._code(self.DEPLOY)
+        runs = re.findall(r"\$ENGINE run[^\n]*\\\n(?:[^\n]*\\\n)*[^\n]*", code)
+        assert len(runs) == 3, runs
+        for run in runs:
+            assert "9>&-" in run, run
+        # the rollback closes the fd on the container, not on the echo after it
+        assert '>/dev/null 9>&- && echo "    rolled back."' in code
+
+    def test_a_second_trigger_waits_for_the_lock_instead_of_skipping(self):
+        assert 'flock -w "$LOCK_WAIT_S"' in self._code(self.WATCH)
+
+    def test_repeated_activation_is_bounded_not_unlimited(self):
+        unit = self.UNIT.read_text()
+        assert "StartLimitIntervalSec=600" in unit and "StartLimitBurst=60" in unit
+        assert "StartLimitIntervalSec=0" not in unit
+        burst = int(unit.split("StartLimitBurst=")[1].split()[0])
+        assert burst >= 30
+
+    def test_a_failure_before_the_trigger_is_consumed_is_paced(self):
+        text = self.WATCH.read_text()
+        assert "PACE_FAILURE_S" in text and 'if ! exec 9>"$LOCK_FILE"' in text
+
+    def test_the_lock_survives_the_watcher_being_killed(self, tmp_path):
+        # The #116 round-3 scenario, executed: the watcher dies, deploy.sh
+        # (which inherited fd 9) goes on, and a second flock must WAIT.
+        import os
+        import signal
+        import subprocess
+        import time
+
+        lock = tmp_path / "lock"
+        script = tmp_path / "watcher.sh"
+        script.write_text(f'#!/bin/bash\nexec 9>"{lock}"\nflock -w 5 9\nbash -c "sleep 3"\ntrue\n')
+        script.chmod(0o755)
+        outer = subprocess.Popen([str(script)])
+        time.sleep(0.4)
+        os.kill(outer.pid, signal.SIGTERM)
+        outer.wait(timeout=5)
+        assert subprocess.run(["flock", "-n", str(lock), "true"]).returncode != 0, "released when the watcher died"
+        time.sleep(3.2)
+        assert subprocess.run(["flock", "-n", str(lock), "true"]).returncode == 0
+
+    def test_a_container_started_with_fd_nine_closed_inherits_no_lock(self, tmp_path):
+        import subprocess
+
+        lock = tmp_path / "lock"
+        # Single quotes on the inner command: $$ must be the CHILD's pid.
+        script = f'exec 9>"{lock}"; flock 9; bash -c \'[ -e /proc/$$/fd/9 ] && echo open || echo closed\' 9>&-'
+        out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=True).stdout.strip()
+        assert out == "closed"
