@@ -37,6 +37,7 @@ from app.alerts.artifacts import REPO_PHRASES
 from app.alerts.phrase_registry import JOIN, validate_phrase_set
 from app.alerts.render_context import FACT_SOURCES
 from app.config import Settings, get_settings
+from app.engine.snapshot_contract import ACTION_BANDS, ACTION_STATES
 from app.llm_gateway import (
     complete,
 )
@@ -538,19 +539,46 @@ def _canonical(name: str) -> str:
 
 _REGISTRY_MATCHERS: dict[str, re.Pattern[str]] | None = None
 
+#: What the alert renderer can put into a slot, per fact: its TYPED domain.
+#: The renderer copies the typed band enums, the rule's asset label and the
+#: next check as HH:MM, and formats every other fact as a number (digits, a
+#: sign, a decimal point). A slot used to admit any non-blank run up to the
+#: reviewed width, so the F_ASSET slot proved "Execution armed: SELL OUT,
+#: median 99." as registry text (#119 round 4, SOTA-A, executed). A fact
+#: without an entry here is a number: the strictest domain, so a new fact
+#: fails closed rather than open.
+_NUMERAL = r"[-+]?\d+(?:\.\d+)?"
+_STATE = "|".join(re.escape(state) for state in ACTION_STATES)
+_BAND = "|".join(re.escape(band) for band in ACTION_BANDS)
+#: The rule labels the shipped ruleset carries; pinned against it.
+_ASSET = "SPY|QQQ"
+_SLOT_DOMAINS: dict[str, str] = {
+    "F_BAND_EFFECTIVE": _STATE, "F_BAND_PREVIOUS": _STATE,
+    "F_BAND_BASE": _BAND, "F_BAND_SCORE": _BAND,
+    "F_ASSET": _ASSET,
+    "F_NEXT_CHECK": r"\d{2}:\d{2}",
+    # MATERIAL_CHANGE shows a fact's two values, and that fact may be a band.
+    "F_TRIGGER_VALUE": f"{_NUMERAL}|{_STATE}", "F_CURRENT_VALUE": f"{_NUMERAL}|{_STATE}",
+}
+
+
+def _slot_domain(fact_id: str) -> str:
+    """The pattern a slot of `fact_id` may hold: what the renderer writes there."""
+    return "(?:" + _SLOT_DOMAINS.get(fact_id, _NUMERAL) + ")"
+
 
 def _registry_matchers() -> dict[str, re.Pattern[str]]:
     """One pattern per language, each matching exactly what the alert
     renderer can produce IN THAT LANGUAGE.
 
     The renderer joins reviewed fragments - headlines, phrases, next-checks,
-    caveats - with their slots filled from bounded facts, and it writes one
+    caveats - with their slots filled from typed facts, and it writes one
     language per message. A text is the registry's if and only if it parses
     as such a join in ONE language; a first cut pooled every language into
     one alternation, so a German-and-English mixture no renderer could
-    produce passed as registry text (#119 round 2, SOTA-A, executed). The
-    registry's own max_width bounds each slot. Read once from the shipped
-    phrase set; an unreadable set authorizes nothing.
+    produce passed as registry text (#119 round 2, SOTA-A, executed). Each
+    slot admits its fact's typed domain only (see _SLOT_DOMAINS). Read once
+    from the shipped phrase set; an unreadable set authorizes nothing.
     """
     global _REGISTRY_MATCHERS
     if _REGISTRY_MATCHERS is None:
@@ -563,8 +591,7 @@ def _registry_matchers() -> dict[str, re.Pattern[str]]:
                     for lang, text in fragment.texts or ((phrase_set.language, fragment.text),):
                         pattern = re.escape(text)
                         for slot in fragment.slots:
-                            width = phrase_set.facts[slot].max_width if slot in phrase_set.facts else 12
-                            pattern = pattern.replace(re.escape("{" + slot + "}"), rf"\S{{1,{width}}}")
+                            pattern = pattern.replace(re.escape("{" + slot + "}"), _slot_domain(slot))
                         by_language.setdefault(lang, []).append(pattern)
             _REGISTRY_MATCHERS = {}
             for lang, fragments in by_language.items():

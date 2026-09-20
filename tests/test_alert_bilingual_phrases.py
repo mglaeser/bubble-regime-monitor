@@ -141,6 +141,78 @@ class TestTheShippedSets:
         assert set(composer._registry_matchers()) == {"de", "en"}
 
 
+class TestRoundFourOn119:
+    """A slot admits its fact's typed domain, not any word of its width
+    (#119 round 4, SOTA-A, executed: the scenario reproduced verbatim)."""
+
+    def test_the_ledger_scenario(self):
+        from app.message_engine import composer
+
+        assert not composer.registry_authored("Execution armed: SELL OUT, median 99.")
+        assert not composer.registry_authored("Ausfuehrung scharf: SELL OUT, Median 99.")
+        assert composer.registry_authored("Execution armed: SPY OUT, median 99.")
+        assert composer.registry_authored("Ausfuehrung scharf: QQQ OUT, Median 99.0.")
+
+    def test_every_slot_of_every_fragment_refuses_a_word_of_its_width(self):
+        from app.alerts.phrase_registry import validate_phrase_set
+        from app.message_engine import composer
+
+        phrase_set = validate_phrase_set(V35.read_text(encoding="utf-8"))
+        forbidden = {1: "x", 2: "go", 3: "buy", 4: "SELL", 5: "crash", 6: "kaufen",
+                     7: "verkauf", 10: "sell-now"}
+        checked = 0
+        for table in (phrase_set.headlines, phrase_set.phrases,
+                      phrase_set.next_checks, phrase_set.caveats):
+            for fragment in table.values():
+                if not fragment.slots:
+                    continue
+                for _lang, text in fragment.texts:
+                    for slot in fragment.slots:
+                        width = phrase_set.facts[slot].max_width
+                        word = forbidden[max(w for w in forbidden if w <= width)]
+                        filled = text
+                        for other in fragment.slots:
+                            filled = filled.replace("{" + other + "}", word if other == slot else "7")
+                        assert not composer.registry_authored(filled), (fragment.code, slot, filled)
+                        checked += 1
+        assert checked >= 40
+
+    def test_a_typed_value_in_every_slot_is_still_the_registrys(self):
+        from app.alerts.phrase_registry import validate_phrase_set
+        from app.message_engine import composer
+
+        phrase_set = validate_phrase_set(V35.read_text(encoding="utf-8"))
+        typed = {"F_ASSET": "SPY", "F_NEXT_CHECK": "14:00", "F_BAND_EFFECTIVE": "de-risk",
+                 "F_BAND_PREVIOUS": "suppressed", "F_BAND_BASE": "trim", "F_BAND_SCORE": "hold",
+                 "F_TRIGGER_VALUE": "trim", "F_CURRENT_VALUE": "-100.0"}
+        for table in (phrase_set.headlines, phrase_set.phrases,
+                      phrase_set.next_checks, phrase_set.caveats):
+            for fragment in table.values():
+                for _lang, text in fragment.texts:
+                    filled = text
+                    for slot in fragment.slots:
+                        filled = filled.replace("{" + slot + "}", typed.get(slot, "-12.5"))
+                    assert composer.registry_authored(filled), (fragment.code, filled)
+
+    def test_the_asset_domain_is_the_shipped_rulesets(self):
+        import re
+
+        from app.message_engine import composer
+
+        rules = (ROOT / "config" / "alert_rules.v3.2.yaml").read_text(encoding="utf-8")
+        labelled = set(re.findall(r"labels: \{asset: ([A-Z]+)\}", rules))
+        assert labelled and labelled == set(composer._ASSET.split("|"))
+
+    def test_a_fact_without_a_typed_domain_is_a_number(self):
+        import re
+
+        from app.message_engine import composer
+
+        pattern = re.compile(composer._slot_domain("F_SOMETHING_NEW"))
+        assert pattern.fullmatch("42") and pattern.fullmatch("-0.5")
+        assert not pattern.fullmatch("SELL") and not pattern.fullmatch("kaufen")
+
+
 class TestTheSettingReachesTheRenderPath:
     @pytest.mark.parametrize("language, expected", [("de", "Stufe"), ("en", "Level")])
     def test_validate_from_disk_renders_the_operator_language(self, monkeypatch, language, expected):
