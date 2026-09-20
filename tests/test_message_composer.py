@@ -1345,7 +1345,7 @@ class TestRoundEightOn112:
         assert not composer.registry_authored(summary)
 
     def test_an_unreadable_registry_authorizes_nothing(self, monkeypatch):
-        monkeypatch.setattr(composer, "_REGISTRY_MATCHER", None)
+        monkeypatch.setattr(composer, "_REGISTRY_MATCHERS", None)
         monkeypatch.setattr(composer, "REPO_PHRASES", Path("/nonexistent/alert_phrases.json"))
         try:
             assert not composer.registry_authored("Regime sonst unveraendert.")
@@ -1353,7 +1353,7 @@ class TestRoundEightOn112:
             kept = composer._prose_screened(entry, {"condition_summary": "Regime sonst unveraendert."})
             assert kept == {"condition_summary": None}
         finally:
-            monkeypatch.setattr(composer, "_REGISTRY_MATCHER", None)
+            monkeypatch.setattr(composer, "_REGISTRY_MATCHERS", None)
 
     def test_a_key_alone_authorizes_nothing(self):
         entry = {"authorized_prose": ["s"]}

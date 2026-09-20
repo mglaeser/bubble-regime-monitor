@@ -134,6 +134,11 @@ class TestTheShippedSets:
         assert composer.registry_authored("Stufe trim (vorher hold). Regime sonst unveraendert.")
         assert composer.registry_authored("Level trim (before hold). Regime otherwise unchanged.")
         assert not composer.registry_authored("sell everything now")
+        # One language per message, as the renderer writes it: a mixture no
+        # renderer could produce is not the registry's (#119 round 2, SOTA-A).
+        assert not composer.registry_authored("Level trim (before hold). Regime sonst unveraendert.")
+        assert not composer.registry_authored("Stufe trim (vorher hold). Regime otherwise unchanged.")
+        assert set(composer._registry_matchers()) == {"de", "en"}
 
 
 class TestTheSettingReachesTheRenderPath:

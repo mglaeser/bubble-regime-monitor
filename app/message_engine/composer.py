@@ -536,46 +536,50 @@ def _canonical(name: str) -> str:
     return name if name.startswith("F_") else "F_" + name.upper()
 
 
-_REGISTRY_MATCHER: re.Pattern[str] | None = None
+_REGISTRY_MATCHERS: dict[str, re.Pattern[str]] | None = None
 
 
-def _registry_matcher() -> re.Pattern[str]:
-    """A pattern that matches exactly what the alert renderer can produce.
+def _registry_matchers() -> dict[str, re.Pattern[str]]:
+    """One pattern per language, each matching exactly what the alert
+    renderer can produce IN THAT LANGUAGE.
 
     The renderer joins reviewed fragments - headlines, phrases, next-checks,
-    caveats - with their slots filled from bounded facts. A text is the
-    registry's if and only if it parses as such a join; the registry's own
-    max_width bounds each slot. Read once from the shipped phrase set; an
-    unreadable set authorizes nothing.
+    caveats - with their slots filled from bounded facts, and it writes one
+    language per message. A text is the registry's if and only if it parses
+    as such a join in ONE language; a first cut pooled every language into
+    one alternation, so a German-and-English mixture no renderer could
+    produce passed as registry text (#119 round 2, SOTA-A, executed). The
+    registry's own max_width bounds each slot. Read once from the shipped
+    phrase set; an unreadable set authorizes nothing.
     """
-    global _REGISTRY_MATCHER
-    if _REGISTRY_MATCHER is None:
+    global _REGISTRY_MATCHERS
+    if _REGISTRY_MATCHERS is None:
         try:
             phrase_set = validate_phrase_set(REPO_PHRASES.read_text(encoding="utf-8"))
-            fragments = []
+            by_language: dict[str, list[str]] = {}
             for table in (phrase_set.headlines, phrase_set.phrases,
                           phrase_set.next_checks, phrase_set.caveats):
                 for fragment in table.values():
-                    # Every language the set carries: the renderer writes
-                    # whichever the operator selected, and a summary in
-                    # either is the registry's own text.
-                    for _lang, text in fragment.texts or ((phrase_set.language, fragment.text),):
+                    for lang, text in fragment.texts or ((phrase_set.language, fragment.text),):
                         pattern = re.escape(text)
                         for slot in fragment.slots:
                             width = phrase_set.facts[slot].max_width if slot in phrase_set.facts else 12
                             pattern = pattern.replace(re.escape("{" + slot + "}"), rf"\S{{1,{width}}}")
-                        fragments.append(pattern)
-            one = "(?:" + "|".join(fragments) + ")"
-            _REGISTRY_MATCHER = re.compile(rf"^{one}(?:{re.escape(JOIN)}{one})*$")
+                        by_language.setdefault(lang, []).append(pattern)
+            _REGISTRY_MATCHERS = {}
+            for lang, fragments in by_language.items():
+                one = "(?:" + "|".join(fragments) + ")"
+                _REGISTRY_MATCHERS[lang] = re.compile(rf"^{one}(?:{re.escape(JOIN)}{one})*$")
         except Exception as exc:  # noqa: BLE001 - nothing is authorized, and that is logged
             log.warning("message_engine_registry_unreadable", error=type(exc).__name__)
-            _REGISTRY_MATCHER = re.compile(r"(?!)")
-    return _REGISTRY_MATCHER
+            _REGISTRY_MATCHERS = {}
+    return _REGISTRY_MATCHERS
 
 
 def registry_authored(text: str) -> bool:
-    """Is this text something the alert renderer could have produced?"""
-    return _registry_matcher().fullmatch(text) is not None
+    """Is this text something the alert renderer could have produced, in one
+    of the registry's languages?"""
+    return any(matcher.fullmatch(text) is not None for matcher in _registry_matchers().values())
 
 
 #: The screen judges MEANING only: the channel limits are out of the way
