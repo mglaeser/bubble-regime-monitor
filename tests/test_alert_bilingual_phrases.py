@@ -141,6 +141,19 @@ class TestTheShippedSets:
         assert set(composer._registry_matchers()) == {"de", "en"}
 
 
+#: A value of each typed slot; every other slot is a number.
+_TYPED = {"F_ASSET": "SPY", "F_NEXT_CHECK": "14:00", "F_BAND_EFFECTIVE": "de-risk",
+          "F_BAND_PREVIOUS": "suppressed", "F_BAND_BASE": "trim", "F_BAND_SCORE": "hold",
+          "F_TRIGGER_VALUE": "trim", "F_CURRENT_VALUE": "-100.0"}
+
+
+def _at_width(phrase_set, slot):
+    """A signed decimal exactly as wide as the slot's reviewed width, or the
+    widest number that fits."""
+    width = phrase_set.facts[slot].max_width
+    return "-1." + "5" * (width - 3) if width >= 4 else "9" * width
+
+
 class TestRoundFourOn119:
     """A slot admits its fact's typed domain, not any word of its width
     (#119 round 4, SOTA-A, executed: the scenario reproduced verbatim)."""
@@ -172,7 +185,8 @@ class TestRoundFourOn119:
                         word = forbidden[max(w for w in forbidden if w <= width)]
                         filled = text
                         for other in fragment.slots:
-                            filled = filled.replace("{" + other + "}", word if other == slot else "7")
+                            filled = filled.replace("{" + other + "}",
+                                                    word if other == slot else _TYPED.get(other, "7"))
                         assert not composer.registry_authored(filled), (fragment.code, slot, filled)
                         checked += 1
         assert checked >= 40
@@ -182,16 +196,13 @@ class TestRoundFourOn119:
         from app.message_engine import composer
 
         phrase_set = validate_phrase_set(V35.read_text(encoding="utf-8"))
-        typed = {"F_ASSET": "SPY", "F_NEXT_CHECK": "14:00", "F_BAND_EFFECTIVE": "de-risk",
-                 "F_BAND_PREVIOUS": "suppressed", "F_BAND_BASE": "trim", "F_BAND_SCORE": "hold",
-                 "F_TRIGGER_VALUE": "trim", "F_CURRENT_VALUE": "-100.0"}
         for table in (phrase_set.headlines, phrase_set.phrases,
                       phrase_set.next_checks, phrase_set.caveats):
             for fragment in table.values():
                 for _lang, text in fragment.texts:
                     filled = text
                     for slot in fragment.slots:
-                        filled = filled.replace("{" + slot + "}", typed.get(slot, "-12.5"))
+                        filled = filled.replace("{" + slot + "}", _TYPED.get(slot, _at_width(phrase_set, slot)))
                     assert composer.registry_authored(filled), (fragment.code, filled)
 
     def test_the_asset_domain_is_the_shipped_rulesets(self):
@@ -208,9 +219,68 @@ class TestRoundFourOn119:
 
         from app.message_engine import composer
 
-        pattern = re.compile(composer._slot_domain("F_SOMETHING_NEW"))
+        pattern = re.compile(composer._slot_domain("F_SOMETHING_NEW", 4))
         assert pattern.fullmatch("42") and pattern.fullmatch("-0.5")
         assert not pattern.fullmatch("SELL") and not pattern.fullmatch("kaufen")
+
+
+class TestRoundFiveOn119:
+    """The typed slot keeps the reviewed width, and a present-but-empty
+    language inventory is malformed (#119 round 5, SOTA-A, both executed)."""
+
+    def test_the_ledger_scenario_a_numeral_past_its_width(self):
+        from app.message_engine import composer
+
+        assert composer.registry_authored("Execution armed: SPY OUT, median 100.0.")   # 5 wide
+        assert not composer.registry_authored("Execution armed: SPY OUT, median 999999.")
+        assert not composer.registry_authored("Execution armed: SPY OUT, median " + "9" * 400 + ".")
+        assert not composer.registry_authored("Ausfuehrung scharf: SPY OUT, Median -100.0.")
+
+    def test_every_numeric_slot_holds_its_width_and_not_one_more(self):
+        from app.alerts.phrase_registry import validate_phrase_set
+        from app.message_engine import composer
+
+        phrase_set = validate_phrase_set(V35.read_text(encoding="utf-8"))
+        checked = 0
+        for table in (phrase_set.headlines, phrase_set.phrases,
+                      phrase_set.next_checks, phrase_set.caveats):
+            for fragment in table.values():
+                numeric = [s for s in fragment.slots if s not in composer._SLOT_DOMAINS]
+                for _lang, text in fragment.texts:
+                    for slot in numeric:
+                        width = phrase_set.facts[slot].max_width
+                        for value, proved in (("9" * width, True), ("9" * (width + 1), False)):
+                            filled = text
+                            for other in fragment.slots:
+                                filled = filled.replace("{" + other + "}",
+                                                        value if other == slot else _TYPED.get(other, "7"))
+                            assert composer.registry_authored(filled) is proved, (fragment.code, slot, filled)
+                            checked += 1
+        assert checked >= 40
+
+    @pytest.mark.parametrize("value, fits", [
+        ("100.0", True), ("-10.0", True), ("12345", True), ("0", True), ("-1", True),
+        ("-100.0", False), ("1.2345", False), ("123456", False), ("1.", False), (".5", False),
+        ("", False), ("1e5", False), ("1,5", False)])
+    def test_the_numeral_of_a_width(self, value, fits):
+        import re
+
+        from app.message_engine import composer
+
+        assert (re.fullmatch(composer._numeral(5), value) is not None) is fits
+
+    @pytest.mark.parametrize("meta", [
+        {"languages": []}, {"languages": ""}, {"languages": {}}, {"languages": [""]},
+        {"language": ""}, {"language": None}, {"language": 7}])
+    def test_a_present_but_empty_inventory_is_malformed(self, meta):
+        with pytest.raises(PhraseSetInvalid, match="meta.language"):
+            validate_phrase_set(_tiny("Stufe {F_X}.", extra_meta=meta))
+
+    def test_absent_keys_still_take_the_legacy_defaults(self):
+        raw = json.loads(_tiny("Stufe {F_X}."))
+        raw["meta"].pop("language")
+        ps = validate_phrase_set(json.dumps(raw))
+        assert ps.language == "de" and ps.languages == ("de",)
 
 
 class TestTheSettingReachesTheRenderPath:

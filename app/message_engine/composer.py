@@ -539,15 +539,16 @@ def _canonical(name: str) -> str:
 
 _REGISTRY_MATCHERS: dict[str, re.Pattern[str]] | None = None
 
-#: What the alert renderer can put into a slot, per fact: its TYPED domain.
-#: The renderer copies the typed band enums, the rule's asset label and the
-#: next check as HH:MM, and formats every other fact as a number (digits, a
-#: sign, a decimal point). A slot used to admit any non-blank run up to the
-#: reviewed width, so the F_ASSET slot proved "Execution armed: SELL OUT,
-#: median 99." as registry text (#119 round 4, SOTA-A, executed). A fact
-#: without an entry here is a number: the strictest domain, so a new fact
-#: fails closed rather than open.
-_NUMERAL = r"[-+]?\d+(?:\.\d+)?"
+#: What the alert renderer can put into a slot, per fact: its TYPED domain,
+#: within the fact's REVIEWED width. The renderer copies the typed band
+#: enums, the rule's asset label and the next check as HH:MM, and formats
+#: every other fact as a number (digits, a sign, a decimal point). A slot
+#: used to admit any non-blank run up to the reviewed width, so the F_ASSET
+#: slot proved "Execution armed: SELL OUT, median 99." as registry text
+#: (#119 round 4, SOTA-A, executed); typed without the width, a number of
+#: any length was proved (round 5). A fact without an entry here is a
+#: number: the strictest domain, so a new fact fails closed rather than
+#: open.
 _STATE = "|".join(re.escape(state) for state in ACTION_STATES)
 _BAND = "|".join(re.escape(band) for band in ACTION_BANDS)
 #: The rule labels the shipped ruleset carries; pinned against it.
@@ -557,14 +558,33 @@ _SLOT_DOMAINS: dict[str, str] = {
     "F_BAND_BASE": _BAND, "F_BAND_SCORE": _BAND,
     "F_ASSET": _ASSET,
     "F_NEXT_CHECK": r"\d{2}:\d{2}",
-    # MATERIAL_CHANGE shows a fact's two values, and that fact may be a band.
-    "F_TRIGGER_VALUE": f"{_NUMERAL}|{_STATE}", "F_CURRENT_VALUE": f"{_NUMERAL}|{_STATE}",
 }
+#: MATERIAL_CHANGE shows a fact's two values, and that fact may be a band.
+_TWO_VALUED = frozenset({"F_TRIGGER_VALUE", "F_CURRENT_VALUE"})
 
 
-def _slot_domain(fact_id: str) -> str:
-    """The pattern a slot of `fact_id` may hold: what the renderer writes there."""
-    return "(?:" + _SLOT_DOMAINS.get(fact_id, _NUMERAL) + ")"
+def _numeral(width: int) -> str:
+    """A number of at most `width` characters as the renderer formats one:
+    an optional sign, digits, an optional decimal part - bounded by
+    construction, because a lookahead cannot tell the value's own point
+    from the fragment's full stop after it."""
+    alternatives = []
+    for sign, used in (("", 0), ("[-+]", 1)):
+        for digits in range(1, width - used + 1):
+            room = width - used - digits - 1   # decimals after the point
+            tail = rf"(?:\.\d{{1,{room}}})?" if room >= 1 else ""
+            alternatives.append(rf"{sign}\d{{{digits}}}{tail}")
+    return "(?:" + "|".join(alternatives) + ")"
+
+
+def _slot_domain(fact_id: str, width: int) -> str:
+    """The pattern a slot of `fact_id` may hold: what the renderer writes
+    there, no wider than the registry reviewed."""
+    if fact_id in _SLOT_DOMAINS:
+        return "(?:" + _SLOT_DOMAINS[fact_id] + ")"
+    if fact_id in _TWO_VALUED:
+        return "(?:" + _numeral(width) + "|" + _STATE + ")"
+    return _numeral(width)
 
 
 def _registry_matchers() -> dict[str, re.Pattern[str]]:
@@ -577,8 +597,9 @@ def _registry_matchers() -> dict[str, re.Pattern[str]]:
     as such a join in ONE language; a first cut pooled every language into
     one alternation, so a German-and-English mixture no renderer could
     produce passed as registry text (#119 round 2, SOTA-A, executed). Each
-    slot admits its fact's typed domain only (see _SLOT_DOMAINS). Read once
-    from the shipped phrase set; an unreadable set authorizes nothing.
+    slot admits its fact's typed domain only, within the fact's reviewed
+    max_width (see _slot_domain). Read once from the shipped phrase set;
+    an unreadable set authorizes nothing.
     """
     global _REGISTRY_MATCHERS
     if _REGISTRY_MATCHERS is None:
@@ -591,7 +612,8 @@ def _registry_matchers() -> dict[str, re.Pattern[str]]:
                     for lang, text in fragment.texts or ((phrase_set.language, fragment.text),):
                         pattern = re.escape(text)
                         for slot in fragment.slots:
-                            pattern = pattern.replace(re.escape("{" + slot + "}"), _slot_domain(slot))
+                            domain = _slot_domain(slot, phrase_set.facts[slot].max_width)
+                            pattern = pattern.replace(re.escape("{" + slot + "}"), domain)
                         by_language.setdefault(lang, []).append(pattern)
             _REGISTRY_MATCHERS = {}
             for lang, fragments in by_language.items():

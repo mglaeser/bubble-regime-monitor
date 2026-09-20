@@ -230,8 +230,14 @@ def validate_phrase_set(raw_json: str, *, language: str | None = None) -> Valida
     version = meta.get("phrase_set_version")
     if not version:
         raise PhraseSetInvalid("phrase set has no meta.phrase_set_version")
-    default_language = str(meta.get("language") or "de")
-    declared = meta.get("languages") or [default_language]
+    # Absent keys take the legacy defaults (a German-only set); a key that
+    # is PRESENT must be well-formed. `or` conflated the two, so an explicit
+    # empty inventory was normalized to the default instead of refused
+    # (#119 round 5, SOTA-A, executed).
+    default_language = meta.get("language", "de")
+    if not isinstance(default_language, str) or not default_language:
+        raise PhraseSetInvalid("meta.language must be a non-empty language code")
+    declared = meta.get("languages", [default_language])
     if (not isinstance(declared, list) or not declared
             or any(not isinstance(lang, str) or not lang for lang in declared)):
         raise PhraseSetInvalid("meta.languages must be a non-empty list of language codes")
