@@ -598,6 +598,14 @@ narrowing is undone:
   default, so an alert routed through the engine is not held for minutes
   behind a rejected reply (#121 round 3, SOTA-A). The loop is bounded by
   the content cap whatever the governor answers (round 4, SOTA-C).
+* **The prompt's own constants are grounded.** The owner's DATA lines
+  quote frozen rule constants and call them quotable (the ten-month
+  trend rule, the 55 gate, the 100 basis points), and the validator
+  grounded numerals against the facts alone, so a compliant reply that
+  quoted one was rejected (#121 round 9, SOTA-A). The numerals written
+  in the entry's prompt are grounded like the facts; slot names, list
+  markers and unit-glued numbers ("24h") are not, and a withheld constant
+  (the S3 tiers) stays withheld.
 * **Background facts are read, never printed**, and the gauge labels are
   not printable either: a background numeral that equals a grounded one
   is grounded (provenance is not tracked), so the raw summary syntax

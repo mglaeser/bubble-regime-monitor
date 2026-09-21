@@ -399,8 +399,9 @@ class TestRoundOneOn121:
     def test_the_library_declares_the_digests_background_fields(self):
         entry = composer.library()["prompts"]["daily_digest"]
         assert composer.background_fields(entry) == frozenset({"F_S_BLOCK_SUMMARY", "F_D_BLOCK_SUMMARY", "F_JUDGMENT"})
-        assert set(composer.grounding_facts(entry, DIGEST_FACTS)) == set(DIGEST_FACTS) - {
-            "s_block_summary", "d_block_summary", "judgment"}
+        assert set(composer.grounding_facts(entry, DIGEST_FACTS)) == (set(DIGEST_FACTS) - {
+            "s_block_summary", "d_block_summary", "judgment"}) | {composer.CONSTANTS_KEY}
+        assert composer.grounding_facts(entry, DIGEST_FACTS)[composer.CONSTANTS_KEY] == "0"   # "0-{score_scale_max}"
         with pytest.raises(TypeError):
             composer.background_fields({"grounding_fields": ["a"], "background_fields": ["b"]})
         with pytest.raises(TypeError):
@@ -672,4 +673,40 @@ class TestRoundEightOn121:
     def test_a_german_message_is_german(self, text):
         result = validate(text, channel=Channel.IMESSAGE, facts=DIGEST_FACTS, prose_rules=True, language="de", **LIMITS)
         assert result.ok, result.reason
+
+
+class TestRoundNineOn121:
+    """The owner's DATA lines quote frozen rule constants and call them
+    quotable; the validator grounded numerals against the facts alone, so
+    a compliant reply quoting the ten-month rule or the 55 gate was
+    rejected (SOTA-A, executed). The prompt's own numerals are grounded;
+    slot names, list markers and unit-glued numbers are not."""
+
+    FACTS = {"F_ASSET": "SPY", "F_HEADLINE_MEDIAN": 62}
+
+    def test_the_constants_the_prompt_quotes(self):
+        lib = composer.library()["prompts"]
+        assert composer.prompt_constants(lib["FABER_OUT_HIGH_RISK"]) == ["0-100", "10", "55"]
+        assert composer.prompt_constants(lib["RF3_CREDIT_STRESS"]) == ["100"]
+        assert composer.prompt_constants(lib["BAND_TO_TRIM"]) == []          # "24h clock" is a unit, not a constant
+        assert composer.prompt_constants(lib["RF_INPUT_UNAVAILABLE"]) == []  # "(1) ... (4)" are list markers
+        assert composer.prompt_constants(lib["S3_TIER"]) == []               # {F_S3} is a slot name; the tiers are withheld
+
+    def test_a_reply_quoting_the_frozen_constants_is_the_message(self, monkeypatch):
+        reply = ("bubblegauge: SPY ended the month below the average of its last 10 month-end prices while the "
+                 "monitor score stands at 62, above the 55 gate. The next check is at month end.")
+        out, prompts = _compose(monkeypatch, reply, trigger="FABER_OUT_HIGH_RISK", facts=dict(self.FACTS))
+        assert out.source == "generated", out.reason
+        assert "(and the constants written in the DATA lines above: 0-100 10 55)" in prompts[0]
+
+    def test_a_numeral_that_is_neither_a_fact_nor_a_constant_is_still_refused(self, monkeypatch):
+        reply = ("bubblegauge: SPY ended the month below the average of its last 12 month-end prices while the "
+                 "monitor score stands at 62. The next check is at month end.")
+        out, _ = _compose(monkeypatch, reply, trigger="FABER_OUT_HIGH_RISK", facts=dict(self.FACTS))
+        assert out.source == "fallback" and "12" in (out.reason or ""), out.reason
+
+    def test_a_list_marker_does_not_ground_a_count(self, monkeypatch):
+        out, _ = _compose(monkeypatch, "bubblegauge notice: warning inputs missing, 4 flags cannot fire. Next run 14:00 UTC.",
+                          trigger="RF_INPUT_UNAVAILABLE", facts={"F_NEXT_CHECK": "14:00"})
+        assert out.source == "fallback" and "'4'" in (out.reason or ""), out.reason
 

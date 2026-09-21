@@ -542,11 +542,39 @@ def background_fields(entry: dict[str, Any]) -> frozenset[str]:
     return frozenset(background)
 
 
+#: A numeral the owner wrote into the prompt itself: not inside a slot
+#: name ({F_S3}), not a list marker ((1), (2)), not glued to a unit or a
+#: word (24h). What is left is what the DATA lines call "frozen rule
+#: constants (quotable)": the 10 of the ten-month trend rule, the 55 gate,
+#: the 100 basis points.
+_PROMPT_CONSTANT_RE = re.compile(r"(?<![\w.])[-+]?\d+(?:[.,:/\-]\d+)*%?(?![A-Za-z0-9])")
+_LIST_MARKER_IN_PROMPT_RE = re.compile(r"\(\d+\)")
+CONSTANTS_KEY = "prompt_constants"
+
+
+def prompt_constants(entry: dict[str, Any]) -> list[str]:
+    """The numerals the entry's own prompt carries, in the order written.
+
+    The owner's DATA lines quote frozen rule constants and call them
+    quotable, and the validator grounded numerals against the facts alone,
+    so a compliant reply that quoted the ten-month rule or the 55 gate was
+    content-rejected and the template went out (#121 round 9, SOTA-A,
+    executed). The prompt is the owner's; its numerals are grounded like
+    the facts. Slot names, list markers and unit-glued numbers are not."""
+    text = _LIST_MARKER_IN_PROMPT_RE.sub(" ", _SLOT_RE.sub(" ", str(entry.get("prompt", ""))))
+    return list(dict.fromkeys(_PROMPT_CONSTANT_RE.findall(text)))
+
+
 def grounding_facts(entry: dict[str, Any], facts: dict[str, object]) -> dict[str, object]:
     """The visible facts the message may quote: the declared ones less the
-    background ones. What the validator grounds numerals against."""
+    background ones, plus the prompt's own constants. What the validator
+    grounds numerals against."""
     background = background_fields(entry)
-    return {k: v for k, v in visible_facts(entry, facts).items() if _canonical(k) not in background}
+    grounded = {k: v for k, v in visible_facts(entry, facts).items() if _canonical(k) not in background}
+    constants = prompt_constants(entry)
+    if constants:
+        grounded[CONSTANTS_KEY] = " ".join(constants)
+    return grounded
 
 
 def _canonical(name: str) -> str:
@@ -831,9 +859,13 @@ def writing_prompt(entry: dict[str, Any], facts: dict[str, object],
                     f"at most {limits['imessage_max_emoji']} emoji and only from the neutral "
                     f"set the rules allow; emoji are optional. {punctuation}")
     visible = visible_facts(entry, facts)
+    grounding = grounding_facts(entry, facts)
+    constants = grounding.pop(CONSTANTS_KEY, None)
     grounded = "\n".join(f"  {key} = {sanitize(value) if isinstance(value, str) else value}"
-                          for key, value in sorted(grounding_facts(entry, facts).items())
+                          for key, value in sorted(grounding.items())
                           if value is not None and isinstance(value, _SCALARS))
+    if constants:
+        grounded += f"\n  (and the constants written in the DATA lines above: {constants})"
     body = _with_house_rules(selection_prompt(entry["prompt"]),
                              house_rules() if rules is None else rules, language)
     body = _render_prompt(body, visible)
@@ -903,7 +935,7 @@ def _prompt_for(entry: dict[str, Any], facts: dict[str, object],
     # fallback and failing open costs a disclosure.
     grounded = "\n".join(f"  {key} = {sanitize(value) if isinstance(value, str) else value}"
                           for key, value in sorted(grounding_facts(entry, facts).items())
-                          if value is not None and isinstance(value, _SCALARS))
+                          if key != CONSTANTS_KEY and value is not None and isinstance(value, _SCALARS))
     language = settings.message_language or LIBRARY_LANGUAGE
     listed = "\n".join(f"  {i}: {t}" for i, t in enumerate(phrasings_for(entry, language)))
     in_language = "" if language == LIBRARY_LANGUAGE else f" (written in {language!r})"
