@@ -834,7 +834,9 @@ _COMPOUND_NUMBER_DE_RE = re.compile(
 #: - provenance is not tracked - and the labels carry digits of their own
 #: that are (1, 4). The raw syntax and the bare internal labels are
 #: refused as content in any language (#121 round 3, SOTA-A).
-_GAUGE_LABEL_RE = re.compile(r"(?<![A-Za-z])[sdSD][1-6]\s*=|\b[sdSD][1-6]\b(?!\s*[/%:])")
+#: No exemption for what follows the label: "s1: 1" and "d4/4" are the
+#: label all the same (#121 round 7, SOTA-A).
+_GAUGE_LABEL_RE = re.compile(r"(?<![A-Za-z])[sdSD][1-6]\s*=|\b[sdSD][1-6]\b")
 
 #: Letters German needs that English does not: the fold reduces the umlauts,
 #: ß has no decomposition and is admitted as itself.

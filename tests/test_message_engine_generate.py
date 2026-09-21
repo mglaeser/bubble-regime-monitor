@@ -183,14 +183,18 @@ class TestTheModelWrites:
 
     @pytest.mark.parametrize("reply", [
         f"IMSG: {GOOD_EN}", f'"{GOOD_EN}"', f"SMS: bubblegauge 59/100 trim. || IMSG: {GOOD_EN}",
-        f"  {GOOD_EN}\n"])
+        f"  {GOOD_EN}\t"])
     def test_a_label_a_quote_or_a_two_variant_reply_still_yields_the_body(self, monkeypatch, reply):
         out, _ = _compose(monkeypatch, reply)
         assert out.source == "generated" and out.text == GOOD_EN
 
-    def test_a_two_line_reply_is_rejected_not_repaired(self, monkeypatch):
-        out, _ = _compose(monkeypatch, f"{GOOD_EN}\nRange 57-61.")
-        assert out.source == "fallback" and "single line" in (out.reason or "")
+    @pytest.mark.parametrize("reply", [f"{GOOD_EN}\nRange 57-61.", f"{GOOD_EN}\n", f"\n{GOOD_EN}", f"{GOOD_EN}\r\n"])
+    def test_a_reply_with_a_line_break_anywhere_is_rejected_not_repaired(self, monkeypatch, reply):
+        out, _ = _compose(monkeypatch, reply)
+        assert out.source == "fallback", out.reason
+        assert "single line" in (out.reason or "") or "trailing whitespace" in (out.reason or ""), out.reason
+        with session_scope() as s:
+            assert s.query(MessageEngineAttempt).first().outcome == "format_rejected"
 
     def test_the_mandate_is_read_back_in_generate_mode_too(self, monkeypatch):
         facts = {"F_BAND_BASE": "trim", "F_NEXT_CHECK": "14:00"}
@@ -372,6 +376,7 @@ class TestWritten:
         ("first || second", Channel.SMS, "first"),
         ("  padded  ", Channel.SMS, "padded"),
         ('"unbalanced', Channel.SMS, '"unbalanced'),
+        ("kept\n", Channel.SMS, "kept\n"),                  # a line break is the validator's to refuse
     ])
     def test_the_body_in_the_reply(self, answer, channel, body):
         assert composer.written(answer, channel) == body
@@ -619,4 +624,25 @@ class TestRoundSixOn121:
         assert "planted" not in prompt and "eyJ" not in prompt
         assert "provider refused Bearer [redacted]" in prompt          # the slot, sanitized
         assert "  reason_plain = provider refused Bearer [redacted]" in prompt   # the table, sanitized
+
+
+class TestRoundSevenOn121:
+    """Two SOTA-A defects, executed: the gauge-label rule exempted a label
+    followed by ':' '/' '%', and written() stripped terminal line breaks
+    before the validator could refuse them."""
+
+    @pytest.mark.parametrize("text, language", [
+        ("Der Wert liegt bei 59 von 100; s1: 1 von 4.", "de"),
+        ("bubblegauge is at 59 out of 100 in band trim; d4/4 is on. The range is 57-61.", "en"),
+        ("bubblegauge is at 59 out of 100 in band trim; S2 % is 1. The range is 57-61.", "en"),
+    ])
+    def test_a_gauge_label_is_refused_whatever_follows_it(self, text, language):
+        result = validate(text, channel=Channel.IMESSAGE, facts=DIGEST_FACTS, prose_rules=True, language=language, **LIMITS)
+        assert not result.ok and "internal gauge label" in (result.reason or ""), result.reason
+
+    def test_a_terminal_line_break_is_a_format_rejection(self, monkeypatch):
+        out, _ = _compose(monkeypatch, f"{GOOD_EN}\n")
+        assert out.source == "fallback" and "whitespace" in (out.reason or "")
+        with session_scope() as s:
+            assert s.query(MessageEngineAttempt).first().outcome == "format_rejected"
 

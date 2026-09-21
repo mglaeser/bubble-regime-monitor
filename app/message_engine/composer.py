@@ -850,7 +850,15 @@ def writing_prompt(entry: dict[str, Any], facts: dict[str, object],
     )
 
 
-_LABEL_RE = re.compile(r"^\s*(?:SMS|IMSG|IMESSAGE|MESSAGE|BODY)\s*:\s*", re.IGNORECASE)
+_LABEL_RE = re.compile(r"^[ \t]*(?:SMS|IMSG|IMESSAGE|MESSAGE|BODY)[ \t]*:[ \t]*", re.IGNORECASE)
+
+
+#: Blanks a reply may carry at its ends: spaces and tabs. NOT line breaks -
+#: a reply that ends in one is not a single line, and stripping it before
+#: the validator saw it neutralised the single-line contract (#121 round 7,
+#: SOTA-A). The validator refuses it as FORMAT and the governor grants the
+#: short retry (Q29: reject and retry, never repair).
+_BLANKS = " \t"
 
 
 def written(answer: str, channel: Channel) -> str:
@@ -860,18 +868,19 @@ def written(answer: str, channel: Channel) -> str:
     format does anyway - a channel label, or both variants on one line
     separated by '||' - and of one pair of surrounding quotes. Nothing else
     is repaired: what remains is judged by the validator as written, and a
-    reply with a line break in it fails the format there (ruling Q29).
+    reply with a line break anywhere in it, its ends included, fails the
+    format there (ruling Q29).
     """
-    text = answer.strip()
+    text = answer.strip(_BLANKS)
     if "||" in text:
         wanted = "SMS" if channel is Channel.SMS else "IMSG"
-        parts = [part.strip() for part in text.split("||")]
+        parts = [part.strip(_BLANKS) for part in text.split("||")]
         chosen = [part for part in parts if part.upper().startswith(wanted)]
         text = (chosen or parts)[0]
     text = _LABEL_RE.sub("", text, count=1)
     if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
         text = text[1:-1]
-    return text.strip()
+    return text.strip(_BLANKS)
 
 
 def _prompt_for(entry: dict[str, Any], facts: dict[str, object],
