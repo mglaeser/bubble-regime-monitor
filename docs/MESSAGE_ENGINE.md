@@ -605,7 +605,10 @@ narrowing is undone:
   quoted one was rejected (#121 round 9, SOTA-A). The numerals written
   in the entry's prompt are grounded like the facts; slot names, list
   markers and unit-glued numbers ("24h") are not, and a withheld constant
-  (the S3 tiers) stays withheld.
+  (the S3 tiers) stays withheld. A constant is grounded IN ITS WORDING
+  only - beside the words the prompt writes it with, never across a
+  sentence boundary - so "the 55 gate" cannot become "the score stands at
+  55" (round 11, SOTA-A).
 * **Background facts are read, never printed**, and the gauge labels are
   not printable either: a background numeral that equals a grounded one
   is grounded (provenance is not tracked), so the raw summary syntax

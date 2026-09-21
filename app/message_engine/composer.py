@@ -598,6 +598,64 @@ def printed_background(entry: dict[str, Any], facts: dict[str, object], text: st
     return None
 
 
+#: Only blanks, hyphens and brackets may sit between a numeral and its
+#: neighbour: a full stop ends the neighbourhood, or "stands at 55. The"
+#: would borrow "the" from the next sentence.
+_NEIGHBOUR_BEFORE_RE = re.compile(r"([A-Za-zÄÖÜäöüß&]+)[\s\-\u2013(\"']*$")
+_NEIGHBOUR_AFTER_RE = re.compile(r"[\s\-\u2013)\"']*([A-Za-zÄÖÜäöüß&]+)")
+
+
+def _neighbours(text: str, start: int, end: int) -> set[str]:
+    """The word before and the word after a span, lowercased; a word
+    across sentence punctuation is not a neighbour."""
+    found: set[str] = set()
+    before = _NEIGHBOUR_BEFORE_RE.search(text[:start])
+    after = _NEIGHBOUR_AFTER_RE.match(text[end:])
+    if before:
+        found.add(before.group(1).lower())
+    if after:
+        found.add(after.group(1).lower())
+    return found
+
+
+def constant_contexts(entry: dict[str, Any]) -> dict[str, set[str]]:
+    """For each numeral form the prompt's constants admit, the words the
+    prompt writes next to it. A constant is grounded IN ITS WORDING only:
+    "the 55 gate" grounds 55 beside "the" or "gate", not "the score stands
+    at 55" (#121 round 11, SOTA-A: a constant flattened into the facts
+    could be reported as the live reading)."""
+    from app.message_engine.validator import _NUMERAL_RE, _strip_compounds, grounded_numerals
+
+    text = _LIST_MARKER_IN_PROMPT_RE.sub(" ", _SLOT_RE.sub(" ", str(entry.get("prompt", ""))))
+    contexts: dict[str, set[str]] = {}
+    for match in _NUMERAL_RE.finditer(_strip_compounds(text)):
+        words = _neighbours(text, match.start(), match.end())
+        for form in grounded_numerals({"c": match.group(0)}):
+            contexts.setdefault(form, set()).update(words)
+    return contexts
+
+
+def constant_out_of_context(entry: dict[str, Any], facts: dict[str, object], text: str) -> str | None:
+    """A numeral in the text that only the prompt's constants ground, used
+    away from the words the prompt writes it with - or None."""
+    from app.message_engine.validator import _NUMERAL_RE, _strip_compounds, grounded_numerals
+
+    by_facts = grounded_numerals({k: v for k, v in grounding_facts(entry, facts).items() if k != CONSTANTS_KEY})
+    contexts = constant_contexts(entry)
+    stripped = _strip_compounds(text)
+    for match in _NUMERAL_RE.finditer(stripped):
+        token = match.group(0)
+        if token in by_facts or token.lstrip("+") in by_facts:
+            continue
+        allowed = contexts.get(token) or contexts.get(token.lstrip("+"))
+        if allowed is None:
+            continue                      # not a constant either: the validator's to refuse
+        if not (_neighbours(text, match.start(), match.end()) & allowed):
+            return (f"constant {token!r} used outside its quoted wording "
+                    f"(the prompt writes it beside {sorted(allowed)})")
+    return None
+
+
 def grounding_facts(entry: dict[str, Any], facts: dict[str, object]) -> dict[str, object]:
     """The visible facts the message may quote: the declared ones less the
     background ones, plus the prompt's own constants. What the validator
@@ -1211,6 +1269,10 @@ def compose(*, trigger: str, channel: Channel,
             if copied is not None:
                 result = ValidationResult(False, FailureClass.CONTENT,
                                           f"background value of {copied} reproduced in the message")
+        if result.ok:
+            misused = constant_out_of_context(entry, facts, text)
+            if misused is not None:
+                result = ValidationResult(False, FailureClass.CONTENT, misused)
     else:
         choice = _select_phrasing(answer, phrasings)
         if choice is None:

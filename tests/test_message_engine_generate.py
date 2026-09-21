@@ -741,3 +741,41 @@ class TestRoundTenOn121:
         out, _ = _compose(monkeypatch, reply)
         assert out.source == "generated", out.reason
 
+
+class TestRoundElevenOn121:
+    """A constant flattened into the facts could be reported as the live
+    reading ("the score stands at 55", SOTA-A, executed). A constant is
+    grounded in its quoted wording only: beside the words the prompt
+    writes it with, never across sentence punctuation."""
+
+    FACTS = {"F_ASSET": "SPY", "F_HEADLINE_MEDIAN": 62}
+
+    def test_the_words_a_constant_is_written_with(self):
+        lib = composer.library()["prompts"]
+        assert composer.constant_contexts(lib["FABER_OUT_HIGH_RISK"])["55"] == {"the", "gate"}
+        assert composer.constant_contexts(lib["RF3_CREDIT_STRESS"])["100"] == {"than", "basis"}
+        assert composer.constant_contexts(lib["daily_digest"])["0"] == {"a", "scale"}
+
+    @pytest.mark.parametrize("reply, token", [
+        ("bubblegauge: SPY ended the month below its 10-month average price while the monitor score stands at 55. "
+         "The next check is at month end.", "55"),
+        ("bubblegauge: SPY ended the month below its average of the last 10 month-end prices (55 is the gate). "
+         "The next check is at month end.", "55"),
+    ])
+    def test_a_constant_reported_as_a_reading_is_refused(self, monkeypatch, reply, token):
+        out, _ = _compose(monkeypatch, reply, trigger="FABER_OUT_HIGH_RISK", facts=dict(self.FACTS))
+        assert out.source == "fallback" and f"constant '{token}' used outside its quoted wording" in (out.reason or ""), out.reason
+
+    def test_a_constant_in_its_wording_and_the_live_reading_pass(self, monkeypatch):
+        reply = ("bubblegauge: SPY ended the month below the average of its last 10 month-end prices while the "
+                 "monitor score stands at 62, above the 55 gate. The next check is at month end.")
+        out, _ = _compose(monkeypatch, reply, trigger="FABER_OUT_HIGH_RISK", facts=dict(self.FACTS))
+        assert out.source == "generated", out.reason
+
+    def test_the_digests_scale_zero_cannot_become_a_flag_count(self, monkeypatch):
+        out, _ = _compose(monkeypatch, "bubblegauge reports 59 out of 100 in band trim with 0 flags active. The range is 57-61.")
+        assert out.source == "fallback" and "constant '0'" in (out.reason or ""), out.reason
+        out, _ = _compose(monkeypatch, "bubblegauge reports 59 out of 100 on a 0-100 scale in band trim. The range is 57-61. "
+                                       "Flags are 1 of 4.", now=LATER)
+        assert out.source == "generated", out.reason
+
