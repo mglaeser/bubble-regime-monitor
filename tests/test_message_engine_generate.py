@@ -570,3 +570,27 @@ class TestRoundFourOn121:
                                             sleep=sleep, clock=clock)
         assert out.source == "fallback" and len(prompts) == 3 and state["slept"] == []
 
+
+class TestRoundFiveOn121:
+    """The passive modal names no reader: "Gewinne sollten jetzt mitgenommen
+    werden" passed the German advice grammar (SOTA-A, executed)."""
+
+    @pytest.mark.parametrize("text", [
+        "Der Wert liegt bei 59 von 100. Gewinne sollten jetzt mitgenommen werden.",
+        "Der Wert liegt bei 59 von 100. Positionen müssen abgesichert werden.",
+        "Der Wert liegt bei 59 von 100. Das Risiko ist zu reduzieren.",
+        "Der Wert liegt bei 59 von 100. Es gilt, Gewinne zu sichern.",
+        "Der Wert liegt bei 59 von 100. Vorsicht wäre angebracht, Positionen sollten kleiner sein.",
+    ])
+    def test_a_passive_or_impersonal_recommendation_is_advice(self, text):
+        result = validate(text, channel=Channel.IMESSAGE, facts=DIGEST_FACTS, prose_rules=True, language="de", **LIMITS)
+        assert not result.ok and "advice or a forecast" in (result.reason or ""), result.reason
+
+    @pytest.mark.parametrize("text", [
+        "Der Wert liegt bei 59 von 100; die Bewertungen sind hoch, die Kreditlage bleibt ruhig. Spanne 57-61.",
+        "Der Wert liegt bei 59 von 100; der Override ist nicht aktiv. Flaggen 1 von 4.",
+    ])
+    def test_a_statement_with_sein_or_werden_and_no_modal_is_not(self, text):
+        result = validate(text, channel=Channel.IMESSAGE, facts=DIGEST_FACTS, prose_rules=True, language="de", **LIMITS)
+        assert result.ok, result.reason
+

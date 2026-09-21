@@ -629,7 +629,8 @@ German (decision 23), so German is judged by the language-agnostic rules
 arithmetic, format) plus a German set: a banned lexicon (probability,
 advice, certainty, forecast, crash talk), an advice/forecast grammar
 (reader-directed modals, impersonal recommendations, future or modal
-movements), the formal imperative ("Kaufen Sie") and the informal one (a
+movements, the passive modal "sollten ... werden" and "ist zu
+verkaufen" - #121 round 5), the formal imperative ("Kaufen Sie") and the informal one (a
 bare verb stem opening a clause: "Bleib in SPY.", "Halt Abstand.", from
 an enumerated list of the verbs an instruction to an investor uses -
 the shape of the English action-verb list, with its known limit), German

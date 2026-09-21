@@ -776,6 +776,19 @@ _ADVICE_DE_RE = re.compile(
     # "wird fallen", "dürften steigen", "kann einbrechen" - a forecast
     r"|\b(?:wird|werden|d[uü]rfte[n]?|k[oö]nnte[n]?|kann|k[oö]nnen|soll|sollen|muss|m[uü]ssen|mag)\s+"
     r"(?:(?!sie\b)[a-zäöüß]+\s+){0,3}?(?:" + _MOVEMENT_DE + r")\b"
+    # THE PASSIVE MODAL: "Gewinne sollten jetzt mitgenommen werden" names
+    # no reader and no "man", and passed (#121 round 5, SOTA-A, executed).
+    # A modal with "werden"/"sein" later in the clause is a recommendation
+    # in the passive or a modal state ("should be reduced", "must be
+    # secured"); "ist zu verkaufen" and "es gilt" are the same advice in
+    # other clothes.
+    r"|\b(?:sollte[n]?|soll|sollen|muss|m[uü]ss(?:en|te|ten)|k[oö]nnte[n]?|kann|k[oö]nnen|w[aä]re[n]?)\b"
+    r"[^.;!?]{0,60}?\b(?:werden|sein)\b"
+    r"|\b(?:ist|sind|w[aä]re[n]?|bleibt|bleiben)\s+(?:jetzt\s+|nun\s+|weiter\s+)?zu\s+"
+    r"(?:verkauf|kauf|reduzier|verringer|erh[oö]h|sicher|absicher|meid|vermeid|halt|realisier|"
+    r"mitnehm|abbau|aufstock|umschicht|nachkauf|aussteig|einsteig|absto[sß]|liquidier|hedg|"
+    r"begrenz|senk|streich|schlie[sß]|verlass)\w*"
+    r"|\b(?:gilt\s+es|es\s+gilt)\b"
 )
 #: The formal imperative: a capitalised -en verb followed by "Sie" at the
 #: head of a clause ("Kaufen Sie", "Halten Sie", "Bleiben Sie ruhig").
