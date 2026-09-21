@@ -710,3 +710,34 @@ class TestRoundNineOn121:
                           trigger="RF_INPUT_UNAVAILABLE", facts={"F_NEXT_CHECK": "14:00"})
         assert out.source == "fallback" and "'4'" in (out.reason or ""), out.reason
 
+
+class TestRoundTenOn121:
+    """The numeral and label rules covered the gauge summaries' form; a
+    non-numeric background value could still be reproduced verbatim
+    (SOTA-A). The library names the fields whose value may not appear at
+    all; the note the owner's prompt says the model may draw on is not
+    among them."""
+
+    def test_the_library_names_the_never_printed_fields(self):
+        entry = composer.library()["prompts"]["daily_digest"]
+        assert composer.never_printed_fields(entry) == frozenset({"F_S_BLOCK_SUMMARY", "F_D_BLOCK_SUMMARY"})
+        with pytest.raises(TypeError):
+            composer.never_printed_fields({"grounding_fields": ["a", "b"], "background_fields": ["a"],
+                                           "never_printed_fields": ["b"]})
+        assert composer.never_printed_fields({"grounding_fields": ["a"]}) == frozenset()
+
+    def test_a_gauge_summary_copied_into_the_message_is_refused(self, monkeypatch):
+        facts = {**DIGEST_FACTS, "s_block_summary": "valuation gauge high, concentration gauge elevated"}
+        reply = ("bubblegauge is at 59 out of 100 in band trim. The gauges say valuation gauge high, "
+                 "concentration gauge elevated. The range is 57-61.")
+        out, _ = _compose(monkeypatch, reply, facts=facts)
+        assert out.source == "fallback" and "background value of F_S_BLOCK_SUMMARY reproduced" in (out.reason or ""), out.reason
+        with session_scope() as s:
+            assert s.query(MessageEngineAttempt).first().outcome == "content_rejected"
+
+    def test_the_note_the_model_may_draw_on_may_be_reused(self, monkeypatch):
+        reply = ("bubblegauge is at 59 out of 100 in band trim: valuations are stretched while credit stays calm. "
+                 "The range is 57-61. Flags are 1 of 4. SPY and QQQ are IN.")
+        out, _ = _compose(monkeypatch, reply)
+        assert out.source == "generated", out.reason
+

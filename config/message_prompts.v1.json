@@ -253,6 +253,11 @@
         "judgment"
       ],
       "background_fields_note": "Shown to the model as background (DATA) and never printable: their numerals are not grounded, so a sub-score or a number from the note is an ungrounded numeral and the message is refused (#121 round 1, SOTA-A).",
+      "never_printed_fields": [
+        "s_block_summary",
+        "d_block_summary"
+      ],
+      "never_printed_fields_note": "Background fields whose VALUE may not appear in the message at all, not even copied: the gauge summaries. The plain-language note is background the prompt says the model may draw on, so its words may be reused; its numerals are still not grounded.",
       "context_endpoints": [
         "/api/v1/score",
         "/api/v1/legs/trend",

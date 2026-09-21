@@ -565,6 +565,39 @@ def prompt_constants(entry: dict[str, Any]) -> list[str]:
     return list(dict.fromkeys(_PROMPT_CONSTANT_RE.findall(text)))
 
 
+def never_printed_fields(entry: dict[str, Any]) -> frozenset[str]:
+    """The background fields whose VALUE may not appear in the message,
+    not even copied, by canonical id: a subset of the background fields.
+    The numeral and label rules covered the gauge summaries' form; a
+    non-numeric background value could still be reproduced verbatim (#121
+    round 10, SOTA-A). The plain-language note is not among them: the
+    owner's prompt says the model may draw on it."""
+    background = background_fields(entry)
+    raw = entry.get("never_printed_fields") or []
+    if not isinstance(raw, list) or any(not isinstance(name, str) for name in raw):
+        raise TypeError("'never_printed_fields' is not a list of fact names")
+    never = {_canonical(name) for name in raw}
+    if not never <= background:
+        raise TypeError("'never_printed_fields' names a fact that is not a background field")
+    return frozenset(never)
+
+
+def printed_background(entry: dict[str, Any], facts: dict[str, object], text: str) -> str | None:
+    """The name of a never-printed field whose value the text reproduces,
+    or None. Values shorter than three characters are not judged: a
+    two-character value is a coincidence waiting to happen, and the label
+    and numeral rules own the short forms."""
+    never = never_printed_fields(entry)
+    lowered = text.casefold()
+    for key, value in visible_facts(entry, facts).items():
+        if _canonical(key) not in never or not isinstance(value, str):
+            continue
+        needle = value.strip().casefold()
+        if len(needle) >= 3 and needle in lowered:
+            return _canonical(key)
+    return None
+
+
 def grounding_facts(entry: dict[str, Any], facts: dict[str, object]) -> dict[str, object]:
     """The visible facts the message may quote: the declared ones less the
     background ones, plus the prompt's own constants. What the validator
@@ -1028,6 +1061,7 @@ def compose(*, trigger: str, channel: Channel,
             raise TypeError("'prompt' is not text")
         rules = house_rules(lib)
         grounding = grounding_facts(entry, facts)
+        never_printed_fields(entry)
     except Exception as exc:  # noqa: BLE001 - a malformed entry is the same class
         return _bare_event(trigger, channel, settings,
                            f"library entry is malformed: {type(exc).__name__}",
@@ -1172,6 +1206,11 @@ def compose(*, trigger: str, channel: Channel,
         text = written(answer, channel)
         result = validate(text, channel=channel, facts=grounding,
                           prose_rules=True, language=language, **limits)
+        if result.ok:
+            copied = printed_background(entry, facts, text)
+            if copied is not None:
+                result = ValidationResult(False, FailureClass.CONTENT,
+                                          f"background value of {copied} reproduced in the message")
     else:
         choice = _select_phrasing(answer, phrasings)
         if choice is None:

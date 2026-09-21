@@ -610,7 +610,11 @@ narrowing is undone:
   not printable either: a background numeral that equals a grounded one
   is grounded (provenance is not tracked), so the raw summary syntax
   (`s1=`) and the bare internal labels (`s1`, `d4`) are refused as content
-  in any language (#121 round 3, SOTA-A).
+  in any language (#121 round 3, SOTA-A). A background field the entry
+  names in `never_printed_fields` may not have its VALUE reproduced in
+  the message at all, numeric or not (round 10); the plain-language note
+  is not among them, because the owner's prompt says the model may draw
+  on it.
 * Select mode is unchanged and pinned; the existing selection pins name
   it explicitly.
 * **Background facts are read, never printed.** An entry may declare
