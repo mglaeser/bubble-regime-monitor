@@ -562,7 +562,13 @@ def prompt_constants(entry: dict[str, Any]) -> list[str]:
     executed). The prompt is the owner's; its numerals are grounded like
     the facts. Slot names, list markers and unit-glued numbers are not."""
     text = _LIST_MARKER_IN_PROMPT_RE.sub(" ", _SLOT_RE.sub(" ", str(entry.get("prompt", ""))))
-    return list(dict.fromkeys(_PROMPT_CONSTANT_RE.findall(text)))
+    found = list(dict.fromkeys(_PROMPT_CONSTANT_RE.findall(text)))
+    # A constant the prompt writes as a percentage ("below 50 percent") is
+    # a percentage to the validator ("50%"), which holds it to a fact that
+    # carries the unit; the percent form is a constant too.
+    found += [f"{n}%" for n in re.findall(r"(?<![\w.])(\d+(?:\.\d+)?)\s*(?:%|percent\b)", text)
+              if f"{n}%" not in found]
+    return found
 
 
 def never_printed_fields(entry: dict[str, Any]) -> frozenset[str]:
@@ -693,12 +699,38 @@ def constant_out_of_context(entry: dict[str, Any], facts: dict[str, object], tex
     return None
 
 
+_REGISTRY_UNITS: dict[str, str] | None = None
+UNIT_SUFFIX = "__unit"
+
+
+def _registry_units() -> dict[str, str]:
+    """The unit the phrase registry declares for each fact id ("%" for the
+    breadth share), read once; an unreadable registry declares none."""
+    global _REGISTRY_UNITS
+    if _REGISTRY_UNITS is None:
+        try:
+            phrase_set = validate_phrase_set(REPO_PHRASES.read_text(encoding="utf-8"))
+            _REGISTRY_UNITS = {fact_id: spec.unit for fact_id, spec in phrase_set.facts.items() if spec.unit}
+        except Exception as exc:  # noqa: BLE001 - no unit is grounded, and that is logged
+            log.warning("message_engine_registry_unreadable", error=type(exc).__name__)
+            _REGISTRY_UNITS = {}
+    return _REGISTRY_UNITS
+
+
 def grounding_facts(entry: dict[str, Any], facts: dict[str, object]) -> dict[str, object]:
     """The visible facts the message may quote: the declared ones less the
-    background ones, plus the prompt's own constants. What the validator
-    grounds numerals against."""
+    background ones, plus the prompt's own constants, plus the percent
+    form of a fact the registry declares in percent (the validator holds
+    "44.2%" to a fact that carries the unit, and the breadth share is
+    injected bare - #121 round 12). What the validator grounds numerals
+    against; the unit forms are not shown in the prompt's table."""
     background = background_fields(entry)
     grounded = {k: v for k, v in visible_facts(entry, facts).items() if _canonical(k) not in background}
+    units = _registry_units()
+    for key, value in list(grounded.items()):
+        if units.get(_canonical(key)) == "%" and isinstance(value, (int, float, str)) \
+                and not isinstance(value, bool) and not str(value).endswith("%"):
+            grounded[f"{key}{UNIT_SUFFIX}"] = f"{value}%"
     constants = prompt_constants(entry)
     if constants:
         grounded[CONSTANTS_KEY] = " ".join(constants)
@@ -991,7 +1023,8 @@ def writing_prompt(entry: dict[str, Any], facts: dict[str, object],
     constants = grounding.pop(CONSTANTS_KEY, None)
     grounded = "\n".join(f"  {key} = {sanitize(value) if isinstance(value, str) else value}"
                           for key, value in sorted(grounding.items())
-                          if value is not None and isinstance(value, _SCALARS))
+                          if value is not None and isinstance(value, _SCALARS)
+                          and not key.endswith(UNIT_SUFFIX))
     if constants:
         grounded += f"\n  (and the constants written in the DATA lines above: {constants})"
     body = _with_house_rules(selection_prompt(entry["prompt"]),
@@ -1063,7 +1096,8 @@ def _prompt_for(entry: dict[str, Any], facts: dict[str, object],
     # fallback and failing open costs a disclosure.
     grounded = "\n".join(f"  {key} = {sanitize(value) if isinstance(value, str) else value}"
                           for key, value in sorted(grounding_facts(entry, facts).items())
-                          if key != CONSTANTS_KEY and value is not None and isinstance(value, _SCALARS))
+                          if key != CONSTANTS_KEY and not key.endswith(UNIT_SUFFIX)
+                          and value is not None and isinstance(value, _SCALARS))
     language = settings.message_language or LIBRARY_LANGUAGE
     listed = "\n".join(f"  {i}: {t}" for i, t in enumerate(phrasings_for(entry, language)))
     in_language = "" if language == LIBRARY_LANGUAGE else f" (written in {language!r})"

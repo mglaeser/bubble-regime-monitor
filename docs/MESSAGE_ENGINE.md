@@ -610,7 +610,16 @@ narrowing is undone:
   (the nearest on either side, past stopwords and numbers), never across
   a sentence boundary - so "the 55 gate" cannot become "the score stands
   at 55" (round 11, SOTA-A) or "the 55 level" (round 12: an article is
-  not a wording).
+  not a wording). A fact the registry declares in percent grounds its
+  percent form too ("44.2%" for a bare 44.2), and a constant the prompt
+  writes as a percentage is a percentage to the validator as well.
+* **The quotable lines invite only words the validator admits.** Pinning
+  the constants found the owner's own wording inviting refused text:
+  "not a probability" (the lexicon), "two monthly declines" and "two
+  years" (spelled-out numbers), "closing price" and "a close above"
+  (the advice rule's verbs), "the flag switches on" (likewise). Those
+  lines are reworded under the signature, and a pin holds every quotable
+  line to the lexicon, the number words and the advice rule.
 * **Background facts are read, never printed**, and the gauge labels are
   not printable either: a background numeral that equals a grounded one
   is grounded (provenance is not tracked), so the raw summary syntax

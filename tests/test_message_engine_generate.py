@@ -690,7 +690,7 @@ class TestRoundNineOn121:
         assert composer.prompt_constants(lib["RF3_CREDIT_STRESS"]) == ["100"]
         assert composer.prompt_constants(lib["BAND_TO_TRIM"]) == []          # "24h clock" is a unit, not a constant
         assert composer.prompt_constants(lib["RF_INPUT_UNAVAILABLE"]) == []  # "(1) ... (4)" are list markers
-        assert composer.prompt_constants(lib["S3_TIER"]) == []               # {F_S3} is a slot name; the tiers are withheld
+        assert composer.prompt_constants(lib["S3_TIER"]) == ["2"]            # "the last 2 years"; {F_S3} is a slot name and the tiers are withheld
 
     def test_a_reply_quoting_the_frozen_constants_is_the_message(self, monkeypatch):
         reply = ("bubblegauge: SPY ended the month below the average of its last 10 month-end prices while the "
@@ -756,12 +756,12 @@ class TestRoundElevenOn121:
         assert content == {"above", "gate"} and stops == {"the"}
         assert composer.constant_contexts(lib["RF3_CREDIT_STRESS"])["100"][0] == {"more", "basis"}
         assert composer.constant_contexts(lib["daily_digest"])["0"][0] == {"look", "scale"}
-        assert composer.constant_contexts(lib["MARGIN_ROLLOVER"])["1.0"][0] == {"moves", "when"}
+        assert composer.constant_contexts(lib["MARGIN_ROLLOVER"])["1.0"][0] == {"reads", "when"}
 
     @pytest.mark.parametrize("reply, token", [
         ("bubblegauge: SPY ended the month below its 10-month average price while the monitor score stands at 55. "
          "The next check is at month end.", "55"),
-        ("bubblegauge: SPY ended the month below its average of the last 10 month-end prices (55 is the gate). "
+        ("bubblegauge: SPY ended the month below its average of the last 10 month-end prices; the score reads 55 today. "
          "The next check is at month end.", "55"),
     ])
     def test_a_constant_reported_as_a_reading_is_refused(self, monkeypatch, reply, token):
@@ -803,21 +803,49 @@ class TestRoundTwelveOn121:
 
     @pytest.mark.parametrize("trigger, facts, reply", [
         ("EXECUTION_ARMED", {"asset": "SPY", "headline_median": 62},
-         "bubblegauge: SPY month-end trend signal negative; overall reading 62 on a scale of 0 to 100, not a probability. "
-         "The pre-set execution condition is met. Next check at month-end."),
+         "bubblegauge: SPY month-end trend signal negative; overall reading 62 on a scale of 0 to 100, a heuristic "
+         "score only. The pre-set execution condition is met. Next check at month-end."),
         ("RF4_FIRST", {"F_BREADTH": "44.2", "F_NEXT_CHECK": "14:00"},
-         "Breadth flag on: 44.2% of big US stocks are above their own 200-day average price, below the 50 percent line "
-         "while the index sits within 2 percent of its high. Next check 14:00 UTC."),
+         "Breadth flag on: 44.2 percent of big US stocks are above their own 200-day average price, below the 50 "
+         "percent line while the index sits within 2 percent of its high. Next check 14:00 UTC."),
         ("MARGIN_ROLLOVER", {"F_D2": "0.0"},
-         "Borrowing against brokerage accounts has turned down; the rollover marker moves to 1.0 when two monthly "
-         "declines follow a high. Next check at the next monthly release."),
+         "Borrowing against brokerage accounts has turned down; the rollover marker reads 1.0 when a second "
+         "monthly decline follows a high. Next check at the next monthly release."),
     ])
     def test_a_constant_in_the_prompts_own_wording_passes(self, monkeypatch, trigger, facts, reply):
         out, _ = _compose(monkeypatch, reply, trigger=trigger, facts=dict(facts))
         assert out.source == "generated", out.reason
 
     def test_a_constant_as_a_reading_is_refused_even_next_to_a_shared_noun(self, monkeypatch):
-        out, _ = _compose(monkeypatch, "Borrowing has turned down; the marker reads 1.0 today. Next check at the next monthly release.",
+        out, _ = _compose(monkeypatch, "Borrowing has turned down; the marker is at 1.0 now. Next check at the next monthly release.",
                           trigger="MARGIN_ROLLOVER", facts={"F_D2": "0.0"})
         assert out.source == "fallback" and "constant '1.0'" in (out.reason or ""), out.reason
+
+    def test_a_fact_the_registry_declares_in_percent_grounds_its_percent_form(self, monkeypatch):
+        entry = composer.library()["prompts"]["RF4_FIRST"]
+        grounded = composer.grounding_facts(entry, {"F_BREADTH": "44.2", "F_NEXT_CHECK": "14:00"})
+        assert grounded["F_BREADTH__unit"] == "44.2%"
+        assert "F_BREADTH__unit" not in composer.writing_prompt(entry, {"F_BREADTH": "44.2", "F_NEXT_CHECK": "14:00"},
+                                                                  Channel.IMESSAGE, _settings(), "en")
+        out, _ = _compose(monkeypatch, "Breadth flag on: 44.2% of big US stocks are above their own 200-day average price. "
+                                       "Next check 14:00 UTC.", trigger="RF4_FIRST",
+                          facts={"F_BREADTH": "44.2", "F_NEXT_CHECK": "14:00"})
+        assert out.source == "generated", out.reason
+
+    def test_the_quotable_lines_invite_only_words_the_validator_admits(self):
+        # Found by these pins: EXECUTION_ARMED invited "not a probability" and
+        # MARGIN_ROLLOVER "two monthly declines"; both are refused as written.
+        from app.message_engine.validator import _ADVICE_RE, _NUMBER_WORDS, BANNED_LEXICON
+
+        for name, entry in composer.library()["prompts"].items():
+            for line in entry["prompt"].splitlines():
+                if "quotable" not in line.lower() and "You may state" not in line:
+                    continue
+                lowered = line.lower()
+                for phrase in BANNED_LEXICON:
+                    assert phrase not in lowered, (name, phrase, line[:80])
+                for word in re.findall(r"[a-z]+", lowered):
+                    assert word not in _NUMBER_WORDS, (name, word, line[:80])
+                quoted = line.split(":", 1)[1] if ":" in line else line
+                assert not _ADVICE_RE.search(quoted), (name, _ADVICE_RE.search(quoted).group(0), line[:80])
 
