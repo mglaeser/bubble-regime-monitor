@@ -373,7 +373,12 @@ class TestWritten:
         ("'hello'", Channel.SMS, "hello"),
         ("SMS: short || IMSG: longer text", Channel.IMESSAGE, "longer text"),
         ("SMS: short || IMSG: longer text", Channel.SMS, "short"),
-        ("first || second", Channel.SMS, "first"),
+        ("SMS: alpha || IMESSAGE: beta", Channel.IMESSAGE, "beta"),         # round 14: IMESSAGE is a label too
+        ("SMS: alpha || IMESSAGE: beta", Channel.SMS, "alpha"),
+        ("IMESSAGE: beta || SMS: alpha", Channel.IMESSAGE, "beta"),
+        ("SMS: alpha || beta", Channel.IMESSAGE, "beta"),                   # the one unlabelled part
+        ("SMS: alpha || SMS: gamma", Channel.IMESSAGE, ""),                 # nothing for this channel: empty, a FORMAT rejection
+        ("first || second", Channel.SMS, ""),                              # two unlabelled parts: nothing to choose
         ("  padded  ", Channel.SMS, "padded"),
         ('"unbalanced', Channel.SMS, '"unbalanced'),
         ("kept\n", Channel.SMS, "kept\n"),                  # a line break is the validator's to refuse
@@ -883,4 +888,19 @@ class TestRoundThirteenOn121:
         out, _ = _compose(monkeypatch, "Credit flag on: the distance is 100 basis points. Next check 14:00 UTC.",
                           trigger="RF3_CREDIT_STRESS", facts={"F_RF3_DISTANCE": "+12", "F_NEXT_CHECK": "14:00"})
         assert out.source == "fallback" and "constant '100'" in (out.reason or ""), out.reason
+
+
+class TestRoundFourteenOn121:
+    """written() knew the label IMSG only, so "SMS: alpha || IMESSAGE: beta"
+    sent alpha over iMessage (SOTA-A, executed)."""
+
+    def test_the_imessage_variant_under_either_label(self, monkeypatch):
+        out, _ = _compose(monkeypatch, f"SMS: bubblegauge 59/100 trim. || IMESSAGE: {GOOD_EN}")
+        assert out.source == "generated" and out.text == GOOD_EN
+
+    def test_a_reply_with_no_variant_for_this_channel_is_a_format_rejection(self, monkeypatch):
+        out, _ = _compose(monkeypatch, "SMS: bubblegauge 59/100 trim. || SMS: bubblegauge 59/100 trim, range 57-61.")
+        assert out.source == "fallback" and "empty message" in (out.reason or ""), out.reason
+        with session_scope() as s:
+            assert s.query(MessageEngineAttempt).first().outcome == "format_rejected"
 

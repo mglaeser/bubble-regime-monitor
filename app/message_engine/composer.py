@@ -1057,7 +1057,7 @@ def writing_prompt(entry: dict[str, Any], facts: dict[str, object],
     )
 
 
-_LABEL_RE = re.compile(r"^[ \t]*(?:SMS|IMSG|IMESSAGE|MESSAGE|BODY)[ \t]*:[ \t]*", re.IGNORECASE)
+_LABEL_RE = re.compile(r"^[ \t]*(SMS|IMSG|IMESSAGE|MESSAGE|BODY)[ \t]*:[ \t]*", re.IGNORECASE)
 
 
 #: Blanks a reply may carry at its ends: spaces and tabs. NOT line breaks -
@@ -1080,10 +1080,21 @@ def written(answer: str, channel: Channel) -> str:
     """
     text = answer.strip(_BLANKS)
     if "||" in text:
-        wanted = "SMS" if channel is Channel.SMS else "IMSG"
+        # THE VARIANT FOR THIS CHANNEL, by its label: SMS, or IMSG/IMESSAGE.
+        # The first cut knew the label IMSG only, so "SMS: alpha ||
+        # IMESSAGE: beta" sent alpha over iMessage (#121 round 14, SOTA-A,
+        # executed). A reply that labels no part for this channel yields
+        # its one unlabelled part, or nothing - an empty message is a FORMAT
+        # rejection with the short retry, never the other channel's text.
+        labels = ("SMS",) if channel is Channel.SMS else ("IMSG", "IMESSAGE")
         parts = [part.strip(_BLANKS) for part in text.split("||")]
-        chosen = [part for part in parts if part.upper().startswith(wanted)]
-        text = (chosen or parts)[0]
+        labelled = [(part, _LABEL_RE.match(part)) for part in parts]
+        chosen = [part for part, label in labelled if label and label.group(1).upper() in labels]
+        if chosen:
+            text = chosen[0]
+        else:
+            unlabelled = [part for part, label in labelled if not label]
+            text = unlabelled[0] if len(unlabelled) == 1 else ""
     text = _LABEL_RE.sub("", text, count=1)
     if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
         text = text[1:-1]
