@@ -1799,9 +1799,18 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
             # THE GERMAN RULES (decision 25). The English grammar below would
             # misread German either way, so it is not consulted; the lexicon
             # above still was, since its words are not German words.
-            if not (set(re.findall(r"[a-zäöüß]+", lowered)) & _GERMAN_MARKERS):
-                return ValidationResult(False, FailureClass.CONTENT,
-                                        "not German: no German word in the message")
+            # PREDOMINANTLY German, not merely touched by it: one marker was
+            # enough, so an English message with the homograph "die" in it
+            # ("The die shows ...") went out as German (#121 round 8,
+            # SOTA-A, executed). The German function words must outnumber
+            # the English ones over the whole message.
+            _tokens = re.findall(r"[a-zäöüß]+", lowered)
+            _german = sum(1 for w in _tokens if w in _GERMAN_MARKERS)
+            _english = sum(1 for w in _tokens if w in _ENGLISH_MARKERS)
+            if not _german or _german <= _english:
+                return ValidationResult(
+                    False, FailureClass.CONTENT,
+                    f"not German: {_german} German function word(s) against {_english} English")
             banned = _BANNED_DE_RE.search(lowered)
             if banned:
                 return ValidationResult(False, FailureClass.CONTENT,

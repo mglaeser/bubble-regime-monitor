@@ -635,9 +635,10 @@ bare verb stem opening a clause: "Bleib in SPY.", "Halt Abstand.", from
 an enumerated list of the verbs an instruction to an investor uses -
 the shape of the English action-verb list, with its known limit), German
 number words and compounds, and a POSITIVE check that the text is German
-at all (a
-function word or monitor noun no German sentence of this register does
-without; a compliant English reply had passed as German, #121 round 1).
+at all: the German function words must outnumber the English ones over
+the whole message (a compliant English reply had passed as German, #121
+round 1; one marker was then enough and "The die shows ..." passed,
+round 8).
 The English shape rules are not consulted on German clauses: German
 puts its verb second, and "Langfristig sind SPY und QQQ IN." read to them
 as an instruction on the first real digest. A clause WITHOUT a German

@@ -646,3 +646,30 @@ class TestRoundSevenOn121:
         with session_scope() as s:
             assert s.query(MessageEngineAttempt).first().outcome == "format_rejected"
 
+
+class TestRoundEightOn121:
+    """One German marker was enough: an English message with the homograph
+    "die" went out as German (SOTA-A, executed). German function words
+    must outnumber English ones over the whole message."""
+
+    @pytest.mark.parametrize("reply", [
+        "bubblegauge 59/100, band trim. The range is 57-61. The die shows stretched valuations as the main driver. "
+        "SPY and QQQ are IN. Flags 1/4.",
+        "bubblegauge reports 59 out of 100 in band trim; der range is 57-61 and the flags are 1 of 4.",
+    ])
+    def test_an_english_message_touched_by_german_is_not_german(self, monkeypatch, reply):
+        out, _ = _compose(monkeypatch, reply, language="de")
+        assert out.source == "fallback" and "not German" in (out.reason or ""), out.reason
+
+    @pytest.mark.parametrize("text", [
+        "Der Stand liegt bei 59 von 100 im Band trim. Haupttreiber sind hohe Bewertungen. Spanne: 57-61. "
+        "Warnflaggen: 1 von 4. Langfristiger Trend: SPY IN, QQQ IN.",
+        "59 von 100, Band trim. Treiber: hohe Bewertungen und starke Konzentration. Spanne 57-61, Warnflaggen 1 von 4. "
+        "Langfristtrend: SPY IN, QQQ IN.",
+        "bubblegauge 59/100 trim. Spanne 57-61. SPY IN, QQQ IN. Flaggen 1/4.",
+        "Der Wert liegt bei 59 von 100, the range 57-61. Flaggen 1 von 4.",     # one English word in a German message
+    ])
+    def test_a_german_message_is_german(self, text):
+        result = validate(text, channel=Channel.IMESSAGE, facts=DIGEST_FACTS, prose_rules=True, language="de", **LIMITS)
+        assert result.ok, result.reason
+
