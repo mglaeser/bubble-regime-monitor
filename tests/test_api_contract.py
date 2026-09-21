@@ -67,7 +67,10 @@ def test_score_envelope(client_with_snapshot):
 
     v = data["V"]
     assert v["label"] == "lagging confirmation"
-    assert data["judgment_call"].keys() >= {"text", "stale"}
+    assert data["judgment_call"].keys() >= {"text", "stale", "provenance"}
+    # A judgment is a model's words whenever it exists; the renderer tints the
+    # dynamic-content marker by this (owner, 2026-09-21).
+    assert data["judgment_call"]["provenance"] == ("generated" if data["judgment_call"]["text"] else "none")
 
 
 def test_indicators_list_and_detail(client):

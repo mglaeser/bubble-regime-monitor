@@ -280,6 +280,7 @@ def build_status() -> dict[str, Any]:
                 "red_flag_count": snap.red_flag_count,
                 "coverage": (snap.data_freshness or {}).get("_coverage", {}),
                 "judgment_call": snap.judgment_call, "judgment_stale": snap.judgment_stale,
+                "judgment_provenance": "generated" if snap.judgment_call else "none",
             }
         live = _indicator_live(snap)
 
