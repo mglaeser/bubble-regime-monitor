@@ -598,46 +598,75 @@ def printed_background(entry: dict[str, Any], facts: dict[str, object], text: st
     return None
 
 
-#: Only blanks, hyphens and brackets may sit between a numeral and its
-#: neighbour: a full stop ends the neighbourhood, or "stands at 55. The"
-#: would borrow "the" from the next sentence.
-_NEIGHBOUR_BEFORE_RE = re.compile(r"([A-Za-zÄÖÜäöüß&]+)[\s\-\u2013(\"']*$")
-_NEIGHBOUR_AFTER_RE = re.compile(r"[\s\-\u2013)\"']*([A-Za-zÄÖÜäöüß&]+)")
+#: Words that say nothing about WHAT a number is: an article or a
+#: preposition beside a constant is not its wording. "the 55 gate" grounds
+#: 55 beside "gate"; "the 55 level" borrowed "the" and passed (#121 round
+#: 12, SOTA-A, executed).
+_STOPWORDS = frozenset(
+    "the a an of to at in on by for with from as and or than its own is are was were be "
+    "this that these those it their our your not no".split())
+_WORD_RE = re.compile(r"[A-Za-zÄÖÜäöüß&]+")
+_SENTENCE_END_RE = re.compile(r"[.;:!?]")
 
 
-def _neighbours(text: str, start: int, end: int) -> set[str]:
-    """The word before and the word after a span, lowercased; a word
-    across sentence punctuation is not a neighbour."""
-    found: set[str] = set()
-    before = _NEIGHBOUR_BEFORE_RE.search(text[:start])
-    after = _NEIGHBOUR_AFTER_RE.match(text[end:])
-    if before:
-        found.add(before.group(1).lower())
-    if after:
-        found.add(after.group(1).lower())
-    return found
+def _nearby_words(text: str, start: int, end: int, *, reach: int = 1) -> tuple[set[str], set[str]]:
+    """(content words, stopwords) around a span, not across sentence
+    punctuation: the nearest content word on either side, past any
+    stopwords and numbers ("on a scale of 0 to 100": the content word
+    beside 100 is "scale", three words back), and the stopwords between.
+    One on each side, no more: "the marker reads 1.0 today" shares
+    "marker" with "the marker moves to 1.0 when" two words out, and is a
+    misreport of the marker all the same."""
+    before = text[:start]
+    cut = [m.end() for m in _SENTENCE_END_RE.finditer(before)]
+    before = before[cut[-1]:] if cut else before
+    after = text[end:]
+    stop = _SENTENCE_END_RE.search(after)
+    after = after[:stop.start()] if stop else after
+    content: set[str] = set()
+    stops: set[str] = set()
+    for side in ([w.lower() for w in _WORD_RE.findall(before)][::-1],
+                 [w.lower() for w in _WORD_RE.findall(after)]):
+        seen = 0
+        for word in side:
+            if word in _STOPWORDS:
+                stops.add(word)
+                continue
+            content.add(word)
+            seen += 1
+            if seen >= reach:
+                break
+    return content, stops
 
 
-def constant_contexts(entry: dict[str, Any]) -> dict[str, set[str]]:
-    """For each numeral form the prompt's constants admit, the words the
-    prompt writes next to it. A constant is grounded IN ITS WORDING only:
-    "the 55 gate" grounds 55 beside "the" or "gate", not "the score stands
-    at 55" (#121 round 11, SOTA-A: a constant flattened into the facts
-    could be reported as the live reading)."""
+def constant_contexts(entry: dict[str, Any]) -> dict[str, tuple[set[str], set[str]]]:
+    """For each numeral form the prompt's constants admit, the (content
+    words, stopwords) the prompt writes within two words of it. A constant
+    is grounded IN ITS WORDING only: "the 55 gate" grounds 55 near "gate",
+    not "the score stands at 55" (#121 round 11) and not "the 55 level"
+    (round 12)."""
     from app.message_engine.validator import _NUMERAL_RE, _strip_compounds, grounded_numerals
 
     text = _LIST_MARKER_IN_PROMPT_RE.sub(" ", _SLOT_RE.sub(" ", str(entry.get("prompt", ""))))
-    contexts: dict[str, set[str]] = {}
+    contexts: dict[str, tuple[set[str], set[str]]] = {}
     for match in _NUMERAL_RE.finditer(_strip_compounds(text)):
-        words = _neighbours(text, match.start(), match.end())
+        content, stops = _nearby_words(text, match.start(), match.end())
         for form in grounded_numerals({"c": match.group(0)}):
-            contexts.setdefault(form, set()).update(words)
+            known = contexts.setdefault(form, (set(), set()))
+            known[0].update(content)
+            known[1].update(stops)
     return contexts
 
 
 def constant_out_of_context(entry: dict[str, Any], facts: dict[str, object], text: str) -> str | None:
     """A numeral in the text that only the prompt's constants ground, used
-    away from the words the prompt writes it with - or None."""
+    away from the wording the prompt writes it in - or None.
+
+    A constant the prompt writes beside a content word ("gate", "basis",
+    "month", "scale") must appear near one of those words; a constant the
+    prompt writes only among stopwords ("moves to 1.0 when") must have
+    every stopword the reply puts beside it among the prompt's own.
+    """
     from app.message_engine.validator import _NUMERAL_RE, _strip_compounds, grounded_numerals
 
     by_facts = grounded_numerals({k: v for k, v in grounding_facts(entry, facts).items() if k != CONSTANTS_KEY})
@@ -647,12 +676,20 @@ def constant_out_of_context(entry: dict[str, Any], facts: dict[str, object], tex
         token = match.group(0)
         if token in by_facts or token.lstrip("+") in by_facts:
             continue
-        allowed = contexts.get(token) or contexts.get(token.lstrip("+"))
-        if allowed is None:
+        known = contexts.get(token) or contexts.get(token.lstrip("+"))
+        if known is None:
             continue                      # not a constant either: the validator's to refuse
-        if not (_neighbours(text, match.start(), match.end()) & allowed):
+        content, stops = known
+        near_content, near_stops = _nearby_words(text, match.start(), match.end())
+        if content:
+            if near_content & content:
+                continue
             return (f"constant {token!r} used outside its quoted wording "
-                    f"(the prompt writes it beside {sorted(allowed)})")
+                    f"(the prompt writes it near {sorted(content)})")
+        if near_stops and near_stops <= stops and not near_content:
+            continue
+        return (f"constant {token!r} used outside its quoted wording "
+                f"(the prompt writes it only beside {sorted(stops)})")
     return None
 
 

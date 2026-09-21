@@ -752,9 +752,11 @@ class TestRoundElevenOn121:
 
     def test_the_words_a_constant_is_written_with(self):
         lib = composer.library()["prompts"]
-        assert composer.constant_contexts(lib["FABER_OUT_HIGH_RISK"])["55"] == {"the", "gate"}
-        assert composer.constant_contexts(lib["RF3_CREDIT_STRESS"])["100"] == {"than", "basis"}
-        assert composer.constant_contexts(lib["daily_digest"])["0"] == {"a", "scale"}
+        content, stops = composer.constant_contexts(lib["FABER_OUT_HIGH_RISK"])["55"]
+        assert content == {"above", "gate"} and stops == {"the"}
+        assert composer.constant_contexts(lib["RF3_CREDIT_STRESS"])["100"][0] == {"more", "basis"}
+        assert composer.constant_contexts(lib["daily_digest"])["0"][0] == {"look", "scale"}
+        assert composer.constant_contexts(lib["MARGIN_ROLLOVER"])["1.0"][0] == {"moves", "when"}
 
     @pytest.mark.parametrize("reply, token", [
         ("bubblegauge: SPY ended the month below its 10-month average price while the monitor score stands at 55. "
@@ -778,4 +780,44 @@ class TestRoundElevenOn121:
         out, _ = _compose(monkeypatch, "bubblegauge reports 59 out of 100 on a 0-100 scale in band trim. The range is 57-61. "
                                        "Flags are 1 of 4.", now=LATER)
         assert out.source == "generated", out.reason
+
+
+class TestRoundTwelveOn121:
+    """A stopword is not a constant's wording: "the 55 level" borrowed "the"
+    from "the 55 gate" and passed (SOTA-A, executed). A constant must sit
+    beside one of the CONTENT words the prompt writes next to it - the
+    nearest content word on either side, past stopwords and numbers, never
+    across a sentence boundary."""
+
+    FACTS = {"F_ASSET": "SPY", "F_HEADLINE_MEDIAN": 62}
+
+    @pytest.mark.parametrize("reply", [
+        "bubblegauge: SPY ended the month below its 10-month average price. The score stands at the 55 level. "
+        "The next check is at month end.",
+        "bubblegauge: SPY ended the month below its 10-month average price; the reading is the 55 mark. "
+        "The next check is at month end.",
+    ])
+    def test_a_stopword_beside_a_constant_is_not_its_wording(self, monkeypatch, reply):
+        out, _ = _compose(monkeypatch, reply, trigger="FABER_OUT_HIGH_RISK", facts=dict(self.FACTS))
+        assert out.source == "fallback" and "constant '55' used outside its quoted wording" in (out.reason or ""), out.reason
+
+    @pytest.mark.parametrize("trigger, facts, reply", [
+        ("EXECUTION_ARMED", {"asset": "SPY", "headline_median": 62},
+         "bubblegauge: SPY month-end trend signal negative; overall reading 62 on a scale of 0 to 100, not a probability. "
+         "The pre-set execution condition is met. Next check at month-end."),
+        ("RF4_FIRST", {"F_BREADTH": "44.2", "F_NEXT_CHECK": "14:00"},
+         "Breadth flag on: 44.2% of big US stocks are above their own 200-day average price, below the 50 percent line "
+         "while the index sits within 2 percent of its high. Next check 14:00 UTC."),
+        ("MARGIN_ROLLOVER", {"F_D2": "0.0"},
+         "Borrowing against brokerage accounts has turned down; the rollover marker moves to 1.0 when two monthly "
+         "declines follow a high. Next check at the next monthly release."),
+    ])
+    def test_a_constant_in_the_prompts_own_wording_passes(self, monkeypatch, trigger, facts, reply):
+        out, _ = _compose(monkeypatch, reply, trigger=trigger, facts=dict(facts))
+        assert out.source == "generated", out.reason
+
+    def test_a_constant_as_a_reading_is_refused_even_next_to_a_shared_noun(self, monkeypatch):
+        out, _ = _compose(monkeypatch, "Borrowing has turned down; the marker reads 1.0 today. Next check at the next monthly release.",
+                          trigger="MARGIN_ROLLOVER", facts={"F_D2": "0.0"})
+        assert out.source == "fallback" and "constant '1.0'" in (out.reason or ""), out.reason
 
