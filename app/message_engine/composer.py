@@ -611,6 +611,9 @@ def printed_background(entry: dict[str, Any], facts: dict[str, object], text: st
 _STOPWORDS = frozenset(
     "the a an of to at in on by for with from as and or than its own is are was were be "
     "this that these those it their our your not no".split())
+#: A unit is not a wording either: "stands at 50 percent" shares "percent"
+#: with "below 50 percent" and misreports the threshold all the same.
+_UNIT_WORDS = frozenset("percent basis points bp bps pp".split())
 _WORD_RE = re.compile(r"[A-Za-zÄÖÜäöüß&]+")
 _SENTENCE_END_RE = re.compile(r"[.;:!?]")
 
@@ -638,6 +641,8 @@ def _nearby_words(text: str, start: int, end: int, *, reach: int = 1) -> tuple[s
             if word in _STOPWORDS:
                 stops.add(word)
                 continue
+            if word in _UNIT_WORDS:
+                continue
             content.add(word)
             seen += 1
             if seen >= reach:
@@ -657,11 +662,20 @@ def constant_contexts(entry: dict[str, Any]) -> dict[str, tuple[set[str], set[st
     contexts: dict[str, tuple[set[str], set[str]]] = {}
     for match in _NUMERAL_RE.finditer(_strip_compounds(text)):
         content, stops = _nearby_words(text, match.start(), match.end())
-        for form in grounded_numerals({"c": match.group(0)}):
+        forms = set(grounded_numerals({"c": match.group(0)}))
+        if _PERCENT_AFTER_RE.match(text, match.end()):
+            # "50 percent" is "50%" to the validator, and the percent form
+            # had no context entry, so "stands at 50%" was nobody's to
+            # refuse (#121 round 13, SOTA-A, executed).
+            forms |= set(grounded_numerals({"c": match.group(0).rstrip("%") + "%"}))
+        for form in forms:
             known = contexts.setdefault(form, (set(), set()))
             known[0].update(content)
             known[1].update(stops)
     return contexts
+
+
+_PERCENT_AFTER_RE = re.compile(r"\s*(?:%|percent\b)")
 
 
 def constant_out_of_context(entry: dict[str, Any], facts: dict[str, object], text: str) -> str | None:

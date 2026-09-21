@@ -754,7 +754,7 @@ class TestRoundElevenOn121:
         lib = composer.library()["prompts"]
         content, stops = composer.constant_contexts(lib["FABER_OUT_HIGH_RISK"])["55"]
         assert content == {"above", "gate"} and stops == {"the"}
-        assert composer.constant_contexts(lib["RF3_CREDIT_STRESS"])["100"][0] == {"more", "basis"}
+        assert composer.constant_contexts(lib["RF3_CREDIT_STRESS"])["100"][0] == {"more", "above"}   # "basis" is a unit
         assert composer.constant_contexts(lib["daily_digest"])["0"][0] == {"look", "scale"}
         assert composer.constant_contexts(lib["MARGIN_ROLLOVER"])["1.0"][0] == {"reads", "when"}
 
@@ -848,4 +848,39 @@ class TestRoundTwelveOn121:
                     assert word not in _NUMBER_WORDS, (name, word, line[:80])
                 quoted = line.split(":", 1)[1] if ":" in line else line
                 assert not _ADVICE_RE.search(quoted), (name, _ADVICE_RE.search(quoted).group(0), line[:80])
+
+
+class TestRoundThirteenOn121:
+    """A percent-form constant had no context entry: "50 percent" grounds
+    "50%", and "the score stands at 50%" was nobody's to refuse (SOTA-A,
+    executed). The percent forms carry the same wording; a unit word
+    ("percent", "basis points") is not a wording either."""
+
+    FACTS = {"F_BREADTH": "44.2", "F_NEXT_CHECK": "14:00"}
+
+    def test_the_percent_forms_carry_the_wording(self):
+        ctx = composer.constant_contexts(composer.library()["prompts"]["RF4_FIRST"])
+        assert ctx["50%"][0] == ctx["50"][0] == {"below", "while"}
+        assert ctx["2%"][0] == {"within", "record"}
+
+    @pytest.mark.parametrize("reply, token", [
+        ("Breadth flag on: the score stands at 50%. Next check 14:00 UTC.", "50%"),
+        ("Breadth flag on: the score stands at 50 percent. Next check 14:00 UTC.", "50"),
+        ("Breadth flag on: 44.2% of big US stocks are above their own 200-day average price; the index is up 2% today. "
+         "Next check 14:00 UTC.", "2%"),
+    ])
+    def test_a_percent_constant_as_a_reading_is_refused(self, monkeypatch, reply, token):
+        out, _ = _compose(monkeypatch, reply, trigger="RF4_FIRST", facts=dict(self.FACTS))
+        assert out.source == "fallback" and f"constant '{token}'" in (out.reason or ""), out.reason
+
+    def test_the_percent_constants_in_their_wording_pass(self, monkeypatch):
+        reply = ("Breadth flag on: 44.2% of big US stocks are above their own 200-day average price, below the 50 percent "
+                 "line while the index sits within 2% of its record high. Next check 14:00 UTC.")
+        out, _ = _compose(monkeypatch, reply, trigger="RF4_FIRST", facts=dict(self.FACTS))
+        assert out.source == "generated", out.reason
+
+    def test_a_unit_word_is_not_a_wording(self, monkeypatch):
+        out, _ = _compose(monkeypatch, "Credit flag on: the distance is 100 basis points. Next check 14:00 UTC.",
+                          trigger="RF3_CREDIT_STRESS", facts={"F_RF3_DISTANCE": "+12", "F_NEXT_CHECK": "14:00"})
+        assert out.source == "fallback" and "constant '100'" in (out.reason or ""), out.reason
 

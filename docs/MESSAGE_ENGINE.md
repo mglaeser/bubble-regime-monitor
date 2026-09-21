@@ -610,9 +610,10 @@ narrowing is undone:
   (the nearest on either side, past stopwords and numbers), never across
   a sentence boundary - so "the 55 gate" cannot become "the score stands
   at 55" (round 11, SOTA-A) or "the 55 level" (round 12: an article is
-  not a wording). A fact the registry declares in percent grounds its
-  percent form too ("44.2%" for a bare 44.2), and a constant the prompt
-  writes as a percentage is a percentage to the validator as well.
+  not a wording; a unit word is not one either, round 13). A fact the
+  registry declares in percent grounds its percent form too ("44.2%" for
+  a bare 44.2), and a constant the prompt writes as a percentage is a
+  percentage to the validator as well, with the same wording bound to it.
 * **The quotable lines invite only words the validator admits.** Pinning
   the constants found the owner's own wording inviting refused text:
   "not a probability" (the lexicon), "two monthly declines" and "two
