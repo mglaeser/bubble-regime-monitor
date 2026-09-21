@@ -1302,21 +1302,27 @@ def _reads_as_state(text: str, match: re.Match[str]) -> bool:
 #: English prose rather than a German label ("Langfristtrend: SPY IN")
 #: that merely lacks a German marker. "in" is left out: it is German too,
 #: and the trend state is written IN.
+#: ("an" is left out too: it is a German preposition.)
 _ENGLISH_MARKERS: frozenset[str] = frozenset(
-    "the a an to of your you now into out with for from should must is are this that "
+    "the a to of your you now into out with for from should must is are this that "
     "and or at by on".split())
 
 
 def _english_offence(judged: str, grounded_words: set[str]) -> str | None:
-    """The English advice rule on a clause of a German message that has no
-    German word in it, and - when the clause has an English function word,
-    so it is English prose rather than a German label - the English
-    imperative shapes too. The band-verb state test is not applied: German
-    compounds end in "band" ("Aktionsband trim") and the German rules own
-    the band words there."""
-    if _ADVICE_RE.search(judged):
+    """The English advice and imperative rules on a clause of a German
+    message that carries an English function word - English prose, whether
+    or not a German word sits beside it: "Die move to cash now." was skipped
+    as German on the strength of "Die" (#121 round 4, SOTA-A, executed).
+    A German label without one ("Langfristtrend: SPY IN") is not judged
+    here. The band-verb state test is not applied: German compounds end in
+    "band" ("Aktionsband trim") and the German rules own the band words."""
+    words = set(re.findall(r"[a-zäöüß]+", judged.lower()))
+    english = bool(words & _ENGLISH_MARKERS)
+    # The advice rule is word-based and reads a clause that is not German
+    # ("Consider selling.", round 3) as well as one that is English prose.
+    if (english or not words & _GERMAN_MARKERS) and _ADVICE_RE.search(judged):
         return "reads as advice, not an observation"
-    if not (set(re.findall(r"[a-z]+", judged.lower())) & _ENGLISH_MARKERS):
+    if not english:
         return None
     clauses = re.split(_CLAUSE_BOUNDARY_RE, judged)
     clauses += [f"{label} {rest}" for label, rest in zip(clauses, clauses[1:], strict=False)
@@ -1807,13 +1813,13 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
         # AN ENGLISH CLAUSE INSIDE A GERMAN MESSAGE is judged by the English
         # rules: "Move to cash. Die Spanne liegt bei 57-61." satisfied the
         # German marker with "die" and the German grammar with nothing
-        # (#121 round 3, SOTA-A, executed). A clause with no German word in
-        # it is not German, and the English advice, imperative and band-verb
-        # rules read it as English; a clause with one is German and was
-        # judged above.
+        # (#121 round 3, SOTA-A, executed), and "Die move to cash now." did
+        # the same inside one clause (round 4). A clause that carries an
+        # English function word is English prose - whatever else is in it -
+        # and the English advice and imperative rules read it as such.
         _grounded_words = {str(v).casefold() for v in facts.values()}
         for _clause in re.split(_CLAUSE_BOUNDARY_RE, judged):
-            if not _clause.strip() or set(re.findall(r"[a-zäöüß]+", _clause.lower())) & _GERMAN_MARKERS:
+            if not _clause.strip():
                 continue
             offence = _english_offence(_clause, _grounded_words)
             if offence is not None:

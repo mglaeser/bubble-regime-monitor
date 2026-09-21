@@ -531,3 +531,42 @@ class TestRoundThreeOn121:
         assert "patience_s=settings.message_engine_retry_patience_s" in source
         assert inspect.signature(service.deliver).parameters["patience_s"].default == 0
 
+
+class TestRoundFourOn121:
+    """SOTA-A: a mixed clause with one German word skipped the English
+    rules ("Die move to cash now."), executed. SOTA-C: an unbounded retry
+    loop should the governor ever answer 0 s after a rejection - not
+    reproducible (the rejection is on the rows before compose() returns),
+    bounded by the content cap regardless."""
+
+    @pytest.mark.parametrize("text", [
+        "Die move to cash now. Die Spanne liegt bei 57-61.",
+        "Der Wert liegt bei 59 von 100 und you should reduce exposure now.",
+        "Der Wert liegt bei 59 von 100. Consider selling. Die Spanne liegt bei 57-61.",
+    ])
+    def test_a_mixed_clause_with_english_prose_is_judged_as_english(self, text):
+        result = validate(text, channel=Channel.IMESSAGE, facts=DIGEST_FACTS, prose_rules=True, language="de", **LIMITS)
+        assert not result.ok and "an English clause in a German message" in (result.reason or ""), result.reason
+
+    def test_a_german_clause_with_an_at_the_preposition_is_german(self):
+        result = validate("Der Wert liegt an der oberen Grenze der Spanne 57-61; SPY und QQQ sind langfristig IN. Flaggen 1 von 4.",
+                          channel=Channel.IMESSAGE, facts=DIGEST_FACTS, prose_rules=True, language="de", **LIMITS)
+        assert result.ok, result.reason
+
+    def test_the_retry_loop_is_bounded_by_the_cap_whatever_the_governor_says(self, monkeypatch):
+        state, clock, sleep = TestTheDeliveryIsPatient()._clock()
+        monkeypatch.setattr(service, "_next_attempt_in", lambda *_a, **_k: 0.0)    # "ask again now", forever
+        bad = "bubblegauge 59/100 trim; a crash is likely. Range 57-61. Flags 1/4."
+        prompts = _replies(monkeypatch, bad, bad, bad, bad, bad, bad)
+        settings = _settings(message_engine_max_content_iterations=3)
+        monkeypatch.setattr(composer.gov, "reserve",
+                            lambda **_k: (composer.gov.Decision(composer.gov.Verdict.ASK, "clear"), 1))
+        monkeypatch.setattr(composer, "_close", lambda *_a, **_k: True)
+        monkeypatch.setattr(composer, "_rejected",
+                            lambda trigger, channel, priority, text, reason, finished, settings: composer._issue(
+                                text=text, source="fallback", trigger=trigger, channel=channel.value, reason=reason))
+        out = service.compose_with_patience(trigger="daily_digest", channel=Channel.IMESSAGE, priority=3,
+                                            facts=dict(DIGEST_FACTS), settings=settings, patience_s=10_000,
+                                            sleep=sleep, clock=clock)
+        assert out.source == "fallback" and len(prompts) == 3 and state["slept"] == []
+

@@ -596,7 +596,8 @@ narrowing is undone:
   governor when. A refusal that was not a rejection ends the wait at once.
   `deliver()` itself grants none: a ready fallback is never withheld by
   default, so an alert routed through the engine is not held for minutes
-  behind a rejected reply (#121 round 3, SOTA-A).
+  behind a rejected reply (#121 round 3, SOTA-A). The loop is bounded by
+  the content cap whatever the governor answers (round 4, SOTA-C).
 * **Background facts are read, never printed**, and the gauge labels are
   not printable either: a background numeral that equals a grounded one
   is grounded (provenance is not tracked), so the raw summary syntax
@@ -641,11 +642,13 @@ puts its verb second, and "Langfristig sind SPY und QQQ IN." read to them
 as an instruction on the first real digest. A clause WITHOUT a German
 word in it is not German, though: "Move to cash. Die Spanne liegt bei
 57-61." satisfied the marker with "die" and the German grammar with
-nothing (#121 round 3), so such a clause is judged by the English advice
-rule and - when it carries an English function word, so it is prose and
-not a German label like "Langfristtrend:" - by the English imperative
-shapes. `validate(..., language="de")` selects the set; a language
-without rules is refused outright.
+nothing (#121 round 3), and "Die move to cash now." did the same inside
+one clause (round 4). So a clause that carries an English function word
+is English prose whatever else is in it and is judged by the English
+advice rule and the English imperative shapes; a clause with neither
+language's words is judged by the advice rule; a German label such as
+"Langfristtrend:" is neither. `validate(..., language="de")` selects
+the set; a language without rules is refused outright.
 
 This is the interim the owner accepted so German is enriched at all
 (option (c) of the coherence review). It is weaker than the English set:

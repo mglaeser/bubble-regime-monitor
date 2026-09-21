@@ -140,7 +140,14 @@ def compose_with_patience(*, trigger: str, channel: Channel, priority: int,
     composed = composer.compose(trigger=trigger, channel=channel, priority=priority,
                                 facts=facts, settings=settings, now=clock())
     budget = float(patience_s)
-    while _was_rejected(composed) and budget > 0:
+    # BOUNDED BY THE CAP, whatever the governor answers. The governor is the
+    # authority on WHEN, and a rejection is on its rows before compose()
+    # returns; but a loop that spends the model's calls must not depend on
+    # that to terminate (#121 round 4, SOTA-C): no send makes more attempts
+    # than the content cap (Q38) allows.
+    attempts = 1
+    while (_was_rejected(composed) and budget > 0
+           and attempts < max(1, settings.message_engine_max_content_iterations)):
         try:
             wait = _next_attempt_in(trigger, priority, settings, clock())
         except Exception as exc:  # noqa: BLE001 - the evergreen text is already in hand
@@ -154,6 +161,7 @@ def compose_with_patience(*, trigger: str, channel: Channel, priority: int,
         if wait:
             sleep(wait)
         budget -= wait
+        attempts += 1
         composed = composer.compose(trigger=trigger, channel=channel, priority=priority,
                                     facts=facts, settings=settings, now=clock())
     return composed
