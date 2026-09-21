@@ -57,11 +57,26 @@ Already-dynamic, already-API-served (no change): `snapshot.judgment_call`,
 `service.recompute_schedule`, the worked `/score` example, docs links inside
 `/api/v1/status`, and every metric/series value.
 
+### The dynamic-content marker (owner, 2026-09-21)
+
+Every dynamic text a frontend shows - a slot from `/content/dynamic`, the
+judgment call from `/score` or `/status` - ends in **DOT ABOVE, U+02D9
+(`˙`)**, drawn at the text's own size: **green, within the shade range of
+the text**, when a model wrote the text (`provenance: "generated"`), and in
+**the text's own colour** when the text came from a template - a
+placeholder or an evergreen fallback (`provenance: "template"`). The API
+decides, the renderer draws: `/content/dynamic` carries `provenance` on
+every slot and the convention itself under `data.marker` (glyph,
+codepoint, rule); the judgment call carries `provenance` (`generated` when
+it exists, `none` when it does not; a stale one is an older model's words
+and stays `generated`). The status page implements it (`.dyn.generated`,
+`.dyn.template`); save-haven follows the same rule from the same fields.
+
 ## 2 · Endpoints
 
 ```
 GET /api/v1/content/dashboard   static blocks {slug: {kind, text|items|entries}}
-GET /api/v1/content/dynamic     dynamic slots {slug: {text, source, updated_at, purpose, as_of, constraints}}
+GET /api/v1/content/dynamic     dynamic slots {slug: {text, source, provenance, updated_at, purpose, as_of, constraints, writer}} + marker
 ```
 
 v1 completeness is the full code-anchored manifest (`app/content_manifest.py`):

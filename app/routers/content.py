@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends, Request, Response
 
 from app.config import get_settings
 from app.content_registry import (
+    DYNAMIC_MARKER,
     artifact_view,
     dashboard_payload,
     dynamic_slots_payload,
@@ -60,5 +61,6 @@ def get_dynamic_content(request: Request, response: Response,
                         _: None = Depends(require_read_access)) -> dict[str, Any]:
     response.headers["Cache-Control"] = _cache_control(60)
     return {"data": {"slots": dynamic_slots_payload(),
+                     "marker": DYNAMIC_MARKER,
                      "content_version": artifact_view()[1]},
             "meta": _meta()}

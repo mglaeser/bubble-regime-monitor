@@ -115,6 +115,19 @@ class TestDynamicContent:
         r = client.get("/api/v1/content/dynamic")
         assert "max-age=60" in r.headers.get("cache-control", "")
 
+    def test_every_slot_carries_its_provenance_and_the_marker_rides_along(self, client):
+        # The dynamic-content marker (owner, 2026-09-21): a renderer appends
+        # DOT ABOVE to every dynamic text and tints it by provenance; the API
+        # says which and carries the glyph so every frontend draws the same.
+        data = client.get("/api/v1/content/dynamic").json()["data"]
+        assert data["marker"]["glyph"] == "\u02d9" and data["marker"]["codepoint"] == "U+02D9"
+        assert "generated" in data["marker"]["rule"] and "template" in data["marker"]["rule"]
+        for slug, slot in data["slots"].items():
+            assert slot["provenance"] == "template", slug          # placeholders are templates
+        assert content_registry.provenance_of("generated") == "generated"
+        assert content_registry.provenance_of("fallback") == "template"
+        assert content_registry.provenance_of("placeholder") == "template"
+
 
 class TestCacheScope:
     def test_public_while_read_surface_is_public(self, client):

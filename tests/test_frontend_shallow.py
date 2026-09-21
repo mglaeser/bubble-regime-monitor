@@ -103,3 +103,28 @@ class TestShallowPage:
         # The fetch-failure branch may never state facts; it must keep the
         # generic prefix exactly (tests document the contract).
         assert "Failed to load status: " in PAGE
+
+
+class TestTheDynamicContentMarker:
+    """Every dynamic text on the page ends in DOT ABOVE (U+02D9) at the
+    text's own size, green within the text's shade when a model wrote the
+    text, the text's own colour when it came from a template (owner,
+    2026-09-21). The page draws; the API decides."""
+
+    def test_the_glyph_and_its_two_tints(self):
+        assert "const DYN_GLYPH = '\\u02D9';" in PAGE
+        assert ".dyn{font-size:inherit" in PAGE                    # the text's own size
+        assert ".dyn.template{color:currentColor}" in PAGE         # the text's own colour
+        assert ".dyn.generated{color:#5fa77a;color:color-mix(in srgb, currentColor 55%, var(--ok) 45%)}" in PAGE
+
+    def test_the_judgment_and_every_rendered_slot_carry_it(self):
+        assert "el.appendChild(dyn(j, snap.judgment_provenance||'generated'))" in PAGE
+        for slot in ("headline_note", "audit_note"):
+            assert f"dyn(h('div','slot', note), slotProvenance('{slot}'))" in PAGE, slot
+        # no slot is rendered without the marker
+        assert "appendChild(h('div','slot', note))" not in PAGE
+
+    def test_the_tint_follows_the_apis_provenance_only(self):
+        assert "s.provenance==='generated'" in PAGE
+        assert "'generated':'template'" in PAGE
+

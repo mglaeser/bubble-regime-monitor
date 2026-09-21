@@ -108,7 +108,11 @@ def get_score(request: Request, _: None = Depends(require_read_access)) -> dict[
         "trend_states": snap.trend_states,
         "fast_alarm": snap.fast_alarm,
         "judgment_call": {"text": snap.judgment_call, "stale": snap.judgment_stale,
-                          "error_class": snap.judgment_error},
+                          "error_class": snap.judgment_error,
+                          # A judgment is a model's words whenever it exists (a
+                          # stale one is an older model's words); there is no
+                          # template for it. The renderer tints its marker by this.
+                          "provenance": "generated" if snap.judgment_call else "none"},
         # Q8 (shallow-frontend program): the gauge display copy rides the data
         # it explains — band one-liners, indicator glosses, badge/banner texts.
         # Sourced from the versioned content-block artifact; {} until it ships.

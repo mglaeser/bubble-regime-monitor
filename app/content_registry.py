@@ -699,12 +699,34 @@ DYNAMIC_SLOTS: tuple[DynamicSlot, ...] = (
 )
 
 
+#: The dynamic-content marker (owner, 2026-09-21): every dynamic text ends in
+#: DOT ABOVE, at the text's own size, tinted green when a model wrote the
+#: text and in the text's own colour when it came from a template. The API
+#: carries the glyph and the rule so every frontend draws the same mark; the
+#: colour is the renderer's (docs/CONTENT_API.md, "The dynamic-content
+#: marker").
+DYNAMIC_MARKER: dict[str, Any] = {
+    "glyph": "\u02d9",
+    "codepoint": "U+02D9",
+    "rule": ("Append the glyph to every dynamic text at the text's own size. Tint it green, "
+             "within the shade range of the text, when provenance is 'generated'; keep the "
+             "text's own colour when provenance is 'template'."),
+}
+
+
+def provenance_of(source: str) -> str:
+    """'generated' for text a model wrote; 'template' for a placeholder or an
+    evergreen fallback. The one word a renderer needs to pick the tint."""
+    return "generated" if source == "generated" else "template"
+
+
 def dynamic_slots_payload() -> dict[str, dict[str, Any]]:
     """Serve every dynamic slot. Placeholder-backed until generation lands."""
     return {
         s.slug: {
             "text": s.placeholder,
             "source": "placeholder",
+            "provenance": provenance_of("placeholder"),
             "updated_at": None,
             "purpose": s.purpose,
             "as_of": s.as_of,

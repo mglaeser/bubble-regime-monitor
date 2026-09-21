@@ -73,6 +73,14 @@
   .overflow{overflow-x:auto}
   code{font-family:var(--mono);background:var(--panel2);padding:1px 5px;border-radius:5px;font-size:12px}
   .slot{font-size:12.5px;color:var(--muted);font-style:italic;margin-top:6px;flex-basis:100%}
+  /* The dynamic-content marker (owner, 2026-09-21): DOT ABOVE at the end of
+     every dynamic text, the text's own size; green within the text's shade
+     when a model wrote the text, the text's own colour when it came from a
+     template. color-mix keeps the tint in the text's lightness range; the
+     plain colour before it is the fallback for browsers without it. */
+  .dyn{font-size:inherit;font-style:normal;margin-left:1px}
+  .dyn.template{color:currentColor}
+  .dyn.generated{color:#5fa77a;color:color-mix(in srgb, currentColor 55%, var(--ok) 45%)}
 </style>
 </head>
 <body>
@@ -173,6 +181,15 @@ function ctext(slug, fb){ const b=CONTENT[slug]; return (b && typeof b.text==='s
 function citems(slug){ const b=CONTENT[slug]; return (b && Array.isArray(b.items)) ? b.items : []; }
 function cmap(slug){ const b=CONTENT[slug]; return (b && b.entries && typeof b.entries==='object') ? b.entries : {}; }
 function slotText(name){ const s=SLOTS[name]; return (s && typeof s.text==='string') ? s.text : null; }
+// Dynamic content ends in the marker (U+02D9 DOT ABOVE), tinted by where the
+// words came from: 'generated' (a model wrote them) or 'template' (a
+// placeholder or an evergreen fallback). The API says which; this only draws.
+const DYN_GLYPH = '\u02D9';
+function slotProvenance(name){ const s=SLOTS[name]; return (s && s.provenance==='generated') ? 'generated' : 'template'; }
+function dyn(el, provenance){
+  const m=h('span','dyn '+(provenance==='generated'?'generated':'template'), DYN_GLYPH);
+  m.setAttribute('aria-label', provenance==='generated' ? 'model-written' : 'template');
+  el.appendChild(m); return el; }
 
 function renderContentText(){
   const stale=document.getElementById('content-stale');
@@ -228,9 +245,10 @@ function renderHeadline(s){
   ]));
   el.appendChild(right);
   if(snap.judgment_call){ const j=h('div','ind-meta'); j.style.flexBasis='100%';
-    j.textContent='Judgment: '+snap.judgment_call+(snap.judgment_stale?' (stale)':''); el.appendChild(j); }
+    j.textContent='Judgment: '+snap.judgment_call+(snap.judgment_stale?' (stale)':'');
+    el.appendChild(dyn(j, snap.judgment_provenance||'generated')); }
   const note=slotText('headline_note');
-  if(note){ el.appendChild(h('div','slot', note)); }
+  if(note){ el.appendChild(dyn(h('div','slot', note), slotProvenance('headline_note'))); }
 }
 
 let AUDIT=[], AUDIT_FILTER='all';
@@ -251,7 +269,7 @@ function drawAudit(){
   const list=AUDIT.filter(f=>AUDIT_FILTER==='all'||f.severity===AUDIT_FILTER);
   if(!list.length){ el.appendChild(h('div','muted','Nothing flagged at this level.')); return; }
   const note=slotText('audit_note');
-  if(note){ el.appendChild(h('div','slot', note)); }
+  if(note){ el.appendChild(dyn(h('div','slot', note), slotProvenance('audit_note'))); }
   list.forEach(f=>{
     const d=h('div','flag '+f.severity);
     const t=h('div','t'); t.appendChild(badge(f.severity==='error'?'error':(f.severity==='warn'?'warn':'info')));
