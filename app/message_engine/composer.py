@@ -791,10 +791,14 @@ def _with_house_rules(prompt: str, rules: list[str], language: str) -> str:
 def _render_prompt(template: str, facts: dict[str, object]) -> str:
     """The prompt's DATA lines with the grounded facts in their slots; a
     missing value reads '?', which the library's prompts already tell the
-    model to omit. Only declared, sanitized facts reach here (see compose)."""
+    model to omit. compose() sanitizes every declared string fact once
+    before anything is rendered (decision 16); this renderer sanitizes
+    again on its own account, so a caller that hands it raw facts cannot
+    put a credential in front of the model either (#121 round 6, SOTA-A:
+    executed on compose() and not reproduced; closed here structurally)."""
     def _sub(match: re.Match[str]) -> str:
         value = _slot_value(match.group(1), facts)
-        text = "?" if value is None else str(value)
+        text = "?" if value is None else sanitize(str(value))
         return _CONTROL_RE.sub(" ", text)
 
     return _SLOT_RE.sub(_sub, template)

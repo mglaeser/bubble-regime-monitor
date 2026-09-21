@@ -594,3 +594,29 @@ class TestRoundFiveOn121:
         result = validate(text, channel=Channel.IMESSAGE, facts=DIGEST_FACTS, prose_rules=True, language="de", **LIMITS)
         assert result.ok, result.reason
 
+
+class TestRoundSixOn121:
+    """SOTA-A: "declared string facts reach the model unsanitized through the
+    DATA slots". Executed on compose(): not reproduced - every declared
+    string fact is sanitized once before anything is rendered (decision
+    16). Closed structurally anyway: the slot renderer sanitizes on its own
+    account, so even a direct caller with raw facts cannot brief the model
+    with a credential."""
+
+    SECRET = "Bearer eyJhbGciOiJIUzI1NiJ9.plantedplantedplanted.signature"   # pragma: allowlist secret
+
+    def test_compose_briefs_the_model_with_sanitized_facts_only(self, monkeypatch):
+        facts = {**DIGEST_FACTS, "judgment": f"Valuations are stretched; upstream said {self.SECRET} and key "
+                                             "sk-plant-1234567890abcdefghijklmn"}   # pragma: allowlist secret
+        out, prompts = _compose(monkeypatch, GOOD_EN, facts=facts)
+        assert "planted" not in prompts[0] and "sk-plant" not in prompts[0] and "eyJ" not in prompts[0]
+
+    def test_the_writing_prompt_sanitizes_raw_facts_on_its_own(self):
+        entry = composer.library()["prompts"]["failure_alert_failing"]
+        raw = {"failures": 3, "first_seen_utc": "20 Sep 08:00Z", "snapshot_age": "3h",
+               "reason_plain": f"provider refused {self.SECRET}"}
+        prompt = composer.writing_prompt(entry, raw, Channel.IMESSAGE, _settings(), "en")
+        assert "planted" not in prompt and "eyJ" not in prompt
+        assert "provider refused Bearer [redacted]" in prompt          # the slot, sanitized
+        assert "  reason_plain = provider refused Bearer [redacted]" in prompt   # the table, sanitized
+
