@@ -751,7 +751,7 @@ _ORDINALS: frozenset[str] = frozenset(
     for form in (_english_ordinal(cardinal), _english_ordinal(cardinal) + "s"))
 
 
-# --- German (decision 25) -----------------------------------------------------
+# --- German (decision 24) -----------------------------------------------------
 # The meaning-of-prose rules above are English: the lexicon, the advice and
 # forecast grammar, the imperative shapes and the not-English backstop. A
 # German message the model wrote is judged by the language-agnostic rules
@@ -857,7 +857,15 @@ _ADVICE_DE_RE = re.compile(
 #: ...in ANY case of the verb, "BLEIBEN Sie ruhig" included (#124 round 1,
 #: SOTA-A): the suffix was lowercase-only. "Sie" keeps its capital, in any
 #: case after it ("SIE"); a lowercase "sie" is "they" (round 23).
-_IMPERATIVE_DE_RE = re.compile(r"(?:^|[.!?;:,]\s*|\s-\s)((?i:[a-zäöüß]+(?:en|n)))\s+S(?i:ie)\b")
+#: ...and a clause opens after a bracket, a quote or a dash too:
+#: "(Bleiben Sie ruhig.)" opened with a bracket the rules did not list
+#: (#124 round 4, SOTA-A). A bracket opens whatever follows it; a quote
+#: only with no space after it, since the same marks close a quote and
+#: "„Bewertung“ bleibt hoch" is a statement; a hyphen, spaced (the longer
+#: dashes are refused as numeric forms before any prose rule).
+_OPENS_DE = r"[(\[{]\s*|[\"'\u201e\u201c\u201a\u2018\u00ab\u00bb](?=\S)|\s-\s"
+_IMPERATIVE_DE_RE = re.compile(
+    r"(?:^|[.!?;:,]\s*|" + _OPENS_DE + r")((?i:[a-zäöüß]+(?:en|n)))\s+S(?i:ie)\b")
 
 #: The informal imperative has no "Sie" to key on: "Bleib in SPY." passed
 #: the formal pattern and the advice grammar (#121 round 2, SOTA-A,
@@ -924,7 +932,7 @@ _SEPARABLE_BASES_DE = sorted({
 _IMPERATIVE_FORMS_DE = "|".join(
     [_ACTION_STEMS_DE, *_SEPARABLE_BASES_DE, *_STRONG_IMPERATIVES_DE.values()])
 _IMPERATIVE_DU_RE = re.compile(
-    r"(?:^|[.!?;:]\s*|\s-\s)((?:" + _IMPERATIVE_FORMS_DE + r")(?:e|t)?)\b"
+    r"(?:^|[.!?;:]\s*|" + _OPENS_DE + r")((?:" + _IMPERATIVE_FORMS_DE + r")(?:e|t)?)\b"
     # ...followed by the object, an adverb or a particle, not by a subject
     # that would make it a declarative ("Halt und Kauf sind ..." is rare in
     # this register and the cost of a false positive is one fallback).
@@ -1070,12 +1078,17 @@ def _one_count_de(text: str) -> str | None:
     count of one and "einem Prozent" is 1% (#121 round 27).
 
     ONE SCANNER, NOT A CAP. From the article the words are walked to the
-    head of the phrase: a counted noun, in any case, is the finding; a
-    capitalised word that is not one ends the phrase - German capitalises
-    its nouns, so it is the head ("Eine breite Erholung" counts nothing);
-    any other word is a modifier and the walk goes on, however many there
-    are - two was the cap once and three walked past it, capitalised (round
-    44) and then in lowercase (round 49). Sentence punctuation ends it too.
+    end of the noun phrase: a counted noun anywhere in it, in any case, is
+    the finding. German capitalises its nouns, so the phrase is the
+    modifiers in lowercase, however many - two was the cap once and three
+    walked past it, capitalised (round 44) and then in lowercase (round
+    49) - and then the run of capitalised words; the first lowercase word
+    after that run ends it ("Eine breite Erholung zeigt sich" counts
+    nothing, "Ein Treiber ist der Monat" neither). The whole run, since a
+    capitalised word can be an adjective ("Eine Berliner Warnflagge",
+    #124 round 4). A ticker in capitals is a modifier. Sentence
+    punctuation ends the phrase too. The cost of the run: a counted noun
+    straight after the head ("Eine Studie Monate später") is a fallback.
     A message written without capitals has no heads to stop at, so a
     counted noun anywhere after the article in its clause is the finding:
     the cost of that is a fallback on German written without capitals."""
@@ -1083,6 +1096,7 @@ def _one_count_de(text: str) -> str | None:
     for start, token in enumerate(tokens):
         if token.lower() not in _ARTICLE_ONE_FORMS_DE:
             continue
+        seen_head = False
         for end in range(start + 1, len(tokens)):
             word = tokens[end]
             if word in ".,;:!?()[]\"":
@@ -1090,6 +1104,8 @@ def _one_count_de(text: str) -> str | None:
             if _counted_de(word):
                 return " ".join(tokens[start:end + 1])
             if _is_head_de(word):
+                seen_head = True
+            elif seen_head:
                 break
     return None
 
@@ -1772,7 +1788,7 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
 
     `language` is the language the text was WRITTEN in and selects which
     meaning-of-prose rules judge it: English (the full set) or German (the
-    reduced set, decision 25). The language-agnostic rules - the channel
+    reduced set, decision 24). The language-agnostic rules - the channel
     contract, grounding, numerals, zones, arithmetic - are the same for both.
     """
     if language not in ("en", "de"):
@@ -2224,7 +2240,7 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
                 False, FailureClass.CONTENT,
                 f"letter U+{ord(ch):04X} does not fold to {'German' if german else 'English'}")
         if german:
-            # THE GERMAN RULES (decision 25). The English grammar below would
+            # THE GERMAN RULES (decision 24). The English grammar below would
             # misread German either way, so it is not consulted; the lexicon
             # above still was, since its words are not German words.
             # PREDOMINANTLY German, not merely touched by it: one marker was
@@ -2453,14 +2469,39 @@ _CONTEXT_NUMBER_WORDS: frozenset[str] = (
                  "einmaligem"}))
 
 
+#: A Roman numeral is a number: "Risk remains at level IV." (#124 round 4,
+#: SOTA-A). A whole word of two letters or more that reads as one - in
+#: capitals, or in lowercase from i, v and x ("phase iii"); "VIX" and "mix"
+#: do not read as one. Single letters stay words: the monitor's own V and
+#: D blocks, the pronoun I, "M&A". The credit ratings CCC and CC stay
+#: words too. An acronym that reads as a numeral ("IV" for implied
+#: volatility) costs the context, not the message.
+_ROMAN_WORD_RE = re.compile(r"\b(?:[MDCLXVI]{2,}|[ivx]{2,})\b")
+_ROMAN_NUMERAL_RE = re.compile(r"M{0,3}(?:CM|CD|D?C{0,3})(?:XC|XL|L?X{0,3})(?:IX|IV|V?I{0,3})")
+_RATINGS = frozenset({"CCC", "CC"})
+
+
+def _roman_numeral(text: str) -> str | None:
+    for match in _ROMAN_WORD_RE.finditer(text):
+        word = match.group(0)
+        if word not in _RATINGS and _ROMAN_NUMERAL_RE.fullmatch(word.upper()):
+            return word
+    return None
+
+
 def validate_context(text: str, *, language: str, max_chars: int) -> ValidationResult:
-    """The context a model wrote for a message (decision 27): the prose
+    """The context a model wrote for a message (decision 24): the prose
     rules of its language, and NO NUMBER OF ANY KIND - no digit, no number
     word in either language, no ordinal, count or multiple. The numbers of
     a message are the owner's template's; the context only says what they
     mean, so whether a number in it is grounded never arises."""
-    if any(ch.isdigit() for ch in text):
+    # isnumeric, not isdigit: a numeral character ("Ⅳ", "½") is no
+    # digit
+    if any(ch.isnumeric() for ch in text):
         return ValidationResult(False, FailureClass.CONTENT, "a context carries no numbers")
+    roman = _roman_numeral(text)
+    if roman:
+        return ValidationResult(False, FailureClass.CONTENT, f"a context carries no numbers: {roman!r}")
     for word in re.findall(r"[a-zäöüß]+", _fold_latin(text).lower()):
         if word in _CONTEXT_NUMBER_WORDS or _COMPOUND_NUMBER_DE_RE.fullmatch(word):
             return ValidationResult(False, FailureClass.CONTENT,

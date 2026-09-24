@@ -595,16 +595,21 @@ puts its verb second. The set has these parts:
   its imperative opens without the prefix ("Stoße die Aktien ab") (#124
   round 2). The strong verbs' imperatives ("gib", "nimm", "wirf") come
   from one map of their stems. The infinitive-order rule is generated from
-  the same stems.
+  the same stems. A clause also opens after a bracket, and after a quote
+  with no space after it ("(Bleiben Sie ruhig.)", "„Bleib ruhig“"); a
+  closing quote before a verb is a statement ("„Bewertung“ bleibt hoch")
+  (#124 round 4).
 - **Number words.** Model text refuses the ordinals from "third"/"dritte"
   up and the counts and multiples ("twice", "dreimal", "verdoppelt"), in
   both languages; "first"/"second" stay words, as #100 decided. The
   cardinals and their compounds are generated from the word list (hundred-led, teen- and ten-led thousands, tens joined by
   "und", halves, and a number word joined to a period or a unit:
   "Zweiwochenhoch" - #124 round 3). "ein"/"eine" counts as the number one before a counted
-  noun, read by one scanner that walks any number of modifiers to the
-  head of the phrase. German capitalises its nouns, so the first
-  capitalised word ends the phrase; a ticker in capitals is a modifier.
+  noun, read by one scanner that walks the whole noun phrase: any number of
+  lowercase modifiers, then the run of capitalised words, ending at the
+  first lowercase word after it. A counted noun anywhere in the phrase is
+  the count, since a capitalised word can be an adjective ("Eine Berliner
+  Warnflagge", #124 round 4); a ticker in capitals is a modifier.
 - **A positive language check.** A German message needs at least two
   distinct German function words, outnumbering the English evidence.
   English evidence includes common English words as well as function
@@ -633,7 +638,13 @@ word in either language:
   round 2);
 - counts and multiples ("twice", "half", "doubled", "dreimal",
   "verdoppelt", "doppelt so hoch"), generated from the cardinals where the
-  language builds them.
+  language builds them;
+- Roman numerals: a word of two letters or more that reads as one, in
+  capitals or in lowercase from i, v and x ("level IV", "phase iii"), and
+  any numeral character (#124 round 4). Single letters stay words (the V
+  and D blocks, "I", "M&A"), and so do the credit ratings CCC and CC. An
+  acronym that reads as a numeral ("IV" for implied volatility) costs the
+  context, not the message.
 
 The numbers of a message are the owner's template's. The context only
 says what they mean, so it never has to ground a number. That closes by

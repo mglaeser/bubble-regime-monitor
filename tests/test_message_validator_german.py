@@ -1,4 +1,4 @@
-"""The German prose rules of the validator (decision 25), lifted from the
+"""The German prose rules of the validator (decision 24), lifted from the
 hardening rounds of #121 with their provenance, and the context check
 (validate_context): a context carries no number of any kind."""
 from __future__ import annotations
@@ -343,7 +343,7 @@ class TestRoundThirtyTwoOn121:
     """SOTA-A, executed: "Veräußere Aktien." - the disposal verb was in no
     German list. The family joins the lexicon, the informal imperative and
     the infinitive order; that the lists keep being caught one word short
-    is decision 25's stated residual, and the German validator program's
+    is decision 24's stated residual, and the German validator program's
     to close by construction."""
 
     @pytest.mark.parametrize("text", [
@@ -369,7 +369,7 @@ class TestRoundThirtyFourOn121:
     """SOTA-A, executed: the infinitive-order rule kept a stem list of its
     own and it had drifted from the action stems, so "Positionen
     verkleinern." survived. The rule is built from the action stems now,
-    so the two cannot diverge again - the structural half of decision 25's
+    so the two cannot diverge again - the structural half of decision 24's
     residual, which the enumerations alone could not give."""
 
     def test_the_rule_is_built_from_the_action_stems(self):
@@ -792,7 +792,7 @@ class TestRoundTenOfTheRestart:
 
 
 class TestTheContextCarriesNoNumbers:
-    """validate_context (decision 27): the context a model writes says what
+    """validate_context (decision 24): the context a model writes says what
     the numbers mean and carries none - no digit, no number word in either
     language, no ordinal, count or multiple. That closes by construction
     what the rounds of #121 found one word at a time: the gauge labels
@@ -997,3 +997,77 @@ class TestRoundThreeOn124:
         result = validate("Der Wert liegt bei 59 von 100 und der Index auf einem Zweiwochenhoch. Die Spanne "
                           "liegt bei 57-61.", channel=Channel.IMESSAGE, facts=DIGEST_FACTS, language="de", **LIMITS)
         assert not result.ok and "spelled-out number" in (result.reason or ""), result.reason
+
+
+class TestRoundFourOn124:
+    """#124 round 4, SOTA-A, three defects, all executed; SOTA-C approved.
+    A bracket or a quote opens a clause for the imperative rules; the
+    article-one scanner reads the whole noun phrase, since a capitalised
+    word can be an adjective; and a Roman numeral is a number in a
+    context."""
+
+    @pytest.mark.parametrize("text", [
+        "Der Wert liegt bei 59 von 100 (Bleiben Sie ruhig.)",
+        "Der Wert liegt bei 59 von 100. ( Bleiben Sie ruhig )",
+        "Der Wert liegt bei 59 von 100. [Bleib ruhig.]",
+        "Der Wert liegt bei 59 von 100. „Bleib ruhig“, heißt es.",
+        "Der Wert liegt bei 59 von 100. »Bleiben Sie ruhig«",
+        'Der Wert liegt bei 59 von 100. "Halte Kurs", heißt es.',
+    ])
+    def test_an_imperative_after_a_bracket_or_a_quote_is_refused(self, text):
+        result = validate(text, channel=Channel.IMESSAGE, facts=DIGEST_FACTS, prose_rules=True, language="de",
+                          **LIMITS)
+        assert not result.ok and "instruction" in (result.reason or ""), (text, result.reason)
+
+    @pytest.mark.parametrize("text", [
+        "Der Wert liegt bei 59 von 100. Der Indikator „Bewertung“ bleibt hoch.",
+        'Der Wert liegt bei 59 von 100. Der Indikator "Bewertung" bleibt hoch.',
+    ])
+    def test_a_closing_quote_before_a_verb_is_a_statement(self, text):
+        result = validate(text, channel=Channel.IMESSAGE, facts=DIGEST_FACTS, prose_rules=True, language="de",
+                          **LIMITS)
+        assert result.ok, (text, result.reason)
+
+    @pytest.mark.parametrize("text", [
+        "Der Wert liegt bei 59 von 100. Eine Berliner Warnflagge ist aktiv.",
+        "Der Wert liegt bei 59 von 100. Ein New Yorker Signal ist aktiv.",
+        "Der Wert liegt bei 59 von 100. Eine Warnflagge Berlins ist aktiv.",
+        "Der Wert liegt bei 59 von 100. Einer der Monate war ruhig.",
+    ])
+    def test_a_counted_noun_anywhere_in_the_phrase_is_a_count(self, text):
+        result = validate(text, channel=Channel.IMESSAGE, facts=DIGEST_FACTS, prose_rules=True, language="de",
+                          **LIMITS)
+        assert not result.ok and "spelled-out number" in (result.reason or ""), (text, result.reason)
+
+    @pytest.mark.parametrize("text", [
+        "Der Wert liegt bei 59 von 100. Ein Treiber sind die Bewertungen, die im Monat stiegen.",
+        "Der Wert liegt bei 59 von 100. Einer der Treiber ist der Monat mit hohen Bewertungen.",
+        "Der Wert liegt bei 59 von 100. Eine breite Erholung zeigt sich im Markt.",
+        "Der Wert liegt bei 59 von 100. Eine Frankfurter Studie sieht hohe Bewertungen.",
+    ])
+    def test_the_phrase_ends_at_the_first_lowercase_word_after_its_nouns(self, text):
+        result = validate(text, channel=Channel.IMESSAGE, facts=DIGEST_FACTS, prose_rules=True, language="de",
+                          **LIMITS)
+        assert result.ok, (text, result.reason)
+
+    @pytest.mark.parametrize("text, language", [
+        ("Risk remains at level IV.", "en"),
+        ("The market sits in phase III of the cycle, with valuations stretched.", "en"),
+        ("The market sits in phase iii of the cycle, with valuations stretched.", "en"),
+        ("Risk remains at level Ⅳ, with valuations stretched.", "en"),
+        ("Das Risiko liegt auf Stufe IV, die Bewertungen sind hoch.", "de"),
+    ])
+    def test_a_roman_numeral_is_refused(self, text, language):
+        result = validate_context(text, language=language, max_chars=200)
+        assert not result.ok and "no numbers" in (result.reason or ""), (text, result.reason)
+
+    @pytest.mark.parametrize("text", [
+        "The VIX curve is calm and valuations are stretched.",
+        "A mix of stretched valuations and calm credit drives the reading.",
+        "Spreads on CCC-rated bonds stay calm while valuations are stretched.",
+        "The V block stays calm while valuations are stretched.",
+        "M&A activity is frothy while valuations are stretched.",
+    ])
+    def test_a_word_that_is_no_numeral_stays(self, text):
+        result = validate_context(text, language="en", max_chars=200)
+        assert result.ok, (text, result.reason)
