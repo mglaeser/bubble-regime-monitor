@@ -499,7 +499,7 @@ def _clip(text: str, room: int) -> str:
     return cut.rstrip(" ,;:-")
 
 
-def _channel_limits(settings: Settings) -> dict[str, int]:
+def _channel_limits(settings: Settings) -> dict[str, Any]:
     return {
         "sms_max_len": settings.sms_max_len,
         "imessage_max_chars": settings.message_engine_imessage_max_chars,
@@ -633,7 +633,7 @@ def registry_authored(text: str) -> bool:
 
 #: The screen judges MEANING only: the channel limits are out of the way
 #: (the fit owns length), and the format class is ignored.
-_SCREEN_LIMITS = {"sms_max_len": 100_000, "imessage_max_chars": 100_000,
+_SCREEN_LIMITS: dict[str, Any] = {"sms_max_len": 100_000, "imessage_max_chars": 100_000,
                   "imessage_max_emoji": 100_000}
 
 

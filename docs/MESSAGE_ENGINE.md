@@ -553,3 +553,72 @@ admitted by proof against the registry rather than by judgement
 (decision 16). An entry without a translation for the selected language
 renders in the library's own language: the owner's words in one language
 beat no words at all, and the case is pinned.
+
+## Decision 24 — German is judged by a reduced rule set; a context carries no numbers
+
+The owner's rulings (2026-09-20, 2026-09-24): the model writes, so that a
+message explains what the data means, and by the less complex path. The
+template writes the numbers, and on iMessage the model adds a short
+context saying what they mean (the context mode, next PR). This decision
+is the validator's part: judging German prose, and the one rule every
+context meets.
+
+**German prose rules.** `validate(..., language="de")` judges German with
+the language-agnostic rules (script, format, grounding, arithmetic, zones)
+plus a German set. The English prose rules would misread German, which
+puts its verb second. The set has these parts:
+
+- **One folded spelling.** Every German scan reads one folded spelling of
+  the text, and every word set carries its folded forms. An accent cannot
+  hide a word ("Káufe", "Háltén Sie"), and every umlaut admits its ASCII
+  transliteration ("duerfte").
+- **A banned lexicon.** It covers probability, advice, certainty, forecast
+  and crash talk, including the verb "raten" in every finite form. The
+  noun "die Rate", after an article or a determiner, is not banned.
+- **An advice and forecast grammar.** It covers reader-directed modals,
+  the subject-first modal, impersonal recommendations, the passive modal,
+  "ist zu verkaufen" and "zu" infixed in a separable verb.
+- **Imperatives.** This covers the formal imperative in any case
+  ("Kaufen Sie", "halten Sie"), and the informal imperative from the
+  action stems. The strong verbs' imperatives ("gib", "nimm", "wirf") come
+  from one map of their stems. The infinitive-order rule is generated from
+  the same stems.
+- **Number words.** The cardinals and their compounds are generated from
+  the word list (hundred-led, teen- and ten-led thousands, tens joined by
+  "und", halves). "ein"/"eine" counts as the number one before a counted
+  noun, read by one scanner that walks any number of modifiers to the
+  head of the phrase. German capitalises its nouns, so the first
+  capitalised word ends the phrase; a ticker in capitals is a modifier.
+- **A positive language check.** A German message needs at least two
+  distinct German function words, outnumbering the English evidence.
+  English evidence includes common English words as well as function
+  words, but no word German spells the same way. A clause or comma-part
+  with two English words and more English than German makes the message
+  not German. A third language is refused. A clause carrying English prose
+  is judged by the English advice and imperative rules.
+- **Capital ẞ.** It is a German letter on iMessage; SMS refuses it for
+  GSM-7.
+
+Each item was a finding of the #121 rounds (20-55), and each fix is kept
+in the form it ended in: a generated rule where the item came from a list.
+The residual is stated, not hidden: the advice and imperative rules
+enumerate verbs, so an instruction with a verb outside the lists passes.
+That is the residual of decision 9, in German. The English path of
+`validate()` is unchanged by this decision.
+
+**A context carries no numbers.** `validate_context(text, language,
+max_chars)` judges the context a model writes for a message. It applies
+the prose rules of its language, and refuses any digit and any number
+word in either language:
+
+- cardinals and their compounds;
+- ordinals, "first"/"second" and "erste"/"zweite" included, and "erstmals";
+- counts and multiples ("twice", "half", "doubled", "dreimal",
+  "verdoppelt", "doppelt so hoch"), generated from the cardinals where the
+  language builds them.
+
+The numbers of a message are the owner's template's. The context only
+says what they mean, so it never has to ground a number. That closes by
+construction the largest class of the #121 findings: rule constants used
+in the wrong role, gauge labels, ordinals, counts, and values that are
+never printed. Those rounds found them one word at a time.

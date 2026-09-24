@@ -644,6 +644,7 @@ _NON_ENGLISH_WORDS = frozenset({
     "beurs",
 })
 
+
 #: A numeral as it appears in prose, including decimals, percentages and
 #: signed values. Used to prove every number came from the grounded facts.
 #: Includes EXPONENT notation on purpose: without it '51e2' tokenises as the
@@ -730,6 +731,454 @@ _NUMBER_WORDS: frozenset[str] = frozenset({
 })
 
 
+def _english_ordinal(cardinal: str) -> str:
+    irregular = {"three": "third", "five": "fifth", "eight": "eighth", "nine": "ninth", "twelve": "twelfth"}
+    if cardinal in irregular:
+        return irregular[cardinal]
+    return cardinal[:-1] + "ieth" if cardinal.endswith("y") else cardinal + "th"
+
+
+#: The ORDINALS are numbers too: "a third monthly decline" restates a rule
+#: the owner wrote with "a second", and the ordinal walked past a list of
+#: cardinals (#121 round 48, SOTA-A, found in German; the English form
+#: passed as well). Generated from the cardinals, so a cardinal in the list
+#: has its ordinal and its fraction ("thirds"). "first" and "second" stay
+#: ordinary words here ("a second reading" counts nothing - #100 round 20);
+#: a context carries no number at all (validate_context).
+_ORDINALS: frozenset[str] = frozenset(
+    form
+    for cardinal in _NUMBER_WORDS - {"one", "two", "dozen"}
+    for form in (_english_ordinal(cardinal), _english_ordinal(cardinal) + "s"))
+
+
+# --- German (decision 25) -----------------------------------------------------
+# The meaning-of-prose rules above are English: the lexicon, the advice and
+# forecast grammar, the imperative shapes and the not-English backstop. A
+# German message the model wrote is judged by the language-agnostic rules
+# (script, grounding, numerals, zones, arithmetic, format) plus the German
+# rules below - a REDUCED set, accepted by the owner as the interim so
+# German is enriched at all, with the residual of decision 9 for German
+# until the German validator program lands. Every pattern reads the text as
+# written, lowercased (umlauts intact), with the ASCII transliterations a
+# model may use (ue, ae, oe, ss) - promised here from the start and kept
+# only for the marker words: "duerfte" walked past the lexicon that
+# refused "dürfte" (#121 round 20, SOTA-A, executed). Every umlaut in a
+# pattern below admits its transliteration.
+
+#: Words the German text may not carry: probability, advice, certainty,
+#: forecast, crash talk. Stems, at a word boundary.
+BANNED_LEXICON_DE: tuple[str, ...] = (
+    r"wahrscheinlich\w*", r"chancen?", r"vermutlich", r"voraussichtlich", r"wom(?:o|ö|oe)glich",
+    r"d(?:u|ü|ue)rfte[ns]?", r"vielleicht", r"eventuell",
+    r"kauf(?:en|t|e|st)?", r"k(?:a|ä|ae)ufe[nrs]?", r"verkauf(?:en|t|e|st|s)?", r"verk(?:a|ä|ae)ufe[nrs]?",
+    r"ver(?:a|ä|ae)u(?:s|ß|ss)er\w*",   # "veräußern" is selling (#121 round 32)
+    # "empfiehlt" is the stem "empfiehl": the pattern wanted an "l" right
+    # after "ie" and missed the most common form (#121 round 26, SOTA-A,
+    # executed). "rät zu" and "anraten"/"abraten" are the same advice.
+    r"empf(?:ieh|eh|oh)l\w*", r"empfehlung\w*", r"ratsam", r"anlagetipp\w*", r"bitte",
+    r"r(?:a|ä|ae)t\s+(?:zu|von|ab)\b", r"(?:an|ab|zu)r(?:a|ä|ae)t\w*", r"(?:an|ab|zu)geraten",
+    # advocacy in the same family (#121 round 52)
+    r"pl(?:a|ä|ae)dier\w*", r"bef(?:u|ü|ue)rwort\w*",
+    # the recommendation as a NOUN: "Mein Rat: Positionen abbauen." (#121
+    # round 28, SOTA-A, executed). "Hinweis" is the notice messages' own
+    # word and stays.
+    r"rat", r"ratschl(?:a|ä|ae)g\w*", r"tipps?", r"vorschl(?:a|ä|ae)g\w*", r"handlungsempfehlung\w*",
+    r"sicher(?:lich|e|er|es|en|em)?", r"garantiert\w*", r"definitiv\w*", r"zweifellos",
+    r"unausweichlich", r"unvermeidlich",
+    r"prognos\w*", r"vorhersag\w*", r"voraussag\w*", r"erwart\w*", r"kursziel\w*",
+    r"crash\w*", r"abst(?:u|ü|ue)rz\w*", r"absturz\w*", r"platz(?:t|en)",
+)
+_BANNED_DE_RE = re.compile(r"\b(?:" + "|".join(BANNED_LEXICON_DE) + r")\b")
+
+#: Advice and forecasts in German grammar: a modal aimed at the reader, an
+#: impersonal recommendation, a future or modal movement.
+_MOVEMENT_DE = (r"steig\w*|f(?:a|ä|ae)ll\w*|sink\w*|crash\w*|abst(?:u|ü|ue)rz\w*|platz\w*|einbr\w*|"
+                r"kipp\w*|dreh\w*|erhol\w*|anzieh\w*|nachgeb\w*|korrigier\w*|weitergeh\w*|"
+                r"anhalt\w*|zur(?:u|ü|ue)ckkomm\w*|verschlechter\w*|verbesser\w*|kollabier\w*|"
+                r"explodier\w*|einsetz\w*|ausweit\w*")
+_ADVICE_DE_RE = re.compile(
+    # "sollten Sie", "man sollte", "Anleger müssen", "Sie könnten"
+    r"\b(?:sollte[nst]?|m(?:u|ü|ue)ss(?:en|t)|muss|musst|k(?:o|ö|oe)nnte[nst]?|k(?:o|ö|oe)nn(?:en|t))\s+"
+    r"(?:man|sie|du|ihr|anleger\w*|investor\w*|leser\w*)\b"
+    # ...and the subject first, "ihr"/"wir" included: "Ihr solltet
+    # Positionen reduzieren" (#121 round 31, SOTA-A, executed).
+    r"|\b(?:man|sie|du|ihr|wir|anleger\w*|investor\w*|leser\w*)\s+"
+    r"(?:sollte[nst]?|m(?:u|ü|ue)ss(?:en|t)|muss|musst|k(?:o|ö|oe)nnte[nst]?|kannst|kann|"
+    r"k(?:o|ö|oe)nn(?:en|t))\b"
+    # "es empfiehlt sich", "es lohnt sich", "ist ratsam", "an der Zeit"
+    r"|\b(?:empfiehlt|lohnt)\s+(?:es\s+)?sich\b"
+    r"|\b(?:ist|w(?:a|ä|ae)re)\s+(?:es\s+)?(?:ratsam|empfehlenswert|zeit|an\s+der\s+zeit|h(?:o|ö|oe)chste\s+zeit)\b"
+    # "jetzt verkaufen", "nun absichern"
+    r"|\b(?:jetzt|nun|sofort)\s+(?:kaufen|verkaufen|aussteigen|einsteigen|absichern|"
+    r"reduzieren|umschichten|nachkaufen|halten|abbauen|aufstocken)\b"
+    # "wird fallen", "dürften steigen", "kann einbrechen" - a forecast
+    r"|\b(?:wird|werden|d(?:u|ü|ue)rfte[n]?|k(?:o|ö|oe)nnte[n]?|kann|k(?:o|ö|oe)nnen|soll|sollen|muss|m(?:u|ü|ue)ssen|mag)\s+"
+    r"(?:(?!sie\b)[a-zäöüß]+\s+){0,3}?(?:" + _MOVEMENT_DE + r")\b"
+    # THE PASSIVE MODAL: "Gewinne sollten jetzt mitgenommen werden" names
+    # no reader and no "man", and passed (#121 round 5, SOTA-A, executed).
+    # A modal with "werden"/"sein" later in the clause is a recommendation
+    # in the passive or a modal state ("should be reduced", "must be
+    # secured"); "ist zu verkaufen" and "es gilt" are the same advice in
+    # other clothes.
+    r"|\b(?:sollte[n]?|soll|sollen|muss|m(?:u|ü|ue)ss(?:en|te|ten)|k(?:o|ö|oe)nnte[n]?|kann|k(?:o|ö|oe)nnen|w(?:a|ä|ae)re[n]?)\b"
+    r"[^.;!?]{0,60}?\b(?:werden|sein)\b"
+    r"|\b(?:ist|sind|w(?:a|ä|ae)re[n]?|bleibt|bleiben)\s+(?:jetzt\s+|nun\s+|weiter\s+)?(?:zu\s+"
+    r"(?:verkauf|kauf|reduzier|verringer|erh(?:o|ö|oe)h|sicher|absicher|meid|vermeid|halt|realisier|"
+    r"mitnehm|abbau|aufstock|umschicht|nachkauf|aussteig|einsteig|absto(?:s|ß|ss)|liquidier|hedg|"
+    r"begrenz|senk|streich|schlie(?:s|ß|ss)|verlass)\w*"
+    # ...and the separable verb with "zu" INFIXED: "Positionen sind
+    # abzustoßen" (#121 round 25, SOTA-A, executed).
+    r"|(?:ab|um|auf|nach|aus|ein|zur(?:u|ü|ue)ck|weg|los)zu"
+    r"(?:sto(?:s|ß|ss)|sicher|schicht|stock|bau|kauf|steig|halt|zieh|fahr|geb|nehm|setz|streich|"
+    r"l(?:o|ö|oe)s|tausch|teil|trenn)\w*)"
+    r"|\b(?:gilt\s+es|es\s+gilt)\b"
+)
+#: The formal imperative: a capitalised -en verb followed by "Sie" at the
+#: head of a clause ("Kaufen Sie", "Halten Sie", "Bleiben Sie ruhig").
+#: The verb in any case: after a semicolon a model writes lowercase, and
+#: "; halten Sie Abstand" passed the capitalised form (#121 round 23,
+#: SOTA-A, executed). "Sie" stays capitalised: the formal address is
+#: capitalised mid-sentence too, and lowercase "sie" is "they".
+_IMPERATIVE_DE_RE = re.compile(r"(?:^|[.!?;:,]\s*|\s-\s)([A-Za-zÄÖÜäöüß]+(?:en|n))\s+Sie\b")
+
+#: The informal imperative has no "Sie" to key on: "Bleib in SPY." passed
+#: the formal pattern and the advice grammar (#121 round 2, SOTA-A,
+#: executed). German du/ihr imperatives are a bare verb stem (optional -e,
+#: plural -t) at the head of a clause, so the stems of the verbs an
+#: instruction to an investor uses are enumerated - the shape of English
+#: `_ACTION_VERBS`, with the same known limit (decision 9): a stem outside
+#: the list is the residual the German validator program owns.
+_ACTION_STEMS_DE = (
+    r"bleib|kauf|verkauf|halt|reduzier|verringer|erh(?:o|ö|oe)h|sicher|steig|geh|wart|"
+    r"setz|streich|meid|vermeid|behalt|verlass|wechsl|wechsel|schicht|bau|stock|nutz|"
+    # the strong verbs' infinitive stems; their imperatives come from
+    # _STRONG_IMPERATIVES_DE below (round 34, round 49)
+    r"nehm|geb|werf|"
+    r"greif|hedg|verkleiner|vergr(?:o|ö|oe)(?:s|ß|ss)er|senk|heb|zieh|pack|lass|hol|verschieb|"
+    r"investier|desinvestier|liquidier|shorte|short|kassier|realisier|mach|"
+    # "Veräußere Aktien." (#121 round 32, SOTA-A, executed) and its
+    # neighbours in the disposal/allocation family.
+    r"ver(?:a|ä|ae)u(?:s|ß|ss)er|absto(?:s|ß|ss)|aufl(?:o|ö|oe)s|trenn|tausch|umtausch|"
+    r"allokier|diversifizier|gewicht|(?:u|ü|ue)bergewicht|untergewicht|park|dispon|r(?:a|ä|ae)um")
+#: The infinitive as an instruction: a clause that ENDS in an action
+#: infinitive ("Positionen abbauen.", "Gewinne mitnehmen.") tells the
+#: reader what to do with no subject at all (#121 round 28, SOTA-A).
+#: BUILT FROM THE ACTION STEMS, not a list of its own: the second list
+#: drifted and "Positionen verkleinern." survived (#121 round 34, SOTA-A,
+#: executed). "bleiben" is left out - a clause may end in it as a
+#: statement ("Die Flaggen bleiben.").
+_INFINITIVE_ORDER_DE_RE = re.compile(
+    r"\b(?:ab|auf|um|nach|aus|ein|mit|zur(?:u|ü|ue)ck|weg)?"
+    r"(?:" + "|".join(p for p in _ACTION_STEMS_DE.split("|") if p != "bleib") + r")"
+    r"(?:e)?n\s*(?:[.!;:]|$)")
+#: The strong verbs change their vowel in the imperative: "geben" is "Gib
+#: ...!", "nehmen" is "Nimm ...!", "abwerfen" is "Wirf ... ab!". The comment
+#: above the stems promised "gib" and the list had only "geb", so "Gib deine
+#: Aktien ab." passed (#121 round 49, SOTA-A, executed). Every strong stem
+#: in the list has its imperative here, and the imperative rule reads both.
+_STRONG_IMPERATIVES_DE = {"nehm": "nimm", "geb": "gib", "werf": "wirf"}
+_IMPERATIVE_FORMS_DE = _ACTION_STEMS_DE + "|" + "|".join(_STRONG_IMPERATIVES_DE.values())
+_IMPERATIVE_DU_RE = re.compile(
+    r"(?:^|[.!?;:]\s*|\s-\s)((?:" + _IMPERATIVE_FORMS_DE + r")(?:e|t)?)\b"
+    # ...followed by the object, an adverb or a particle, not by a subject
+    # that would make it a declarative ("Halt und Kauf sind ..." is rare in
+    # this register and the cost of a false positive is one fallback).
+    r"(?=\s|[.!?]|$)",
+    re.IGNORECASE)
+
+def _fold_latin(text: str) -> str:
+    """Latin letters with their diacritics removed, for the directive scans.
+
+    "Emaíl your password." and "Séll holdings." wore accents that the script
+    check admits (English needs no letter beyond Latin Extended-A) and that
+    the word-based scans could not see through (#105 round 17, SOTA-A,
+    executed). Grounding, zones, emoji and the not-English word list judge
+    the text as written; advice, the lexicon and the imperative shapes judge
+    the folded text.
+    """
+    # Only a precomposed Latin letter whose base is ASCII is folded (é, í, ñ,
+    # ý); everything else stays as written, so an emoji, its variation
+    # selector, ß or a non-Latin letter is not turned into something the
+    # scans would misread (NFKD mapped the allowlisted ℹ️ to a plain "i").
+    # NFC first, so a letter written with a combining mark folds the same.
+    out: list[str] = []
+    for ch in unicodedata.normalize("NFC", text):
+        if ch.isascii():
+            out.append(ch)
+            continue
+        parts = unicodedata.normalize("NFD", ch)
+        base = parts[0]
+        if (len(parts) > 1 and base.isascii() and base.isalpha()
+                and all(unicodedata.category(c) == "Mn" for c in parts[1:])):
+            out.append(base)
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _with_folded(words: frozenset[str]) -> frozenset[str]:
+    """The words and their folded spellings. The German scans read the
+    FOLDED text (round 37), so a list written with umlauts must carry the
+    folded form too, or "fünf" would no longer match "funf"."""
+    return words | frozenset(_fold_latin(w) for w in words)
+
+
+#: The verb "raten" in every finite form: "Ich rate heute zur Vorsicht."
+#: passed - the lexicon had "rät zu" and the noun "Rat" only (#121 round
+#: 52, SOTA-A, executed). The noun "die Rate" (a rate, an instalment) is
+#: told apart by what stands before it, not by its capital: a capital at
+#: the start of a sentence is the verb's too ("Raten wir zur Vorsicht.",
+#: round 53), so a form is the verb unless an article or a determiner
+#: stands right before it. The participle "geraten" stays out: "unter
+#: Druck geraten" is a happening, not advice (round 26).
+_RATEN_FORMS_DE: frozenset[str] = _with_folded(frozenset({
+    "rate", "raten", "ratet", "rätst", "raetst", "riet", "rietst", "rieten", "rietet", "riete"}))
+_DETERMINERS_DE: frozenset[str] = _with_folded(frozenset("""
+der die das den dem des ein eine einer eines einem einen kein keine keiner keines keinem keinen
+diese dieser dieses diesem diesen jene jener jenes jenem jenen jede jeder jedes jedem jeden
+meine meiner seine seiner ihre ihrer ihren unsere unserer eure eurer alle welche welcher solche
+""".split()))
+
+
+def _raten_de(lowered: str) -> str | None:
+    """A finite form of "raten" that is not the noun "Rate", or None."""
+    tokens: list[str] = re.findall(r"[a-zäöüß]+|[.;:!?,()]", lowered)
+    for i, token in enumerate(tokens):
+        if token in _RATEN_FORMS_DE and (i == 0 or tokens[i - 1] not in _DETERMINERS_DE):
+            return token
+    return None
+
+
+#: German number words: a spelled-out number bypasses the grounding of
+#: numerals exactly as an English one does. Articles (ein, eine) are not
+#: numbers here.
+_NUMBER_WORDS_DE: frozenset[str] = _with_folded(frozenset({
+    "null", "eins", "zwei", "drei", "vier", "fünf", "fuenf", "sechs", "sieben", "acht", "neun",
+    "zehn", "elf", "zwölf", "zwoelf", "dreizehn", "vierzehn", "fünfzehn", "fuenfzehn", "sechzehn",
+    "siebzehn", "achtzehn", "neunzehn", "zwanzig", "dreißig", "dreissig", "vierzig", "fünfzig",
+    "fuenfzig", "sechzig", "siebzig", "achtzig", "neunzig", "hundert", "tausend", "million",
+    "millionen", "milliarde", "milliarden", "dutzend", "hälfte", "haelfte", "drittel", "viertel",
+    # "anderthalb" reported an ungrounded 1.5 (#121 round 25, SOTA-A, executed)
+    "anderthalb", "eineinhalb", "zweieinhalb", "dreieinhalb", "viereinhalb", "einhalb",
+}))
+#: The article as the number one: "einem Prozent" is 1% and "eine Flagge"
+#: is a count of one, and neither was a number word (#121 round 27,
+#: SOTA-A, executed). "ein"/"eine" alone stay articles; before a unit or a
+#: counted thing of this monitor's they are the numeral.
+#: The things this monitor counts and measures in, as NOUNS: every declined
+#: form, and nothing derived - "ein monatlicher Rückgang" is a monthly
+#: decline, not one month, and "monat\w*" had refused it, and with it the
+#: owner's own rule in German ("ein zweiter monatlicher Rückgang"). A
+#: compound whose head is a flag, a signal or an event is that thing
+#: ("eine Breitenflagge"); a unit is matched whole ("ein Zeitpunkt" is not
+#: a point).
+_COUNTED_FORMS_DE: frozenset[str] = _with_folded(frozenset({
+    "prozent", "prozente", "prozenten", "prozents", "prozentpunkt", "prozentpunkte", "prozentpunkten",
+    "basispunkt", "basispunkte", "basispunkten", "basispunkts", "basispunktes",
+    "punkt", "punkte", "punkten", "punkts", "punktes", "zehntel", "zehnteln",
+    "hundertstel", "hundertsteln",
+    "monat", "monate", "monaten", "monats", "monates", "woche", "wochen",
+    "tag", "tage", "tagen", "tages", "tags", "jahr", "jahre", "jahren", "jahres", "jahrs",
+    "stunde", "stunden", "minute", "minuten",
+    "lauf", "läufe", "läufen", "laufes", "laufs", "aktualisierung", "aktualisierungen",
+}))
+_COUNTED_HEADS_DE: tuple[str, ...] = tuple(sorted(_with_folded(frozenset({
+    "flagge", "flaggen", "signal", "signale", "signalen", "signals",
+    "ereignis", "ereignisse", "ereignissen", "ereignisses",
+})), key=len, reverse=True))
+_ARTICLE_ONE_FORMS_DE = frozenset({"ein", "eine", "einem", "einen", "einer", "eines", "eins"})
+#: A word is a hyphenated compound whole ("SPY-Warnflagge", "S&P-500-Aktien"):
+#: German writes one noun so, and its head is the last element.
+_ONE_COUNT_TOKEN_RE = re.compile(
+    r"[A-Za-zÄÖÜäöüß&0-9]*[A-Za-zÄÖÜäöüß](?:-[A-Za-zÄÖÜäöüß&0-9]+)*|[.,;:!?()\[\]\"]")
+
+
+def _counted_de(word: str) -> bool:
+    head = word.rsplit("-", 1)[-1].lower()
+    return head in _COUNTED_FORMS_DE or head.endswith(_COUNTED_HEADS_DE)
+
+
+def _is_head_de(word: str) -> bool:
+    """A capitalised noun ends the phrase; a ticker or an acronym in
+    capitals (SPY, QQQ, S&P) is a modifier, not a noun (#121 round 50)."""
+    head = word.rsplit("-", 1)[-1]
+    return head[:1].isupper() and not head.isupper()
+
+
+def _one_count_de(text: str) -> str | None:
+    """The article standing as the number one, or None: "eine Flagge" is a
+    count of one and "einem Prozent" is 1% (#121 round 27).
+
+    ONE SCANNER, NOT A CAP. From the article the words are walked to the
+    head of the phrase: a counted noun, in any case, is the finding; a
+    capitalised word that is not one ends the phrase - German capitalises
+    its nouns, so it is the head ("Eine breite Erholung" counts nothing);
+    any other word is a modifier and the walk goes on, however many there
+    are - two was the cap once and three walked past it, capitalised (round
+    44) and then in lowercase (round 49). Sentence punctuation ends it too.
+    A message written without capitals has no heads to stop at, so a
+    counted noun anywhere after the article in its clause is the finding:
+    the cost of that is a fallback on German written without capitals."""
+    tokens = [m.group(0) for m in _ONE_COUNT_TOKEN_RE.finditer(text)]
+    for start, token in enumerate(tokens):
+        if token.lower() not in _ARTICLE_ONE_FORMS_DE:
+            continue
+        for end in range(start + 1, len(tokens)):
+            word = tokens[end]
+            if word in ".,;:!?()[]\"":
+                break
+            if _counted_de(word):
+                return " ".join(tokens[start:end + 1])
+            if _is_head_de(word):
+                break
+    return None
+
+
+#: The words in the German list that are not whole cardinals: fractions,
+#: halves, the dozen and the plural magnitudes have no ordinal.
+_NOT_CARDINAL_DE = _with_folded(frozenset({
+    "millionen", "milliarden", "dutzend", "hälfte", "haelfte", "drittel", "viertel",
+    "anderthalb", "eineinhalb", "zweieinhalb", "dreieinhalb", "viereinhalb", "einhalb",
+}))
+
+
+def _german_ordinal_stem(cardinal: str) -> str:
+    irregular = {"eins": "erst", "zwei": "zweit", "drei": "dritt", "sieben": "siebt", "acht": "acht"}
+    if cardinal in irregular:
+        return irregular[cardinal]
+    if cardinal.endswith(("zig", "ßig", "ssig")) or cardinal in ("hundert", "tausend", "million", "milliarde"):
+        return cardinal + "st"
+    return cardinal + "t"
+
+
+#: German ordinals, as the English ones: "nach dem dritten monatlichen
+#: Rückgang" restated the rule's second decline (#121 round 48, SOTA-A,
+#: executed). Generated from the cardinals with every adjective ending;
+#: "erste" and "zweite" are the rule ordinals below, and "achte"/"achten"
+#: are the verb as well ("achten auf").
+_ORDINALS_DE: frozenset[str] = _with_folded(frozenset(
+    _german_ordinal_stem(cardinal) + ending
+    for cardinal in _NUMBER_WORDS_DE - _NOT_CARDINAL_DE - {"null", "eins", "zwei"}
+    for ending in ("e", "en", "er", "es", "em")
+) - {"achte", "achten"})
+#: COUNTS AND MULTIPLES: "the flag fired twice", "spreads doubled",
+#: "dreimal", "verdoppelt" report a count or a ratio (#121 round 55, SOTA-A).
+#: Generated from the cardinals where the language builds them ("twofold",
+#: "dreifach", "zehnmal") with the doubling and halving families;
+#: "once"/"einmal" ("auf einmal", "noch einmal") and "einfach" (simple) are
+#: words and stay out. A context refuses them (validate_context).
+_QUANTITY_WORDS: frozenset[str] = _with_folded(
+    frozenset(cardinal + "fold" for cardinal in _NUMBER_WORDS - {"zero", "one", "dozen"})
+    | frozenset("""twice thrice half halve halved halves halving double doubled doubles doubling
+                   triple tripled triples tripling quadruple quadrupled quadruples quadrupling""".split())
+    | frozenset(cardinal + "mal" for cardinal in _NUMBER_WORDS_DE - _NOT_CARDINAL_DE - {"null", "eins"})
+    | frozenset(cardinal + "fach" + ending
+                for cardinal in _NUMBER_WORDS_DE - _NOT_CARDINAL_DE - {"null", "eins"}
+                for ending in ("", "e", "en", "er", "es", "em"))
+    | frozenset("""halb halbe halben halber halbes halbem halbiert halbierte halbierten halbieren
+                   halbierung doppelt doppelte doppelten doppelter doppeltes doppeltem verdoppelt
+                   verdoppelte verdoppelten verdoppeln verdoppelung verdopplung verdreifacht
+                   verdreifachte verdreifachten verdreifachen verdreifachung vervierfacht
+                   vervierfachte vervierfachen""".split()))
+
+
+
+#: The parts a German number compound is built from: every number word,
+#: both spellings, plus "ein" - alone it is the article, but inside a
+#: compound it is the numeral ("einundzwanzig"). The compound rules below
+#: are GENERATED from this, so a word in the list is a word in the rules;
+#: the literal spellings they used to carry omitted the folded "funf" and
+#: "zwolf" forms (#121 round 43, SOTA-A, executed).
+_COMPOUND_PARTS_DE: frozenset[str] = _with_folded(_NUMBER_WORDS_DE | {"ein"})
+_COMPOUND_ALT_DE = "|".join(sorted(_COMPOUND_PARTS_DE, key=len, reverse=True))
+#: ...without the words that are a magnitude of their own: "million" does
+#: not lead "millionhundert".
+_COMPOUND_LEAD_DE = "|".join(sorted(
+    (w for w in _COMPOUND_PARTS_DE
+     if w not in ("million", "millionen", "milliarde", "milliarden", "dutzend")),
+    key=len, reverse=True))
+_COMPOUND_NUMBER_DE_RE = re.compile(
+    r"(?:" + _COMPOUND_ALT_DE + r")"
+    r"\w{0,3}(?:und\w+|zig|ßig|ssig|hundert|tausend)\w*"
+    # ...and the compounds a hundred or a thousand LEADS: "hundertundeins"
+    # reported an ungrounded 101 (#121 round 21, SOTA-A, executed).
+    r"|(?:hundert|tausend)(?:und)?(?:" + _COMPOUND_ALT_DE + r")\w*"
+    # ...and ANY number word leading a hundred or a thousand -
+    # "dreizehntausend" (#121 round 31), "zwanzigtausend" (round 35).
+    r"|(?:" + _COMPOUND_LEAD_DE + r")(?:und)?(?:hundert|tausend)\w*"
+    # ...and two number words joined by "und": "fünfundzwanzig",
+    # "einundzwanzig" (round 43).
+    r"|(?:" + _COMPOUND_ALT_DE + r")und(?:" + _COMPOUND_ALT_DE + r")\w*"
+    # "fünfeinhalb", "zweieinhalb": a number word and a half.
+    r"|\w*(?:" + _COMPOUND_ALT_DE + r")einhalb"
+    )
+
+#: Letters German needs that English does not: the fold reduces the umlauts,
+#: ß has no decomposition and is admitted as itself.
+_GERMAN_LETTERS = frozenset("ßẞ")
+
+#: The POSITIVE check that a German message is German: at least one of the
+#: function words and monitor nouns no German sentence of this register
+#: does without. Without it a compliant English reply was accepted and sent
+#: under MESSAGE_LANGUAGE=de (#121 round 1, SOTA-A, executed). Words that
+#: are also English (band, in, an, war, die as a verb aside) are left out.
+_GERMAN_MARKERS: frozenset[str] = _with_folded(frozenset("""
+der die das den dem des ein eine einem einen einer eines und oder aber ist sind
+wird werden bleibt bleiben liegt liegen steht stehen bei von vom beim zum zur mit
+ohne nicht kein keine keinen noch jetzt heute derzeit aktuell weiterhin zuletzt
+sowie über ueber unter zwischen gegenüber gegenueber nach vor seit wert werte
+stufe spanne flaggen warnsignale warnflaggen treiber haupttreiber nächster
+naechster nächste naechste prüfung pruefung lauf daten unvollständig
+unvollstaendig datenlücke datenluecke datenlücken bewertung bewertungen markt
+aktien trendsignal monatsende erneut wieder weiter
+""".split()))
+#: Two German words at least: one marker carried "bubblegauge market signal
+#: remains unchanged." as German on the strength of "signal", which is
+#: English too and is no longer a marker (#121 round 21, SOTA-A, executed).
+_GERMAN_MARKERS_REQUIRED = 2
+
+
+#: The not-English list's words that are not German either: what a German
+#: message may not carry any more than an English one may. Foreign words
+#: were neutral to the German check, so a French clause of advice ("vendez
+#: tout") passed both language gates (#121 round 29, SOTA-A, executed).
+#: Words German shares with a neighbour (German "die", "war", "also") are
+#: kept out by construction: the German markers and the German words of
+#: the not-English list are removed. Romance and Dutch number words join
+#: the list, since a number in another language is a number the grounding
+#: cannot see.
+_ROMANCE_AND_DUTCH_NUMBERS: frozenset[str] = _with_folded(frozenset(
+    "un deux trois quatre cinq huit neuf dix vingt trente cent mille "
+    "uno dos tres cuatro cinco siete ocho nueve diez veinte treinta cien ciento mil "
+    "due quattro cinque otto nove dieci venti trenta cento "
+    "twee drie vijf zes zeven negen tien twintig dertig honderd duizend".split()))   # Dutch vier/acht are German too
+#: The German words of `_NON_ENGLISH_WORDS`: the not-English backstop
+#: names them so an English message cannot carry them, and the German
+#: check must not refuse them as foreign. Held equal to the list's German
+#: section by a pin, so the two cannot drift apart.
+_NOT_ENGLISH_GERMAN: frozenset[str] = _with_folded(frozenset({
+    "aber", "aktie", "aktien", "aktuell", "alle", "alles", "alte", "auch", "auf", "beim",
+    "bereits", "bitte", "bleiben", "bleibt", "damit", "dann", "das", "dass", "dem", "den",
+    "der", "deutlich", "dich", "die", "diese", "dieser", "dieses", "doch", "dort", "durch",
+    "ein", "eine", "einen", "etwas", "euch", "fuer", "für", "ganz", "gegen", "gerade",
+    "gestern", "haben", "hat", "hatte", "heute", "hier", "hoch", "ihm", "ihn", "ihnen", "ihr",
+    "ihre", "ihren", "immer", "ist", "jede", "jeder", "jetzt", "kann", "kaufen", "kaum",
+    "kein", "keine", "klein", "kurs", "kurse", "können", "leicht", "markt", "mehr", "meist",
+    "mich", "mit", "morgen", "muss", "müssen", "nach", "nein", "neu", "neue", "neuen", "nicht",
+    "nichts", "nie", "niedrig", "niemals", "noch", "nur", "oder", "ohne", "schlecht", "schon",
+    "schwach", "schwer", "sehr", "sein", "seine", "seit", "selten", "sich", "sie", "sind",
+    "sinken", "sinkt", "sollte", "sondern", "steigen", "steigt", "ueber", "und", "uns",
+    "unser", "unsere", "unter", "verkaufen", "viel", "viele", "vom", "vor", "weil", "weiter",
+    "welche", "wenig", "wenige", "wenn", "werden", "wieder", "wir", "wird", "worden", "wurde",
+    "wurden", "zum", "zur", "zwischen", "über",
+}))
+
+_FOREIGN_TO_GERMAN: frozenset[str] = (
+    (_NON_ENGLISH_WORDS - _NOT_ENGLISH_GERMAN - _GERMAN_MARKERS) | _ROMANCE_AND_DUTCH_NUMBERS
+) - frozenset("also war die dies dit sei mit hier".split())
+
+
+
 #: The only numerator/denominator pairings that read as a score rather than
 #: a quotient. Taken from the daily-digest template itself:
 #: "bubblegauge {median}/{score_scale_max} … Flags {red_flag_count}/{red_flag_total}".
@@ -799,36 +1248,6 @@ def _is_foreign_dash(ch: str) -> bool:
     if category == "Pd" and ch != "-":
         return True
     return category == "Sm" and not ch.isascii()
-
-
-def _fold_latin(text: str) -> str:
-    """Latin letters with their diacritics removed, for the directive scans.
-
-    "Emaíl your password." and "Séll holdings." wore accents that the script
-    check admits (English needs no letter beyond Latin Extended-A) and that
-    the word-based scans could not see through (#105 round 17, SOTA-A,
-    executed). Grounding, zones, emoji and the not-English word list judge
-    the text as written; advice, the lexicon and the imperative shapes judge
-    the folded text.
-    """
-    # Only a precomposed Latin letter whose base is ASCII is folded (é, í, ñ,
-    # ý); everything else stays as written, so an emoji, its variation
-    # selector, ß or a non-Latin letter is not turned into something the
-    # scans would misread (NFKD mapped the allowlisted ℹ️ to a plain "i").
-    # NFC first, so a letter written with a combining mark folds the same.
-    out: list[str] = []
-    for ch in unicodedata.normalize("NFC", text):
-        if ch.isascii():
-            out.append(ch)
-            continue
-        parts = unicodedata.normalize("NFD", ch)
-        base = parts[0]
-        if (len(parts) > 1 and base.isascii() and base.isalpha()
-                and all(unicodedata.category(c) == "Mn" for c in parts[1:])):
-            out.append(base)
-        else:
-            out.append(ch)
-    return "".join(out)
 
 
 def _is_emoji(ch: str, *, presented: bool = False) -> bool:
@@ -1184,11 +1603,117 @@ def _reads_as_state(text: str, match: re.Match[str]) -> bool:
     return bool(re.search(r"\d+\s*/\s*\d+$|\d%$", before))
 
 
+#: English function words that mark a clause of a German message as
+#: English prose rather than a German label ("Langfristtrend: SPY IN")
+#: that merely lacks a German marker. "in" is left out: it is German too,
+#: and the trend state is written IN.
+#: ("an" is left out too: it is a German preposition.)
+_ENGLISH_MARKERS: frozenset[str] = frozenset(
+    "the a to of your you now into out with for from should must is are this that "
+    "and or at by on".split())
+#: The English monitor vocabulary counts as English evidence for the
+#: language test: an English message padded with German articles ("die
+#: der") carried no English FUNCTION word (#121 round 24, SOTA-A). Words
+#: German shares (band, trend, score, index) are left out.
+_ENGLISH_EVIDENCE: frozenset[str] = _ENGLISH_MARKERS | frozenset(
+    "range flags flag level reading readings warning warnings check checks run runs review "
+    "reviews month week events event driver drivers average price prices stocks shares "
+    "market signal scale gate below above within remains unchanged".split())
+#: COMMON ENGLISH, not only its function words: "Valuations stretched while
+#: credit stays calm: bubblegauge 59/100, Stufe trim, Spanne 57-61" carried
+#: no word of the list above and passed as German on its two labels (#121
+#: round 51, SOTA-A). The everyday English of a market note - its pronouns,
+#: auxiliaries, verbs, adjectives and nouns - counts as English evidence,
+#: less every word German writes the same way ("still", "fall", "stand",
+#: "also", "fast", "gut", "Momentum" and the loanwords of German finance).
+_ENGLISH_COMMON: frozenset[str] = frozenset("""
+i me my we our ours you your yours he him his she it its they them their theirs what which who whom whose
+when where why how all any both each few many much more most other some such no nor not only own same than
+too very can could may might shall would should must do does did done doing have has had having be been being
+am was were will just don now then there here these those this that into onto upon over through during before
+after about against between under again further once off out up down while because until if though although
+however whereas whether yet also either neither every another anything nothing something everything
+today yesterday tomorrow week weeks month months year years day days hour hours time times
+rise rises rising risen rose climb climbs climbing climbed drop drops dropping dropped decline declines declining
+declined gain gains gaining gained lose loses losing lost increase increases increasing increased decrease
+decreases decreasing decreased grow grows growing grew grown slip slips slipping slipped ease eases easing eased
+move moves moving moved stay stays staying stayed remain remaining remained hold holds holding held keep keeps
+keeping kept turn turns turning turned look looks looking looked seem seems seeming seemed appear appears
+appearing appeared show shows showing showed shown point points pointing pointed suggest suggests suggesting
+suggested indicate indicates indicating indicated drive drives driving drove driven lead leads leading led
+report reports reporting reported read reads note notes noting noted say says saying said mean means meaning
+meant stretched stretch elevated calm calmer quiet steady stable strong stronger strongest weak weaker weakest
+high higher highest low lower lowest rich richer cheap cheaper expensive tight tighter loose looser wide wider
+narrow narrower broad broader heavy heavier light lighter large larger small smaller big bigger key main major
+minor overall current recent recently latest previous next last first second third new old early late
+valuation valuations credit breadth yield yields earnings profit profits growth economy economic inflation
+rates rate spread spreads concentration sentiment volatility risk risks bubble bubbles froth frothy excess
+excessive fear greed caution cautious concern concerns pressure support resistance outlook view views story
+remains stays holds looks seems still just already almost nearly slightly sharply strongly clearly roughly
+about around across along behind beyond near toward towards without inside outside despite since unlike
+""".split())
+#: The words German writes the same way, so neither list may count them.
+_GERMAN_HOMOGRAPHS: frozenset[str] = frozenset("""
+die was will war also fast bald man am an in so hat den des rat not hell gift kind arm hand art mist rot tag
+bad brief fern hut rein see wand wind still fall falls stand fund top plan fit test status name system problem
+index trend band score signal hold trim long short lag sank gut bin rose fell her us hier momentum rating
+timing trading hedge boom crash cash spread spreads bonds bond boss manager team start ende last
+""".split())
+_ENGLISH_EVIDENCE = (_ENGLISH_EVIDENCE | _ENGLISH_COMMON) - _GERMAN_HOMOGRAPHS - _GERMAN_MARKERS
+
+
+#: The English verbs an instruction to an investor uses, as words: a
+#: clause carrying one is English prose whatever German is padded around
+#: it ("Jetzt move cash." carried no English function word and skipped the
+#: imperative shapes - #121 round 22, SOTA-A, executed).
+_ENGLISH_ACTION_WORDS: frozenset[str] = frozenset(
+    re.findall(r"[a-z]+", _ACTION_VERBS) + re.findall(r"[a-z]+", _COMMAND_VERBS)) - {"down"}
+
+
+def _english_offence(judged: str, grounded_words: set[str]) -> str | None:
+    """The English advice and imperative rules on a clause of a German
+    message that carries an English function word - English prose, whether
+    or not a German word sits beside it: "Die move to cash now." was skipped
+    as German on the strength of "Die" (#121 round 4, SOTA-A, executed).
+    A German label without one ("Langfristtrend: SPY IN") is not judged
+    here. The band-verb state test is not applied: German compounds end in
+    "band" ("Aktionsband trim") and the German rules own the band words."""
+    words = set(re.findall(r"[a-zäöüß]+", judged.lower()))
+    english = bool(words & _ENGLISH_MARKERS) or bool(words & _ENGLISH_ACTION_WORDS)
+    # The advice rule is word-based and reads a clause that is not German
+    # ("Consider selling.", round 3) as well as one that is English prose.
+    if (english or not words & _GERMAN_MARKERS) and _ADVICE_RE.search(judged):
+        return "reads as advice, not an observation"
+    if not english:
+        return None
+    clauses = re.split(_CLAUSE_BOUNDARY_RE, judged)
+    clauses += [f"{label} {rest}" for label, rest in zip(clauses, clauses[1:], strict=False)
+                if len(label.split()) == 1 and rest.strip()]
+    for clause in clauses:
+        if _looks_imperative(clause, grounded_words):
+            return (f"{clause.strip()!r} opens a short clause with a word this "
+                    "monitor never uses as a subject - it reads as an instruction")
+    if _IMPERATIVE_OBJECT_RE.search(judged):
+        return "reads as an instruction about a position, not an observation"
+    return None
+
+
 def validate(text: str, *, channel: Channel, facts: dict[str, object],
              sms_max_len: int, imessage_max_chars: int,
              imessage_max_emoji: int,
-             prose_rules: bool = True) -> ValidationResult:
-    """The whole contract, in the order that gives the most useful reason."""
+             prose_rules: bool = True,
+             language: str = "en") -> ValidationResult:
+    """The whole contract, in the order that gives the most useful reason.
+
+    `language` is the language the text was WRITTEN in and selects which
+    meaning-of-prose rules judge it: English (the full set) or German (the
+    reduced set, decision 25). The language-agnostic rules - the channel
+    contract, grounding, numerals, zones, arithmetic - are the same for both.
+    """
+    if language not in ("en", "de"):
+        return ValidationResult(False, FailureClass.CONTENT,
+                                f"no prose rules for language {language!r}")
+    german = language == "de"
     # THE CHANNEL IS AN ENUM, however it was spelt. The gate compared by
     # identity, so the StrEnum's own value "sms" fell into the iMessage
     # branch and an SMS could carry emoji, non-GSM-7 text and the wrong
@@ -1344,6 +1869,24 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
     # list judge the text as written; everything about MEANING judges this.
     judged = _fold_latin(text)
     judged_lower = judged.lower()
+    if german:
+        # ONE SPELLING FOR EVERY GERMAN SCAN. The script check admits any
+        # Latin letter that folds, so "Káufe" and "zweí" wore accents the
+        # German patterns could not see (#121 round 37, SOTA-A, executed).
+        # The fold turns ä into a, which the patterns' transliteration
+        # classes already accept, and every foreign accent is gone.
+        lowered = judged_lower
+    if german:
+        one = _one_count_de(judged)
+        if one:
+            return ValidationResult(False, FailureClass.CONTENT,
+                                    f"spelled-out number {one!r}: numerals must come from the facts")
+        for match in re.finditer(r"[a-zäöüß]+", lowered):
+            word = match.group(0)
+            if word in _NUMBER_WORDS_DE or _COMPOUND_NUMBER_DE_RE.fullmatch(word):
+                return ValidationResult(
+                    False, FailureClass.CONTENT,
+                    f"spelled-out number {word!r}: numerals must come from the facts")
     for match in re.finditer(r"[a-z]+(?:-[a-z]+)?", judged_lower):
         word = match.group(0)
         head = word.split("-")[0]
@@ -1597,13 +2140,102 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
             presented = i + 1 < len(judged) and judged[i + 1] == _VS16
             if _is_emoji(ch, presented=presented):
                 continue
+            # THE GERMAN LETTERS FIRST. Capital ẞ is U+1E9E, above the
+            # Latin Extended-A bound, so the block check refused a German
+            # message that used it before the allowlist was consulted
+            # (#121 round 41, SOTA-A, executed).
+            if german and ch in _GERMAN_LETTERS:
+                continue
             if ord(ch) > 0x024F:
                 return ValidationResult(
                     False, FailureClass.CONTENT,
-                    f"non-Latin script U+{ord(ch):04X}: messages are English")
+                    f"non-Latin script U+{ord(ch):04X}: messages are {'German' if german else 'English'}")
             return ValidationResult(
                 False, FailureClass.CONTENT,
-                f"letter U+{ord(ch):04X} does not fold to English")
+                f"letter U+{ord(ch):04X} does not fold to {'German' if german else 'English'}")
+        if german:
+            # THE GERMAN RULES (decision 25). The English grammar below would
+            # misread German either way, so it is not consulted; the lexicon
+            # above still was, since its words are not German words.
+            # PREDOMINANTLY German, not merely touched by it: one marker was
+            # enough, so an English message with the homograph "die" in it
+            # ("The die shows ...") went out as German (#121 round 8,
+            # SOTA-A, executed). The German function words must outnumber
+            # the English ones over the whole message.
+            # DISTINCT words, not tokens: "die die" padded an English text
+            # to two German markers (#121 round 24, SOTA-A, executed); and
+            # the English monitor vocabulary counts against it.
+            _tokens = set(re.findall(r"[a-zäöüß]+", lowered))
+            _german = len(_tokens & _GERMAN_MARKERS)
+            _english = len(_tokens & _ENGLISH_EVIDENCE)
+            if _german < _GERMAN_MARKERS_REQUIRED or _german <= _english:
+                return ValidationResult(
+                    False, FailureClass.CONTENT,
+                    f"not German: {_german} distinct German word(s) against {_english} English")
+            _foreign = sorted(_tokens & _FOREIGN_TO_GERMAN)
+            if _foreign:
+                return ValidationResult(False, FailureClass.CONTENT,
+                                        f"not German: foreign words {_foreign[:4]}")
+            banned = _BANNED_DE_RE.search(lowered)
+            advised = banned.group(0) if banned else _raten_de(lowered)
+            if advised:
+                return ValidationResult(False, FailureClass.CONTENT,
+                                        f"banned lexicon (de): {advised!r}")
+            if _ADVICE_DE_RE.search(lowered):
+                return ValidationResult(False, FailureClass.CONTENT,
+                                        "reads as advice or a forecast, not an observation (de)")
+            # The FOLDED text, like every other German scan: "Háltén Sie"
+            # wore accents the pattern could not see (#121 round 38,
+            # SOTA-A, executed). The fold keeps the capitals, which this
+            # pattern needs for "Sie".
+            ordered = _IMPERATIVE_DE_RE.search(judged)
+            if ordered:
+                return ValidationResult(False, FailureClass.CONTENT,
+                                        f"{ordered.group(1)!r} Sie: reads as an instruction (de)")
+            told = _IMPERATIVE_DU_RE.search(lowered)
+            if told:
+                return ValidationResult(False, FailureClass.CONTENT,
+                                        f"{told.group(1)!r} opens a clause as an instruction (de)")
+            ordered_by_infinitive = _INFINITIVE_ORDER_DE_RE.search(lowered)
+            if ordered_by_infinitive:
+                return ValidationResult(False, FailureClass.CONTENT,
+                                        f"{ordered_by_infinitive.group(0).strip()!r} ends a clause as an instruction (de)")
+            # NOT the English shape rules. German puts its verb second, so
+            # "Langfristig sind SPY und QQQ IN." has the shape the English
+            # position-instruction pattern keys on (a word, then a position
+            # noun, then the end) and was refused as an instruction on the
+            # first real digest (the gateway probe before the PR). An
+            # English instruction smuggled into a German message still meets
+            # the English lexicon above (buy, sell, ...).
+    if prose_rules and german:
+        # AN ENGLISH CLAUSE INSIDE A GERMAN MESSAGE is judged by the English
+        # rules: "Move to cash. Die Spanne liegt bei 57-61." satisfied the
+        # German marker with "die" and the German grammar with nothing
+        # (#121 round 3, SOTA-A, executed), and "Die move to cash now." did
+        # the same inside one clause (round 4). A clause that carries an
+        # English function word is English prose - whatever else is in it -
+        # and the English advice and imperative rules read it as such.
+        _grounded_words = {str(v).casefold() for v in facts.values()}
+        for _clause in re.split(_CLAUSE_BOUNDARY_RE, judged):
+            if not _clause.strip():
+                continue
+            offence = _english_offence(_clause, _grounded_words)
+            if offence is not None:
+                return ValidationResult(False, FailureClass.CONTENT,
+                                        f"{offence} (an English clause in a German message)")
+        # AN ENGLISH PART IS NOT GERMAN, whatever the rest is: German
+        # labels around it ("bubblegauge reports 59/100 today, die Stufe
+        # trim, die Spanne 57-61") outnumbered its English over the whole
+        # message (#121 round 51). Every clause and comma-part is held to
+        # the same test: two English words, and more English than German.
+        for _part in re.split(r"[.;:!?,()]", lowered):
+            _words = set(re.findall(r"[a-zäöüß]+", _part))
+            _part_english = len(_words & _ENGLISH_EVIDENCE)
+            if _part_english >= 2 and _part_english > len(_words & _GERMAN_MARKERS):
+                return ValidationResult(
+                    False, FailureClass.CONTENT,
+                    f"not German: an English part ({_part.strip()[:40]!r})")
+    if prose_rules and not german:
         foreign = {w for w in re.findall(r"[a-zà-ÿ]+", lowered)} & _NON_ENGLISH_WORDS
         if foreign:
             return ValidationResult(False, FailureClass.CONTENT,
@@ -1722,3 +2354,31 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
             return ValidationResult(False, FailureClass.CONTENT,
                                     f"numeral {numeral!r} is not in the grounded facts")
     return _OK
+
+
+#: Every word that is a number in either language: the cardinals, the
+#: ordinals with "first"/"second" and "erste"/"zweite" and "erstmals", and
+#: the counts and multiples. A context carries none of them.
+_CONTEXT_NUMBER_WORDS: frozenset[str] = (
+    _NUMBER_WORDS | _ORDINALS | frozenset({"first", "second", "firstly", "secondly"})
+    | _NUMBER_WORDS_DE | _ORDINALS_DE | _QUANTITY_WORDS
+    | _with_folded(frozenset(
+        stem + ending for stem in ("erst", "zweit") for ending in ("e", "en", "er", "es", "em")))
+    | frozenset({"erstmals", "erstmalig", "erstmalige", "erstmaligen", "erstmaliger", "erstmaliges",
+                 "erstmaligem"}))
+
+
+def validate_context(text: str, *, language: str, max_chars: int) -> ValidationResult:
+    """The context a model wrote for a message (decision 27): the prose
+    rules of its language, and NO NUMBER OF ANY KIND - no digit, no number
+    word in either language, no ordinal, count or multiple. The numbers of
+    a message are the owner's template's; the context only says what they
+    mean, so whether a number in it is grounded never arises."""
+    if any(ch.isdigit() for ch in text):
+        return ValidationResult(False, FailureClass.CONTENT, "a context carries no numbers")
+    for word in re.findall(r"[a-zäöüß]+", _fold_latin(text).lower()):
+        if word in _CONTEXT_NUMBER_WORDS or _COMPOUND_NUMBER_DE_RE.fullmatch(word):
+            return ValidationResult(False, FailureClass.CONTENT,
+                                    f"a context carries no numbers: {word!r}")
+    return validate(text, channel=Channel.IMESSAGE, facts={}, prose_rules=True, language=language,
+                    sms_max_len=max_chars, imessage_max_chars=max_chars, imessage_max_emoji=0)
