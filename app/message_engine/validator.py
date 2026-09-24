@@ -812,6 +812,23 @@ _ZU_ADVICE_DE = (
     r"|(?:ab|um|auf|nach|aus|ein|mit|zur(?:u|ü|ue)ck|weg|los)zu"
     r"(?:sto(?:s|ß|ss)|sicher|schicht|stock|bau|kauf|steig|halt|zieh|fahr|geb|nehm|setz|streich|"
     r"l(?:o|ö|oe)s|tausch|teil|trenn)\w*")
+#: The reader: the pronouns that address or include them, and the
+#: investor nouns.
+_READER_DE = r"(?:man|sie|du|ihr|wir|anleger\w*|investor\w*|leser\w*)"
+#: The reader's modal, in every person and both moods: "sollen",
+#: "müssen" and "können", present and subjunctive ("du solltest", "ihr
+#: sollt", "man müsste", "Anleger sollen"). ONE LIST for every order it is
+#: read in: the lists it replaces were written per shape, and "[nst]?"
+#: missed the two-letter ending of "solltest" (#124 round 7, SOTA-A).
+_READER_MODAL_DE = (r"(?:soll(?:e|en|st|t|te|ten|test|tet)?"
+                    r"|m(?:u|ü|ue)(?:ss|ß)(?:e|en|t|te|ten|test|tet)?"
+                    r"|kann(?:st)?|k(?:o|ö|oe)nn(?:e|en|t|te|ten|test|tet))")
+#: A forecast's future or modal, and a passive modal's modal: third
+#: person, since their subject is the market.
+_FORECAST_MODAL_DE = (r"(?:wird|werden|d(?:u|ü|ue)rfte[n]?|k(?:o|ö|oe)nnte[n]?|kann|k(?:o|ö|oe)nnen|soll|sollen|"
+                      r"muss|m(?:u|ü|ue)ssen|mag)")
+_PASSIVE_MODAL_DE = (r"(?:sollte[n]?|soll|sollen|muss|m(?:u|ü|ue)ss(?:en|te|ten)|k(?:o|ö|oe)nnte[n]?|kann|"
+                     r"k(?:o|ö|oe)nnen|w(?:a|ä|ae)re[n]?)")
 #: Advice and forecasts in German grammar: a modal aimed at the reader, an
 #: impersonal recommendation, a future or modal movement.
 _MOVEMENT_DE = (r"steig\w*|f(?:a|ä|ae)ll\w*|sink\w*|crash\w*|abst(?:u|ü|ue)rz\w*|platz\w*|einbr\w*|"
@@ -820,13 +837,10 @@ _MOVEMENT_DE = (r"steig\w*|f(?:a|ä|ae)ll\w*|sink\w*|crash\w*|abst(?:u|ü|ue)rz\
                 r"explodier\w*|einsetz\w*|ausweit\w*")
 _ADVICE_DE_RE = re.compile(
     # "sollten Sie", "man sollte", "Anleger müssen", "Sie könnten"
-    r"\b(?:sollte[nst]?|m(?:u|ü|ue)ss(?:en|t)|muss|musst|k(?:o|ö|oe)nnte[nst]?|k(?:o|ö|oe)nn(?:en|t))\s+"
-    r"(?:man|sie|du|ihr|anleger\w*|investor\w*|leser\w*)\b"
+    r"\b" + _READER_MODAL_DE + r"\s+" + _READER_DE + r"\b"
     # ...and the subject first, "ihr"/"wir" included: "Ihr solltet
     # Positionen reduzieren" (#121 round 31, SOTA-A, executed).
-    r"|\b(?:man|sie|du|ihr|wir|anleger\w*|investor\w*|leser\w*)\s+"
-    r"(?:sollte[nst]?|m(?:u|ü|ue)ss(?:en|t)|muss|musst|k(?:o|ö|oe)nnte[nst]?|kannst|kann|"
-    r"k(?:o|ö|oe)nn(?:en|t))\b"
+    r"|\b" + _READER_DE + r"\s+" + _READER_MODAL_DE + r"\b"
     # "es empfiehlt sich", "es lohnt sich", "ist ratsam", "an der Zeit"
     r"|\b(?:empfiehlt|lohnt)\s+(?:es\s+)?sich\b"
     r"|\b(?:ist|w(?:a|ä|ae)re)\s+(?:es\s+)?(?:ratsam|empfehlenswert|zeit|an\s+der\s+zeit|h(?:o|ö|oe)chste\s+zeit)\b"
@@ -834,7 +848,7 @@ _ADVICE_DE_RE = re.compile(
     r"|\b(?:jetzt|nun|sofort)\s+(?:kaufen|verkaufen|aussteigen|einsteigen|absichern|"
     r"reduzieren|umschichten|nachkaufen|halten|abbauen|aufstocken)\b"
     # "wird fallen", "dürften steigen", "kann einbrechen" - a forecast
-    r"|\b(?:wird|werden|d(?:u|ü|ue)rfte[n]?|k(?:o|ö|oe)nnte[n]?|kann|k(?:o|ö|oe)nnen|soll|sollen|muss|m(?:u|ü|ue)ssen|mag)\s+"
+    r"|\b" + _FORECAST_MODAL_DE + r"\s+"
     # ...any distance within the sentence: a cap of three words let "Die
     # Kurse werden in den kommenden Wochen sehr deutlich fallen" through
     # (#124 round 1, SOTA-A)
@@ -847,8 +861,7 @@ _ADVICE_DE_RE = re.compile(
     # in the passive or a modal state ("should be reduced", "must be
     # secured"); "ist zu verkaufen" and "es gilt" are the same advice in
     # other clothes.
-    r"|\b(?:sollte[n]?|soll|sollen|muss|m(?:u|ü|ue)ss(?:en|te|ten)|k(?:o|ö|oe)nnte[n]?|kann|k(?:o|ö|oe)nnen|w(?:a|ä|ae)re[n]?)\b"
-    r"[^.;!?]*?\b(?:werden|sein)\b"
+    r"|\b" + _PASSIVE_MODAL_DE + r"[^.;!?]*?\b(?:werden|sein)\b"
     r"|\b(?:ist|sind|w(?:a|ä|ae)re[n]?|bleibt|bleiben)\s+(?:jetzt\s+|nun\s+|weiter\s+)?(?:" + _ZU_ADVICE_DE + r")"
     r"|\b(?:gilt\s+es|es\s+gilt)\b"
     # THE VERB-FINAL ORDER. A subordinate clause puts its finite verb last,
@@ -859,16 +872,13 @@ _ADVICE_DE_RE = re.compile(
     # - the forecast: a movement's infinitive, then the future or a modal
     #   ("steigen wird", "erholen könnte"). A noun ("Die Erholung wird
     #   getragen") does not end in -n.
-    r"|\b(?:" + _MOVEMENT_DE + r")(?<=n)\s+(?:wird|werden|d(?:u|ü|ue)rfte[n]?|k(?:o|ö|oe)nnte[n]?|kann|"
-    r"k(?:o|ö|oe)nnen|soll|sollen|muss|m(?:u|ü|ue)ssen|mag)\b"
+    r"|\b(?:" + _MOVEMENT_DE + r")(?<=n)\s+" + _FORECAST_MODAL_DE + r"\b"
     # - the reader's modal: the reader earlier in the clause, then an
     #   infinitive and the modal ("dass man Gewinne mitnehmen sollte").
-    r"|\b(?:man|sie|du|ihr|wir|anleger\w*|investor\w*|leser\w*)\b[^.;:!?,]*?\b[a-zäöüß]+n\s+"
-    r"(?:sollte[nst]?|m(?:u|ü|ue)ss(?:en|t)|muss|musst|k(?:o|ö|oe)nnte[nst]?|kannst|kann|k(?:o|ö|oe)nn(?:en|t))\b"
+    r"|\b" + _READER_DE + r"\b[^.;:!?,]*?\b[a-zäöüß]+n\s+" + _READER_MODAL_DE + r"\b"
     # - the passive modal: "werden" or "sein", then the modal ("reduziert
     #   werden sollten").
-    r"|\b(?:werden|sein)\s+(?:sollte[nst]?|soll|sollen|muss|m(?:u|ü|ue)ss(?:en|te|ten)|k(?:o|ö|oe)nnte[n]?|kann|"
-    r"k(?:o|ö|oe)nnen|w(?:a|ä|ae)re[n]?)\b"
+    r"|\b(?:werden|sein)\s+" + _PASSIVE_MODAL_DE + r"\b"
     # - the impersonal recommendation: "dass es sich lohnt", "weil es an
     #   der Zeit ist".
     r"|\bsich\b[^.;:!?,]*?\blohnt\b"
@@ -2513,7 +2523,23 @@ _CONTEXT_NUMBER_WORDS: frozenset[str] = (
     # range settles"), a count in a context: "The flag fired once." (#124
     # round 2, SOTA-A). A context has "when" and "wieder" for the rest.
     | frozenset({"once", "einmal", "einmalig", "einmalige", "einmaligen", "einmaliger", "einmaliges",
-                 "einmaligem"}))
+                 "einmaligem"})
+    # ...and the ORDINAL ADVERBS, generated from the ordinals: "Fourthly,
+    # valuations remain stretched" passed (#124 round 7, SOTA-A), and so did
+    # "drittens". With them the rest of the number vocabulary the lists
+    # left out: the scale words in the plural ("hundreds of stocks",
+    # "Tausende"), the fractions ("a quarter of", "ein Fünftel"), "pair",
+    # and "single", the multiple of one beside "double" and "triple".
+    | frozenset(_english_ordinal(cardinal) + "ly" for cardinal in _NUMBER_WORDS - {"one", "two", "dozen"})
+    | _with_folded(frozenset(
+        {_german_ordinal_stem(cardinal) + "ens"
+         for cardinal in _NUMBER_WORDS_DE - _NOT_CARDINAL_DE - {"null"}}
+        | {_german_ordinal_stem(cardinal) + ending
+           for cardinal in _NUMBER_WORDS_DE - _NOT_CARDINAL_DE - {"null", "eins", "zwei"}
+           for ending in ("el", "eln")}
+        | {scale + ending for scale in ("dutzend", "hundert", "tausend") for ending in ("e", "en")}))
+    | frozenset(scale + "s" for scale in ("dozen", "hundred", "thousand", "million", "billion"))
+    | frozenset({"quarter", "quarters", "pair", "pairs", "single"}))
 
 
 #: A Roman numeral is a number: "Risk remains at level IV." (#124 round 4,

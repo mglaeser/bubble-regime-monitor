@@ -590,7 +590,9 @@ puts its verb second. The set has these parts:
   ("weil der Kurs steigen wird", "dass man Gewinne mitnehmen sollte",
   "weil Positionen reduziert werden sollten", "dass es sich lohnt", "zu
   reduzieren ist"), and "zu" infixed after "mit" ("mitzunehmen") (#124
-  round 6).
+  round 6). The reader's modal is one list for every order, in every
+  person and both moods of "sollen", "müssen" and "können" ("du
+  solltest", "ihr sollt", "man müsste", "Anleger sollen") (#124 round 7).
 - **Imperatives.** This covers the formal imperative in any case of the
   verb ("Kaufen Sie", "halten Sie", "BLEIBEN Sie") with "Sie" keeping its
   capital, and the informal imperative from the action stems - at the head
@@ -644,13 +646,17 @@ max_chars)` judges the context a model writes for a message. It applies
 the prose rules of its language, and refuses any digit and any number
 word in either language:
 
-- cardinals and their compounds;
-- ordinals, "first"/"second" and "erste"/"zweite" included, and "erstmals";
+- cardinals and their compounds, the scale words in the plural
+  ("hundreds", "Tausende") and the fractions ("a quarter", "ein Fünftel")
+  (#124 round 7);
+- ordinals, "first"/"second" and "erste"/"zweite" included, "erstmals",
+  and the ordinal adverbs ("thirdly", "drittens"), generated from the
+  ordinals (#124 round 7);
 - "once" and "einmal", words elsewhere and a count in a context (#124
   round 2);
-- counts and multiples ("twice", "half", "doubled", "dreimal",
-  "verdoppelt", "doppelt so hoch"), generated from the cardinals where the
-  language builds them;
+- counts and multiples ("twice", "half", "doubled", "single", "pair",
+  "dreimal", "verdoppelt", "doppelt so hoch"), generated from the
+  cardinals where the language builds them;
 - Roman numerals: a word of two letters or more that reads as one, in
   capitals or in lowercase from i, v and x ("level IV", "phase iii"), and
   any numeral character (#124 round 4), read off the folded text ("level

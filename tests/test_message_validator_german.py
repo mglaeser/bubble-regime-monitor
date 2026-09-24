@@ -1191,3 +1191,74 @@ class TestRoundSixOn124:
     def test_an_accent_does_not_hide_a_roman_numeral(self, text):
         result = validate_context(text, language="en", max_chars=200)
         assert not result.ok and "no numbers" in (result.reason or ""), (text, result.reason)
+
+
+class TestRoundSevenOn124:
+    """#124 round 7, SOTA-A, two defects, both executed; SOTA-C approved.
+    The reader's modal is one list in every person and both moods, read in
+    every order ("[nst]?" missed "solltest"); and a context refuses the
+    ordinal adverbs, generated from the ordinals, with the rest of the
+    number vocabulary the lists left out."""
+
+    @pytest.mark.parametrize("text", [
+        "Du solltest Positionen reduzieren, wenn die Daten fehlen.",
+        "Wenn die Daten fehlen, solltest du Positionen reduzieren.",
+        "Du könntest Positionen reduzieren, wenn die Daten fehlen.",
+        "Du sollst Positionen reduzieren, wenn die Daten fehlen.",
+        "Ihr sollt Positionen reduzieren, wenn die Daten fehlen.",
+        "Anleger sollen Positionen reduzieren, wenn die Daten fehlen.",
+        "Man soll Positionen reduzieren, wenn die Daten fehlen.",
+        "Man müsste Positionen reduzieren, wenn die Daten fehlen.",
+        "Du müsstest Positionen reduzieren, wenn die Daten fehlen.",
+        "Ihr müsstet Positionen reduzieren, wenn die Daten fehlen.",
+        "Jetzt kann man Gewinne mitnehmen, die Lage ist angespannt.",
+        "Die Lage ist angespannt, weshalb du Positionen reduzieren solltest.",
+        "Die Lage ist angespannt, weshalb ihr Positionen reduzieren sollt.",
+        "Die Lage ist angespannt, weshalb man Positionen reduzieren müsste.",
+    ])
+    def test_the_readers_modal_is_refused_in_every_person_and_mood(self, text):
+        result = validate("Der Wert liegt bei 59 von 100. " + text, channel=Channel.IMESSAGE, facts=DIGEST_FACTS,
+                          prose_rules=True, language="de", **LIMITS)
+        assert not result.ok and "advice or a forecast" in (result.reason or ""), (text, result.reason)
+
+    def test_a_modal_whose_subject_is_not_the_reader_stays(self):
+        text = "Der Wert liegt bei 59 von 100. Die Notenbank soll die Lage beobachten, die Bewertungen sind hoch."
+        result = validate(text, channel=Channel.IMESSAGE, facts=DIGEST_FACTS, prose_rules=True, language="de",
+                          **LIMITS)
+        assert result.ok, result.reason
+
+    @pytest.mark.parametrize("text, language", [
+        ("Thirdly, valuations remain stretched.", "en"),
+        ("Fourthly, valuations remain stretched and credit is calm.", "en"),
+        ("Dozens of stocks carry the index while valuations are stretched.", "en"),
+        ("A quarter of the signals are calm while valuations are stretched.", "en"),
+        ("A pair of flags is active while valuations are stretched.", "en"),
+        ("A single flag is active while valuations are stretched.", "en"),
+        ("Drittens bleiben die Bewertungen hoch.", "de"),
+        ("Erstens sind die Bewertungen hoch, zweitens ist Kredit ruhig.", "de"),
+        ("Ein Fünftel der Signale ist ruhig, die Bewertungen sind hoch.", "de"),
+        ("Dutzende Aktien tragen den Index, die Bewertungen sind hoch.", "de"),
+    ])
+    def test_the_number_vocabulary_is_refused_in_a_context(self, text, language):
+        result = validate_context(text, language=language, max_chars=200)
+        assert not result.ok and "no numbers" in (result.reason or ""), (text, result.reason)
+
+    def test_every_ordinal_has_its_adverb(self):
+        from app.message_engine.validator import (
+            _CONTEXT_NUMBER_WORDS,
+            _NOT_CARDINAL_DE,
+            _NUMBER_WORDS,
+            _NUMBER_WORDS_DE,
+            _english_ordinal,
+            _german_ordinal_stem,
+        )
+
+        for cardinal in _NUMBER_WORDS - {"one", "two", "dozen"}:
+            assert _english_ordinal(cardinal) + "ly" in _CONTEXT_NUMBER_WORDS, cardinal
+        for cardinal in _NUMBER_WORDS_DE - _NOT_CARDINAL_DE - {"null"}:
+            assert _german_ordinal_stem(cardinal) + "ens" in _CONTEXT_NUMBER_WORDS, cardinal
+
+    def test_lastly_is_no_number(self):
+        result = validate_context("Lastly, valuations remain stretched while credit stays calm.", language="en",
+                                  max_chars=200)
+        assert result.ok, result.reason
