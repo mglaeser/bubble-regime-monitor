@@ -621,19 +621,24 @@ puts its verb second. The set has these parts:
 - **Number words.** Model text refuses the ordinals from "third"/"dritte"
   up and the counts and multiples ("twice", "dreimal", "verdoppelt"), in
   both languages; "first"/"second" stay words, as #100 decided. The
-  cardinals and their compounds are generated from the word list (hundred-led, teen- and ten-led thousands, tens joined by
-  "und", halves, and a number word joined to a period or a unit:
-  "Zweiwochenhoch" - #124 round 3). "ein"/"eine" counts as the number one before a counted
-  noun, read by one scanner that walks the whole noun phrase: any number of
-  lowercase modifiers, then the run of capitalised words, ending at the
-  first lowercase word after it. A counted noun anywhere in the phrase is
-  the count, since a capitalised word can be an adjective ("Eine Berliner
-  Warnflagge", #124 round 4); a ticker in capitals is a modifier. A comma
-  between two modifiers, and a bracket or a quote before the nouns, stay
-  inside the phrase ("Eine aktive, bestätigte Warnflagge", #124 round 5).
-  "achte" and "achten" are the verb as well ("achten auf"), so they count
-  as the ordinal only after a determiner ("im achten Monat", #124 round
-  8).
+  cardinals and their compounds are generated from the word list
+  (hundred-led, teen- and ten-led thousands, tens joined by "und", halves,
+  and a number word joined to a period or a unit: "Zweiwochenhoch" - #124
+  round 3; joined to a fraction, "halb" joined to a period, and the
+  periods of years: "Zweidrittelmehrheit", "Halbjahreshoch", "Jahrzehnt" -
+  #124 round 10). The counts and multiples in "-mal" and "-fach" are
+  generated from every number word, the mixed numbers included
+  ("anderthalbmal"). "ein"/"eine" counts as the number one before a
+  counted noun, read by one scanner that walks the whole noun phrase: any
+  number of lowercase modifiers, then the run of capitalised words, ending
+  at the first lowercase word after it. A counted noun anywhere in the
+  phrase is the count, since a capitalised word can be an adjective ("Eine
+  Berliner Warnflagge", #124 round 4); a ticker in capitals is a modifier.
+  A comma between two modifiers, and a bracket or a quote before the
+  nouns, stay inside the phrase ("Eine aktive, bestätigte Warnflagge",
+  #124 round 5). "achte" and "achten" are the verb as well ("achten auf"),
+  so they count as the ordinal only after a determiner ("im achten Monat",
+  #124 round 8).
 - **A positive language check.** A German message needs at least two
   distinct German function words, outnumbering the English evidence.
   English evidence includes common English words as well as function
@@ -658,7 +663,10 @@ word in either language:
 
 - cardinals and their compounds, the scale words in the plural
   ("hundreds", "Tausende") and the fractions ("a quarter", "ein Fünftel")
-  (#124 round 7);
+  (#124 round 7), a fraction in a compound ("Zweidrittelmehrheit") (#124
+  round 10);
+- the periods that are a number: "decade", "century", "fortnight",
+  "biweekly", "Jahrzehnt", "Jahrhundert" (#124 round 10);
 - ordinals, "first"/"second" and "erste"/"zweite" included, "erstmals",
   and the ordinal adverbs ("thirdly", "drittens"), generated from the
   ordinals (#124 round 7);

@@ -1218,6 +1218,13 @@ _ORDINALS_DE: frozenset[str] = _with_folded(frozenset(
     for cardinal in _NUMBER_WORDS_DE - _NOT_CARDINAL_DE - {"null", "eins", "zwei"}
     for ending in ("e", "en", "er", "es", "em")
 ) - {"achte", "achten"})
+#: The German fractions, generated from the ordinals: "Drittel", "Fünftel",
+#: "Hundertstel". One list for the context's words and for the number
+#: compounds, which build "Zweidrittelmehrheit" from it (#124 round 10).
+_FRACTIONS_DE: frozenset[str] = _with_folded(frozenset(
+    _german_ordinal_stem(cardinal) + ending
+    for cardinal in _NUMBER_WORDS_DE - _NOT_CARDINAL_DE - {"null", "eins", "zwei"}
+    for ending in ("el", "eln")))
 #: COUNTS AND MULTIPLES: "the flag fired twice", "spreads doubled",
 #: "dreimal", "verdoppelt" report a count or a ratio (#121 round 55, SOTA-A).
 #: Generated from the cardinals where the language builds them ("twofold",
@@ -1228,9 +1235,12 @@ _QUANTITY_WORDS: frozenset[str] = _with_folded(
     frozenset(cardinal + "fold" for cardinal in _NUMBER_WORDS - {"zero", "one", "dozen"})
     | frozenset("""twice thrice half halve halved halves halving double doubled doubles doubling
                    triple tripled triples tripling quadruple quadrupled quadruples quadrupling""".split())
-    | frozenset(cardinal + "mal" for cardinal in _NUMBER_WORDS_DE - _NOT_CARDINAL_DE - {"null", "eins"})
-    | frozenset(cardinal + "fach" + ending
-                for cardinal in _NUMBER_WORDS_DE - _NOT_CARDINAL_DE - {"null", "eins"}
+    # ...from EVERY number word, the mixed numbers and the magnitudes
+    # included: "anderthalbmal" and "millionenfach" were left out with the
+    # words that are no plain cardinal (#124 round 10, SOTA-A).
+    | frozenset(word + "mal" for word in _NUMBER_WORDS_DE - {"null", "eins"})
+    | frozenset(word + "fach" + ending
+                for word in _NUMBER_WORDS_DE - {"null", "eins"}
                 for ending in ("", "e", "en", "er", "es", "em"))
     | frozenset("""halb halbe halben halber halbes halbem halbiert halbierte halbierten halbieren
                    halbierung doppelt doppelte doppelten doppelter doppeltes doppeltem verdoppelt
@@ -1269,8 +1279,16 @@ _COMPOUND_NUMBER_DE_RE = re.compile(
     # ...and a number word joined to a period or a unit: "Zweiwochenhoch",
     # "Zehnjahrestief" (#124 round 3, SOTA-A); "Zweifel" and "Dreieck" are
     # words, their second part being no unit.
-    r"|(?:" + _COMPOUND_LEAD_DE + r")(?:und\w+?)?(?:tage?s?|wochen?|monate?s?|quartale?s?|jahre?s?|"
+    # "halb" leads a period too ("Halbjahreshoch"), and nothing else
+    # ("Halbleiter").
+    r"|(?:" + _COMPOUND_LEAD_DE + r"|halb)(?:und\w+?)?(?:tage?s?|wochen?|monate?s?|quartale?s?|jahre?s?|"
     r"stunden?|minuten?|prozent|punkte?)\w*"
+    # ...and a number word joined to a fraction: "Zweidrittelmehrheit",
+    # "Dreiviertelstunde" (#124 round 10, SOTA-A).
+    r"|(?:" + _COMPOUND_LEAD_DE + r")(?:" + "|".join(sorted(_FRACTIONS_DE, key=len, reverse=True)) + r")\w*"
+    # ...and the periods that are a number of years: "seit einem
+    # Jahrzehnt", "Jahrhunderthoch" (#124 round 10).
+    r"|jahr(?:zehnt|hundert|tausend)\w*"
     # "fünfeinhalb", "zweieinhalb": a number word and a half.
     r"|\w*(?:" + _COMPOUND_ALT_DE + r")einhalb"
     )
@@ -2562,11 +2580,14 @@ _CONTEXT_NUMBER_WORDS: frozenset[str] = (
     | _with_folded(frozenset(
         {_german_ordinal_stem(cardinal) + "ens"
          for cardinal in _NUMBER_WORDS_DE - _NOT_CARDINAL_DE - {"null"}}
-        | {_german_ordinal_stem(cardinal) + ending
-           for cardinal in _NUMBER_WORDS_DE - _NOT_CARDINAL_DE - {"null", "eins", "zwei"}
-           for ending in ("el", "eln")}
+        | _FRACTIONS_DE
         | {scale + ending for scale in ("dutzend", "hundert", "tausend") for ending in ("e", "en")}))
     | frozenset(scale + "s" for scale in ("dozen", "hundred", "thousand", "million", "billion"))
+    # ...and the periods that are a number: "the highest in a decade" is a
+    # ten-year claim no fact grounds (#124 round 10).
+    | frozenset("""decade decades century centuries millennium millennia fortnight fortnights fortnightly
+                   biweekly bimonthly biannual biannually semiannual semiannually biennial biennially
+                   triennial triennially""".split())
     | frozenset({"quarter", "quarters", "pair", "pairs", "single"}))
 
 

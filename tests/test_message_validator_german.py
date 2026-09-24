@@ -1322,3 +1322,50 @@ class TestRoundEightOn124:
         result = validate("Der Wert liegt bei 59 von 100. " + text, channel=Channel.IMESSAGE, facts=DIGEST_FACTS,
                           prose_rules=True, language="de", **LIMITS)
         assert result.ok, (text, result.reason)
+
+
+class TestRoundTenOn124:
+    """#124 round 10, SOTA-A, two defects, both executed; SOTA-B and SOTA-C
+    timed out. The German fractions are one generated list, and the number
+    compounds build on it ("Zweidrittelmehrheit"); "-mal" and "-fach" are
+    generated from every number word ("anderthalbmal"); and the periods
+    that are a number ("decade", "Jahrzehnt") are numbers in a context."""
+
+    @pytest.mark.parametrize("text, language", [
+        ("Die Bewertungen haben eine Zweidrittelmehrheit der Signale hinter sich.", "de"),
+        ("Die Bewertungen liegen anderthalbmal so hoch wie sonst, die Lage bleibt ruhig.", "de"),
+        ("Die Bewertungen sind seit einer Dreiviertelstunde hoch, die Lage bleibt ruhig.", "de"),
+        ("Dreiviertel der Signale sind ruhig, die Bewertungen sind hoch.", "de"),
+        ("Die Bewertungen sind anderthalbfach so hoch, die Lage bleibt ruhig.", "de"),
+        ("Die Bewertungen sind eineinhalbmal so hoch, die Lage bleibt ruhig.", "de"),
+        ("Die Bewertungen sind zweieinhalbfach so hoch, die Lage bleibt ruhig.", "de"),
+        ("Die Aktien werden millionenfach gehandelt, die Bewertungen sind hoch.", "de"),
+        ("Die Signale sind dutzendfach belegt, die Bewertungen sind hoch.", "de"),
+        ("Der Index steht auf einem Halbjahreshoch, die Bewertungen sind hoch.", "de"),
+        ("Die Bewertungen sind so hoch wie seit einem Jahrzehnt nicht, die Lage bleibt ruhig.", "de"),
+        ("Der Index steht auf einem Jahrhunderthoch, die Bewertungen sind hoch.", "de"),
+        ("Valuations are the highest in a decade while credit stays calm.", "en"),
+        ("Margin debt is reported biweekly and valuations are stretched.", "en"),
+    ])
+    def test_a_fraction_multiple_or_numbered_period_is_refused(self, text, language):
+        result = validate_context(text, language=language, max_chars=200)
+        assert not result.ok and "no numbers" in (result.reason or ""), (text, result.reason)
+
+    @pytest.mark.parametrize("text", [
+        "Der Wert liegt bei 59 von 100. Die Bewertungen liegen anderthalbmal so hoch.",
+        "Der Wert liegt bei 59 von 100. Eine Zweidrittelmehrheit der Signale ist ruhig.",
+    ])
+    def test_they_are_refused_in_german_model_text_too(self, text):
+        result = validate(text, channel=Channel.IMESSAGE, facts=DIGEST_FACTS, prose_rules=True, language="de",
+                          **LIMITS)
+        assert not result.ok and "spelled-out" in (result.reason or ""), (text, result.reason)
+
+    @pytest.mark.parametrize("text", [
+        "Die Halbleiteraktien tragen die hohen Bewertungen, die Lage bleibt ruhig.",
+        "Die Lage ist einfach angespannt, die Bewertungen sind hoch.",
+        "Die Mittel fließen in wenige Titel, die Bewertungen sind hoch.",
+        "Die Bewertungen sind hoch, und die Breite bleibt vielfach schwach.",
+    ])
+    def test_the_words_that_only_look_like_them_stay(self, text):
+        result = validate_context(text, language="de", max_chars=200)
+        assert result.ok, (text, result.reason)
