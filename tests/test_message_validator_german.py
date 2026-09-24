@@ -912,3 +912,51 @@ class TestRoundOneOn124:
         for language in ("en", "de"):
             validate("bubblegauge reports 59 out of 100 in band trim. The range is 57-61.",
                      channel=Channel.IMESSAGE, facts=DIGEST_FACTS, language=language, **LIMITS)
+
+
+class TestRoundTwoOn124:
+    """#124 round 2, SOTA-A, three defects, all executed; SOTA-C repeated its
+    crash claim (not reproduced, pinned in round 1). A command after a
+    comma is a command - a bare imperative with no subject after it, since
+    German puts the verb first after a fronted clause; a separable verb
+    opens its imperative without its prefix, so the bases are generated
+    from the prefixed stems; and a context counts "once" and "einmal"."""
+
+    @pytest.mark.parametrize("sentence", [
+        "Die Daten fehlen; wenn die Bewertungen hoch sind, nimm Gewinne mit.",
+        "Die Bewertungen sind hoch, bleib ruhig und halte Abstand.",
+        "Die Bewertungen sind hoch. Stoße die Aktien ab.",
+        "Die Bewertungen sind hoch. Löse die Position auf.",
+    ])
+    def test_the_command_is_found_after_a_comma_and_without_its_prefix(self, sentence):
+        result = validate(sentence, channel=Channel.IMESSAGE, facts=DIGEST_FACTS, language="de", **LIMITS)
+        assert not result.ok and "instruction" in (result.reason or ""), (sentence, result.reason)
+
+    @pytest.mark.parametrize("sentence", [
+        "Wenn die Bewertungen hoch sind, bleibt die Lage angespannt.",
+        "Wenn die Bewertungen hoch sind, bleibe ich ruhig.",
+        "Die Bewertungen sind hoch, die Breite bleibt schwach.",
+    ])
+    def test_the_verb_first_statement_after_a_clause_stays(self, sentence):
+        result = validate(sentence, channel=Channel.IMESSAGE, facts=DIGEST_FACTS, language="de", **LIMITS)
+        assert result.ok, (sentence, result.reason)
+
+    def test_every_prefixed_stem_has_its_base(self):
+        from app.message_engine.validator import (
+            _ACTION_STEMS_DE,
+            _SEPARABLE_BASES_DE,
+            _SEPARABLE_PREFIX_DE,
+            _alternatives,
+        )
+
+        for stem in _alternatives(_ACTION_STEMS_DE):
+            if _SEPARABLE_PREFIX_DE.match(stem) and len(_SEPARABLE_PREFIX_DE.sub("", stem)) >= 3:
+                assert _SEPARABLE_PREFIX_DE.sub("", stem) in _SEPARABLE_BASES_DE, stem
+
+    @pytest.mark.parametrize("text, language", [
+        ("The flag fired once and valuations stay stretched.", "en"),
+        ("Die Lage ist ruhig und die Flagge schlug einmal an.", "de"),
+    ])
+    def test_once_is_a_count_in_a_context(self, text, language):
+        result = validate_context(text, language=language, max_chars=200)
+        assert not result.ok and "no numbers" in (result.reason or ""), result.reason

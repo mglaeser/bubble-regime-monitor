@@ -883,13 +883,49 @@ _INFINITIVE_ORDER_DE_RE = re.compile(
 #: Aktien ab." passed (#121 round 49, SOTA-A, executed). Every strong stem
 #: in the list has its imperative here, and the imperative rule reads both.
 _STRONG_IMPERATIVES_DE = {"nehm": "nimm", "geb": "gib", "werf": "wirf"}
-_IMPERATIVE_FORMS_DE = _ACTION_STEMS_DE + "|" + "|".join(_STRONG_IMPERATIVES_DE.values())
+#: A separable verb opens its imperative WITHOUT its prefix: "abstoßen" is
+#: "Stoße die Aktien ab.", and the list held the prefixed stem only (#124
+#: round 2, SOTA-A). The bases are generated from the prefixed stems.
+_SEPARABLE_PREFIX_DE = re.compile(r"^(?:ab|an|auf|aus|ein|mit|nach|um|zu|weg|los|vor)(?=[a-z(])")
+
+
+def _alternatives(pattern: str) -> list[str]:
+    """The top-level alternatives of a regex alternation - a "|" inside a
+    group ("erh(?:o|ö|oe)h") belongs to that group."""
+    parts, depth, start = [], 0, 0
+    for i, ch in enumerate(pattern):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif ch == "|" and depth == 0:
+            parts.append(pattern[start:i])
+            start = i + 1
+    parts.append(pattern[start:])
+    return parts
+
+
+_SEPARABLE_BASES_DE = sorted({
+    _SEPARABLE_PREFIX_DE.sub("", stem) for stem in _alternatives(_ACTION_STEMS_DE)
+    if _SEPARABLE_PREFIX_DE.match(stem) and len(_SEPARABLE_PREFIX_DE.sub("", stem)) >= 3
+})
+_IMPERATIVE_FORMS_DE = "|".join(
+    [_ACTION_STEMS_DE, *_SEPARABLE_BASES_DE, *_STRONG_IMPERATIVES_DE.values()])
 _IMPERATIVE_DU_RE = re.compile(
     r"(?:^|[.!?;:]\s*|\s-\s)((?:" + _IMPERATIVE_FORMS_DE + r")(?:e|t)?)\b"
     # ...followed by the object, an adverb or a particle, not by a subject
     # that would make it a declarative ("Halt und Kauf sind ..." is rare in
     # this register and the cost of a false positive is one fallback).
     r"(?=\s|[.!?]|$)",
+    re.IGNORECASE)
+#: ...and after a COMMA, where a subordinate clause hands over to the
+#: command: "wenn die Bewertungen hoch sind, nimm Gewinne mit" (#124 round
+#: 2, SOTA-A). Only the bare form counts there, and only with no subject
+#: after it: German puts the verb first after a fronted clause, so "...,
+#: bleibt die Lage ruhig" and "..., bleibe ich ruhig" are statements.
+_IMPERATIVE_DU_COMMA_RE = re.compile(
+    r",\s*((?:" + _IMPERATIVE_FORMS_DE + r"))\s+"
+    r"(?!(?:ich|du|er|sie|es|wir|ihr|man|der|die|das|den|dem|des|ein|eine|einer|eines)\b)",
     re.IGNORECASE)
 
 def _fold_latin(text: str) -> str:
@@ -1872,6 +1908,9 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
         if unicodedata.category(ch) in _NOT_TEXT:
             return ValidationResult(False, FailureClass.FORMAT,
                                     f"U+{ord(ch):04X} is not a text character")
+    # Assigned here, before any language branch, for every language: the
+    # English and the German scans both read it (#124 rounds 1 and 2:
+    # SOTA-C's "unbound when language is en", executed, not reproduced).
     lowered = text.lower()
     # ONE FOLD FOR EVERY MEANING SCAN. The directive scans judged a folded
     # copy since round 17 and the script check accepted letters that fold
@@ -2206,7 +2245,7 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
             if ordered:
                 return ValidationResult(False, FailureClass.CONTENT,
                                         f"{ordered.group(1)!r} Sie: reads as an instruction (de)")
-            told = _IMPERATIVE_DU_RE.search(lowered)
+            told = _IMPERATIVE_DU_RE.search(lowered) or _IMPERATIVE_DU_COMMA_RE.search(lowered)
             if told:
                 return ValidationResult(False, FailureClass.CONTENT,
                                         f"{told.group(1)!r} opens a clause as an instruction (de)")
@@ -2387,7 +2426,12 @@ _CONTEXT_NUMBER_WORDS: frozenset[str] = (
     | _with_folded(frozenset(
         stem + ending for stem in ("erst", "zweit") for ending in ("e", "en", "er", "es", "em")))
     | frozenset({"erstmals", "erstmalig", "erstmalige", "erstmaligen", "erstmaliger", "erstmaliges",
-                 "erstmaligem"}))
+                 "erstmaligem"})
+    # ...and "once"/"einmal", words elsewhere ("noch einmal", "once the
+    # range settles"), a count in a context: "The flag fired once." (#124
+    # round 2, SOTA-A). A context has "when" and "wieder" for the rest.
+    | frozenset({"once", "einmal", "einmalig", "einmalige", "einmaligen", "einmaliger", "einmaliges",
+                 "einmaligem"}))
 
 
 def validate_context(text: str, *, language: str, max_chars: int) -> ValidationResult:

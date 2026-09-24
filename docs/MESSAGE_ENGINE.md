@@ -583,7 +583,12 @@ puts its verb second. The set has these parts:
   sentence, not within a count of words or characters (#124 round 1).
 - **Imperatives.** This covers the formal imperative in any case of the
   verb ("Kaufen Sie", "halten Sie", "BLEIBEN Sie") with "Sie" keeping its
-  capital, and the informal imperative from the action stems. The strong verbs' imperatives ("gib", "nimm", "wirf") come
+  capital, and the informal imperative from the action stems - at the head
+  of a clause, and after a comma in its bare form with no subject after it
+  ("..., nimm Gewinne mit"; "..., bleibt die Lage ruhig" is a statement).
+  A separable verb's base stem is generated from its prefixed stem, since
+  its imperative opens without the prefix ("Stoße die Aktien ab") (#124
+  round 2). The strong verbs' imperatives ("gib", "nimm", "wirf") come
   from one map of their stems. The infinitive-order rule is generated from
   the same stems.
 - **Number words.** Model text refuses the ordinals from "third"/"dritte"
@@ -618,6 +623,8 @@ word in either language:
 
 - cardinals and their compounds;
 - ordinals, "first"/"second" and "erste"/"zweite" included, and "erstmals";
+- "once" and "einmal", words elsewhere and a count in a context (#124
+  round 2);
 - counts and multiples ("twice", "half", "doubled", "dreimal",
   "verdoppelt", "doppelt so hoch"), generated from the cardinals where the
   language builds them.
