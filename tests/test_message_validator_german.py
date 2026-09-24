@@ -1135,3 +1135,59 @@ class TestRoundFiveOn124:
     def test_the_ledgers_texts_are_refused_as_a_context(self, text):
         result = validate_context(text, language="de", max_chars=200)
         assert not result.ok, (text, result.reason)
+
+
+class TestRoundSixOn124:
+    """#124 round 6, SOTA-A, two defects, both executed; SOTA-C approved.
+    A subordinate clause puts its finite verb last, and every advice and
+    forecast shape read only the main clause's order: each shape is matched
+    verb last too. And the Roman scan reads the folded text."""
+
+    @pytest.mark.parametrize("text", [
+        "Die Lage ist angespannt, weil der Kurs steigen wird.",
+        "Die Lage ist angespannt, weil Anleger Positionen reduzieren sollten.",
+        "Die Lage ist angespannt, da sich der Markt erholen könnte.",
+        "Die Lage ist angespannt, dass die Märkte einbrechen können.",
+        "Die Lage ist angespannt, dass man Gewinne mitnehmen sollte.",
+        "Die Lage ist angespannt, weil wir Positionen abbauen müssen.",
+        "Die Lage ist angespannt, weil Positionen reduziert werden sollten.",
+        "Die Lage ist angespannt, weil die Gewinne gesichert sein müssen.",
+        "Die Lage ist angespannt, weshalb es sich lohnt, vorsichtig zu sein.",
+        "Die Lage ist angespannt, weshalb es an der Zeit ist, vorsichtig zu sein.",
+        "Die Lage ist angespannt, weshalb die Position zu reduzieren ist.",
+        "Die Lage ist angespannt, weshalb die Position abzubauen ist.",
+        "Die Lage ist angespannt, weshalb Gewinne mitzunehmen sind.",
+        "Die Lage ist angespannt, Gewinne sind mitzunehmen.",
+    ])
+    def test_every_shape_is_refused_with_its_verb_last(self, text):
+        result = validate("Der Wert liegt bei 59 von 100. " + text, channel=Channel.IMESSAGE, facts=DIGEST_FACTS,
+                          prose_rules=True, language="de", **LIMITS)
+        assert not result.ok and "advice or a forecast" in (result.reason or ""), (text, result.reason)
+
+    @pytest.mark.parametrize("text", [
+        "Die Lage ist angespannt, weil die Kurse seit Monaten klettern.",
+        "Die Erholung wird von der Breite getragen, die Lage bleibt ruhig.",
+        "Die Lage ist angespannt, weil die Bewertungen hoch sind.",
+        "Die Lage ist angespannt, obwohl die Breite stabil geblieben ist.",
+        "Die Lage ist angespannt, weil die Kurse gestiegen sind und die Breite fehlt.",
+    ])
+    def test_a_statement_with_its_verb_last_stays(self, text):
+        result = validate("Der Wert liegt bei 59 von 100. " + text, channel=Channel.IMESSAGE, facts=DIGEST_FACTS,
+                          prose_rules=True, language="de", **LIMITS)
+        assert result.ok, (text, result.reason)
+
+    @pytest.mark.parametrize("text", [
+        "Die Lage ist angespannt, weil der Kurs steigen wird.",
+        "Die Lage ist angespannt, weil Anleger Positionen reduzieren sollten.",
+    ])
+    def test_the_ledgers_texts_are_refused_as_a_context(self, text):
+        result = validate_context(text, language="de", max_chars=200)
+        assert not result.ok and "advice or a forecast" in (result.reason or ""), (text, result.reason)
+
+    @pytest.mark.parametrize("text", [
+        "Risk remains at level ÍV.",
+        "The market sits in phase ìii of the cycle, with valuations stretched.",
+    ])
+    def test_an_accent_does_not_hide_a_roman_numeral(self, text):
+        result = validate_context(text, language="en", max_chars=200)
+        assert not result.ok and "no numbers" in (result.reason or ""), (text, result.reason)

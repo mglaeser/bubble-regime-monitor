@@ -585,7 +585,12 @@ puts its verb second. The set has these parts:
   "ist zu verkaufen" and "zu" infixed in a separable verb. A forecast's
   movement and a passive modal's "werden"/"sein" are found anywhere in the
   sentence, not within a count of words or characters, and past any word
-  ("wir werden sie bald steigen sehen") (#124 rounds 1 and 3).
+  ("wir werden sie bald steigen sehen") (#124 rounds 1 and 3). Every shape
+  is matched with its verb last too, the order of a subordinate clause
+  ("weil der Kurs steigen wird", "dass man Gewinne mitnehmen sollte",
+  "weil Positionen reduziert werden sollten", "dass es sich lohnt", "zu
+  reduzieren ist"), and "zu" infixed after "mit" ("mitzunehmen") (#124
+  round 6).
 - **Imperatives.** This covers the formal imperative in any case of the
   verb ("Kaufen Sie", "halten Sie", "BLEIBEN Sie") with "Sie" keeping its
   capital, and the informal imperative from the action stems - at the head
@@ -648,10 +653,11 @@ word in either language:
   language builds them;
 - Roman numerals: a word of two letters or more that reads as one, in
   capitals or in lowercase from i, v and x ("level IV", "phase iii"), and
-  any numeral character (#124 round 4). Single letters stay words (the V
-  and D blocks, "I", "M&A"), and so do the credit ratings CCC and CC. An
-  acronym that reads as a numeral ("IV" for implied volatility) costs the
-  context, not the message.
+  any numeral character (#124 round 4), read off the folded text ("level
+  ÍV", #124 round 6). Single letters stay words (the V and D blocks, "I",
+  "M&A"), and so do the credit ratings CCC and CC. An acronym that reads
+  as a numeral ("IV" for implied volatility) costs the context, not the
+  message.
 
 The numbers of a message are the owner's template's. The context only
 says what they mean, so it never has to ground a number. That closes by

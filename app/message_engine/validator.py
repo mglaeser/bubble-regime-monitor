@@ -800,6 +800,18 @@ _BANNED_COMPOUND_DE_RE = re.compile(
     r"tipp|ratschl(?:a|ä|ae)g|chance|wahrscheinlich|ratsam|"
     r"k(?:a|ä|ae)ufs?(?:empf|signal|gelegenheit|zeitpunkt|chance|tipp|rat)")
 
+#: What "ist zu ..." recommends: the verbs after a free "zu", and the
+#: separable verbs with "zu" infixed. One list for both orders.
+_ZU_ADVICE_DE = (
+    r"zu\s+(?:verkauf|kauf|reduzier|verringer|erh(?:o|ö|oe)h|sicher|absicher|meid|vermeid|halt|realisier|"
+    r"mitnehm|abbau|aufstock|umschicht|nachkauf|aussteig|einsteig|absto(?:s|ß|ss)|liquidier|hedg|"
+    r"begrenz|senk|streich|schlie(?:s|ß|ss)|verlass)\w*"
+    # ...and the separable verb with "zu" INFIXED: "Positionen sind
+    # abzustoßen" (#121 round 25, SOTA-A, executed); "mit" among the
+    # prefixes, since "Gewinne sind mitzunehmen" passed (#124 round 6).
+    r"|(?:ab|um|auf|nach|aus|ein|mit|zur(?:u|ü|ue)ck|weg|los)zu"
+    r"(?:sto(?:s|ß|ss)|sicher|schicht|stock|bau|kauf|steig|halt|zieh|fahr|geb|nehm|setz|streich|"
+    r"l(?:o|ö|oe)s|tausch|teil|trenn)\w*")
 #: Advice and forecasts in German grammar: a modal aimed at the reader, an
 #: impersonal recommendation, a future or modal movement.
 _MOVEMENT_DE = (r"steig\w*|f(?:a|ä|ae)ll\w*|sink\w*|crash\w*|abst(?:u|ü|ue)rz\w*|platz\w*|einbr\w*|"
@@ -837,16 +849,32 @@ _ADVICE_DE_RE = re.compile(
     # other clothes.
     r"|\b(?:sollte[n]?|soll|sollen|muss|m(?:u|ü|ue)ss(?:en|te|ten)|k(?:o|ö|oe)nnte[n]?|kann|k(?:o|ö|oe)nnen|w(?:a|ä|ae)re[n]?)\b"
     r"[^.;!?]*?\b(?:werden|sein)\b"
-    r"|\b(?:ist|sind|w(?:a|ä|ae)re[n]?|bleibt|bleiben)\s+(?:jetzt\s+|nun\s+|weiter\s+)?(?:zu\s+"
-    r"(?:verkauf|kauf|reduzier|verringer|erh(?:o|ö|oe)h|sicher|absicher|meid|vermeid|halt|realisier|"
-    r"mitnehm|abbau|aufstock|umschicht|nachkauf|aussteig|einsteig|absto(?:s|ß|ss)|liquidier|hedg|"
-    r"begrenz|senk|streich|schlie(?:s|ß|ss)|verlass)\w*"
-    # ...and the separable verb with "zu" INFIXED: "Positionen sind
-    # abzustoßen" (#121 round 25, SOTA-A, executed).
-    r"|(?:ab|um|auf|nach|aus|ein|zur(?:u|ü|ue)ck|weg|los)zu"
-    r"(?:sto(?:s|ß|ss)|sicher|schicht|stock|bau|kauf|steig|halt|zieh|fahr|geb|nehm|setz|streich|"
-    r"l(?:o|ö|oe)s|tausch|teil|trenn)\w*)"
+    r"|\b(?:ist|sind|w(?:a|ä|ae)re[n]?|bleibt|bleiben)\s+(?:jetzt\s+|nun\s+|weiter\s+)?(?:" + _ZU_ADVICE_DE + r")"
     r"|\b(?:gilt\s+es|es\s+gilt)\b"
+    # THE VERB-FINAL ORDER. A subordinate clause puts its finite verb last,
+    # and "weil der Kurs steigen wird" and "weil Anleger Positionen
+    # reduzieren sollten" passed every shape above, each written in the
+    # main clause's order (#124 round 6, SOTA-A). The shapes again, verb
+    # last:
+    # - the forecast: a movement's infinitive, then the future or a modal
+    #   ("steigen wird", "erholen könnte"). A noun ("Die Erholung wird
+    #   getragen") does not end in -n.
+    r"|\b(?:" + _MOVEMENT_DE + r")(?<=n)\s+(?:wird|werden|d(?:u|ü|ue)rfte[n]?|k(?:o|ö|oe)nnte[n]?|kann|"
+    r"k(?:o|ö|oe)nnen|soll|sollen|muss|m(?:u|ü|ue)ssen|mag)\b"
+    # - the reader's modal: the reader earlier in the clause, then an
+    #   infinitive and the modal ("dass man Gewinne mitnehmen sollte").
+    r"|\b(?:man|sie|du|ihr|wir|anleger\w*|investor\w*|leser\w*)\b[^.;:!?,]*?\b[a-zäöüß]+n\s+"
+    r"(?:sollte[nst]?|m(?:u|ü|ue)ss(?:en|t)|muss|musst|k(?:o|ö|oe)nnte[nst]?|kannst|kann|k(?:o|ö|oe)nn(?:en|t))\b"
+    # - the passive modal: "werden" or "sein", then the modal ("reduziert
+    #   werden sollten").
+    r"|\b(?:werden|sein)\s+(?:sollte[nst]?|soll|sollen|muss|m(?:u|ü|ue)ss(?:en|te|ten)|k(?:o|ö|oe)nnte[n]?|kann|"
+    r"k(?:o|ö|oe)nnen|w(?:a|ä|ae)re[n]?)\b"
+    # - the impersonal recommendation: "dass es sich lohnt", "weil es an
+    #   der Zeit ist".
+    r"|\bsich\b[^.;:!?,]*?\blohnt\b"
+    r"|\b(?:es\s+zeit|an\s+der\s+zeit|h(?:o|ö|oe)chste\s+zeit)\s+(?:ist|w(?:a|ä|ae)re)\b"
+    # - "zu reduzieren ist", "abzubauen ist".
+    r"|\b(?:" + _ZU_ADVICE_DE + r")\s+(?:ist|sind|w(?:a|ä|ae)re[n]?|bleibt|bleiben)\b"
 )
 #: The formal imperative: a capitalised -en verb followed by "Sie" at the
 #: head of a clause ("Kaufen Sie", "Halten Sie", "Bleiben Sie ruhig").
@@ -2491,10 +2519,12 @@ _CONTEXT_NUMBER_WORDS: frozenset[str] = (
 #: A Roman numeral is a number: "Risk remains at level IV." (#124 round 4,
 #: SOTA-A). A whole word of two letters or more that reads as one - in
 #: capitals, or in lowercase from i, v and x ("phase iii"); "VIX" and "mix"
-#: do not read as one. Single letters stay words: the monitor's own V and
-#: D blocks, the pronoun I, "M&A". The credit ratings CCC and CC stay
-#: words too. An acronym that reads as a numeral ("IV" for implied
-#: volatility) costs the context, not the message.
+#: do not read as one. It reads the folded text, like every scan of
+#: meaning: "level ÍV" wore an accent (#124 round 6, SOTA-A). Single
+#: letters stay words: the monitor's own V and D blocks, the pronoun I,
+#: "M&A". The credit ratings CCC and CC stay words too. An acronym that
+#: reads as a numeral ("IV" for implied volatility) costs the context,
+#: not the message.
 _ROMAN_WORD_RE = re.compile(r"\b(?:[MDCLXVI]{2,}|[ivx]{2,})\b")
 _ROMAN_NUMERAL_RE = re.compile(r"M{0,3}(?:CM|CD|D?C{0,3})(?:XC|XL|L?X{0,3})(?:IX|IV|V?I{0,3})")
 _RATINGS = frozenset({"CCC", "CC"})
@@ -2518,10 +2548,11 @@ def validate_context(text: str, *, language: str, max_chars: int) -> ValidationR
     # digit
     if any(ch.isnumeric() for ch in text):
         return ValidationResult(False, FailureClass.CONTENT, "a context carries no numbers")
-    roman = _roman_numeral(text)
+    folded = _fold_latin(text)
+    roman = _roman_numeral(folded)
     if roman:
         return ValidationResult(False, FailureClass.CONTENT, f"a context carries no numbers: {roman!r}")
-    for word in re.findall(r"[a-zäöüß]+", _fold_latin(text).lower()):
+    for word in re.findall(r"[a-zäöüß]+", folded.lower()):
         if word in _CONTEXT_NUMBER_WORDS or _COMPOUND_NUMBER_DE_RE.fullmatch(word):
             return ValidationResult(False, FailureClass.CONTENT,
                                     f"a context carries no numbers: {word!r}")
