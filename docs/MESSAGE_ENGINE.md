@@ -589,8 +589,13 @@ puts its verb second. The set has these parts:
 - **Imperatives.** This covers the formal imperative in any case of the
   verb ("Kaufen Sie", "halten Sie", "BLEIBEN Sie") with "Sie" keeping its
   capital, and the informal imperative from the action stems - at the head
-  of a clause, and after a comma in its bare form with no subject after it
-  ("..., nimm Gewinne mit"; "..., bleibt die Lage ruhig" is a statement).
+  of a clause, the plural in -et included ("Haltet die Position."), and
+  after a comma, where the verb's form decides: the bare form and the form
+  in -e are the command whatever follows ("..., nimm die Gewinne mit",
+  "..., halte Abstand") unless "ich" follows; the plural command of a verb
+  whose third person changes its vowel ("nehmt", "haltet", "lasst") is the
+  command unless "ihr" follows; a form in -t that is also the third person
+  is a statement ("..., bleibt die Lage ruhig") (#124 rounds 2 and 5).
   A separable verb's base stem is generated from its prefixed stem, since
   its imperative opens without the prefix ("Stoße die Aktien ab") (#124
   round 2). The strong verbs' imperatives ("gib", "nimm", "wirf") come
@@ -609,7 +614,9 @@ puts its verb second. The set has these parts:
   lowercase modifiers, then the run of capitalised words, ending at the
   first lowercase word after it. A counted noun anywhere in the phrase is
   the count, since a capitalised word can be an adjective ("Eine Berliner
-  Warnflagge", #124 round 4); a ticker in capitals is a modifier.
+  Warnflagge", #124 round 4); a ticker in capitals is a modifier. A comma
+  between two modifiers, and a bracket or a quote before the nouns, stay
+  inside the phrase ("Eine aktive, bestätigte Warnflagge", #124 round 5).
 - **A positive language check.** A German message needs at least two
   distinct German function words, outnumbering the English evidence.
   English evidence includes common English words as well as function

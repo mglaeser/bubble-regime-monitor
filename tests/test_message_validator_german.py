@@ -1071,3 +1071,67 @@ class TestRoundFourOn124:
     def test_a_word_that_is_no_numeral_stays(self, text):
         result = validate_context(text, language="en", max_chars=200)
         assert result.ok, (text, result.reason)
+
+
+class TestRoundFiveOn124:
+    """#124 round 5, SOTA-A, two defects, both executed; SOTA-C approved.
+    After a comma the rule reads the verb's form, not what follows it: an
+    object with its article no longer hides the command, the form in -e
+    and the plural commands count too, and only "ich" or "ihr" after the
+    verb makes a statement. And a comma between two modifiers, a bracket
+    or a quote stays inside the noun phrase of the one-count scan."""
+
+    @pytest.mark.parametrize("text", [
+        "Wenn die Bewertungen hoch sind, nimm die Gewinne mit.",
+        "Die Bewertungen sind hoch, halte Abstand.",
+        "Wenn die Bewertungen hoch sind, reduziere die Positionen.",
+        "Wenn die Bewertungen hoch sind, nehmt die Gewinne mit.",
+        "Wenn die Bewertungen hoch sind, haltet die Position.",
+        "Wenn die Bewertungen hoch sind, lasst die Gewinne laufen.",
+        "Haltet die Position.",
+        "Wartet ab, bis die Lage klar ist.",
+    ])
+    def test_the_command_is_read_off_the_verb(self, text):
+        result = validate("Der Wert liegt bei 59 von 100. " + text, channel=Channel.IMESSAGE, facts=DIGEST_FACTS,
+                          prose_rules=True, language="de", **LIMITS)
+        assert not result.ok and "instruction" in (result.reason or ""), (text, result.reason)
+
+    @pytest.mark.parametrize("text", [
+        "Wenn die Bewertungen hoch sind, bleibt die Notenbank vorsichtig.",
+        "Wenn die Bewertungen hoch sind, steigt die Nervosität am Markt.",
+        "Wenn die Bewertungen hoch sind, geht die Breite oft zurück.",
+        "Wenn die Bewertungen hoch sind, halte ich mich an die Daten.",
+        "Wenn die Bewertungen hoch sind, nehmt ihr die Lage ernst.",
+    ])
+    def test_a_statement_after_a_comma_stays(self, text):
+        result = validate("Der Wert liegt bei 59 von 100. " + text, channel=Channel.IMESSAGE, facts=DIGEST_FACTS,
+                          prose_rules=True, language="de", **LIMITS)
+        assert result.ok, (text, result.reason)
+
+    @pytest.mark.parametrize("text", [
+        "Eine aktive, bestätigte Warnflagge bleibt; die Daten sind aktuell.",
+        "Eine (bestätigte) Warnflagge ist aktiv.",
+        'Eine "bestätigte" Warnflagge ist aktiv.',
+    ])
+    def test_the_phrase_runs_through_its_commas_brackets_and_quotes(self, text):
+        result = validate("Der Wert liegt bei 59 von 100. " + text, channel=Channel.IMESSAGE, facts=DIGEST_FACTS,
+                          prose_rules=True, language="de", **LIMITS)
+        assert not result.ok and "spelled-out number" in (result.reason or ""), (text, result.reason)
+
+    @pytest.mark.parametrize("text", [
+        "Ein Treiber, der seit Monaten wirkt, sind die Bewertungen.",
+        "Ein Treiber (seit Monaten) sind die Bewertungen.",
+        "Einer, der seit Monaten zusieht, sieht hohe Bewertungen.",
+    ])
+    def test_the_phrase_ends_after_its_nouns_or_straight_after_the_article(self, text):
+        result = validate("Der Wert liegt bei 59 von 100. " + text, channel=Channel.IMESSAGE, facts=DIGEST_FACTS,
+                          prose_rules=True, language="de", **LIMITS)
+        assert result.ok, (text, result.reason)
+
+    @pytest.mark.parametrize("text", [
+        "Wenn die Bewertungen hoch sind, nimm die Gewinne mit.",
+        "Eine aktive, bestätigte Warnflagge bleibt; die Daten sind aktuell.",
+    ])
+    def test_the_ledgers_texts_are_refused_as_a_context(self, text):
+        result = validate_context(text, language="de", max_chars=200)
+        assert not result.ok, (text, result.reason)

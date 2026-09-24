@@ -932,20 +932,30 @@ _SEPARABLE_BASES_DE = sorted({
 _IMPERATIVE_FORMS_DE = "|".join(
     [_ACTION_STEMS_DE, *_SEPARABLE_BASES_DE, *_STRONG_IMPERATIVES_DE.values()])
 _IMPERATIVE_DU_RE = re.compile(
-    r"(?:^|[.!?;:]\s*|" + _OPENS_DE + r")((?:" + _IMPERATIVE_FORMS_DE + r")(?:e|t)?)\b"
+    r"(?:^|[.!?;:]\s*|" + _OPENS_DE + r")((?:" + _IMPERATIVE_FORMS_DE + r")(?:e|e?t)?)\b"
     # ...followed by the object, an adverb or a particle, not by a subject
     # that would make it a declarative ("Halt und Kauf sind ..." is rare in
-    # this register and the cost of a false positive is one fallback).
+    # this register and the cost of a false positive is one fallback). The
+    # plural of a stem in -t takes -et: "Haltet die Position." (#124 round
+    # 5).
     r"(?=\s|[.!?]|$)",
     re.IGNORECASE)
 #: ...and after a COMMA, where a subordinate clause hands over to the
 #: command: "wenn die Bewertungen hoch sind, nimm Gewinne mit" (#124 round
-#: 2, SOTA-A). Only the bare form counts there, and only with no subject
-#: after it: German puts the verb first after a fronted clause, so "...,
-#: bleibt die Lage ruhig" and "..., bleibe ich ruhig" are statements.
+#: 2, SOTA-A). German puts the verb first after a fronted clause, so a
+#: statement opens there too, and the rule reads the verb's form:
+#: - the bare form and the form in -e are the command, whatever follows
+#:   them, an object with its article included ("..., nimm die Gewinne
+#:   mit", "..., halte Abstand" - #124 round 5, SOTA-A); only "ich" after
+#:   them makes a statement ("..., bleibe ich ruhig");
+#: - the plural command of a verb whose third person changes its vowel
+#:   ("nehmt", "haltet", "lasst") is the command too, unless "ihr" follows;
+#: - a form in -t that is also the third person ("..., bleibt die Lage
+#:   ruhig") is a statement.
+_PLURAL_COMMANDS_DE = r"nehmt|gebt|werft|haltet|behaltet|lasst|verlasst|sto(?:s|ß|ss)t"
 _IMPERATIVE_DU_COMMA_RE = re.compile(
-    r",\s*((?:" + _IMPERATIVE_FORMS_DE + r"))\s+"
-    r"(?!(?:ich|du|er|sie|es|wir|ihr|man|der|die|das|den|dem|des|ein|eine|einer|eines)\b)",
+    r",\s*((?:" + _IMPERATIVE_FORMS_DE + r")e?\b(?!\s+ich\b)"
+    r"|(?:" + _PLURAL_COMMANDS_DE + r")\b(?!\s+ihr\b))",
     re.IGNORECASE)
 
 def _fold_latin(text: str) -> str:
@@ -1089,9 +1099,14 @@ def _one_count_de(text: str) -> str | None:
     #124 round 4). A ticker in capitals is a modifier. Sentence
     punctuation ends the phrase too. The cost of the run: a counted noun
     straight after the head ("Eine Studie Monate später") is a fallback.
+    A comma between two modifiers, and a bracket or a quote before the
+    nouns, stay inside the phrase ("Eine aktive, bestätigte Warnflagge",
+    "Eine (bestätigte) Warnflagge" - #124 round 5, SOTA-A); after the
+    nouns, or straight after the article ("Einer, der ..."), they end it.
     A message written without capitals has no heads to stop at, so a
-    counted noun anywhere after the article in its clause is the finding:
-    the cost of that is a fallback on German written without capitals."""
+    counted noun anywhere after the article in its sentence is the
+    finding: the cost of that is a fallback on German written without
+    capitals."""
     tokens = [m.group(0) for m in _ONE_COUNT_TOKEN_RE.finditer(text)]
     for start, token in enumerate(tokens):
         if token.lower() not in _ARTICLE_ONE_FORMS_DE:
@@ -1099,8 +1114,12 @@ def _one_count_de(text: str) -> str | None:
         seen_head = False
         for end in range(start + 1, len(tokens)):
             word = tokens[end]
-            if word in ".,;:!?()[]\"":
+            if word in ".;:!?":
                 break
+            if word in ",()[]\"":
+                if seen_head or (word == "," and end == start + 1):
+                    break
+                continue
             if _counted_de(word):
                 return " ".join(tokens[start:end + 1])
             if _is_head_de(word):
