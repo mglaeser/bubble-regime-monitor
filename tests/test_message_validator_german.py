@@ -960,3 +960,40 @@ class TestRoundTwoOn124:
     def test_once_is_a_count_in_a_context(self, text, language):
         result = validate_context(text, language=language, max_chars=200)
         assert not result.ok and "no numbers" in (result.reason or ""), result.reason
+
+
+class TestRoundThreeOn124:
+    """#124 round 3, SOTA-A, three defects, all executed; SOTA-C approved.
+    German joins its words: a banned stem inside a compound is banned
+    ("Kaufempfehlung", "Kursprognose", "Crashgefahr"; "kauf" only with an
+    advice part, since "Verkaufsdruck" describes the market), and a number
+    word joined to a period or a unit is a number ("Zweiwochenhoch"). And
+    the forecast's gap no longer stops at "sie"."""
+
+    @pytest.mark.parametrize("text", [
+        "Das ist eine Kaufempfehlung.",
+        "Die Kursprognose ist freundlich, die Lage ruhig.",
+        "Das Verkaufssignal ist aktiv und die Lage angespannt.",
+        "Die Crashgefahr ist hoch und die Lage angespannt.",
+        "Die Kurse sind ruhig; wir werden sie bald steigen sehen.",
+        "Der Markt steht auf einem Zweiwochenhoch.",
+        "Der Index steht auf einem Zehnjahreshoch und die Lage ist angespannt.",
+    ])
+    def test_a_compound_or_a_far_forecast_is_refused(self, text):
+        result = validate_context(text, language="de", max_chars=200)
+        assert not result.ok, (text, result.reason)
+
+    @pytest.mark.parametrize("text", [
+        "Der Verkaufsdruck bei Halbleitern ist hoch, die Lage bleibt angespannt.",
+        "Es gibt Zweifel an der Breite, und die Bewertungen sind hoch.",
+        "Die Kaufkraft der Anleger ist hoch und die Lage bleibt ruhig.",
+        "Die Bewertungen sind hoch; die Absicherung gegen Rückschläge ist teuer geworden.",
+    ])
+    def test_a_compound_that_describes_the_market_stays(self, text):
+        result = validate_context(text, language="de", max_chars=200)
+        assert result.ok, (text, result.reason)
+
+    def test_the_number_compound_is_refused_in_any_german_model_text(self):
+        result = validate("Der Wert liegt bei 59 von 100 und der Index auf einem Zweiwochenhoch. Die Spanne "
+                          "liegt bei 57-61.", channel=Channel.IMESSAGE, facts=DIGEST_FACTS, language="de", **LIMITS)
+        assert not result.ok and "spelled-out number" in (result.reason or ""), result.reason

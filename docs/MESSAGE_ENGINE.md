@@ -575,12 +575,17 @@ puts its verb second. The set has these parts:
 - **A banned lexicon.** It covers probability, advice, certainty, forecast
   and crash talk, including the verb "raten" in every finite form. The
   noun "die Rate", capitalised and after a determiner, is not banned;
-  "Alle raten ..." is the verb (#124 round 1).
+  "Alle raten ..." is the verb (#124 round 1). German joins its words, so
+  the stems that are always advice or forecast are banned inside a
+  compound too ("Kaufempfehlung", "Kursprognose", "Crashgefahr"); "kauf"
+  only with an advice part, since "Verkaufsdruck" describes the market
+  (#124 round 3).
 - **An advice and forecast grammar.** It covers reader-directed modals,
   the subject-first modal, impersonal recommendations, the passive modal,
   "ist zu verkaufen" and "zu" infixed in a separable verb. A forecast's
   movement and a passive modal's "werden"/"sein" are found anywhere in the
-  sentence, not within a count of words or characters (#124 round 1).
+  sentence, not within a count of words or characters, and past any word
+  ("wir werden sie bald steigen sehen") (#124 rounds 1 and 3).
 - **Imperatives.** This covers the formal imperative in any case of the
   verb ("Kaufen Sie", "halten Sie", "BLEIBEN Sie") with "Sie" keeping its
   capital, and the informal imperative from the action stems - at the head
@@ -595,7 +600,8 @@ puts its verb second. The set has these parts:
   up and the counts and multiples ("twice", "dreimal", "verdoppelt"), in
   both languages; "first"/"second" stay words, as #100 decided. The
   cardinals and their compounds are generated from the word list (hundred-led, teen- and ten-led thousands, tens joined by
-  "und", halves). "ein"/"eine" counts as the number one before a counted
+  "und", halves, and a number word joined to a period or a unit:
+  "Zweiwochenhoch" - #124 round 3). "ein"/"eine" counts as the number one before a counted
   noun, read by one scanner that walks any number of modifiers to the
   head of the phrase. German capitalises its nouns, so the first
   capitalised word ends the phrase; a ticker in capitals is a modifier.

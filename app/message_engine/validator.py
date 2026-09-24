@@ -789,6 +789,16 @@ BANNED_LEXICON_DE: tuple[str, ...] = (
     r"crash\w*", r"abst(?:u|ü|ue)rz\w*", r"absturz\w*", r"platz(?:t|en)",
 )
 _BANNED_DE_RE = re.compile(r"\b(?:" + "|".join(BANNED_LEXICON_DE) + r")\b")
+#: THE BANNED STEMS INSIDE A COMPOUND. German joins its words, and a
+#: banned word inside one - "Kaufempfehlung", "Kursprognose", "Crashgefahr"
+#: - is not at a word boundary for the lexicon above (#124 round 3,
+#: SOTA-A). These stems are refused anywhere in a word; "kauf" and
+#: "verkauf" only with an advice part ("Kaufsignal", "Verkaufsempfehlung"),
+#: since "Verkaufsdruck" and "Ausverkauf" describe the market.
+_BANNED_COMPOUND_DE_RE = re.compile(
+    r"empf(?:ieh|eh|oh)l|prognos|vorhersag|voraussag|kursziel|crash|abst(?:u|ü|ue)rz|"
+    r"tipp|ratschl(?:a|ä|ae)g|chance|wahrscheinlich|ratsam|"
+    r"k(?:a|ä|ae)ufs?(?:empf|signal|gelegenheit|zeitpunkt|chance|tipp|rat)")
 
 #: Advice and forecasts in German grammar: a modal aimed at the reader, an
 #: impersonal recommendation, a future or modal movement.
@@ -816,7 +826,9 @@ _ADVICE_DE_RE = re.compile(
     # ...any distance within the sentence: a cap of three words let "Die
     # Kurse werden in den kommenden Wochen sehr deutlich fallen" through
     # (#124 round 1, SOTA-A)
-    r"(?:(?!sie\b)[^\s.;!?]+\s+)*?(?:" + _MOVEMENT_DE + r")\b"
+    # ...and not at "sie" either: "wir werden sie bald steigen sehen" (#124
+    # round 3, SOTA-A)
+    r"(?:[^\s.;!?]+\s+)*?(?:" + _MOVEMENT_DE + r")\b"
     # THE PASSIVE MODAL: "Gewinne sollten jetzt mitgenommen werden" names
     # no reader and no "man", and passed (#121 round 5, SOTA-A, executed).
     # A modal with "werden"/"sein" later in the clause is a recommendation
@@ -1157,6 +1169,11 @@ _COMPOUND_NUMBER_DE_RE = re.compile(
     # ...and two number words joined by "und": "fünfundzwanzig",
     # "einundzwanzig" (round 43).
     r"|(?:" + _COMPOUND_ALT_DE + r")und(?:" + _COMPOUND_ALT_DE + r")\w*"
+    # ...and a number word joined to a period or a unit: "Zweiwochenhoch",
+    # "Zehnjahrestief" (#124 round 3, SOTA-A); "Zweifel" and "Dreieck" are
+    # words, their second part being no unit.
+    r"|(?:" + _COMPOUND_LEAD_DE + r")(?:und\w+?)?(?:tage?s?|wochen?|monate?s?|quartale?s?|jahre?s?|"
+    r"stunden?|minuten?|prozent|punkte?)\w*"
     # "fünfeinhalb", "zweieinhalb": a number word and a half.
     r"|\w*(?:" + _COMPOUND_ALT_DE + r")einhalb"
     )
@@ -2230,7 +2247,9 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
                 return ValidationResult(False, FailureClass.CONTENT,
                                         f"not German: foreign words {_foreign[:4]}")
             banned = _BANNED_DE_RE.search(lowered)
-            advised = banned.group(0) if banned else _raten_de(judged)
+            compound = next((m.group(0) for m in re.finditer(r"[a-zäöüß]+", lowered)
+                             if _BANNED_COMPOUND_DE_RE.search(m.group(0))), None)
+            advised = banned.group(0) if banned else compound or _raten_de(judged)
             if advised:
                 return ValidationResult(False, FailureClass.CONTENT,
                                         f"banned lexicon (de): {advised!r}")
