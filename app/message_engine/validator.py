@@ -813,7 +813,10 @@ _ADVICE_DE_RE = re.compile(
     r"reduzieren|umschichten|nachkaufen|halten|abbauen|aufstocken)\b"
     # "wird fallen", "dürften steigen", "kann einbrechen" - a forecast
     r"|\b(?:wird|werden|d(?:u|ü|ue)rfte[n]?|k(?:o|ö|oe)nnte[n]?|kann|k(?:o|ö|oe)nnen|soll|sollen|muss|m(?:u|ü|ue)ssen|mag)\s+"
-    r"(?:(?!sie\b)[a-zäöüß]+\s+){0,3}?(?:" + _MOVEMENT_DE + r")\b"
+    # ...any distance within the sentence: a cap of three words let "Die
+    # Kurse werden in den kommenden Wochen sehr deutlich fallen" through
+    # (#124 round 1, SOTA-A)
+    r"(?:(?!sie\b)[^\s.;!?]+\s+)*?(?:" + _MOVEMENT_DE + r")\b"
     # THE PASSIVE MODAL: "Gewinne sollten jetzt mitgenommen werden" names
     # no reader and no "man", and passed (#121 round 5, SOTA-A, executed).
     # A modal with "werden"/"sein" later in the clause is a recommendation
@@ -821,7 +824,7 @@ _ADVICE_DE_RE = re.compile(
     # secured"); "ist zu verkaufen" and "es gilt" are the same advice in
     # other clothes.
     r"|\b(?:sollte[n]?|soll|sollen|muss|m(?:u|ü|ue)ss(?:en|te|ten)|k(?:o|ö|oe)nnte[n]?|kann|k(?:o|ö|oe)nnen|w(?:a|ä|ae)re[n]?)\b"
-    r"[^.;!?]{0,60}?\b(?:werden|sein)\b"
+    r"[^.;!?]*?\b(?:werden|sein)\b"
     r"|\b(?:ist|sind|w(?:a|ä|ae)re[n]?|bleibt|bleiben)\s+(?:jetzt\s+|nun\s+|weiter\s+)?(?:zu\s+"
     r"(?:verkauf|kauf|reduzier|verringer|erh(?:o|ö|oe)h|sicher|absicher|meid|vermeid|halt|realisier|"
     r"mitnehm|abbau|aufstock|umschicht|nachkauf|aussteig|einsteig|absto(?:s|ß|ss)|liquidier|hedg|"
@@ -839,7 +842,10 @@ _ADVICE_DE_RE = re.compile(
 #: "; halten Sie Abstand" passed the capitalised form (#121 round 23,
 #: SOTA-A, executed). "Sie" stays capitalised: the formal address is
 #: capitalised mid-sentence too, and lowercase "sie" is "they".
-_IMPERATIVE_DE_RE = re.compile(r"(?:^|[.!?;:,]\s*|\s-\s)([A-Za-zÄÖÜäöüß]+(?:en|n))\s+Sie\b")
+#: ...in ANY case of the verb, "BLEIBEN Sie ruhig" included (#124 round 1,
+#: SOTA-A): the suffix was lowercase-only. "Sie" keeps its capital, in any
+#: case after it ("SIE"); a lowercase "sie" is "they" (round 23).
+_IMPERATIVE_DE_RE = re.compile(r"(?:^|[.!?;:,]\s*|\s-\s)((?i:[a-zäöüß]+(?:en|n)))\s+S(?i:ie)\b")
 
 #: The informal imperative has no "Sie" to key on: "Bleib in SPY." passed
 #: the formal pattern and the advice grammar (#121 round 2, SOTA-A,
@@ -940,12 +946,18 @@ meine meiner seine seiner ihre ihrer ihren unsere unserer eure eurer alle welche
 """.split()))
 
 
-def _raten_de(lowered: str) -> str | None:
-    """A finite form of "raten" that is not the noun "Rate", or None."""
-    tokens: list[str] = re.findall(r"[a-zäöüß]+|[.;:!?,()]", lowered)
+def _raten_de(text: str) -> str | None:
+    """A finite form of "raten" that is not the noun "Rate", or None. The
+    noun is capitalised AND follows a determiner ("die Rate", "alle
+    Raten"); a determiner alone is not enough, since "alle" is a subject too
+    ("Alle raten zur Vorsicht" - #124 round 1, SOTA-A)."""
+    tokens: list[str] = re.findall(r"[A-Za-zÄÖÜäöüß]+|[.;:!?,()]", text)
     for i, token in enumerate(tokens):
-        if token in _RATEN_FORMS_DE and (i == 0 or tokens[i - 1] not in _DETERMINERS_DE):
-            return token
+        if token.lower() not in _RATEN_FORMS_DE:
+            continue
+        noun = token[0].isupper() and i > 0 and tokens[i - 1].lower() in _DETERMINERS_DE
+        if not noun:
+            return token.lower()
     return None
 
 
@@ -1883,14 +1895,16 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
                                     f"spelled-out number {one!r}: numerals must come from the facts")
         for match in re.finditer(r"[a-zäöüß]+", lowered):
             word = match.group(0)
-            if word in _NUMBER_WORDS_DE or _COMPOUND_NUMBER_DE_RE.fullmatch(word):
+            if (word in _NUMBER_WORDS_DE or (prose_rules and word in _ORDINALS_DE)
+                    or _COMPOUND_NUMBER_DE_RE.fullmatch(word)):
                 return ValidationResult(
                     False, FailureClass.CONTENT,
                     f"spelled-out number {word!r}: numerals must come from the facts")
     for match in re.finditer(r"[a-z]+(?:-[a-z]+)?", judged_lower):
         word = match.group(0)
         head = word.split("-")[0]
-        if head not in _NUMBER_WORDS and word not in _NUMBER_WORDS:
+        if (head not in _NUMBER_WORDS and word not in _NUMBER_WORDS
+                and not (prose_rules and head in _ORDINALS)):
             continue
         # A cardinal modifying a TIME UNIT describes the rule, not a reading:
         # the S3 fallback says "over two years", which is the lookback the
@@ -2177,7 +2191,7 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
                 return ValidationResult(False, FailureClass.CONTENT,
                                         f"not German: foreign words {_foreign[:4]}")
             banned = _BANNED_DE_RE.search(lowered)
-            advised = banned.group(0) if banned else _raten_de(lowered)
+            advised = banned.group(0) if banned else _raten_de(judged)
             if advised:
                 return ValidationResult(False, FailureClass.CONTENT,
                                         f"banned lexicon (de): {advised!r}")
@@ -2353,6 +2367,14 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
         if numeral not in allowed and numeral.lstrip("+") not in allowed:
             return ValidationResult(False, FailureClass.CONTENT,
                                     f"numeral {numeral!r} is not in the grounded facts")
+    # Counts and multiples, last, in model text: the arithmetic rules above
+    # keep their own reasons ("twice 51" is arithmetic); see _QUANTITY_WORDS.
+    if prose_rules:
+        for match in re.finditer(r"[a-zäöüß]+", judged_lower):
+            if match.group(0) in _QUANTITY_WORDS:
+                return ValidationResult(
+                    False, FailureClass.CONTENT,
+                    f"spelled-out quantity {match.group(0)!r}: numbers must come from the facts")
     return _OK
 
 

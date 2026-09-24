@@ -574,17 +574,22 @@ puts its verb second. The set has these parts:
   transliteration ("duerfte").
 - **A banned lexicon.** It covers probability, advice, certainty, forecast
   and crash talk, including the verb "raten" in every finite form. The
-  noun "die Rate", after an article or a determiner, is not banned.
+  noun "die Rate", capitalised and after a determiner, is not banned;
+  "Alle raten ..." is the verb (#124 round 1).
 - **An advice and forecast grammar.** It covers reader-directed modals,
   the subject-first modal, impersonal recommendations, the passive modal,
-  "ist zu verkaufen" and "zu" infixed in a separable verb.
-- **Imperatives.** This covers the formal imperative in any case
-  ("Kaufen Sie", "halten Sie"), and the informal imperative from the
-  action stems. The strong verbs' imperatives ("gib", "nimm", "wirf") come
+  "ist zu verkaufen" and "zu" infixed in a separable verb. A forecast's
+  movement and a passive modal's "werden"/"sein" are found anywhere in the
+  sentence, not within a count of words or characters (#124 round 1).
+- **Imperatives.** This covers the formal imperative in any case of the
+  verb ("Kaufen Sie", "halten Sie", "BLEIBEN Sie") with "Sie" keeping its
+  capital, and the informal imperative from the action stems. The strong verbs' imperatives ("gib", "nimm", "wirf") come
   from one map of their stems. The infinitive-order rule is generated from
   the same stems.
-- **Number words.** The cardinals and their compounds are generated from
-  the word list (hundred-led, teen- and ten-led thousands, tens joined by
+- **Number words.** Model text refuses the ordinals from "third"/"dritte"
+  up and the counts and multiples ("twice", "dreimal", "verdoppelt"), in
+  both languages; "first"/"second" stay words, as #100 decided. The
+  cardinals and their compounds are generated from the word list (hundred-led, teen- and ten-led thousands, tens joined by
   "und", halves). "ein"/"eine" counts as the number one before a counted
   noun, read by one scanner that walks any number of modifiers to the
   head of the phrase. German capitalises its nouns, so the first

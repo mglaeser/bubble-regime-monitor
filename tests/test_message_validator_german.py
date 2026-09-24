@@ -854,3 +854,61 @@ class TestTheContextCarriesNoNumbers:
         assert not validate_context("Stretched valuations are the main driver 📈.", language="en",
                                     max_chars=200).ok
 
+
+
+class TestRoundOneOn124:
+    """#124 round 1, SOTA-A, four defects, all executed; SOTA-C's crash
+    claim executed and not reproduced. The ordinals and the counts are
+    numbers in model text again, in both languages, as the #121 rounds left
+    them; "raten" is the noun only when capitalised AND after a determiner,
+    since "alle" is a subject too; the forecast and passive gaps run to the
+    end of the sentence, not to a count; the formal imperative is read in
+    any case of the verb, with "Sie" keeping its capital."""
+
+    @pytest.mark.parametrize("text, language", [
+        ("bubblegauge reports 59 out of 100 in band trim; the flag fired twice. The range is 57-61.", "en"),
+        ("bubblegauge reports 59 out of 100 in band trim; spreads doubled. The range is 57-61.", "en"),
+        ("Der Wert liegt bei 59 von 100 im dritten Monat. Die Spanne liegt bei 57-61.", "de"),
+        ("Der Wert liegt bei 59 von 100; die Flagge schlug dreimal an. Die Spanne liegt bei 57-61.", "de"),
+    ])
+    def test_ordinals_and_counts_are_numbers_in_model_text(self, text, language):
+        result = validate(text, channel=Channel.IMESSAGE, facts=DIGEST_FACTS, language=language, **LIMITS)
+        assert not result.ok and "spelled-out" in (result.reason or ""), result.reason
+
+    @pytest.mark.parametrize("sentence", [
+        "Alle raten zur Vorsicht.",
+        "Die Kurse werden in den kommenden Wochen sehr deutlich und schnell fallen.",
+        "Gewinne sollten angesichts der sehr hohen und weiter steigenden Bewertungen bald mitgenommen werden.",
+        "BLEIBEN Sie ruhig.",
+        "BLEIBEN SIE ruhig.",
+    ])
+    def test_the_advice_rules_find_it_however_far_or_however_written(self, sentence):
+        result = validate(f"Der Wert liegt bei 59 von 100. {sentence}", channel=Channel.IMESSAGE,
+                          facts=DIGEST_FACTS, language="de", **LIMITS)
+        assert not result.ok, (sentence, result.reason)
+
+    @pytest.mark.parametrize("sentence", [
+        "Die Rate der Ausfälle bleibt niedrig.",
+        "Alle Raten bleiben niedrig.",
+        "Die Anleger halten sie für teuer.",
+    ])
+    def test_the_noun_and_they_stay(self, sentence):
+        result = validate(f"Der Wert liegt bei 59 von 100. {sentence}", channel=Channel.IMESSAGE,
+                          facts=DIGEST_FACTS, language="de", **LIMITS)
+        assert result.ok, (sentence, result.reason)
+
+    def test_a_second_reading_still_counts_nothing(self):
+        """#100's decision holds for model text: first/second are words."""
+        assert validate("bubblegauge reports 59 out of 100 in band trim; a second reading confirms the band. "
+                        "The range is 57-61.", channel=Channel.IMESSAGE, facts=DIGEST_FACTS, **LIMITS).ok
+
+    def test_twice_before_a_number_keeps_its_arithmetic_reason(self):
+        result = validate("Score is twice 51.", channel=Channel.IMESSAGE, facts={"s": 51}, **LIMITS)
+        assert not result.ok and "arithmetic" in (result.reason or ""), result.reason
+
+    def test_the_english_path_runs_whatever_the_language_argument(self):
+        """SOTA-C: "lowered is only defined for German". Executed, not
+        reproduced: it is assigned before the language is looked at."""
+        for language in ("en", "de"):
+            validate("bubblegauge reports 59 out of 100 in band trim. The range is 57-61.",
+                     channel=Channel.IMESSAGE, facts=DIGEST_FACTS, language=language, **LIMITS)
