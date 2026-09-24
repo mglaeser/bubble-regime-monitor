@@ -934,7 +934,9 @@ _ACTION_STEMS_DE = (
 _INFINITIVE_ORDER_DE_RE = re.compile(
     r"\b(?:ab|auf|um|nach|aus|ein|mit|zur(?:u|ü|ue)ck|weg)?"
     r"(?:" + "|".join(p for p in _ACTION_STEMS_DE.split("|") if p != "bleib") + r")"
-    r"(?:e)?n\s*(?:[.!;:]|$)")
+    # ...and a closing quote or bracket ends the clause too: "Die Devise
+    # lautet „Positionen abbauen“." (#124 round 8, SOTA-A)
+    r"(?:e)?n(?:\s*(?:[.!;:]|$)|[)\]}\"'\u201c\u201d\u2019\u00ab\u00bb])")
 #: The strong verbs change their vowel in the imperative: "geben" is "Gib
 #: ...!", "nehmen" is "Nimm ...!", "abwerfen" is "Wirf ... ab!". The comment
 #: above the stems promised "gib" and the list had only "geb", so "Gib deine
@@ -975,8 +977,9 @@ _IMPERATIVE_DU_RE = re.compile(
     # that would make it a declarative ("Halt und Kauf sind ..." is rare in
     # this register and the cost of a false positive is one fallback). The
     # plural of a stem in -t takes -et: "Haltet die Position." (#124 round
-    # 5).
-    r"(?=\s|[.!?]|$)",
+    # 5). A comma or a closing mark ends it as well: "Bleib, wenn die Daten
+    # fehlen, investiert." (#124 round 8, SOTA-A).
+    r"(?=\s|[.!?,;:)\]}\"'\u201c\u201d\u2019\u00ab\u00bb]|$)",
     re.IGNORECASE)
 #: ...and after a COMMA, where a subordinate clause hands over to the
 #: command: "wenn die Bewertungen hoch sind, nimm Gewinne mit" (#124 round
@@ -1041,13 +1044,31 @@ def _with_folded(words: frozenset[str]) -> frozenset[str]:
 #: round 53), so a form is the verb unless an article or a determiner
 #: stands right before it. The participle "geraten" stays out: "unter
 #: Druck geraten" is a happening, not advice (round 26).
-_RATEN_FORMS_DE: frozenset[str] = _with_folded(frozenset({
-    "rate", "raten", "ratet", "rätst", "raetst", "riet", "rietst", "rieten", "rietet", "riete"}))
+#: ...every form of it: the present, the past and both subjunctives
+#: ("du ratest", "du rietest" - #124 round 8, SOTA-A), the present
+#: participle, and the verbs it forms with a prefix ("abraten", "zuraten",
+#: "anraten", "abgeraten"). "geraten" alone is another verb ("unter Druck
+#: geraten") and counts only after "zu"/"zur"/"zum" (_raten_de).
+_RATEN_BASE_DE = ("rate", "raten", "ratet", "rätst", "ratest", "rät", "riet", "rietst", "rietest", "rieten",
+                  "rietet", "riete", "ratend")
+_RATEN_FORMS_DE: frozenset[str] = _with_folded(frozenset(
+    {*_RATEN_BASE_DE}
+    | {prefix + form for prefix in ("ab", "an", "zu", "wider") for form in _RATEN_BASE_DE}
+    | {prefix + "zuraten" for prefix in ("ab", "an", "wider")}
+    | {prefix + "geraten" for prefix in ("ab", "an", "zu", "wider")}))
 _DETERMINERS_DE: frozenset[str] = _with_folded(frozenset("""
 der die das den dem des ein eine einer eines einem einen kein keine keiner keines keinem keinen
 diese dieser dieses diesem diesen jene jener jenes jenem jenen jede jeder jedes jedem jeden
 meine meiner seine seiner ihre ihrer ihren unsere unserer eure eurer alle welche welcher solche
 """.split()))
+
+
+#: "achte" and "achten" are the verb as well ("achten auf"), so the
+#: ordinals leave them out; after a determiner they are the ordinal: "im
+#: achten Monat" (#124 round 8, SOTA-A).
+_EIGHTH_DE_RE = re.compile(
+    r"\b(?:" + "|".join(sorted(_DETERMINERS_DE - {"alle", "welche", "welcher", "solche"}
+                               | {"im", "am", "zum", "zur", "vom", "beim"})) + r")\s+acht(?:e|en)\b")
 
 
 def _raten_de(text: str) -> str | None:
@@ -1057,6 +1078,9 @@ def _raten_de(text: str) -> str | None:
     ("Alle raten zur Vorsicht" - #124 round 1, SOTA-A)."""
     tokens: list[str] = re.findall(r"[A-Za-zÄÖÜäöüß]+|[.;:!?,()]", text)
     for i, token in enumerate(tokens):
+        # "zur Vorsicht geraten" is the perfect of "raten" (#124 round 8)
+        if token.lower() == "geraten" and {t.lower() for t in tokens[max(0, i - 3):i]} & {"zu", "zur", "zum"}:
+            return "geraten"
         if token.lower() not in _RATEN_FORMS_DE:
             continue
         noun = token[0].isupper() and i > 0 and tokens[i - 1].lower() in _DETERMINERS_DE
@@ -2029,6 +2053,10 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
                 return ValidationResult(
                     False, FailureClass.CONTENT,
                     f"spelled-out number {word!r}: numerals must come from the facts")
+        eighth = _EIGHTH_DE_RE.search(lowered) if prose_rules else None
+        if eighth:
+            return ValidationResult(False, FailureClass.CONTENT,
+                                    f"spelled-out number {eighth.group(0)!r}: numerals must come from the facts")
     for match in re.finditer(r"[a-z]+(?:-[a-z]+)?", judged_lower):
         word = match.group(0)
         head = word.split("-")[0]

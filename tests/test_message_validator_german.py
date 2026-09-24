@@ -1262,3 +1262,63 @@ class TestRoundSevenOn124:
         result = validate_context("Lastly, valuations remain stretched while credit stays calm.", language="en",
                                   max_chars=200)
         assert result.ok, result.reason
+
+
+class TestRoundEightOn124:
+    """#124 round 8, SOTA-A, three defects, all executed; SOTA-C approved.
+    A comma or a closing mark ends an informal imperative, and a closing
+    quote or bracket ends an instruction's clause; "raten" is refused in
+    every form, prefixed ones and "zur Vorsicht geraten" included; and
+    "achte"/"achten" after a determiner are the ordinal."""
+
+    @pytest.mark.parametrize("text", [
+        "Bleib, wenn die Daten fehlen, investiert.",
+        "Halte, solange die Breite fehlt, deine Positionen.",
+        "Die Lage ist angespannt; bleib, wenn die Daten fehlen, ruhig.",
+        "Die Devise lautet „Positionen abbauen“.",
+        'Die Devise lautet "Positionen abbauen".',
+        "„Positionen abbauen“, heißt die Devise.",
+        "Die Lage ist angespannt (Positionen abbauen).",
+    ])
+    def test_an_instruction_before_a_comma_or_a_closing_mark_is_refused(self, text):
+        result = validate("Der Wert liegt bei 59 von 100. " + text, channel=Channel.IMESSAGE, facts=DIGEST_FACTS,
+                          prose_rules=True, language="de", **LIMITS)
+        assert not result.ok and "instruction" in (result.reason or ""), (text, result.reason)
+
+    @pytest.mark.parametrize("text", [
+        "Die Lage ist angespannt, du rietest zur Vorsicht.",
+        "Die Lage ist angespannt, du ratest zur Vorsicht.",
+        "Die Lage ist angespannt, zur Vorsicht ratend.",
+        "Die Lage ist angespannt, Analysten haben zur Vorsicht geraten.",
+        "Die Lage ist angespannt, weshalb Analysten davon abraten.",
+        "Die Lage ist angespannt, Analysten haben davon abgeraten.",
+    ])
+    def test_raten_is_refused_in_every_form(self, text):
+        result = validate("Der Wert liegt bei 59 von 100. " + text, channel=Channel.IMESSAGE, facts=DIGEST_FACTS,
+                          prose_rules=True, language="de", **LIMITS)
+        assert not result.ok and "banned lexicon" in (result.reason or ""), (text, result.reason)
+
+    @pytest.mark.parametrize("text", [
+        "Die Lage ist im achten Monat angespannt.",
+        "Die Lage ist zum achten Mal angespannt.",
+    ])
+    def test_the_eighth_after_a_determiner_is_a_number(self, text):
+        result = validate("Der Wert liegt bei 59 von 100. " + text, channel=Channel.IMESSAGE, facts=DIGEST_FACTS,
+                          prose_rules=True, language="de", **LIMITS)
+        assert not result.ok and "spelled-out number" in (result.reason or ""), (text, result.reason)
+
+    def test_the_eighth_is_refused_in_a_context(self):
+        result = validate_context("Die Bewertungen sind im achten Monat hoch, die Lage bleibt ruhig.", language="de",
+                                  max_chars=200)
+        assert not result.ok and "spelled-out number" in (result.reason or ""), result.reason
+
+    @pytest.mark.parametrize("text", [
+        "Die Kurse sind unter Druck geraten, die Lage ist angespannt.",
+        "Die Lage ist angespannt, die Breite ist in Bewegung geraten.",
+        "Anleger achten auf die Breite, die Lage ist angespannt.",
+        'Die Kennzahl "Bewertung" bleibt hoch.',
+    ])
+    def test_the_other_verbs_and_a_quoted_noun_stay(self, text):
+        result = validate("Der Wert liegt bei 59 von 100. " + text, channel=Channel.IMESSAGE, facts=DIGEST_FACTS,
+                          prose_rules=True, language="de", **LIMITS)
+        assert result.ok, (text, result.reason)

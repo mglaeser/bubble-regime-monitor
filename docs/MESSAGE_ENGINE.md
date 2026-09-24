@@ -573,9 +573,13 @@ puts its verb second. The set has these parts:
   hide a word ("Káufe", "Háltén Sie"), and every umlaut admits its ASCII
   transliteration ("duerfte").
 - **A banned lexicon.** It covers probability, advice, certainty, forecast
-  and crash talk, including the verb "raten" in every finite form. The
-  noun "die Rate", capitalised and after a determiner, is not banned;
-  "Alle raten ..." is the verb (#124 round 1). German joins its words, so
+  and crash talk, including the verb "raten" in every form: present,
+  past, both subjunctives ("du ratest", "du rietest"), the present
+  participle, the prefixed verbs ("abraten", "zuraten", "angeraten"), and
+  "geraten" after "zu"/"zur"/"zum" ("zur Vorsicht geraten"; "unter Druck
+  geraten" is another verb) (#124 round 8). The noun "die Rate",
+  capitalised and after a determiner, is not banned; "Alle raten ..." is
+  the verb (#124 round 1). German joins its words, so
   the stems that are always advice or forecast are banned inside a
   compound too ("Kaufempfehlung", "Kursprognose", "Crashgefahr"); "kauf"
   only with an advice part, since "Verkaufsdruck" describes the market
@@ -610,7 +614,10 @@ puts its verb second. The set has these parts:
   the same stems. A clause also opens after a bracket, and after a quote
   with no space after it ("(Bleiben Sie ruhig.)", "„Bleib ruhig“"); a
   closing quote before a verb is a statement ("„Bewertung“ bleibt hoch")
-  (#124 round 4).
+  (#124 round 4). A comma or a closing mark ends the informal imperative
+  ("Bleib, wenn die Daten fehlen, investiert."), and a closing quote or
+  bracket ends the clause of an infinitive instruction ("Die Devise lautet
+  „Positionen abbauen“.") (#124 round 8).
 - **Number words.** Model text refuses the ordinals from "third"/"dritte"
   up and the counts and multiples ("twice", "dreimal", "verdoppelt"), in
   both languages; "first"/"second" stay words, as #100 decided. The
@@ -624,6 +631,9 @@ puts its verb second. The set has these parts:
   Warnflagge", #124 round 4); a ticker in capitals is a modifier. A comma
   between two modifiers, and a bracket or a quote before the nouns, stay
   inside the phrase ("Eine aktive, bestätigte Warnflagge", #124 round 5).
+  "achte" and "achten" are the verb as well ("achten auf"), so they count
+  as the ordinal only after a determiner ("im achten Monat", #124 round
+  8).
 - **A positive language check.** A German message needs at least two
   distinct German function words, outnumbering the English evidence.
   English evidence includes common English words as well as function
