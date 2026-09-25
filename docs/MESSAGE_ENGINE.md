@@ -627,21 +627,32 @@ puts its verb second. The set has these parts:
   round 3; joined to a fraction, "halb" joined to a period, and the
   periods of years: "Zweidrittelmehrheit", "Halbjahreshoch", "Jahrzehnt" -
   #124 round 10; the number nouns and the decades: "Dreier",
-  "Zwanzigerjahre" - #124 round 11). The counts and multiples in "-mal"
-  and "-fach" are generated from every number word, the mixed numbers
-  included ("anderthalbmal"). "ein"/"eine" counts as the number one before
-  a counted noun, read by one scanner that walks the whole noun phrase:
-  any number of lowercase modifiers, then the run of capitalised words,
-  ending at the first lowercase word after it. A counted noun anywhere in
-  the phrase is the count, since a capitalised word can be an adjective
-  ("Eine Berliner Warnflagge", #124 round 4); a ticker in capitals is a
-  modifier. A comma between two modifiers, and a bracket or a quote before
-  the nouns, stay inside the phrase ("Eine aktive, bestätigte Warnflagge",
-  #124 round 5), and so does a comma after the nouns ("Eine Berliner,
-  bestätigte Warnflagge") unless a clause opens after it ("Ein Treiber,
-  der ...") (#124 round 11). "achte" and "achten" are the verb as well
-  ("achten auf"), so they count as the ordinal only after a determiner
-  ("im achten Monat", #124 round 8).
+  "Zwanzigerjahre" - #124 round 11; the adjectives of a count:
+  "dreimalig", "zweistellig", "dreistufig", "zweiwöchig" - #124 round 12).
+  The fractions ("ein Fünftel") are checked in every German message, as
+  the cardinals are, and "Milliarde" makes "milliardste" (#124 round 12).
+  The counts and multiples in "-mal" and "-fach" are generated from every
+  number word, the mixed numbers included ("anderthalbmal"). "ein"/"eine"
+  counts as the number one before a counted noun, read by one scanner that
+  walks the whole noun phrase: any number of lowercase modifiers, then the
+  run of capitalised words, ending at the first lowercase word after it. A
+  counted noun anywhere in the phrase is the count, since a capitalised
+  word can be an adjective ("Eine Berliner Warnflagge", #124 round 4); a
+  ticker in capitals is a modifier. A comma between two modifiers, and a
+  bracket or a quote before the nouns, stay inside the phrase ("Eine
+  aktive, bestätigte Warnflagge", #124 round 5), and so does a comma after
+  the nouns ("Eine Berliner, bestätigte Warnflagge") unless a clause opens
+  after it ("Ein Treiber, der ...") (#124 round 11). "achte" and "achten"
+  are the verb as well ("achten auf"), so they count as the ordinal only
+  after a determiner ("im achten Monat", #124 round 8).
+- **The reader is not addressed.** A German message never addresses its
+  reader: "..., reduziert eure Positionen" passed, the verb's form being a
+  statement's too, and any verb outside the stems would pass with it
+  ("prüft eure Depots"). The informal forms ("du", "dich", "dir", "dein-",
+  "euch", "euer", "eure-") are refused anywhere; lowercase "ihr" is "her"
+  and "their" as well and stays. The formal forms ("Sie", "Ihnen", "Ihr-")
+  are refused mid-sentence, where only the formal "you" is capitalised
+  (#124 round 12).
 - **A positive language check.** A German message needs at least two
   distinct German function words, outnumbering the English evidence.
   English evidence includes common English words as well as function
@@ -661,8 +672,9 @@ That is the residual of decision 9, in German. The English path of
 
 **A context carries no numbers.** `validate_context(text, language,
 max_chars)` judges the context a model writes for a message. It applies
-the prose rules of its language, and refuses any digit and any number
-word in either language:
+the prose rules of its language - an English context addresses no reader
+either ("you", "your"; #124 round 12) - and refuses any digit and any
+number word in either language:
 
 - cardinals and their compounds, the scale words in the plural
   ("hundreds", "Tausende") and the fractions ("a quarter", "ein Fünftel")
@@ -672,7 +684,8 @@ word in either language:
   "biweekly", "Jahrzehnt", "Jahrhundert" (#124 round 10);
 - the words that count without a number word: "both", "beide",
   "zweierlei", "sole", "trio", and the plural cardinals ("tens", "the
-  twenties") (#124 round 11);
+  twenties") (#124 round 11), and the adjectives of a count
+  ("dreimalig", "zweistellig") (#124 round 12);
 - ordinals, "first"/"second" and "erste"/"zweite" included, "erstmals",
   and the ordinal adverbs ("thirdly", "drittens"), generated from the
   ordinals (#124 round 7);

@@ -1071,6 +1071,28 @@ _EIGHTH_DE_RE = re.compile(
                                | {"im", "am", "zum", "zur", "vom", "beim"})) + r")\s+acht(?:e|en)\b")
 
 
+#: A German message never ADDRESSES its reader: "..., reduziert eure
+#: Positionen" passed, the verb's form being a statement's too (#124 round
+#: 12, SOTA-A), and any verb outside the stems passes with it ("prüft eure
+#: Depots"). The informal forms are refused anywhere (lowercase "ihr" is
+#: "her" and "their" as well, and stays); the formal ones mid-sentence,
+#: where only the formal "you" is capitalised.
+_ADDRESS_INFORMAL_DE = frozenset(
+    "du dich dir dein deine deinem deinen deiner deines euch euer eure eurem euren eurer eures".split())
+_ADDRESS_FORMAL_DE = frozenset("Sie Ihnen Ihr Ihre Ihrem Ihren Ihrer Ihres".split())
+
+
+def _reader_addressed_de(text: str) -> str | None:
+    tokens: list[str] = re.findall(r"[A-Za-zÄÖÜäöüß]+|[.!?:;(\[\"\u201e\u201c\u201a\u2018\u00ab\u00bb]", text)
+    for i, token in enumerate(tokens):
+        if token.lower() in _ADDRESS_INFORMAL_DE:
+            return token
+        clause_start = i == 0 or not tokens[i - 1][:1].isalpha()
+        if token in _ADDRESS_FORMAL_DE and not clause_start:
+            return token
+    return None
+
+
 def _raten_de(text: str) -> str | None:
     """A finite form of "raten" that is not the noun "Rate", or None. The
     noun is capitalised AND follows a determiner ("die Rate", "alle
@@ -1230,7 +1252,8 @@ def _german_ordinal_stem(cardinal: str) -> str:
     if cardinal in irregular:
         return irregular[cardinal]
     if cardinal.endswith(("zig", "ßig", "ssig")) or cardinal in ("hundert", "tausend", "million", "milliarde"):
-        return cardinal + "st"
+        # "Milliarde" drops its -e: "milliardste" (#124 round 12, SOTA-A)
+        return cardinal.removesuffix("e") + "st"
     return cardinal + "t"
 
 
@@ -1307,14 +1330,21 @@ _COMPOUND_NUMBER_DE_RE = re.compile(
     # words, their second part being no unit.
     # "halb" leads a period too ("Halbjahreshoch"), and nothing else
     # ("Halbleiter").
-    r"|(?:" + _COMPOUND_LEAD_DE + r"|halb)(?:und\w+?)?(?:tage?s?|wochen?|monate?s?|quartale?s?|jahre?s?|"
-    r"stunden?|minuten?|prozent|punkte?)\w*"
+    # The periods by their stems, so the adjectives count too: "zweiwöchig",
+    # "fünfminütig" (#124 round 12).
+    r"|(?:" + _COMPOUND_LEAD_DE + r"|halb)(?:und\w+?)?(?:tag|woch|monat|quartal|jahr|stund|minut|prozent|punkt)\w*"
     # ...and a number word joined to a fraction: "Zweidrittelmehrheit",
     # "Dreiviertelstunde" (#124 round 10, SOTA-A).
     r"|(?:" + _COMPOUND_LEAD_DE + r")(?:" + "|".join(sorted(_FRACTIONS_DE, key=len, reverse=True)) + r")\w*"
     # ...and the periods that are a number of years: "seit einem
     # Jahrzehnt", "Jahrhunderthoch" (#124 round 10).
     r"|jahr(?:zehnt|hundert|tausend)\w*"
+    # ...and the adjectives of a count: "die dreimalige Warnung" (#124
+    # round 12, SOTA-A), "zweistellige Renditen", "dreistufig". Not after
+    # "ein": "einseitig" and "einfältig" are words; "einstellig" is not.
+    r"|(?:" + "|".join(sorted(_COMPOUND_PARTS_DE - {"ein", "eins"}, key=len, reverse=True))
+    + r")(?:malig|stellig|stufig|teilig|seitig|f(?:a|ä|ae)ltig|k(?:o|ö|oe)pfig|gliedrig)\w*"
+    r"|einstellig\w*"
     # ...and the number nouns and the decades: "ein Dreier", "die
     # Zwanzigerjahre", "in den Neunzigern" (#124 round 11); never "einer",
     # and only the noun itself - "Achterbahn" is a word.
@@ -2097,7 +2127,9 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
                                     f"spelled-out number {one!r}: numerals must come from the facts")
         for match in re.finditer(r"[a-zäöüß]+", lowered):
             word = match.group(0)
-            if (word in _NUMBER_WORDS_DE or (prose_rules and word in _ORDINALS_DE)
+            # the fractions with the cardinals: "ein Fünftel" was checked in a
+            # context only (#124 round 12, SOTA-A)
+            if (word in _NUMBER_WORDS_DE or word in _FRACTIONS_DE or (prose_rules and word in _ORDINALS_DE)
                     or _COMPOUND_NUMBER_DE_RE.fullmatch(word)):
                 return ValidationResult(
                     False, FailureClass.CONTENT,
@@ -2418,6 +2450,10 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
             if told:
                 return ValidationResult(False, FailureClass.CONTENT,
                                         f"{told.group(1)!r} opens a clause as an instruction (de)")
+            addressed = _reader_addressed_de(judged)
+            if addressed:
+                return ValidationResult(False, FailureClass.CONTENT,
+                                        f"{addressed!r} addresses the reader (de)")
             ordered_by_infinitive = _INFINITIVE_ORDER_DE_RE.search(lowered)
             if ordered_by_infinitive:
                 return ValidationResult(False, FailureClass.CONTENT,
@@ -2636,8 +2672,8 @@ _CONTEXT_NUMBER_WORDS: frozenset[str] = (
 
 #: A Roman numeral is a number: "Risk remains at level IV." (#124 round 4,
 #: SOTA-A). A whole word of two letters or more that reads as one - in
-#: capitals, or in lowercase from i, v and x ("phase iii"); "VIX" and "mix"
-#: do not read as one. It reads the folded text, like every scan of
+#: capitals, or in lowercase from i, v and x ("phase iii"); "VIX" and the
+#: lowercase "mix" do not read as one ("MIX" in capitals does: M, IX). It reads the folded text, like every scan of
 #: meaning: "level ÍV" wore an accent (#124 round 6, SOTA-A). Single
 #: letters stay words: the monitor's own V and D blocks, the pronoun I,
 #: "M&A". The credit ratings CCC and CC stay words too. An acronym that
@@ -2667,6 +2703,11 @@ def validate_context(text: str, *, language: str, max_chars: int) -> ValidationR
     if any(ch.isnumeric() for ch in text):
         return ValidationResult(False, FailureClass.CONTENT, "a context carries no numbers")
     folded = _fold_latin(text)
+    if language == "en":
+        # the English context addresses no reader either (#124 round 12)
+        you = re.search(r"\b(?:you|your|yours|yourself|yourselves)\b", folded, re.IGNORECASE)
+        if you:
+            return ValidationResult(False, FailureClass.CONTENT, f"{you.group(0)!r} addresses the reader")
     roman = _roman_numeral(folded)
     if roman:
         return ValidationResult(False, FailureClass.CONTENT, f"a context carries no numbers: {roman!r}")

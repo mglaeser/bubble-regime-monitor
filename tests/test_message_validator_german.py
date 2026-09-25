@@ -1423,3 +1423,80 @@ class TestRoundElevenOn124:
     def test_the_words_that_only_look_like_one_stay(self, text, language):
         result = validate_context(text, language=language, max_chars=200)
         assert result.ok, (text, result.reason)
+
+
+class TestRoundTwelveOn124:
+    """#124 round 12: SOTA-A, four defects, all executed; SOTA-C's one
+    defect executed and not reproduced as stated; SOTA-B timed out. A
+    German message does not address its reader; the fractions are checked
+    in every German message; "milliardste" is the ordinal; and the
+    adjectives of a count ("dreimalig", "zweistellig") are numbers."""
+
+    @pytest.mark.parametrize("text", [
+        "Die Lage ist angespannt, reduziert eure Positionen.",
+        "Die Lage ist angespannt, sichert euch die Gewinne.",
+        "Die Lage ist angespannt, prüft eure Depots.",
+        "Die Lage ist angespannt, prüf deine Positionen.",
+        "Die Lage betrifft Ihre Positionen, die Bewertungen sind hoch.",
+        "Die Bewertungen sind hoch, wie Sie sehen, die Lage bleibt ruhig.",
+    ])
+    def test_a_message_that_addresses_its_reader_is_refused(self, text):
+        result = validate("Der Wert liegt bei 59 von 100. " + text, channel=Channel.IMESSAGE, facts=DIGEST_FACTS,
+                          prose_rules=True, language="de", **LIMITS)
+        assert not result.ok and "addresses the reader" in (result.reason or ""), (text, result.reason)
+
+    @pytest.mark.parametrize("text", [
+        "Die Fed reduziert ihre Bilanz, die Lage ist angespannt.",
+        "Sie bleibt angespannt, die Bewertungen sind hoch.",
+        "Die Lage: Sie bleibt angespannt, die Bewertungen sind hoch.",
+        "Die Lage ist angespannt, die Rally ist einseitig.",
+        "Die Lage ist angespannt, das Signal ist zweideutig.",
+    ])
+    def test_her_their_she_and_the_one_sided_stay(self, text):
+        result = validate("Der Wert liegt bei 59 von 100. " + text, channel=Channel.IMESSAGE, facts=DIGEST_FACTS,
+                          prose_rules=True, language="de", **LIMITS)
+        assert result.ok, (text, result.reason)
+
+    @pytest.mark.parametrize("text", [
+        "Ein Fünftel der Signale ist aktiv, die Lage ist angespannt.",
+        "Die Bewertung ist zum milliardsten Mal hoch, die Lage ist angespannt.",
+        "Die Lage ist angespannt, zweistellige Renditen sind die Regel.",
+    ])
+    def test_a_fraction_an_ordinal_or_a_count_adjective_is_refused_in_a_message(self, text):
+        result = validate("Der Wert liegt bei 59 von 100. " + text, channel=Channel.IMESSAGE, facts=DIGEST_FACTS,
+                          prose_rules=True, language="de", **LIMITS)
+        assert not result.ok and "spelled-out number" in (result.reason or ""), (text, result.reason)
+
+    @pytest.mark.parametrize("text", [
+        "Die dreimalige Warnung zeigt hohe Bewertungen, die Lage bleibt ruhig.",
+        "Zweistellige Renditen prägen die Lage, die Bewertungen sind hoch.",
+        "Der dreistufige Aufbau zeigt hohe Bewertungen, die Lage bleibt ruhig.",
+        "Die zweiwöchige Rally zeigt hohe Bewertungen, die Lage bleibt ruhig.",
+    ])
+    def test_a_count_adjective_is_refused_in_a_context(self, text):
+        result = validate_context(text, language="de", max_chars=200)
+        assert not result.ok and "no numbers" in (result.reason or ""), (text, result.reason)
+
+    @pytest.mark.parametrize("text", [
+        "Your portfolio faces stretched valuations while credit stays calm.",
+        "Valuations are stretched, as you can see, while credit stays calm.",
+    ])
+    def test_an_english_context_does_not_address_its_reader(self, text):
+        result = validate_context(text, language="en", max_chars=200)
+        assert not result.ok and "addresses the reader" in (result.reason or ""), (text, result.reason)
+
+    def test_mix_is_a_word_and_mix_in_capitals_a_numeral(self):
+        """SOTA-C: "'mix' is identified as a Roman numeral". Executed: the
+        lowercase word passes (pinned since round 4); only "MIX" in
+        capitals reads as M, IX - which the comment now says."""
+        assert validate_context("A mix of stretched valuations and calm credit drives the reading.",
+                                language="en", max_chars=200).ok
+        result = validate_context("The MIX of stretched valuations and calm credit drives the reading.",
+                                  language="en", max_chars=200)
+        assert not result.ok and "no numbers" in (result.reason or ""), result.reason
+
+    def test_the_billionth_is_milliardste(self):
+        from app.message_engine.validator import _ORDINALS_DE, _german_ordinal_stem
+
+        assert _german_ordinal_stem("milliarde") == "milliardst"
+        assert "milliardste" in _ORDINALS_DE and "milliardeste" not in _ORDINALS_DE
