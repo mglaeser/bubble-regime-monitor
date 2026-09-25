@@ -572,20 +572,22 @@ puts its verb second. The set has these parts:
   the text, and every word set carries its folded forms. An accent cannot
   hide a word ("Káufe", "Háltén Sie"), and every umlaut admits its ASCII
   transliteration ("duerfte").
-- **A banned lexicon.** It covers probability, advice, certainty, forecast
-  and crash talk, including the verb "raten" in every form: present, past,
-  both subjunctives ("du ratest", "du rietest"), the present participle,
-  the prefixed verbs ("abraten", "zuraten", "angeraten"), and "geraten"
-  after "zu"/"zur"/"zum" ("zur Vorsicht geraten"; "unter Druck geraten" is
-  another verb) (#124 round 8), anywhere before it in its clause ("zu
-  großer Vorsicht am Markt geraten"; the infinitive's "um nicht unter
-  Druck zu geraten" stays), and "gut beraten" (#124 round 13); "dazu
-  geraten" too (#124 round 18). The noun "die Rate", capitalised (not in
-  capitals) and after a determiner, is not banned; "Alle raten ..." is the
-  verb (#124 round 1). German joins its words, so the stems that are
-  always advice or forecast are banned inside a compound too
-  ("Kaufempfehlung", "Kursprognose", "Crashgefahr"); "kauf" only with an
-  advice part, since "Verkaufsdruck" describes the market (#124 round 3).
+- **A banned lexicon.** It covers probability and possibility ("möglich",
+  "denkbar", "nicht ausgeschlossen" - #124 round 19), advice, certainty,
+  forecast and crash talk, including the verb "raten" in every form:
+  present, past, both subjunctives ("du ratest", "du rietest"), the
+  present participle, the prefixed verbs ("abraten", "zuraten",
+  "angeraten"), and "geraten" after "zu"/"zur"/"zum" ("zur Vorsicht
+  geraten"; "unter Druck geraten" is another verb) (#124 round 8),
+  anywhere before it in its clause ("zu großer Vorsicht am Markt geraten";
+  the infinitive's "um nicht unter Druck zu geraten" stays), and "gut
+  beraten" (#124 round 13); "dazu geraten" too (#124 round 18). The noun
+  "die Rate", capitalised (not in capitals) and after a determiner, is not
+  banned; "Alle raten ..." is the verb (#124 round 1). German joins its
+  words, so the stems that are always advice or forecast are banned inside
+  a compound too ("Kaufempfehlung", "Kursprognose", "Crashgefahr"); "kauf"
+  only with an advice part, since "Verkaufsdruck" describes the market
+  (#124 round 3).
 - **An advice and forecast grammar.** It covers reader-directed modals,
   the subject-first modal, impersonal recommendations, the passive modal,
   "ist zu verkaufen" and "zu" infixed in a separable verb. A forecast's
@@ -608,8 +610,8 @@ puts its verb second. The set has these parts:
   "..., halte Abstand") unless "ich" follows; the plural command of a verb
   whose third person changes its vowel ("nehmt", "haltet", "lasst") is the
   command unless "ihr" follows; a form in -t that is also the third person
-  is a statement ("..., bleibt die Lage ruhig") (#124 rounds 2 and 5).
-  A separable verb's base stem is generated from its prefixed stem, since
+  is a statement ("..., bleibt die Lage ruhig") (#124 rounds 2 and 5). A
+  separable verb's base stem is generated from its prefixed stem, since
   its imperative opens without the prefix ("Stoße die Aktien ab") (#124
   round 2). The strong verbs' imperatives ("gib", "nimm", "wirf") come
   from one map of their stems. The infinitive-order rule is generated from
@@ -619,7 +621,9 @@ puts its verb second. The set has these parts:
   (#124 round 4). A comma or a closing mark ends the informal imperative
   ("Bleib, wenn die Daten fehlen, investiert."), and a closing quote or
   bracket ends the clause of an infinitive instruction ("Die Devise lautet
-  „Positionen abbauen“.") (#124 round 8).
+  „Positionen abbauen“.") (#124 round 8). A sentence end followed by a
+  closing mark opens a clause too ("(Die Daten fehlen.) Reduziere
+  Positionen.", #124 round 19).
 - **Number words.** Model text refuses the ordinals from "third"/"dritte"
   up and the counts and multiples ("twice", "dreimal", "verdoppelt"), in
   both languages; "first"/"second" stay words, as #100 decided. The
@@ -654,13 +658,15 @@ puts its verb second. The set has these parts:
   Treiber, der ...") (#124 round 11). The lexical counts - the ordinal
   adverbs from "drittens" up, the fractions, the plural scale words,
   "zweierlei", the numbered periods - are numbers in model text of either
-  language, and so are the quantifiers ("beide", "single", "pair") where a
-  counted noun stands in their clause, before or after them, however many
-  modifiers between ("beide Flaggen", "Die Warnflaggen sind beide aktiv";
-  "Gold und Bargeld hielten beide" counts nothing) (#124 rounds 15 and
-  16). The ordinals include "nullte" (#124 round 16). "achte" and "achten"
-  are the verb as well ("achten auf"), so they count as the ordinal only
-  after a determiner ("im achten Monat", #124 round 8).
+  language, and so are the quantifiers ("beide", "single", "pair",
+  "couple", "paar" - #124 round 19) where a counted noun stands in their
+  clause, before or after them, however many modifiers between, a
+  parenthetical skipped whole ("beide Flaggen", "Die Warnflaggen sind
+  beide aktiv", "sind (nach Prüfung) beide aktiv"; "Gold und Bargeld
+  hielten beide" counts nothing) (#124 rounds 15 and 16). The ordinals
+  include "nullte" (#124 round 16). "achte" and "achten" are the verb as
+  well ("achten auf"), so they count as the ordinal only after a
+  determiner ("im achten Monat", #124 round 8).
 - **The reader is not addressed.** A German message never addresses its
   reader: "..., reduziert eure Positionen" passed, the verb's form being a
   statement's too, and any verb outside the stems would pass with it
@@ -692,7 +698,8 @@ That is the residual of decision 9, in German. The English path of
 refuses the German number words ("vier flags"; "null" and "elf" are
 English words), the lexical counts, and a quantifier before a counted
 noun in its clause ("both flags", "the flags both fired"; "Gold and
-cash both held." names its two and counts nothing, as #100 pinned).
+cash both held." names its two and counts nothing, as #100 pinned), and possibility joins probability in its
+lexicon ("possible", "perhaps", "might" - #124 round 19).
 
 **A context carries no numbers.** `validate_context(text, language,
 max_chars)` judges the context a model writes for a message. It applies

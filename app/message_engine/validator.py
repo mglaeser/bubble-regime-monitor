@@ -38,6 +38,9 @@ BANNED_LEXICON: frozenset[str] = frozenset({
     "probabilit", "probabilis", "chance", "likely", "unlikely", "odds", "will crash", "crash soon",
     "buy", "sell", "guaranteed", "certain", "definitely", "recommend",
     "should invest", "advice",
+    # possibility is probability's other half: "It is possible that the
+    # price rises" (#124 round 19; the German form was SOTA-A's finding)
+    "possible", "possibly", "possibilit", "perhaps", "maybe", "might",
 })
 
 #: The imperative sense of a band word ("hold your positions"), as opposed to
@@ -769,7 +772,10 @@ _ORDINALS: frozenset[str] = frozenset(
 #: forecast, crash talk. Stems, at a word boundary.
 BANNED_LEXICON_DE: tuple[str, ...] = (
     r"wahrscheinlich\w*", r"chancen?", r"vermutlich", r"voraussichtlich", r"wom(?:o|ö|oe)glich",
-    r"d(?:u|ü|ue)rfte[ns]?", r"vielleicht", r"eventuell",
+    # ...and possibility: "Es ist möglich, dass der Kurs steigt." (#124
+    # round 19, SOTA-A); "unmöglich" and "ermöglichen" are other words
+    r"m(?:o|ö|oe)glich(?:e|en|er|es|em|erweise|keit|keiten)?", r"denkbar\w*", r"nicht\s+ausgeschlossen",
+    r"d(?:u|ü|ue)rfte[ns]?", r"vielleicht", r"eventuell\w*",
     r"kauf(?:en|t|e|st)?", r"k(?:a|ä|ae)ufe[nrs]?", r"verkauf(?:en|t|e|st|s)?", r"verk(?:a|ä|ae)ufe[nrs]?",
     r"ver(?:a|ä|ae)u(?:s|ß|ss)er\w*",   # "veräußern" is selling (#121 round 32)
     # "empfiehlt" is the stem "empfiehl": the pattern wanted an "l" right
@@ -902,8 +908,11 @@ _ADVICE_DE_RE = re.compile(
 #: "„Bewertung“ bleibt hoch" is a statement; a hyphen, spaced (the longer
 #: dashes are refused as numeric forms before any prose rule).
 _OPENS_DE = r"[(\[{]\s*|[\"'\u201e\u201c\u201a\u2018\u00ab\u00bb](?=\S)|\s-\s"
+#: ...and after a sentence end that a closing mark follows: "(Die Daten
+#: fehlen.) Reduziere Positionen." (#124 round 19, SOTA-A)
+_SENTENCE_END_DE = r"[.!?;:][)\]}\"'\u201c\u201d\u2019\u00ab\u00bb]*\s*"
 _IMPERATIVE_DE_RE = re.compile(
-    r"(?:^|[.!?;:,]\s*|" + _OPENS_DE + r")((?i:[a-zäöüß]+(?:en|n)))\s+S(?i:ie)\b")
+    r"(?:^|" + _SENTENCE_END_DE + r"|,\s*|" + _OPENS_DE + r")((?i:[a-zäöüß]+(?:en|n)))\s+S(?i:ie)\b")
 
 #: The informal imperative has no "Sie" to key on: "Bleib in SPY." passed
 #: the formal pattern and the advice grammar (#121 round 2, SOTA-A,
@@ -972,7 +981,7 @@ _SEPARABLE_BASES_DE = sorted({
 _IMPERATIVE_FORMS_DE = "|".join(
     [_ACTION_STEMS_DE, *_SEPARABLE_BASES_DE, *_STRONG_IMPERATIVES_DE.values()])
 _IMPERATIVE_DU_RE = re.compile(
-    r"(?:^|[.!?;:]\s*|" + _OPENS_DE + r")((?:" + _IMPERATIVE_FORMS_DE + r")(?:e|e?t)?)\b"
+    r"(?:^|" + _SENTENCE_END_DE + r"|" + _OPENS_DE + r")((?:" + _IMPERATIVE_FORMS_DE + r")(?:e|e?t)?)\b"
     # ...followed by the object, an adverb or a particle, not by a subject
     # that would make it a declarative ("Halt und Kauf sind ..." is rare in
     # this register and the cost of a false positive is one fallback). The
@@ -2740,9 +2749,10 @@ _LEXICAL_COUNTS: frozenset[str] = (
 #: context refuses them anywhere.
 _QUANTIFIERS: frozenset[str] = (
     _with_folded(frozenset({"beide", "beiden", "beider", "beides", "beidem", "duo", "duos", "trio", "trios",
-                            "quartett", "quartette", "quintett", "quintette"}))
-    | frozenset("""both sole lone single pair pairs duo duos trio trios quartet quartets quintet quintets
-                   twin twins""".split()))
+                            "quartett", "quartette", "quintett", "quintette", "paar", "paare", "paaren"}))
+    # "A couple of warning flags" (#124 round 19, SOTA-A); "ein paar" too
+    | frozenset("""both sole lone single pair pairs couple couples duo duos trio trios quartet quartets
+                   quintet quintets twin twins""".split()))
 #: The nouns a quantifier counts, in English; German reads _counted_de.
 _COUNTED_EN = frozenset("""flag flags signal signals indicator indicators warning warnings alert alerts
     trigger triggers block blocks component components reading readings event events time times day days
@@ -2763,16 +2773,27 @@ def _quantifies_a_count(text: str, start: int, end: int) -> bool:
     held." counts nothing."""
     word_re = r"[a-zäöüß]+(?:-[a-zäöüß]+)*|[.,;:!?()\[\]]"
 
-    def to_clause_end(tokens: list[str]) -> list[str]:
+    def to_clause_end(tokens: list[str], opens: str, closes: str) -> list[str]:
+        # A parenthetical is skipped whole - neither its words nor its
+        # conjunctions belong to the clause: "The red flags are (after
+        # review) both active." (#124 round 19, SOTA-A)
         kept: list[str] = []
+        depth = 0
         for token in tokens:
-            if not token[0].isalpha() or token in _QUANTIFIER_CLAUSE_ENDS:
+            if token in opens:
+                depth += 1
+            elif token in closes and depth:
+                depth -= 1
+            elif depth:
+                continue
+            elif not token[0].isalpha() or token in _QUANTIFIER_CLAUSE_ENDS:
                 break
-            kept.append(token)
+            else:
+                kept.append(token)
         return kept
 
-    after = to_clause_end(re.findall(word_re, text[end:]))
-    before = to_clause_end(list(reversed(re.findall(word_re, text[:start]))))
+    after = to_clause_end(re.findall(word_re, text[end:]), "([", ")]")
+    before = to_clause_end(list(reversed(re.findall(word_re, text[:start]))), ")]", "([")
     return any(word.rsplit("-", 1)[-1] in _COUNTED_EN or _counted_de(word) for word in after + before)
 
 

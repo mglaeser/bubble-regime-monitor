@@ -1713,3 +1713,60 @@ class TestRoundEighteenOn124:
         result = validate_context("Die Bewertungen sind hoch und vervielfachen sich nicht, die Lage bleibt ruhig.",
                                   language="de", max_chars=200)
         assert result.ok, result.reason
+
+
+class TestRoundNineteenOn124:
+    """#124 round 19: SOTA-A, four defects, all executed; SOTA-C, one
+    defect, executed and not reproduced; SOTA-B timed out. A command opens
+    after a sentence end that a closing mark follows; possibility is banned
+    with probability, in both languages; a parenthetical is skipped whole
+    by a quantifier's clause; and "couple" and "paar" are quantifiers."""
+
+    EN = "bubblegauge 59/100, band trim. "
+    DE = "Der Wert liegt bei 59 von 100. "
+
+    @pytest.mark.parametrize("text, language, reason", [
+        (DE + "(Die Daten fehlen.) Reduziere Positionen.", "de", "instruction"),
+        (DE + "„Die Daten fehlen.“ Halten Sie Kurs.", "de", "instruction"),
+        (DE + "Es ist möglich, dass der Kurs steigt.", "de", "banned lexicon"),
+        (EN + "The red flags are (after review) both active.", "en", "spelled-out number"),
+        (DE + "Die Warnflaggen sind (nach Prüfung) beide aktiv.", "de", "spelled-out number"),
+    ])
+    def test_the_message_is_refused(self, text, language, reason):
+        result = validate(text, channel=Channel.IMESSAGE, facts=DIGEST_FACTS, prose_rules=True, language=language,
+                          **LIMITS)
+        assert not result.ok and reason in (result.reason or ""), (text, result.reason)
+
+    @pytest.mark.parametrize("text, language, reason", [
+        ("A couple of warning flags are active.", "en", "no numbers"),
+        ("Ein paar Warnflaggen sind aktiv, die Lage ist angespannt.", "de", "no numbers"),
+        ("It is possible that the price rises while credit stays calm.", "en", "banned lexicon"),
+        ("Valuations might ease while credit stays calm.", "en", "banned lexicon"),
+        ("Vielleicht steigt der Kurs, die Bewertungen sind hoch.", "de", "banned lexicon"),
+        ("Ein Rückgang ist nicht ausgeschlossen, die Bewertungen sind hoch.", "de", "banned lexicon"),
+    ])
+    def test_the_context_is_refused(self, text, language, reason):
+        result = validate_context(text, language=language, max_chars=200)
+        assert not result.ok and reason in (result.reason or ""), (text, result.reason)
+
+    @pytest.mark.parametrize("text, language", [
+        (DE + "Die Lage (angespannt) bleibt ruhig.", "de"),
+        (EN + "Gold and cash (both held) while valuations stretched.", "en"),
+        (DE + "Die hohen Bewertungen ermöglichen keine ruhige Lage, der Kredit bleibt stabil.", "de"),
+    ])
+    def test_a_verb_after_a_closing_bracket_and_ermoeglichen_stay(self, text, language):
+        result = validate(text, channel=Channel.IMESSAGE, facts=DIGEST_FACTS, prose_rules=True, language=language,
+                          **LIMITS)
+        assert result.ok, (text, result.reason)
+
+    @pytest.mark.parametrize("text, language", [
+        ("bubblegauge 59/100 today.", "en"),
+        ("Der Wert liegt heute bei 59 von 100, die Größe bleibt.", "de"),
+    ])
+    def test_an_ascii_letter_does_not_stop_the_script_check(self, text, language):
+        """SOTA-C: "the character validation loop returns CONTENT for the
+        first valid character". Executed and not reproduced: the loop skips
+        every ASCII letter (`ch.isascii()`) before its return."""
+        result = validate(text, channel=Channel.IMESSAGE, facts={"median": 59, "score_scale_max": 100},
+                          prose_rules=True, language=language, **LIMITS)
+        assert result.ok, (text, result.reason)
