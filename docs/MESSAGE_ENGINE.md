@@ -580,12 +580,12 @@ puts its verb second. The set has these parts:
   another verb) (#124 round 8), anywhere before it in its clause ("zu
   großer Vorsicht am Markt geraten"; the infinitive's "um nicht unter
   Druck zu geraten" stays), and "gut beraten" (#124 round 13). The noun
-  "die Rate", capitalised and after a determiner, is not banned; "Alle
-  raten ..." is the verb (#124 round 1). German joins its words, so the
-  stems that are always advice or forecast are banned inside a compound
-  too ("Kaufempfehlung", "Kursprognose", "Crashgefahr"); "kauf" only with
-  an advice part, since "Verkaufsdruck" describes the market (#124 round
-  3).
+  "die Rate", capitalised (not in capitals) and after a determiner, is not
+  banned; "Alle raten ..." is the verb (#124 round 1). German joins its
+  words, so the stems that are always advice or forecast are banned inside
+  a compound too ("Kaufempfehlung", "Kursprognose", "Crashgefahr"); "kauf"
+  only with an advice part, since "Verkaufsdruck" describes the market
+  (#124 round 3).
 - **An advice and forecast grammar.** It covers reader-directed modals,
   the subject-first modal, impersonal recommendations, the passive modal,
   "ist zu verkaufen" and "zu" infixed in a separable verb. A forecast's
@@ -656,9 +656,10 @@ puts its verb second. The set has these parts:
   "euch", "euer", "eure-") are refused anywhere; lowercase "ihr" is "her"
   and "their" as well and stays. The formal forms ("Sie", "Ihnen", "Ihr-")
   are refused mid-sentence, where only the formal "you" is capitalised
-  (#124 round 12). The English "you" in German prose addresses the reader
-  too, judged after the English-clause rules so a whole English clause is
-  judged as one (#124 round 13).
+  (#124 round 12), and in capitals ("wie SIE sehen", #124 round 14). The
+  English "you" in German prose addresses the reader too, judged after the
+  English-clause rules so a whole English clause is judged as one (#124
+  round 13).
 - **A positive language check.** A German message needs at least two
   distinct German function words, outnumbering the English evidence.
   English evidence includes common English words as well as function

@@ -1088,7 +1088,10 @@ def _reader_addressed_de(text: str) -> str | None:
         if token.lower() in _ADDRESS_INFORMAL_DE:
             return token
         clause_start = i == 0 or not tokens[i - 1][:1].isalpha()
-        if token in _ADDRESS_FORMAL_DE and not clause_start:
+        # in capitals too: "wie SIE sehen", "IHRE Positionen" (#124 round
+        # 14, SOTA-A); only the lowercase forms are "she", "they", "her"
+        formal = token in _ADDRESS_FORMAL_DE or (token.isupper() and token.capitalize() in _ADDRESS_FORMAL_DE)
+        if formal and not clause_start:
             return token
     return None
 
@@ -1117,7 +1120,9 @@ def _raten_de(text: str) -> str | None:
             return f"{tokens[i - 1].lower()} beraten"
         if token.lower() not in _RATEN_FORMS_DE:
             continue
-        noun = token[0].isupper() and i > 0 and tokens[i - 1].lower() in _DETERMINERS_DE
+        # the noun is capitalised, not in capitals: "Alle RATEN zur
+        # Vorsicht" is the verb (#124 round 14)
+        noun = token[0].isupper() and not token.isupper() and i > 0 and tokens[i - 1].lower() in _DETERMINERS_DE
         if not noun:
             return token.lower()
     return None

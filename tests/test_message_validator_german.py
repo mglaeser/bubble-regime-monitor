@@ -1546,3 +1546,32 @@ class TestRoundThirteenOn124:
     def test_geraten_as_got_into_and_the_other_verbs_stay(self, text):
         result = validate_context(text, language="de", max_chars=200)
         assert result.ok, (text, result.reason)
+
+
+class TestRoundFourteenOn124:
+    """#124 round 14, SOTA-A, one defect, executed; SOTA-B and SOTA-C
+    timed out. The formal address is refused in capitals too ("wie SIE
+    sehen"), and the noun "Rate" is capitalised, not in capitals ("Alle
+    RATEN zur Vorsicht" is the verb)."""
+
+    @pytest.mark.parametrize("text", [
+        "Die Lage betrifft IHRE Positionen, die Bewertungen sind hoch.",
+        "Die Bewertungen sind hoch, wie SIE sehen, die Lage bleibt ruhig.",
+        "Die Bewertungen sind hoch und das zeigt IHNEN die Lage deutlich.",
+    ])
+    def test_the_formal_address_in_capitals_is_refused(self, text):
+        result = validate_context(text, language="de", max_chars=200)
+        assert not result.ok and "addresses the reader" in (result.reason or ""), (text, result.reason)
+
+    def test_raten_in_capitals_is_the_verb(self):
+        result = validate_context("Die Bewertungen sind hoch, und Alle RATEN zur Vorsicht am Markt.", language="de",
+                                  max_chars=200)
+        assert not result.ok and "banned lexicon" in (result.reason or ""), result.reason
+
+    @pytest.mark.parametrize("text", [
+        "SIE bleibt angespannt, die Bewertungen sind hoch.",
+        "Die Lage ist angespannt, die Rate der Ausfälle bleibt niedrig.",
+    ])
+    def test_a_clause_start_and_the_noun_stay(self, text):
+        result = validate_context(text, language="de", max_chars=200)
+        assert result.ok, (text, result.reason)
