@@ -128,19 +128,6 @@ class TestTheShippedSets:
         assert 'phrase_set: "v3.5"' in rules and 'phrase_set: "v3.4"' not in rules
         assert 'rule_version: "v3.2.3"' in rules
 
-    def test_the_composer_proves_registry_text_in_either_language(self):
-        from app.message_engine import composer
-
-        assert composer.registry_authored("Stufe trim (vorher hold). Regime sonst unveraendert.")
-        assert composer.registry_authored("Level trim (before hold). Regime otherwise unchanged.")
-        assert not composer.registry_authored("sell everything now")
-        # One language per message, as the renderer writes it: a mixture no
-        # renderer could produce is not the registry's (#119 round 2, SOTA-A).
-        assert not composer.registry_authored("Level trim (before hold). Regime sonst unveraendert.")
-        assert not composer.registry_authored("Stufe trim (vorher hold). Regime otherwise unchanged.")
-        assert set(composer._registry_matchers()) == {"de", "en"}
-
-
 #: A value of each typed slot; every other slot is a number.
 _TYPED = {"F_ASSET": "SPY", "F_NEXT_CHECK": "14:00", "F_BAND_EFFECTIVE": "de-risk",
           "F_BAND_PREVIOUS": "suppressed", "F_BAND_BASE": "trim", "F_BAND_SCORE": "hold",
@@ -154,120 +141,9 @@ def _at_width(phrase_set, slot):
     return "-1." + "5" * (width - 3) if width >= 4 else "9" * width
 
 
-class TestRoundFourOn119:
-    """A slot admits its fact's typed domain, not any word of its width
-    (#119 round 4, SOTA-A, executed: the scenario reproduced verbatim)."""
-
-    def test_the_ledger_scenario(self):
-        from app.message_engine import composer
-
-        assert not composer.registry_authored("Execution armed: SELL OUT, median 99.")
-        assert not composer.registry_authored("Ausfuehrung scharf: SELL OUT, Median 99.")
-        assert composer.registry_authored("Execution armed: SPY OUT, median 99.")
-        assert composer.registry_authored("Ausfuehrung scharf: QQQ OUT, Median 99.0.")
-
-    def test_every_slot_of_every_fragment_refuses_a_word_of_its_width(self):
-        from app.alerts.phrase_registry import validate_phrase_set
-        from app.message_engine import composer
-
-        phrase_set = validate_phrase_set(V35.read_text(encoding="utf-8"))
-        forbidden = {1: "x", 2: "go", 3: "buy", 4: "SELL", 5: "crash", 6: "kaufen",
-                     7: "verkauf", 10: "sell-now"}
-        checked = 0
-        for table in (phrase_set.headlines, phrase_set.phrases,
-                      phrase_set.next_checks, phrase_set.caveats):
-            for fragment in table.values():
-                if not fragment.slots:
-                    continue
-                for _lang, text in fragment.texts:
-                    for slot in fragment.slots:
-                        width = phrase_set.facts[slot].max_width
-                        word = forbidden[max(w for w in forbidden if w <= width)]
-                        filled = text
-                        for other in fragment.slots:
-                            filled = filled.replace("{" + other + "}",
-                                                    word if other == slot else _TYPED.get(other, "7"))
-                        assert not composer.registry_authored(filled), (fragment.code, slot, filled)
-                        checked += 1
-        assert checked >= 40
-
-    def test_a_typed_value_in_every_slot_is_still_the_registrys(self):
-        from app.alerts.phrase_registry import validate_phrase_set
-        from app.message_engine import composer
-
-        phrase_set = validate_phrase_set(V35.read_text(encoding="utf-8"))
-        for table in (phrase_set.headlines, phrase_set.phrases,
-                      phrase_set.next_checks, phrase_set.caveats):
-            for fragment in table.values():
-                for _lang, text in fragment.texts:
-                    filled = text
-                    for slot in fragment.slots:
-                        filled = filled.replace("{" + slot + "}", _TYPED.get(slot, _at_width(phrase_set, slot)))
-                    assert composer.registry_authored(filled), (fragment.code, filled)
-
-    def test_the_asset_domain_is_the_shipped_rulesets(self):
-        import re
-
-        from app.message_engine import composer
-
-        rules = (ROOT / "config" / "alert_rules.v3.2.yaml").read_text(encoding="utf-8")
-        labelled = set(re.findall(r"labels: \{asset: ([A-Z]+)\}", rules))
-        assert labelled and labelled == set(composer._ASSET.split("|"))
-
-    def test_a_fact_without_a_typed_domain_is_a_number(self):
-        import re
-
-        from app.message_engine import composer
-
-        pattern = re.compile(composer._slot_domain("F_SOMETHING_NEW", 4))
-        assert pattern.fullmatch("42") and pattern.fullmatch("-0.5")
-        assert not pattern.fullmatch("SELL") and not pattern.fullmatch("kaufen")
-
-
 class TestRoundFiveOn119:
-    """The typed slot keeps the reviewed width, and a present-but-empty
-    language inventory is malformed (#119 round 5, SOTA-A, both executed)."""
-
-    def test_the_ledger_scenario_a_numeral_past_its_width(self):
-        from app.message_engine import composer
-
-        assert composer.registry_authored("Execution armed: SPY OUT, median 100.0.")   # 5 wide
-        assert not composer.registry_authored("Execution armed: SPY OUT, median 999999.")
-        assert not composer.registry_authored("Execution armed: SPY OUT, median " + "9" * 400 + ".")
-        assert not composer.registry_authored("Ausfuehrung scharf: SPY OUT, Median -100.0.")
-
-    def test_every_numeric_slot_holds_its_width_and_not_one_more(self):
-        from app.alerts.phrase_registry import validate_phrase_set
-        from app.message_engine import composer
-
-        phrase_set = validate_phrase_set(V35.read_text(encoding="utf-8"))
-        checked = 0
-        for table in (phrase_set.headlines, phrase_set.phrases,
-                      phrase_set.next_checks, phrase_set.caveats):
-            for fragment in table.values():
-                numeric = [s for s in fragment.slots if s not in composer._SLOT_DOMAINS]
-                for _lang, text in fragment.texts:
-                    for slot in numeric:
-                        width = phrase_set.facts[slot].max_width
-                        for value, proved in (("9" * width, True), ("9" * (width + 1), False)):
-                            filled = text
-                            for other in fragment.slots:
-                                filled = filled.replace("{" + other + "}",
-                                                        value if other == slot else _TYPED.get(other, "7"))
-                            assert composer.registry_authored(filled) is proved, (fragment.code, slot, filled)
-                            checked += 1
-        assert checked >= 40
-
-    @pytest.mark.parametrize("value, fits", [
-        ("100.0", True), ("-10.0", True), ("12345", True), ("0", True), ("-1", True),
-        ("-100.0", False), ("1.2345", False), ("123456", False), ("1.", False), (".5", False),
-        ("", False), ("1e5", False), ("1,5", False)])
-    def test_the_numeral_of_a_width(self, value, fits):
-        import re
-
-        from app.message_engine import composer
-
-        assert (re.fullmatch(composer._numeral(5), value) is not None) is fits
+    """A present-but-empty language inventory is malformed (#119 round 5,
+    SOTA-A, executed)."""
 
     @pytest.mark.parametrize("meta", [
         {"languages": []}, {"languages": ""}, {"languages": {}}, {"languages": [""]},
@@ -303,19 +179,6 @@ class TestRoundSixOn119:
             assert validate_phrase_set(V35.read_text(encoding="utf-8"), language="en").language == "en"
         finally:
             get_settings.cache_clear()
-
-    def test_the_composers_registry_authorizes_nothing_under_it(self, monkeypatch):
-        from app.config import get_settings
-        from app.message_engine import composer
-
-        monkeypatch.setenv("MESSAGE_LANGUAGE", "fr")
-        get_settings.cache_clear()
-        monkeypatch.setattr(composer, "_REGISTRY_MATCHERS", None)
-        try:
-            assert not composer.registry_authored("Regime sonst unveraendert.")
-        finally:
-            get_settings.cache_clear()
-            composer._REGISTRY_MATCHERS = None
 
     def test_a_missing_settings_context_still_takes_the_default(self, monkeypatch):
         import app.config

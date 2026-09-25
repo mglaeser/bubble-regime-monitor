@@ -1,10 +1,46 @@
 # MESSAGE_ENGINE — LLM-written operator messages (Phase C)
 
-The engine curates one prompt per message trigger just-in-time, grounds it in
-API data plus local context, asks the configured LLM route for the sentence,
-validates the result against a hard per-channel contract, and hands the final
-text to delivery. It is a NEW subsystem in its own `MESSAGE_ENGINE_*` settings
+The engine writes one message per trigger: the model is given the trigger's
+task from the owner's prompt library, every number the caller resolved, and
+what the repository knows about the indicators behind the trigger; it writes
+the message; a few basic checks decide whether the text can go out on its
+channel; the owner's template, with the current numbers in it, goes out
+otherwise. It is its own subsystem in the `MESSAGE_ENGINE_*` settings
 namespace (ruling Q42); `app/alerts/llm_selector.py` is left untouched (Q41).
+
+## Decision 24 — the model writes; basic checks; the reader interprets
+
+The owner's ruling of 2026-09-25, which governs every decision below: "the
+generated messages should follow a system and the prompt for them should be
+including all possible numbers and references, for the LLM to create most
+context out of it - BUT the implementation should be straight forward, it
+should NOT have extensive quality gates, check the basic and the rest is also
+up to the message receiver to interpret it correctly and reflect on the data
+and message on his/her own." It ended a validator that judged the model's
+words (numbers grounded against the facts, a banned lexicon, advice and
+imperative grammar in English and German): a denylist for free text does not
+converge, and 57 review rounds on #121 and 20 on #124 showed it.
+
+- **The prompt** (`composer.prompt_for`): one fixed system paragraph (what
+  bubblegauge is, that the owner interprets, research not advice, numbers
+  as given); the entry's ROLE, TASK and DATA sections from the library with
+  the numbers filled in; every fact, by name; the references for the
+  trigger - the methodology and sources of its indicators
+  (`app/message_engine/context.py`, repo-authored text only, AGENTS.md
+  ground rule 1); and how to write: one message, in `MESSAGE_LANGUAGE`,
+  within the channel's length. The library's other sections (its hard
+  rules and output format, written for the replaced design) are not sent.
+- **The basic checks** (`app/message_engine/checks.py`): not empty, no
+  control character, no link, within the channel's length - on SMS only
+  characters GSM-7 carries, counted in septets. Nothing about what the text
+  says: a number the facts do not carry, or a word the old lexicon banned,
+  goes out as written, and that is pinned.
+- **Otherwise the template**: a reply that fails a basic check, a gateway
+  failure, a paced or budgeted-out call, a fixed trigger, a disabled engine
+  or a P1 - each sends the owner's template with the current numbers.
+- **What stays**: the governor's pacing, budget and breaker (the cost of
+  calling the model), the attempt rows, the library sign-off, provenance,
+  and the admission gate. They are not gates on the content.
 
 ## Why this is not llm_selector
 
@@ -134,17 +170,10 @@ evergreen fallback is used and the exhaustion is reported in the next digest).
 
 ## Channel contract (rulings Q27, Q29, Q30)
 
-The model's words are English only (Q30); the WIRE language is the
-operator's `MESSAGE_LANGUAGE` since decision 23 (owner instruction
-2026-09-19, amending Q30's "English only" for the wire). SMS: <=150
-characters, GSM-7-safe, no emoji, septet-accurate counting. GSM-7 (3GPP
-23.038) is the contract, not ASCII: the German letters ä ö ü Ä Ö Ü ß are
-basic-table characters, one septet each, and never force UCS-2; a character
-outside the table is refused in either language. iMessage: <=200 code points, at most 2 emoji from the allowlist.
-Rejected output is retried, never transliterated. Numerals must appear
-verbatim from the grounded facts; the banned lexicon (probability, chance,
-likely, buy, sell, guaranteed, ...) is rejected — with band names such as
-"hold" exempt, because a band name is a state, not an instruction.
+SMS: at most 150 septets, GSM-7 (3GPP 23.038) - the German letters ä ö ü Ä Ö
+Ü ß are basic-table characters, one septet each. iMessage: at most 200 code
+points (`MESSAGE_ENGINE_IMESSAGE_MAX_CHARS`). The model is told the channel's
+length and alphabet; the basic checks hold it to them (decision 24).
 
 ## Decision 6 — "did not ask" is not "tried and failed" (round 32)
 
@@ -225,41 +254,6 @@ which is where a P1's audit trail belongs. Its `source` is `deterministic`
 rather than `fallback`, which is decision 2's own word and separates "never
 asked, by rule" from "asked and gave up".
 
-## Decision 9 — the directive detector is a denylist, and that is a known limit
-
-Four rounds of the cross-vendor panel found the same class of gap in the rule
-that refuses instructions: round 29 (verb inflections), round 34 (stative
-verbs), round 37 (verbs again, after a fix that claimed to stop enumerating
-them), round 38 (the OBJECTS, and then the adjective forms in front of them).
-
-The rule now keys on SHAPE rather than vocabulary wherever it can. English
-imperatives are subjectless, so a clause that opens with one word, names a
-position, and ends there is an instruction about that position — whatever the
-verb, and whatever modifiers sit in between (counted, not recognised, because
-"safer" has an adjective ending and "quality" does not).
-
-**The object list cannot simply be deleted.** Finding a position in second
-place is what implies the first word was a verb acting on it. Without that
-anchor, "Choose safer assets." and "Gold rose." are the same shape to a regex:
-verb-first and verb-second are indistinguishable without knowing which word is
-the verb. Removing the list would either miss every directive or refuse every
-observation.
-
-So a residual risk stands, and it is stated rather than hidden: **an
-instruction naming a position noun outside the list will validate.** Closing it
-properly needs one of
-
-  * part-of-speech tagging, so imperative mood is detected rather than
-    inferred; or
-  * an ALLOWLIST of approved observational shapes — viable here because the
-    engine's message space is genuinely small (band changes, score readings,
-    flag transitions, freshness), and an allowlist fails safe where a denylist
-    fails open.
-
-The second is the better fit and is a deliberate design change, not a patch.
-It wants an owner's decision because it can refuse legitimate output, which
-the fallback then replaces — a real behaviour change on a live channel.
-
 ## Decision 10 — the engine does not commit the caller's session (round 40)
 
 Decision 1 has the engine composing ahead of delivery, and round 32 added a
@@ -290,91 +284,6 @@ id, and resolve by id afterwards. Then the caller's session is never touched
 and the lock is never held. That changes how `compose()` is invoked, so it is
 a deliberate refactor rather than a review-round patch.
 
-## Decision 11 — the directive check is an ALLOW-LIST of clause openers
-
-Five rounds enumerated what to refuse — verb inflections (29), stative verbs
-(34), verbs again (37), objects (38), adjective forms (38). Each closed the
-instance the panel named and the next round found another, because the set of
-ways to phrase an instruction is open.
-
-**The message space is NOT tiny**, which rules out the obvious inversion. The
-32 shipped fallbacks open their clauses 34 different ways, several with domain
-prose ("Borrowing against brokerage accounts has turned down from its recent
-high"), and one opener is itself a verb ("Compute run later."). An allow-list
-of whole sentence shapes would refuse legitimate output.
-
-What holds is narrower: **an imperative is SHORT and subjectless.** Every short
-clause the library writes opens with a noun, a determiner, an adverb, a ticker
-or a grounded value — never with a verb. So a clause of four words or fewer
-must open with an approved token, and the openers were EXTRACTED from the
-shipped fallbacks rather than invented. Longer clauses are exempt, which is
-what keeps the domain prose legal.
-
-Measured on nineteen imperatives that appear nowhere in the validator — dump,
-ditch, hoard, offload, unwind, deleverage, fade, front-run and others — all
-nineteen are refused, with no shipped fallback refused.
-
-The deny-lists above remain as belt-and-braces. They are no longer the primary
-defence, so their open-set problem can no longer reach the operator.
-
-**The failure direction is deliberate**: an unlisted SUBJECT costs a fallback,
-an unlisted VERB sends advice to the operator.
-
-### Decision 9, resolved (owner, 2026-09-06)
-
-Three panel rounds on the validator each found a new edge of the directive
-allow-list — a fifth word past its bound, an all-caps opener taken for a
-ticker, a bare object with no determiner. That is the signature of an open
-set, and the owner chose to stop narrowing it:
-
-* **Bridge.** The validator merges with the residual stated in the rule's own
-  docstring (`KNOWN RESIDUAL`) and pinned by a test that the statement exists.
-* **Closure, upstream.** Decision 12 below: the composer's output becomes a
-  structured selection over owner-approved phrasings with facts filled
-  verbatim by the renderer. Free text never reaches the wire, so the detector
-  becomes defence-in-depth rather than the gate.
-
-## Decision 12 — the model selects a phrasing; it does not write the wire text
-
-Closes the open set from decision 9 by construction. Each trigger's library
-entry carries `phrasings`: owner-approved sentence templates with fact slots,
-starting as the single evergreen fallback. The model is shown the phrasings
-and the facts and returns a structured choice — which phrasing — and the
-renderer fills the slots from the facts, verbatim. What reaches the wire is
-always an approved template with grounded values.
-
-The model still adds judgement (which phrasing fits the moment), and the owner
-adds phrasings by authoring, not by code. A reply that is not a valid choice
-falls back to phrasing zero. The channel contract still runs on the rendered
-result; the directive detector runs on it too and should never fire.
-
-This narrows Phase C's premise — "the model writes the sentence" — to "the
-model chooses the sentence", which is the containment `llm_selector` already
-uses for the alert path (ruling Q41), applied to the message path.
-
-### Decision 12, as built
-
-* `phrasings_for(entry)`: the library's `phrasings`, defaulting to the single
-  evergreen fallback. Variants are authoring, never code.
-* The model's reply is `{"phrasing": N}`. Tolerant of surrounding prose,
-  strict about the value; anything else is a FORMAT rejection and phrasing
-  zero is sent.
-* The rendered template is validated with **`prose_rules=False`**: the
-  channel contract and every grounding check still run; the meaning-of-prose
-  rules — lexicon, language, advice, imperatives, band-verb grammar — judge
-  model text, of which there is none on this path. This mattered immediately:
-  the owner's own `BAND_TO_*` templates were refused by the band-verb grammar
-  on "(before: hold)", which the old contract never saw because the rendered
-  fallback was never validated.
-* **Slot resolution is explicit.** 21 of 32 shipped fallbacks use lowercase
-  slots (`{band_effective}`) against `F_`-keyed facts and had always rendered
-  dashes; the test meant to catch it matched uppercase slots only. Now: exact
-  key, then `F_` form, then the two aliases the library's notes define
-  (`next_check_utc` → `F_NEXT_CHECK` as a bare time; `override_suffix`
-  computed). No shipped fallback renders a dash with its own declared facts.
-
-
-
 ## Decision 13 — the engine owns its transactions
 
 `compose()` takes no session. Every `message_engine_attempts` write is made
@@ -395,21 +304,6 @@ the truce (a claim lost with the caller's transaction on a crash, the reaper
 unreachable, the write lock held for the whole call). Callers must not hold
 an open write transaction while calling `compose()`; the dispatcher already
 sends outside transactions.
-
-## Status on main (2026-09-19)
-
-Landed, in order: #104 (schema and settings), #105 (the validator,
-standalone; 41 panel rounds), #111 (format controls at the message edges),
-#106 and #109 (the governor and its tests), #112 (the composer and the
-admission gate, standalone; 16 rounds), #113 (governor pins), #114 (composer
-pins). Nothing on main calls the engine yet: decision 1 has it compose
-BEFORE a delivery is queued, so its caller is the alert dispatcher, and
-wiring it is the go-live step under the operator's takeover decision — a
-separate PR (decision 22). Two facts the go-live PR inherits: the shipped
-prompt library is UNSIGNED, so the engine is inert until the owner signs
-its status line (decision 14); and the alert phrase registry is written in
-German while the validator's language is English, so registry text reaches
-the wire only by proof against the registry itself (decision 16).
 
 ## Decision 14 — the library must be signed before the wire
 
@@ -432,40 +326,12 @@ before the channel, the signature and admission, and its refusal logs
 nothing of the object (round 14) — until a `Composed` is proved the
 composer's, every field of it is the caller's string.
 
-## Decision 16 — a fact is a scalar, redacted, and judged before it fills a slot
+## Decision 16 — a fact is a scalar, redacted
 
-Decision 12 judges the model's words and trusts the owner's template; the
-grounding check judges numerals. A FACT was judged by nobody (#112 rounds
-4–9, 11, 15). Now, in `compose()` and again where a slot reads a fact:
-
-* only DECLARED facts fill slots (`grounding_fields`, compared by canonical
-  contract id, so `band_base`, `base_action_band` and `F_BAND_BASE` are one
-  fact); the override suffix is derived, never supplied;
-* a fact is a scalar — a dict or list renders as a dash;
-* every string passes the repository's redaction chokepoint
-  (`app.redaction.sanitize`), the one the failure alert already used;
-* a string carrying an emoji renders as a dash: data has no decoration;
-* a PHRASE (whitespace inside) is held to every meaning-of-prose rule of the
-  validator, the allow-list of clause openers included, grounded by itself
-  so only meaning is judged; an ATOM ("trim", "14:00", "51/100") is held
-  to the banned lexicon only, because alone a band name reads as an order
-  and a score as a quotient, and neither is the atom's doing;
-* a field an entry declares as `authorized_prose` is admitted only if it
-  parses as a join of the phrase registry's own fragments, in one
-  language, with each slot holding its fact's TYPED domain — a band enum,
-  the rule's asset label, an HH:MM next check, else a number — exactly
-  what the alert renderer can produce (round 8 found that trusting the
-  KEY let a caller's "sell everything now" through under it; #119 round 4
-  found that bounding a slot by width alone proved "Execution armed: SELL
-  OUT, median 99." through the asset slot);
-* a refused fact renders as a dash, is kept out of the prompt, and is
-  logged by the library's name or not at all.
-
-Why not judge the rendered sentence: the owner's templates were authored
-against `prose_rules=False`, and the validator refuses their idiom whole
-("(before: hold)" splits into a clause headed by a band word), so a
-whole-sentence judgement cannot tell a hostile fact from the template.
-Measured before it was rejected (round 5).
+A fact is a scalar - a dict or list renders as a dash - and every string
+passes the repository's redaction chokepoint (`app.redaction.sanitize`), the
+one the failure alert uses, before it reaches the prompt or a template slot
+(#112 rounds 4 and 6). The override suffix is derived, never supplied.
 
 ## Decision 17 — the transport is the channel the Composed was made for
 
@@ -482,9 +348,7 @@ sentences are the message; a fact is a value in it. `_fit_render` shortens
 a phrase fact on a word boundary, never inside a numeral, then blanks the
 longest fact to a dash, until the text fits; only a template that overflows
 on its own is clipped. A clip never lands inside a numeral either way
-(round 4), and the fallback is held to the whole channel contract — the
-emoji cap and allow-list included — with the bare event sent in its place
-when it fails (round 7).
+(round 4).
 
 ## Decision 19 — the wire and the log carry the owner's word or "unknown"
 
@@ -492,18 +356,8 @@ The bare-event line said "bubblegauge: {trigger} fired." with the caller's
 string; filtering it to an identifier was not enough, because a credential
 can be an identifier (#112 rounds 6, 7). The name is echoed only when it is
 a key of the library; otherwise the line and the record say "unknown". No
-log line carries a caller-supplied string: a refused fact is logged by the
-library's name, an unissued `Composed` not at all (rounds 11, 14).
-
-## Decision 20 — the library's writing instructions are removed before the choice
-
-The library's prompts were authored for an engine that WROTE the text and
-end in an output section asking for two labelled lines. The composer only
-appended the decision-12 selection instruction after them; "last word wins"
-was an assumption, and a model obeying the earlier one would be
-format-rejected until the compose fell back (#112 round 10, SOTA-C).
-`selection_prompt()` removes the output section and the writing bullets
-before the selection instruction is given; the library is not rewritten.
+log line carries a caller-supplied string: a fact that is not a scalar is
+logged by its kind, an unissued `Composed` not at all (rounds 11, 14).
 
 ## Decision 21 — the contract's fact ids fill the slots
 
@@ -511,45 +365,17 @@ Two entries declared the contract's source attribute (`base_action_band`,
 `missed_recompute_slots`) while the alert contract supplies the fact id
 (`F_BAND_BASE`, `F_MISSED_SLOTS`), so the live value rendered as a dash and
 was invisible to the model (#112 round 9). Every rule-driven entry declares
-contract ids; the contract's own `FACT_SOURCES` table is the slot alias
-table; a pin sweeps every headline-keyed entry for exactly this class.
-
-## Decision 22 — standalone, and what the go-live PR must do
-
-The engine has one path to a transport, `gate.emit`; it takes an issued
-`Composed`; no engine module imports a transport; and the set of app
-modules importing the engine is empty — all pinned. The go-live PR, under
-the operator's takeover decision, will: give the dispatcher a sender that
-names its channel and wraps `app.notify.sipgate` / `app.notify.imessage`;
-call `compose()` outside any write transaction (decision 13) and hand the
-`Composed` to `gate.emit`; rewrite the caller pin to name the dispatcher;
-and land the owner's signature on the library (decision 14). Until then
-the engine is a library, reviewed as one.
+contract ids, and the contract's own `FACT_SOURCES` table is the slot alias
+table.
 
 ## Decision 23 — one language switch for both paths
 
 The operator asked for every message in either English or German, chosen
-by setting. `MESSAGE_LANGUAGE` (`en` | `de`) is that switch, and it is one
-setting because the two paths must never disagree in a single day's
-messages. The alert phrase set carries both languages since v3.5 (see
-docs/ALERT_SYSTEM.md: one promotion admits the whole reviewed set, every
-language held to the worst-case fit). The prompt library carries, per
-entry, `translations.<lang>` with the same keys as the entry - `fallback`,
-optional `phrasings`, `must_mention` where the entry has one - and the
-composer selects that language's phrasings, checks the mandate in that
-language, and tells the model which language the phrasings are written
-in. The prompts stay English: the model selects, it does not write, so
-the language of its instructions and the language of the wire are
-independent by construction (decision 12).
-
-What does not change with the language: the validator. Its meaning-of-
-prose rules are English and they judge the MODEL's words, which never
-reach the wire; the German fallbacks are the owner's templates, held to
-the same runtime contract as the English ones (grounding, format, the
-channel caps) and reviewed in the PR that added them, exactly as the
-English were signed. A fact that is a phrase is still screened by the
-English rules, which is why registry text - now in either language - is
-admitted by proof against the registry rather than by judgement
-(decision 16). An entry without a translation for the selected language
-renders in the library's own language: the owner's words in one language
-beat no words at all, and the case is pinned.
+by setting. `MESSAGE_LANGUAGE` (`en` | `de`) is that switch, one setting so
+the two paths never disagree in a single day's messages. The alert phrase
+set carries both languages since v3.5 (docs/ALERT_SYSTEM.md). The prompt
+library carries, per entry, `translations.<lang>` with its `fallback`
+template; the composer asks the model to write in the selected language and
+sends that language's template otherwise. An entry without a translation
+for the selected language renders in the library's own language: the
+owner's words in one language beat no words at all.

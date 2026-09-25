@@ -118,15 +118,14 @@ class TestEngineOn:
         _admitted(monkeypatch)
         sends: list[str] = []
         self._sent(monkeypatch, sends)
-        monkeypatch.setattr(composer, "complete",
-                            lambda **_kw: type("C", (), {"text": '{"phrasing": 0}'})())
+        reply = "bubblegauge 51/100, band trim: valuations lead the reading, credit stays calm."
+        monkeypatch.setattr(composer, "complete", lambda **_kw: type("C", (), {"text": reply})())
         monkeypatch.setattr(digest, "generate_sms_body",
                             lambda snap: (_ for _ in ()).throw(AssertionError("old path used")))
         out = digest.send_daily_digest()
         assert out["status"] == "sent" and out["engine"] is True and out["transport"] == "imessage"
         assert out["source"] == "generated" and out["llm_used"] is True
-        assert sends == [out["message"]]
-        assert out["message"] == "bubblegauge 51/100 trim. range 40-61. SPY up, QQQ flat. Flags 2/4."
+        assert sends == [out["message"]] and out["message"] == reply
         with session_scope() as s:
             rows = s.query(MessageEngineAttempt).all()
             assert [r.outcome for r in rows] == ["ok"] and rows[0].trigger == "daily_digest"
