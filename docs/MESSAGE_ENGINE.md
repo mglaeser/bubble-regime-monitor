@@ -579,13 +579,13 @@ puts its verb second. The set has these parts:
   after "zu"/"zur"/"zum" ("zur Vorsicht geraten"; "unter Druck geraten" is
   another verb) (#124 round 8), anywhere before it in its clause ("zu
   großer Vorsicht am Markt geraten"; the infinitive's "um nicht unter
-  Druck zu geraten" stays), and "gut beraten" (#124 round 13). The noun
-  "die Rate", capitalised (not in capitals) and after a determiner, is not
-  banned; "Alle raten ..." is the verb (#124 round 1). German joins its
-  words, so the stems that are always advice or forecast are banned inside
-  a compound too ("Kaufempfehlung", "Kursprognose", "Crashgefahr"); "kauf"
-  only with an advice part, since "Verkaufsdruck" describes the market
-  (#124 round 3).
+  Druck zu geraten" stays), and "gut beraten" (#124 round 13); "dazu
+  geraten" too (#124 round 18). The noun "die Rate", capitalised (not in
+  capitals) and after a determiner, is not banned; "Alle raten ..." is the
+  verb (#124 round 1). German joins its words, so the stems that are
+  always advice or forecast are banned inside a compound too
+  ("Kaufempfehlung", "Kursprognose", "Crashgefahr"); "kauf" only with an
+  advice part, since "Verkaufsdruck" describes the market (#124 round 3).
 - **An advice and forecast grammar.** It covers reader-directed modals,
   the subject-first modal, impersonal recommendations, the passive modal,
   "ist zu verkaufen" and "zu" infixed in a separable verb. A forecast's
@@ -634,31 +634,33 @@ puts its verb second. The set has these parts:
   The fractions ("ein Fünftel") are checked in every German message, as
   the cardinals are, and "Milliarde" makes "milliardste" (#124 round 12).
   The counts and multiples in "-mal" and "-fach" are generated from every
-  number word, the mixed numbers included ("anderthalbmal"). "ein"/"eine"
-  counts as the number one before a counted noun, read by one scanner that
-  walks the whole noun phrase: any number of lowercase modifiers, then the
-  run of capitalised words, ending at the first lowercase word after it
-  that is no inflected adjective - a verb or a function word ("Ein
-  Berliner politisches Warnsignal" is one phrase, #124 round 17). A
-  counted noun anywhere in the phrase is the count, since a capitalised
-  word can be an adjective ("Eine Berliner Warnflagge", #124 round 4); a
-  ticker in capitals is a modifier. A period counts by the head of its
-  compound ("seit einem Handelstag", "Geschäftsjahr"), "Quartal" and
-  "Dekade" among them (#124 round 13). A comma between two modifiers, and
-  a bracket or a quote before the nouns, stay inside the phrase ("Eine
-  aktive, bestätigte Warnflagge", #124 round 5), and so does a comma after
-  the nouns ("Eine Berliner, bestätigte Warnflagge") unless a clause opens
-  after it ("Ein Treiber, der ...") (#124 round 11). The lexical counts -
-  the ordinal adverbs from "drittens" up, the fractions, the plural scale
-  words, "zweierlei", the numbered periods - are numbers in model text of
-  either language, and so are the quantifiers ("beide", "single", "pair")
-  where a counted noun stands in their clause, before or after them,
-  however many modifiers between ("beide Flaggen", "Die Warnflaggen sind
-  beide aktiv"; "Gold und Bargeld hielten beide" counts nothing) (#124
-  rounds 15 and 16). The ordinals include "nullte" (#124 round 16).
-  "achte" and "achten" are the verb as well ("achten auf"), so they count
-  as the ordinal only after a determiner ("im achten Monat", #124 round
-  8).
+  number word, the mixed numbers included ("anderthalbmal"), and so are
+  the verbs and nouns of a multiple ("Vervierfachung", "verfünffacht" -
+  #124 round 18). The fractions and the scale nouns have their genitive
+  ("eines Drittels", "eines Dutzends", #124 round 18). "ein"/"eine" counts
+  as the number one before a counted noun, read by one scanner that walks
+  the whole noun phrase: any number of lowercase modifiers, then the run
+  of capitalised words, ending at the first lowercase word after it that
+  is no inflected adjective - a verb or a function word ("Ein Berliner
+  politisches Warnsignal" is one phrase, #124 round 17). A counted noun
+  anywhere in the phrase is the count, since a capitalised word can be an
+  adjective ("Eine Berliner Warnflagge", #124 round 4); a ticker in
+  capitals is a modifier. A period counts by the head of its compound
+  ("seit einem Handelstag", "Geschäftsjahr"), "Quartal" and "Dekade" among
+  them (#124 round 13). A comma between two modifiers, and a bracket or a
+  quote before the nouns, stay inside the phrase ("Eine aktive, bestätigte
+  Warnflagge", #124 round 5), and so does a comma after the nouns ("Eine
+  Berliner, bestätigte Warnflagge") unless a clause opens after it ("Ein
+  Treiber, der ...") (#124 round 11). The lexical counts - the ordinal
+  adverbs from "drittens" up, the fractions, the plural scale words,
+  "zweierlei", the numbered periods - are numbers in model text of either
+  language, and so are the quantifiers ("beide", "single", "pair") where a
+  counted noun stands in their clause, before or after them, however many
+  modifiers between ("beide Flaggen", "Die Warnflaggen sind beide aktiv";
+  "Gold und Bargeld hielten beide" counts nothing) (#124 rounds 15 and
+  16). The ordinals include "nullte" (#124 round 16). "achte" and "achten"
+  are the verb as well ("achten auf"), so they count as the ordinal only
+  after a determiner ("im achten Monat", #124 round 8).
 - **The reader is not addressed.** A German message never addresses its
   reader: "..., reduziert eure Positionen" passed, the verb's form being a
   statement's too, and any verb outside the stems would pass with it

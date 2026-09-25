@@ -1688,3 +1688,28 @@ class TestRoundSeventeenOn124:
         result = validate(text, channel=Channel.IMESSAGE, facts=DIGEST_FACTS, prose_rules=True, language="de",
                           **LIMITS)
         assert result.ok, (text, result.reason)
+
+
+class TestRoundEighteenOn124:
+    """#124 round 18, SOTA-A, three defects, all executed; SOTA-C approved;
+    SOTA-B timed out. "dazu geraten" is advice; the fractions and the
+    scale nouns have their genitive ("eines Drittels", "eines Dutzends");
+    and the verbs and nouns of a multiple are generated ("Vervierfachung",
+    "verfünffacht"), with the English ones past four ("quintupled")."""
+
+    @pytest.mark.parametrize("text, language, reason", [
+        ("Die Bewertungen sind hoch; Analysten haben dazu geraten.", "de", "banned lexicon"),
+        ("Der Kurs liegt innerhalb eines Drittels der Spanne, die Lage bleibt ruhig.", "de", "no numbers"),
+        ("Die Lage ist angespannt, die Breite ist das Ergebnis eines Dutzends Signale.", "de", "no numbers"),
+        ("Die Vervierfachung der Bewertungen prägt die Lage, die Stimmung bleibt ruhig.", "de", "no numbers"),
+        ("Die Bewertungen haben sich verfünffacht, die Lage bleibt ruhig.", "de", "no numbers"),
+        ("Valuations quintupled while credit stays calm.", "en", "no numbers"),
+    ])
+    def test_the_forms_left_out_are_refused(self, text, language, reason):
+        result = validate_context(text, language=language, max_chars=200)
+        assert not result.ok and reason in (result.reason or ""), (text, result.reason)
+
+    def test_vervielfachen_is_no_number(self):
+        result = validate_context("Die Bewertungen sind hoch und vervielfachen sich nicht, die Lage bleibt ruhig.",
+                                  language="de", max_chars=200)
+        assert result.ok, result.reason

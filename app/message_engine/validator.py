@@ -1129,7 +1129,9 @@ def _raten_de(text: str) -> str | None:
                 if earlier in ".;:!?,()":
                     break
                 clause.append(earlier.lower())
-            if {"zu", "zur", "zum"} & set(clause):
+            # ...and the pronominal "dazu": "Analysten haben dazu geraten"
+            # (#124 round 18, SOTA-A)
+            if {"zu", "zur", "zum", "dazu", "hierzu", "wozu"} & set(clause):
                 return "geraten"
         # "gut beraten" is advice ("Anleger sind gut beraten, ...")
         if token.lower() == "beraten" and i > 0 and tokens[i - 1].lower() in {"gut", "besser", "schlecht", "wohl"}:
@@ -1323,7 +1325,8 @@ _ORDINALS_DE: frozenset[str] = _with_folded(frozenset(
 _FRACTIONS_DE: frozenset[str] = _with_folded(frozenset(
     _german_ordinal_stem(cardinal) + ending
     for cardinal in _NUMBER_WORDS_DE - _NOT_CARDINAL_DE - {"null", "eins", "zwei"}
-    for ending in ("el", "eln")))
+    # the genitive too: "innerhalb eines Drittels" (#124 round 18, SOTA-A)
+    for ending in ("el", "eln", "els")))
 #: COUNTS AND MULTIPLES: "the flag fired twice", "spreads doubled",
 #: "dreimal", "verdoppelt" report a count or a ratio (#121 round 55, SOTA-A).
 #: Generated from the cardinals where the language builds them ("twofold",
@@ -1342,10 +1345,17 @@ _QUANTITY_WORDS: frozenset[str] = _with_folded(
                 for word in _NUMBER_WORDS_DE - {"null", "eins"}
                 for ending in ("", "e", "en", "er", "es", "em"))
     | frozenset("""halb halbe halben halber halbes halbem halbiert halbierte halbierten halbieren
-                   halbierung doppelt doppelte doppelten doppelter doppeltes doppeltem verdoppelt
-                   verdoppelte verdoppelten verdoppeln verdoppelung verdopplung verdreifacht
-                   verdreifachte verdreifachten verdreifachen verdreifachung vervierfacht
-                   vervierfachte vervierfachen""".split()))
+                   halbierung halbierungen doppelt doppelte doppelten doppelter doppeltes doppeltem
+                   verdoppelt verdoppelte verdoppelten verdoppeltem verdoppelter verdoppeltes verdoppeln
+                   verdoppelung verdopplung verdoppelungen verdopplungen""".split())
+    # ...and the verbs and nouns of a multiple, GENERATED from the cardinals:
+    # "Vervierfachung" was left out of a list (#124 round 18, SOTA-A)
+    | frozenset("ver" + word + "fach" + ending
+                for word in _NUMBER_WORDS_DE - _NOT_CARDINAL_DE - {"null", "eins", "zwei"}
+                for ending in ("t", "te", "ten", "tem", "ter", "tes", "en", "ung", "ungen"))
+    # ...and the English multiples past four
+    | frozenset(stem + ending for stem in ("quintupl", "sextupl", "septupl", "octupl", "decupl")
+                for ending in ("e", "ed", "es", "ing")))
 
 
 
@@ -2714,7 +2724,7 @@ _LEXICAL_COUNTS: frozenset[str] = (
         {_german_ordinal_stem(cardinal) + "ens"
          for cardinal in _NUMBER_WORDS_DE - _NOT_CARDINAL_DE - {"null", "eins", "zwei"}}
         | _FRACTIONS_DE
-        | {scale + ending for scale in ("dutzend", "hundert", "tausend") for ending in ("e", "en")}
+        | {scale + ending for scale in ("dutzend", "hundert", "tausend") for ending in ("e", "en", "s")}
         | {cardinal + "erlei" for cardinal in _NUMBER_WORDS_DE - _NOT_CARDINAL_DE - {"null", "eins"}}
         | {"dekade", "dekaden"}))
     | frozenset(scale + "s" for scale in ("dozen", "hundred", "thousand", "million", "billion"))
