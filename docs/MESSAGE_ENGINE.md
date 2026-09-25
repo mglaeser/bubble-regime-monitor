@@ -32,15 +32,17 @@ converge, and 57 review rounds on #121 and 20 on #124 showed it.
   channel's length. A fact the entry does not declare never reaches the
   model (#126 round 1), and a string fact is one of the monitor's own
   values - an action or trend state, a number written as text, a block
-  summary - or the bounded prior judgment; anything else renders as a
+  summary keyed by the indicators' own ids - or the bounded prior
+  judgment; anything else renders as a
   dash and stays out of the prompt (AGENTS.md ground rule 1; #126 round
   2). The library's other sections (its hard rules and output format,
   written for the replaced design) are not sent.
 - **The basic checks** (`app/message_engine/checks.py`): something visible,
-  no control or invisible character, no link (any URI - a scheme and its
-  colon - "www.", a bare domain or an address in any case), within the
-  channel's length - on SMS only characters GSM-7 carries, counted in
-  septets. The template meets them too: a template a
+  no control character and nothing that draws nothing (Unicode's
+  default-ignorable code points, admitted only inside an emoji sequence),
+  no link (any URI - a scheme and its colon - "www.", a bare domain or an
+  address in any case and script), within the channel's length - on SMS
+  only characters GSM-7 carries, counted in septets. The template meets them too: a template a
   fact broke sends the bare event. Nothing about what the text
   says: a number the facts do not carry, or a word the old lexicon banned,
   goes out as written, and that is pinned.

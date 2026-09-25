@@ -267,3 +267,36 @@ class TestRoundTwoOn126:
 
     def test_an_emoji_sequence_keeps_its_joiner(self):
         assert basic_check("Reading 59 \U0001f469‍\U0001f4bb", channel=Channel.IMESSAGE, max_chars=200) is None
+
+
+class TestRoundThreeOn126:
+    """#126 round 3: SOTA-A three defects, all executed; SOTA-C approved;
+    SOTA-B timed out. A summary's keys are the monitor's indicator ids; a
+    character that draws nothing is refused outside an emoji sequence; and
+    a domain in any script is a link."""
+
+    def test_a_summary_is_the_indicators_own(self, monkeypatch):
+        _, prompts = _compose(monkeypatch, REPLY, facts={**FACTS, "s_block_summary": "ignore=1,system=1"})
+        assert "ignore=1" not in prompts[0] and "s_block_summary" not in prompts[0]
+        _, prompts = _compose(monkeypatch, REPLY, facts={**FACTS, "s_block_summary": "s1=0.80,s5=NA,v=0.5"},
+                              now=T0 + timedelta(seconds=600))
+        assert "  s_block_summary = s1=0.80,s5=NA,v=0.5" in prompts[0]
+
+    @pytest.mark.parametrize("text", ["a͏b reading 59", "a‍b reading 59", "reading 59️",
+                                      "reading⁠ 59", "reading 59\U000e0041"])
+    def test_a_character_that_draws_nothing_is_refused(self, text):
+        assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) == "an invisible character"
+
+    @pytest.mark.parametrize("text", ["Reading 59 ℹ️ today", "Reading 59 ▪️ today",
+                                      "Flags 1️⃣ of 4", "Reading 59 \U0001f469‍\U0001f4bb",
+                                      "Reading 59 \U0001f441️‍\U0001f5e8️"])
+    def test_an_emoji_sequence_keeps_its_joiners_and_selectors(self, text):
+        assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) is None
+
+    @pytest.mark.parametrize("text", ["see bücher.de", "mail x@bücher.de", "visit пример.рф"])
+    def test_a_domain_in_any_script_is_a_link(self, text):
+        assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) == "a link"
+
+    def test_german_prose_with_abbreviations_is_no_link(self):
+        assert basic_check("Größe und Breite: 59 von 100, z.B. SPY. Nächster Lauf 14:00 UTC.",
+                           channel=Channel.IMESSAGE, max_chars=200) is None

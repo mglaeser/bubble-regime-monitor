@@ -39,6 +39,7 @@ from app.message_engine import governor as gov
 from app.message_engine.checks import basic_check
 from app.message_engine.validator import Channel
 from app.redaction import sanitize
+from app.references import REGISTRY
 
 log = get_logger(__name__)
 
@@ -241,7 +242,10 @@ def _redacted(value: object) -> object:
 #: and "Sell everything now").
 _ENUM_VALUES = frozenset(ACTION_STATES) | {"IN", "OUT", "unknown", "?", "n/a", ""}
 _TEXT_NUMBER_RE = re.compile(r"[+\-\u2212]?\d[\d.,:/%\-]*(?:T[\d:.]+Z?)?")
-_SUMMARY_RE = re.compile(r"[a-z]+\d*=(?:[+-]?\d+(?:\.\d+)?|NA)(?:,[a-z]+\d*=(?:[+-]?\d+(?:\.\d+)?|NA))*")
+#: ...a summary's keys are the monitor's own indicator ids: "ignore=1,system=1"
+#: had the shape of one (#126 round 3, SOTA-A)
+_SUMMARY_ITEM = "(?:" + "|".join(sorted(REGISTRY, key=len, reverse=True)) + r")=(?:[+-]?\d+(?:\.\d+)?|NA)"
+_SUMMARY_RE = re.compile(_SUMMARY_ITEM + "(?:," + _SUMMARY_ITEM + ")*")
 _JUDGMENT_KEY = "judgment"
 _JUDGMENT_MAX = 400
 
