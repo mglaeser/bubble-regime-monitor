@@ -1575,3 +1575,48 @@ class TestRoundFourteenOn124:
     def test_a_clause_start_and_the_noun_stay(self, text):
         result = validate_context(text, language="de", max_chars=200)
         assert result.ok, (text, result.reason)
+
+
+class TestRoundFifteenOn124:
+    """#124 round 15, SOTA-A, three defects, all executed; SOTA-C approved;
+    SOTA-B timed out. Model text of either language refuses the number
+    words of both languages ("vier flags" in English), the lexical counts
+    ("thirdly", "sixes"), and a quantifier before a counted noun ("both
+    flags"); "Gold and cash both held." names its two and counts nothing
+    (#100)."""
+
+    EN = "bubblegauge 59/100, band trim. "
+    DE = "Der Wert liegt bei 59 von 100. "
+
+    @pytest.mark.parametrize("text, language", [
+        (EN + "vier flags are active while valuations are stretched.", "en"),
+        (EN + "Both flags are active while valuations are stretched.", "en"),
+        (EN + "Both of the flags are active while valuations are stretched.", "en"),
+        (EN + "A pair of signals is active while valuations are stretched.", "en"),
+        (EN + "Thirdly, valuations are stretched.", "en"),
+        (DE + "Beide Flaggen sind aktiv, die Lage ist angespannt.", "de"),
+        (DE + "Drittens ist die Lage angespannt.", "de"),
+    ])
+    def test_a_count_in_model_text_is_refused(self, text, language):
+        result = validate(text, channel=Channel.IMESSAGE, facts=DIGEST_FACTS, prose_rules=True, language=language,
+                          **LIMITS)
+        assert not result.ok and "spelled-out number" in (result.reason or ""), (text, result.reason)
+
+    @pytest.mark.parametrize("text, language", [
+        ("Gold and cash both held.", "en"),
+        (DE + "Gold und Bargeld hielten beide, die Lage ist angespannt.", "de"),
+        (DE + "Erstens ist die Lage angespannt.", "de"),
+        (EN + "Valuations are stretched while credit is null and void.", "en"),
+    ])
+    def test_a_quantifier_that_names_its_items_and_the_first_stay(self, text, language):
+        result = validate(text, channel=Channel.IMESSAGE, facts=DIGEST_FACTS, prose_rules=True, language=language,
+                          **LIMITS)
+        assert result.ok, (text, result.reason)
+
+    def test_the_plural_of_six_is_sixes(self):
+        from app.message_engine.validator import _CONTEXT_NUMBER_WORDS, _english_plural
+
+        assert _english_plural("six") == "sixes" and _english_plural("twenty") == "twenties"
+        assert "sixes" in _CONTEXT_NUMBER_WORDS and "sixs" not in _CONTEXT_NUMBER_WORDS
+        result = validate_context("Valuations come in sixes while credit stays calm.", language="en", max_chars=200)
+        assert not result.ok and "no numbers" in (result.reason or ""), result.reason

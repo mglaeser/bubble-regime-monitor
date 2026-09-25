@@ -1096,6 +1096,16 @@ def _reader_addressed_de(text: str) -> str | None:
     return None
 
 
+def _german_number(word: str) -> bool:
+    """A German number word in ENGLISH text: "vier flags" stood against a
+    count of one (#124 round 15, SOTA-A). "null" and "elf" are English
+    words too."""
+    if word in ("null", "elf"):
+        return False
+    return bool(word in _NUMBER_WORDS_DE or word in _FRACTIONS_DE or word in _ORDINALS_DE
+                or _COMPOUND_NUMBER_DE_RE.fullmatch(word))
+
+
 def _raten_de(text: str) -> str | None:
     """A finite form of "raten" that is not the noun "Rate", or None. The
     noun is capitalised AND follows a determiner ("die Rate", "alle
@@ -2165,7 +2175,9 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
         word = match.group(0)
         head = word.split("-")[0]
         if (head not in _NUMBER_WORDS and word not in _NUMBER_WORDS
-                and not (prose_rules and head in _ORDINALS)):
+                and not (prose_rules and (head in _ORDINALS or head in _LEXICAL_COUNTS
+                                          or (head in _QUANTIFIERS and _quantifies_a_count(judged_lower, match.end()))
+                                          or (not german and _german_number(head))))):
             continue
         # A cardinal modifying a TIME UNIT describes the rule, not a reading:
         # the S3 fallback says "over two years", which is the lookback the
@@ -2655,50 +2667,86 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
 #: Every word that is a number in either language: the cardinals, the
 #: ordinals with "first"/"second" and "erste"/"zweite" and "erstmals", and
 #: the counts and multiples. A context carries none of them.
-_CONTEXT_NUMBER_WORDS: frozenset[str] = (
-    _NUMBER_WORDS | _ORDINALS | frozenset({"first", "second", "firstly", "secondly"})
-    | _NUMBER_WORDS_DE | _ORDINALS_DE | _QUANTITY_WORDS
-    | _with_folded(frozenset(
-        stem + ending for stem in ("erst", "zweit") for ending in ("e", "en", "er", "es", "em")))
-    | frozenset({"erstmals", "erstmalig", "erstmalige", "erstmaligen", "erstmaliger", "erstmaliges",
-                 "erstmaligem"})
-    # ...and "once"/"einmal", words elsewhere ("noch einmal", "once the
-    # range settles"), a count in a context: "The flag fired once." (#124
-    # round 2, SOTA-A). A context has "when" and "wieder" for the rest.
-    | frozenset({"once", "einmal", "einmalig", "einmalige", "einmaligen", "einmaliger", "einmaliges",
-                 "einmaligem"})
-    # ...and the ORDINAL ADVERBS, generated from the ordinals: "Fourthly,
-    # valuations remain stretched" passed (#124 round 7, SOTA-A), and so did
-    # "drittens". With them the rest of the number vocabulary the lists
-    # left out: the scale words in the plural ("hundreds of stocks",
-    # "Tausende"), the fractions ("a quarter of", "ein Fünftel"), "pair",
-    # and "single", the multiple of one beside "double" and "triple".
-    | frozenset(_english_ordinal(cardinal) + "ly" for cardinal in _NUMBER_WORDS - {"one", "two", "dozen"})
+def _english_plural(word: str) -> str:
+    """The plural of a cardinal as a noun: "tens", "sixes", "twenties"."""
+    if word.endswith("y"):
+        return word[:-1] + "ies"
+    if word.endswith(("x", "s", "ch", "sh")):
+        return word + "es"
+    return word + "s"
+
+
+#: THE LEXICAL COUNTS: words that are a number without being a cardinal,
+#: an ordinal or a multiple. Model text of either language refuses them
+#: (validate, prose rules) - "both flags" stood against a count of one
+#: (#124 round 15, SOTA-A) - and so does a context:
+#: - the ordinal adverbs from "thirdly"/"drittens" up ("Fourthly, ...",
+#:   #124 round 7); "firstly"/"secondly" and "erstens"/"zweitens" are
+#:   words in model text as "first"/"second" are, and a context's numbers;
+#: - the fractions ("a quarter", "ein Fünftel") and the scale words in the
+#:   plural ("hundreds", "Tausende"), and the plural cardinals ("tens",
+#:   "sixes", "the twenties"; "ones" is a pronoun) (#124 rounds 7, 11, 15);
+#: - "zweierlei" and its family (#124 round 11);
+#: - the periods that are a number ("decade", "Dekade", "fortnight",
+#:   "biweekly") (#124 rounds 10 and 13).
+#: The QUANTIFIERS below count only where they quantify a counted noun.
+_LEXICAL_COUNTS: frozenset[str] = (
+    frozenset(_english_ordinal(cardinal) + "ly" for cardinal in _NUMBER_WORDS - {"one", "two", "dozen"})
     | _with_folded(frozenset(
         {_german_ordinal_stem(cardinal) + "ens"
-         for cardinal in _NUMBER_WORDS_DE - _NOT_CARDINAL_DE - {"null"}}
+         for cardinal in _NUMBER_WORDS_DE - _NOT_CARDINAL_DE - {"null", "eins", "zwei"}}
         | _FRACTIONS_DE
-        | {scale + ending for scale in ("dutzend", "hundert", "tausend") for ending in ("e", "en")}))
+        | {scale + ending for scale in ("dutzend", "hundert", "tausend") for ending in ("e", "en")}
+        | {cardinal + "erlei" for cardinal in _NUMBER_WORDS_DE - _NOT_CARDINAL_DE - {"null", "eins"}}
+        | {"dekade", "dekaden"}))
     | frozenset(scale + "s" for scale in ("dozen", "hundred", "thousand", "million", "billion"))
-    # ...and the words that count without a number word: "Beide
-    # Warnflaggen sind aktiv" is a count of two (#124 round 11, SOTA-A);
-    # "both", "zweierlei", "sole", "trio" and the plural cardinals ("tens",
-    # "the twenties") are the same ("ones" is a pronoun).
-    | _with_folded(frozenset({"beide", "beiden", "beider", "beides", "beidem"}
-                             | {cardinal + "erlei" for cardinal in _NUMBER_WORDS_DE - _NOT_CARDINAL_DE
-                                - {"null", "eins"}}
-                             | {"duo", "duos", "trio", "trios", "quartett", "quartette", "quintett",
-                                "quintette"}))
-    | frozenset("""both sole lone duo duos trio trios quartet quartets quintet quintets twin twins""".split())
-    | frozenset((cardinal[:-1] + "ies" if cardinal.endswith("y") else cardinal + "s")
-                for cardinal in _NUMBER_WORDS - {"one"})
-    # ...and the periods that are a number: "the highest in a decade" is a
-    # ten-year claim no fact grounds (#124 round 10).
-    | frozenset({"dekade", "dekaden"})
-    | frozenset("""decade decades century centuries millennium millennia fortnight fortnights fortnightly
-                   biweekly bimonthly biannual biannually semiannual semiannually biennial biennially
-                   triennial triennially""".split())
-    | frozenset({"quarter", "quarters", "pair", "pairs", "single"}))
+    | frozenset(_english_plural(cardinal) for cardinal in _NUMBER_WORDS - {"one"}) | {"zeroes"}
+    | frozenset("""quarter quarters decade decades century centuries millennium millennia fortnight
+                   fortnights fortnightly biweekly bimonthly biannual biannually semiannual semiannually
+                   biennial biennially triennial triennially""".split()))
+#: THE QUANTIFIERS: "both", "beide", "single", "pair", "trio" and their
+#: family count two or one of something - where they quantify a counted
+#: noun: "Both flags are active" stood against a count of one (#124 round
+#: 15, SOTA-A), while "Gold and cash both held." names its two and counts
+#: nothing (#100). Model text refuses them before a counted noun; a
+#: context refuses them anywhere.
+_QUANTIFIERS: frozenset[str] = (
+    _with_folded(frozenset({"beide", "beiden", "beider", "beides", "beidem", "duo", "duos", "trio", "trios",
+                            "quartett", "quartette", "quintett", "quintette"}))
+    | frozenset("""both sole lone single pair pairs duo duos trio trios quartet quartets quintet quintets
+                   twin twins""".split()))
+#: The nouns a quantifier counts, in English; German reads _counted_de.
+_COUNTED_EN = frozenset("""flag flags signal signals indicator indicators warning warnings alert alerts
+    trigger triggers block blocks component components reading readings event events time times day days
+    week weeks month months year years quarter quarters session sessions point points""".split())
+#: What stands between a quantifier and its noun: "both of the flags".
+_QUANTIFIER_FILLERS = frozenset("""of the these those its their our von der die das den dem des""".split())
+
+
+def _quantifies_a_count(text: str, end: int) -> bool:
+    """Whether the quantifier ending at `end` quantifies a counted noun
+    among the next two words: "both flags", "a pair of signals", "the
+    single biggest counter-signal"."""
+    following = [w for w in re.findall(r"[a-zäöüß]+(?:-[a-zäöüß]+)*", text[end:end + 80])
+                 if w not in _QUANTIFIER_FILLERS][:2]
+    return any(word.rsplit("-", 1)[-1] in _COUNTED_EN or _counted_de(word) for word in following)
+
+#: A CONTEXT'S NUMBERS: every number word of both languages, the ordinals
+#: and their adverbs "first"/"second"/"erste"/"zweite" included, the
+#: counts, multiples and lexical counts, "erstmals", and "once"/"einmal" -
+#: words elsewhere ("noch einmal", "once the range settles"), a count in a
+#: context: "The flag fired once." (#124 round 2, SOTA-A). A context has
+#: "when" and "wieder" for the rest.
+_CONTEXT_NUMBER_WORDS: frozenset[str] = (
+    _NUMBER_WORDS | _ORDINALS | frozenset({"first", "second", "firstly", "secondly"})
+    | _NUMBER_WORDS_DE | _ORDINALS_DE | _QUANTITY_WORDS | _LEXICAL_COUNTS | _QUANTIFIERS
+    | _with_folded(frozenset(
+        {stem + ending for stem in ("erst", "zweit") for ending in ("e", "en", "er", "es", "em")}
+        | {"erstens", "zweitens"}))
+    | frozenset({"erstmals", "erstmalig", "erstmalige", "erstmaligen", "erstmaliger", "erstmaliges",
+                 "erstmaligem"})
+    | frozenset({"once", "einmal", "einmalig", "einmalige", "einmaligen", "einmaliger", "einmaliges",
+                 "einmaligem"}))
 
 
 #: A Roman numeral is a number: "Risk remains at level IV." (#124 round 4,

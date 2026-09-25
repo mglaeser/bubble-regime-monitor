@@ -646,9 +646,14 @@ puts its verb second. The set has these parts:
   a bracket or a quote before the nouns, stay inside the phrase ("Eine
   aktive, bestätigte Warnflagge", #124 round 5), and so does a comma after
   the nouns ("Eine Berliner, bestätigte Warnflagge") unless a clause opens
-  after it ("Ein Treiber, der ...") (#124 round 11). "achte" and "achten"
-  are the verb as well ("achten auf"), so they count as the ordinal only
-  after a determiner ("im achten Monat", #124 round 8).
+  after it ("Ein Treiber, der ...") (#124 round 11). The lexical counts -
+  the ordinal adverbs from "drittens" up, the fractions, the plural scale
+  words, "zweierlei", the numbered periods - are numbers in model text of
+  either language, and so are the quantifiers ("beide", "single", "pair")
+  before a counted noun ("beide Flaggen"; "Gold und Bargeld hielten beide"
+  counts nothing) (#124 round 15). "achte" and "achten" are the verb as
+  well ("achten auf"), so they count as the ordinal only after a
+  determiner ("im achten Monat", #124 round 8).
 - **The reader is not addressed.** A German message never addresses its
   reader: "..., reduziert eure Positionen" passed, the verb's form being a
   statement's too, and any verb outside the stems would pass with it
@@ -675,7 +680,11 @@ in the form it ended in: a generated rule where the item came from a list.
 The residual is stated, not hidden: the advice and imperative rules
 enumerate verbs, so an instruction with a verb outside the lists passes.
 That is the residual of decision 9, in German. The English path of
-`validate()` is unchanged by this decision.
+`validate()` changes in one respect (#124 round 15): its model text
+refuses the German number words ("vier flags"; "null" and "elf" are
+English words), the lexical counts, and a quantifier before a counted
+noun ("both flags"; "Gold and cash both held." names its two and
+counts nothing, as #100 pinned).
 
 **A context carries no numbers.** `validate_context(text, language,
 max_chars)` judges the context a model writes for a message. It applies
