@@ -1654,3 +1654,37 @@ class TestRoundSixteenOn124:
     def test_null_has_its_ordinal(self):
         result = validate_context("Am nullten Tag bleiben die Bewertungen hoch.", language="de", max_chars=200)
         assert not result.ok and "no numbers" in (result.reason or ""), result.reason
+
+
+class TestRoundSeventeenOn124:
+    """#124 round 17, SOTA-A, two defects, both executed; SOTA-C approved;
+    SOTA-B timed out. The informal address is generated in every form
+    ("deins", "euers"); and after the phrase's capitalised words an
+    inflected adjective continues it ("Ein Berliner politisches
+    Warnsignal"), a verb or a function word ends it."""
+
+    @pytest.mark.parametrize("text", [
+        "Die Entscheidung ist deins, die Bewertungen sind hoch.",
+        "Die Wahl ist euers, die Bewertungen sind hoch.",
+    ])
+    def test_every_informal_form_addresses_the_reader(self, text):
+        result = validate_context(text, language="de", max_chars=200)
+        assert not result.ok and "addresses the reader" in (result.reason or ""), (text, result.reason)
+
+    @pytest.mark.parametrize("text", [
+        "Der Wert liegt bei 59 von 100. Ein Berliner politisches Warnsignal ist aktiv.",
+        "Der Wert liegt bei 59 von 100. Eine Frankfurter neue Warnflagge ist aktiv.",
+    ])
+    def test_an_adjective_after_the_capitalised_words_stays_in_the_phrase(self, text):
+        result = validate(text, channel=Channel.IMESSAGE, facts=DIGEST_FACTS, prose_rules=True, language="de",
+                          **LIMITS)
+        assert not result.ok and "spelled-out number" in (result.reason or ""), (text, result.reason)
+
+    @pytest.mark.parametrize("text", [
+        "Der Wert liegt bei 59 von 100. Ein Treiber wird im Monat sichtbar, die Lage ist angespannt.",
+        "Der Wert liegt bei 59 von 100. Ein Treiber kann im Monat wechseln, die Lage ist angespannt.",
+    ])
+    def test_a_verb_after_the_noun_ends_the_phrase(self, text):
+        result = validate(text, channel=Channel.IMESSAGE, facts=DIGEST_FACTS, prose_rules=True, language="de",
+                          **LIMITS)
+        assert result.ok, (text, result.reason)

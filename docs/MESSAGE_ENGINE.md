@@ -637,7 +637,9 @@ puts its verb second. The set has these parts:
   number word, the mixed numbers included ("anderthalbmal"). "ein"/"eine"
   counts as the number one before a counted noun, read by one scanner that
   walks the whole noun phrase: any number of lowercase modifiers, then the
-  run of capitalised words, ending at the first lowercase word after it. A
+  run of capitalised words, ending at the first lowercase word after it
+  that is no inflected adjective - a verb or a function word ("Ein
+  Berliner politisches Warnsignal" is one phrase, #124 round 17). A
   counted noun anywhere in the phrase is the count, since a capitalised
   word can be an adjective ("Eine Berliner Warnflagge", #124 round 4); a
   ticker in capitals is a modifier. A period counts by the head of its
@@ -661,11 +663,12 @@ puts its verb second. The set has these parts:
   reader: "..., reduziert eure Positionen" passed, the verb's form being a
   statement's too, and any verb outside the stems would pass with it
   ("prüft eure Depots"). The informal forms ("du", "dich", "dir", "dein-",
-  "euch", "euer", "eure-") are refused anywhere; lowercase "ihr" is "her"
-  and "their" as well and stays. The formal forms ("Sie", "Ihnen", "Ihr-")
-  are refused mid-sentence, where only the formal "you" is capitalised
-  (#124 round 12), and in capitals ("wie SIE sehen", #124 round 14). The
-  English "you" in German prose addresses the reader too, judged after the
+  "deins", "euch", "euer", "eur-", generated with every ending - #124
+  round 17) are refused anywhere; lowercase "ihr" is "her" and "their" as
+  well and stays. The formal forms ("Sie", "Ihnen", "Ihr-") are refused
+  mid-sentence, where only the formal "you" is capitalised (#124 round
+  12), and in capitals ("wie SIE sehen", #124 round 14). The English "you"
+  in German prose addresses the reader too, judged after the
   English-clause rules so a whole English clause is judged as one (#124
   round 13).
 - **A positive language check.** A German message needs at least two

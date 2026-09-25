@@ -1077,8 +1077,14 @@ _EIGHTH_DE_RE = re.compile(
 #: Depots"). The informal forms are refused anywhere (lowercase "ihr" is
 #: "her" and "their" as well, and stays); the formal ones mid-sentence,
 #: where only the formal "you" is capitalised.
+#: GENERATED, every form: "dein", "euer" and "eur-" with each ending, the
+#: pronoun "deins" (#124 round 17, SOTA-A) and "euers", and the older
+#: "deinig-"/"eurig-".
 _ADDRESS_INFORMAL_DE = frozenset(
-    "du dich dir dein deine deinem deinen deiner deines euch euer eure eurem euren eurer eures".split())
+    {"du", "dich", "dir", "euch", "euer", "euers", "deins"}
+    | {"dein" + ending for ending in ("", "e", "em", "en", "er", "es")}
+    | {"eur" + ending for ending in ("e", "em", "en", "er", "es")}
+    | {stem + ending for stem in ("deinig", "eurig") for ending in ("e", "em", "en", "er", "es")})
 _ADDRESS_FORMAL_DE = frozenset("Sie Ihnen Ihr Ihre Ihrem Ihren Ihrer Ihres".split())
 
 
@@ -1214,6 +1220,16 @@ def _is_head_de(word: str) -> bool:
     return head[:1].isupper() and not head.isupper()
 
 
+def _attributive_de(word: str) -> bool:
+    """A lowercase word after the phrase's capitalised words that still
+    belongs to the phrase: an inflected adjective, not a function word -
+    "Ein Berliner politisches Warnsignal" (#124 round 17, SOTA-A). A verb
+    ends the phrase ("Ein Treiber ist der Monat"); the verb after "ein ..."
+    is singular, and its forms end in -t or are "ist", "wird", "kann"."""
+    lowered = word.lower()
+    return lowered not in _CLAUSE_OPENERS_DE and bool(re.fullmatch(r"[a-zäöüß]+(?:e|en|er|es|em)", lowered))
+
+
 def _one_count_de(text: str) -> str | None:
     """The article standing as the number one, or None: "eine Flagge" is a
     count of one and "einem Prozent" is 1% (#121 round 27).
@@ -1267,7 +1283,7 @@ def _one_count_de(text: str) -> str | None:
                 return " ".join(tokens[start:end + 1])
             if _is_head_de(word):
                 seen_head = True
-            elif seen_head:
+            elif seen_head and not _attributive_de(word):
                 break
     return None
 
