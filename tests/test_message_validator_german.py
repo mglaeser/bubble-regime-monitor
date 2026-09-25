@@ -1620,3 +1620,37 @@ class TestRoundFifteenOn124:
         assert "sixes" in _CONTEXT_NUMBER_WORDS and "sixs" not in _CONTEXT_NUMBER_WORDS
         result = validate_context("Valuations come in sixes while credit stays calm.", language="en", max_chars=200)
         assert not result.ok and "no numbers" in (result.reason or ""), result.reason
+
+
+class TestRoundSixteenOn124:
+    """#124 round 16, SOTA-A, two defects, both executed; SOTA-C approved;
+    SOTA-B timed out. A quantifier counts a counted noun anywhere in its
+    clause, before or after it, the modifiers between however many; and
+    "null" has its ordinal ("am nullten Tag")."""
+
+    EN = "bubblegauge 59/100, band trim. "
+    DE = "Der Wert liegt bei 59 von 100. "
+
+    @pytest.mark.parametrize("text, language", [
+        (DE + "Beide aktuell aktiven roten Warnflaggen bleiben.", "de"),
+        (DE + "Die Warnflaggen sind beide aktiv, die Lage ist angespannt.", "de"),
+        (EN + "Both currently active red warning flags remain.", "en"),
+        (EN + "The flags both fired while valuations are stretched.", "en"),
+    ])
+    def test_a_quantifier_counts_its_noun_anywhere_in_the_clause(self, text, language):
+        result = validate(text, channel=Channel.IMESSAGE, facts=DIGEST_FACTS, prose_rules=True, language=language,
+                          **LIMITS)
+        assert not result.ok and "spelled-out number" in (result.reason or ""), (text, result.reason)
+
+    @pytest.mark.parametrize("text, language", [
+        (EN + "Gold and cash both held steady while two-year valuations are stretched.", "en"),
+        (DE + "Gold und Bargeld hielten beide stand, während die Flaggen ruhig blieben.", "de"),
+    ])
+    def test_a_counted_noun_in_another_clause_is_not_its_noun(self, text, language):
+        result = validate(text, channel=Channel.IMESSAGE, facts=DIGEST_FACTS, prose_rules=True, language=language,
+                          **LIMITS)
+        assert result.ok, (text, result.reason)
+
+    def test_null_has_its_ordinal(self):
+        result = validate_context("Am nullten Tag bleiben die Bewertungen hoch.", language="de", max_chars=200)
+        assert not result.ok and "no numbers" in (result.reason or ""), result.reason

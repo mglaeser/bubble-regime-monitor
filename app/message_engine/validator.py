@@ -1297,7 +1297,8 @@ def _german_ordinal_stem(cardinal: str) -> str:
 #: are the verb as well ("achten auf").
 _ORDINALS_DE: frozenset[str] = _with_folded(frozenset(
     _german_ordinal_stem(cardinal) + ending
-    for cardinal in _NUMBER_WORDS_DE - _NOT_CARDINAL_DE - {"null", "eins", "zwei"}
+    # "null" too: "am nullten Tag" (#124 round 16, SOTA-A)
+    for cardinal in _NUMBER_WORDS_DE - _NOT_CARDINAL_DE - {"eins", "zwei"}
     for ending in ("e", "en", "er", "es", "em")
 ) - {"achte", "achten"})
 #: The German fractions, generated from the ordinals: "Drittel", "Fünftel",
@@ -2176,7 +2177,8 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
         head = word.split("-")[0]
         if (head not in _NUMBER_WORDS and word not in _NUMBER_WORDS
                 and not (prose_rules and (head in _ORDINALS or head in _LEXICAL_COUNTS
-                                          or (head in _QUANTIFIERS and _quantifies_a_count(judged_lower, match.end()))
+                                          or (head in _QUANTIFIERS
+                                              and _quantifies_a_count(judged_lower, match.start(), match.end()))
                                           or (not german and _german_number(head))))):
             continue
         # A cardinal modifying a TIME UNIT describes the rule, not a reading:
@@ -2719,17 +2721,34 @@ _QUANTIFIERS: frozenset[str] = (
 _COUNTED_EN = frozenset("""flag flags signal signals indicator indicators warning warnings alert alerts
     trigger triggers block blocks component components reading readings event events time times day days
     week weeks month months year years quarter quarters session sessions point points""".split())
-#: What stands between a quantifier and its noun: "both of the flags".
-_QUANTIFIER_FILLERS = frozenset("""of the these those its their our von der die das den dem des""".split())
+#: Where a quantifier's clause ends: clause punctuation, a conjunction.
+_QUANTIFIER_CLAUSE_ENDS = frozenset("""and or but while whereas because as since although though when where
+    which that who so yet if unless until after before und oder aber denn sondern doch während wahrend weil
+    da als wenn dass ob obwohl bis nachdem bevor damit sodass wo""".split())
 
 
-def _quantifies_a_count(text: str, end: int) -> bool:
-    """Whether the quantifier ending at `end` quantifies a counted noun
-    among the next two words: "both flags", "a pair of signals", "the
-    single biggest counter-signal"."""
-    following = [w for w in re.findall(r"[a-zäöüß]+(?:-[a-zäöüß]+)*", text[end:end + 80])
-                 if w not in _QUANTIFIER_FILLERS][:2]
-    return any(word.rsplit("-", 1)[-1] in _COUNTED_EN or _counted_de(word) for word in following)
+def _quantifies_a_count(text: str, start: int, end: int) -> bool:
+    """Whether the quantifier at text[start:end] counts a counted noun: one
+    stands ANYWHERE in its clause, before or after it, the modifiers
+    between them however many - "Beide aktuell aktiven roten Warnflaggen"
+    (#124 round 16, SOTA-A; two words were the reach), "Die Warnflaggen
+    sind beide aktiv", "the single biggest counter-signal". The clause
+    ends at clause punctuation or a conjunction, so "Gold and cash both
+    held." counts nothing."""
+    word_re = r"[a-zäöüß]+(?:-[a-zäöüß]+)*|[.,;:!?()\[\]]"
+
+    def to_clause_end(tokens: list[str]) -> list[str]:
+        kept: list[str] = []
+        for token in tokens:
+            if not token[0].isalpha() or token in _QUANTIFIER_CLAUSE_ENDS:
+                break
+            kept.append(token)
+        return kept
+
+    after = to_clause_end(re.findall(word_re, text[end:]))
+    before = to_clause_end(list(reversed(re.findall(word_re, text[:start]))))
+    return any(word.rsplit("-", 1)[-1] in _COUNTED_EN or _counted_de(word) for word in after + before)
+
 
 #: A CONTEXT'S NUMBERS: every number word of both languages, the ordinals
 #: and their adverbs "first"/"second"/"erste"/"zweite" included, the
@@ -2752,8 +2771,9 @@ _CONTEXT_NUMBER_WORDS: frozenset[str] = (
 #: A Roman numeral is a number: "Risk remains at level IV." (#124 round 4,
 #: SOTA-A). A whole word of two letters or more that reads as one - in
 #: capitals, or in lowercase from i, v and x ("phase iii"); "VIX" and the
-#: lowercase "mix" do not read as one ("MIX" in capitals does: M, IX). It reads the folded text, like every scan of
-#: meaning: "level ÍV" wore an accent (#124 round 6, SOTA-A). Single
+#: lowercase "mix" do not read as one ("MIX" in capitals does: M, IX). It
+#: reads the folded text, like every scan of meaning: "level ÍV" wore an
+#: accent (#124 round 6, SOTA-A). Single
 #: letters stay words: the monitor's own V and D blocks, the pronoun I,
 #: "M&A". The credit ratings CCC and CC stay words too. An acronym that
 #: reads as a numeral ("IV" for implied volatility) costs the context,

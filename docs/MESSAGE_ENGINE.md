@@ -650,10 +650,13 @@ puts its verb second. The set has these parts:
   the ordinal adverbs from "drittens" up, the fractions, the plural scale
   words, "zweierlei", the numbered periods - are numbers in model text of
   either language, and so are the quantifiers ("beide", "single", "pair")
-  before a counted noun ("beide Flaggen"; "Gold und Bargeld hielten beide"
-  counts nothing) (#124 round 15). "achte" and "achten" are the verb as
-  well ("achten auf"), so they count as the ordinal only after a
-  determiner ("im achten Monat", #124 round 8).
+  where a counted noun stands in their clause, before or after them,
+  however many modifiers between ("beide Flaggen", "Die Warnflaggen sind
+  beide aktiv"; "Gold und Bargeld hielten beide" counts nothing) (#124
+  rounds 15 and 16). The ordinals include "nullte" (#124 round 16).
+  "achte" and "achten" are the verb as well ("achten auf"), so they count
+  as the ordinal only after a determiner ("im achten Monat", #124 round
+  8).
 - **The reader is not addressed.** A German message never addresses its
   reader: "..., reduziert eure Positionen" passed, the verb's form being a
   statement's too, and any verb outside the stems would pass with it
@@ -683,8 +686,8 @@ That is the residual of decision 9, in German. The English path of
 `validate()` changes in one respect (#124 round 15): its model text
 refuses the German number words ("vier flags"; "null" and "elf" are
 English words), the lexical counts, and a quantifier before a counted
-noun ("both flags"; "Gold and cash both held." names its two and
-counts nothing, as #100 pinned).
+noun in its clause ("both flags", "the flags both fired"; "Gold and
+cash both held." names its two and counts nothing, as #100 pinned).
 
 **A context carries no numbers.** `validate_context(text, language,
 max_chars)` judges the context a model writes for a message. It applies
