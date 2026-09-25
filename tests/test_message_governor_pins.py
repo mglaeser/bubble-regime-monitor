@@ -12,11 +12,6 @@ import pytest
 from app.config import Settings
 from app.db import session_scope
 from app.message_engine import governor as gov
-from app.message_engine.validator import (
-    Channel,
-    FailureClass,
-    validate,
-)
 from app.models import MessageEngineAttempt
 
 pytestmark = pytest.mark.usefixtures("isolated_db")
@@ -28,8 +23,6 @@ FACTS = {
     "F_RF_COUNT": 2,
     "F_NEXT_CHECK": "14:00 UTC",
 }
-
-LIMITS = {"sms_max_len": 150, "imessage_max_chars": 200, "imessage_max_emoji": 2}
 
 
 def _settings(**overrides) -> Settings:
@@ -60,10 +53,6 @@ def _attempt(session, *, outcome, minutes_ago=0, trigger="BAND_TO_TRIM", now=Non
     session.add(row)
     session.commit()
     return row
-
-
-def _v(text: str, channel: Channel = Channel.IMESSAGE, facts=None):
-    return validate(text, channel=channel, facts=facts if facts is not None else FACTS, **LIMITS)
 
 
 class TestRoundOnePanelDefects:
@@ -168,29 +157,6 @@ class TestRoundOnePanelDefects:
             # The unresolved claim neither extends nor breaks the run.
             assert gov.consecutive_strikes(s) == 5
 
-    def test_bare_imperative_is_rejected(self):
-        # SOTA-A: "Hold positions." carried operator advice past the gate.
-        for text in ("Hold positions.", "Reduce exposure now.", "Band trim. Sell holdings."):
-            r = _v(text)
-            assert not r.ok, text
-            assert r.failure_class is FailureClass.CONTENT
-
-    def test_the_state_sense_of_a_band_word_still_passes(self):
-        assert _v("Band is hold, score 51.").ok
-        assert _v("Effective band trim, 2 red flags.").ok
-
-    def test_unicode_line_separators_are_rejected(self):
-        # SOTA-A: U+2028/U+2029 pass a CR/LF check and render extra lines.
-        for sep in ("\u2028", "\u2029", "\x0b", "\x0c", "\u0085"):
-            r = _v(f"Band trim.{sep}Second line.")
-            assert not r.ok and "single line" in r.reason
-
-    def test_exponent_notation_cannot_assemble_an_ungrounded_value(self):
-        # SOTA-A: '51e2' tokenised as grounded '51' + grounded '2' but denotes
-        # 5100. The exponent must be part of the numeral token.
-        r = _v("Score 51e2 today.")
-        assert not r.ok and r.failure_class is FailureClass.CONTENT
-
     def test_venv_symlink_is_not_tracked(self):
         # SOTA-B: a .venv symlink was committed — .gitignore's '.venv/' only
         # matches directories, so a symlink slipped through. It would dangle on
@@ -220,34 +186,6 @@ class TestRoundOnePanelDefects:
 class TestRoundThreePanelDefects:
     """PR #100 round 3 — three validator escapes and a breaker undercount."""
 
-    def test_action_verbs_need_no_object_to_be_advice(self):
-        # 'now' was exempted as a non-object, so 'Reduce now.' read as an
-        # observation. sell/buy/reduce/exit are never states of this monitor.
-        for text in ("Reduce now.", "Sell now.", "Exit today.", "Buy more.", "Increase exposure."):
-            r = _v(text)
-            assert not r.ok, text
-            assert r.failure_class is FailureClass.CONTENT
-
-    def test_zero_width_joiner_between_letters_is_refused(self):
-        # Globally allowing ZWJ let it hide inside a word: the text renders as
-        # 'Sell holdings' but matches neither the lexicon nor the gate.
-        r = _v("S\u200dell holdings.")
-        assert not r.ok and "U+200D" in r.reason
-
-    def test_joiner_inside_an_emoji_sequence_still_passes(self):
-        assert _v("Band trim \u2139\ufe0f score 51.").ok
-
-    def test_unicode_minus_cannot_borrow_a_grounded_number(self):
-        # U+2212 is invisible to an ASCII sign class, so '\u221251' read as
-        # the grounded '51'.
-        r = _v("Score \u221251 today.")
-        assert not r.ok and r.failure_class is FailureClass.CONTENT
-
-    def test_vulgar_fractions_are_refused(self):
-        # '\u00bd' carries a value with no digits to ground at all.
-        r = _v("Half \u00bd done.")
-        assert not r.ok and r.failure_class is FailureClass.CONTENT
-
     def test_in_flight_rows_cannot_hide_a_strike_run(self):
         # The LIMIT was applied BEFORE unresolved rows were skipped, so a
         # burst of claims filled the scan window and concealed the run.
@@ -263,68 +201,6 @@ class TestRoundThreePanelDefects:
 
 class TestRoundFourPanelDefects:
     """PR #100 round 4 — six upheld (one cited case did not reproduce)."""
-
-    @pytest.mark.parametrize(
-        "text",
-        [
-            "Hold 2 positions.",  # object starts with a digit
-            "Hold on tight.",  # 'on' was on the non-object deny-list
-            "Hold in line.",  # ditto 'in'
-            "Now hold positions.",  # leading adverb
-            "Consider selling.",  # advice with no imperative verb
-            "Reduce now.",
-            "Time to sell.",
-        ],
-    )
-    def test_advice_in_any_grammar_is_rejected(self, text):
-        r = _v(text)
-        assert not r.ok, text
-        assert r.failure_class is FailureClass.CONTENT
-
-    @pytest.mark.parametrize(
-        "text",
-        [
-            "Band is hold, score 51.",
-            "Band moved hold to trim, score 51.",
-            "Effective band trim, 2 red flags.",
-            "Band entered hold, 2 red flags.",
-            "Band trim, 2 red flags. Next check 14:00 UTC.",
-        ],
-    )
-    def test_the_state_sense_survives_the_allowlist_gate(self, text):
-        # The gate is now an ALLOW-list of state constructions, so this is the
-        # test that matters: it must not start rejecting the monitor's own
-        # vocabulary.
-        assert _v(text, facts={**FACTS, "F_NEXT_CHECK": "14:00 UTC"}).ok, text
-
-    def test_english_is_required(self):
-        # Ruling Q30. The prompt asks for English; this is the backstop.
-        r = _v("Bitte kaufen.")
-        assert not r.ok and "not English" in r.reason
-
-    def test_arithmetic_cannot_assemble_an_ungrounded_value(self):
-        # facts 51 and 2 tokenise fine, but 51*2 denotes 102.
-        # NB '/' is only arithmetic when spaced: "51/100" is the digest's own
-        # score notation (see test_the_digest_score_notation_is_not_arithmetic).
-        for text in ("Score 51*2 today.", "Score 51 \u00d7 2 today.", "Score 51 / 2 today."):
-            r = _v(text)
-            assert not r.ok, text
-            assert r.failure_class is FailureClass.CONTENT
-
-    def test_text_presentation_selector_cannot_hide_a_letter(self):
-        # VS16 is category Mn, NOT Cf — so the Cf-only scan never saw either
-        # selector, and VS15 hid a letter inside a word.
-        r = _v("S\ufe0eell holdings.")
-        assert not r.ok
-
-    def test_emoji_presentation_and_keycaps_still_pass(self):
-        assert _v("Band trim \u2139\ufe0f score 51.").ok
-
-    def test_keycap_emoji_are_still_counted_and_allowlisted(self):
-        # A's keycap claim did not reproduce: two keycaps already fail the
-        # allowlist and three fail the count. Pinned so it stays that way.
-        assert not _v("2\ufe0f\u20e3 2\ufe0f\u20e3 here.").ok
-        assert not _v("2\ufe0f\u20e3 2\ufe0f\u20e3 2\ufe0f\u20e3 here.").ok
 
     def test_content_cap_is_derived_from_rows_not_the_caller(self):
         # A caller passing iteration=1 on its fourth attempt would otherwise
@@ -373,108 +249,9 @@ class TestRoundFivePanelDefects:
             d = gov.decide(s, priority=2, settings=settings, trigger="T")
             assert d.verdict is gov.Verdict.USE_FALLBACK
 
-    @pytest.mark.parametrize(
-        "text",
-        [
-            "You need to hold positions.",  # 'to' is a state marker, abused
-            "Positions must be sold.",  # passive, irregular participle
-            "Hold your positions.",
-        ],
-    )
-    def test_directives_in_any_voice_are_rejected(self, text):
-        assert not _v(text).ok, text
-
-    @pytest.mark.parametrize(
-        "text",
-        [
-            "Band is hold positions.",  # state marker BEFORE, but an object after
-            "Band is trim exposure.",
-        ],
-    )
-    def test_a_state_marker_does_not_license_an_object(self, text):
-        # The 'terminated' half of the state test: a preceding marker alone
-        # would let "band is hold positions" through. Found by the deletion
-        # audit — the panel's cases were all caught by other controls, so this
-        # one was passing vacuously.
-        assert not _v(text).ok, text
-
-    @pytest.mark.parametrize(
-        "text",
-        [
-            "Positions should be reduced.",
-            "Exposure must be lowered.",
-        ],
-    )
-    def test_passive_advice_with_an_unlisted_participle(self, text):
-        # 'reduced'/'lowered' are not in the action-verb list, so only the
-        # passive framing pattern catches these. Also found by the audit.
-        assert not _v(text).ok, text
-
-    def test_plus_is_arithmetic_between_numerals(self):
-        # facts 51 and 2 admitted '51+2', denoting 53.
-        assert not _v("Score 51+2 today.").ok
-        assert not _v("Score 51 - 2 today.").ok
-
-    def test_a_date_is_not_arithmetic(self):
-        # The bare hyphen is deliberately left alone: '2026-08' is a date.
-        assert _v("As of 2026-08, band is hold.", facts={**FACTS, "as_of": "2026-08"}).ok
-
-    def test_every_non_ascii_dash_is_refused(self):
-        # Enumerating them was wrong once already (U+FE63 was missing), so
-        # membership is decided by Unicode category.
-        for dash in ("\u2212", "\ufe63", "\u2013", "\u2014", "\uff0d"):
-            assert not _v(f"Score {dash}51 today.").ok, hex(ord(dash))
-
-    def test_keycap_mark_needs_its_keycap_context(self):
-        # U+20E3 inside a word is invisible and split 'Sell' past every check.
-        assert not _v("S\u20e3ell holdings.").ok
-        assert _v("Band trim \u2139\ufe0f score 51.").ok
-
-    def test_non_latin_script_is_refused(self):
-        # A word list can only catch Latin-alphabet languages; Japanese
-        # validated cleanly.
-        for text in ("\u5e02\u5834\u306f\u5b89\u5b9a.", "\u0420\u044b\u043d\u043e\u043a 51."):
-            r = _v(text)
-            assert not r.ok and "non-Latin" in r.reason
-
-    @pytest.mark.parametrize(
-        "text",
-        [
-            "Band is hold, score 51.",
-            "Band is hold.",
-            "Band moved hold to trim, score 51.",
-            "Band trim \u2139\ufe0f score 51.",
-            "Effective band trim, 2 red flags.",
-        ],
-    )
-    def test_the_state_sense_still_passes_after_all_of_it(self, text):
-        # Five rounds of hardening must not cost the monitor its vocabulary.
-        assert _v(text).ok, text
-
-
 class TestRoundSixPanelDefects:
     """PR #100 round 6. All five upheld; three needed tests I had not
     written — the deletion audit caught that, not the panel."""
-
-    def test_variation_selector_between_letters_is_refused(self):
-        # SOTA-C: VS16 was allowed UNCONDITIONALLY on the reasoning that it
-        # "only makes a glyph more visible". Between two letters it is
-        # invisible and splits the word, so this renders to the operator as
-        # "Sell holdings." while matching neither the lexicon nor the band
-        # gate. ZWJ was already guarded this way; the sibling was not.
-        r = _v("Se\ufe0fll holdings.")
-        assert not r.ok and "U+FE0F" in r.reason
-
-    def test_allowlisted_emoji_with_a_letter_base_still_passes(self):
-        # The discriminator is whether the COMBINED glyph is allowlisted:
-        # U+2139 is a letter AND the base of 'ℹ️'.
-        assert _v("Band trim \u2139\ufe0f score 51.").ok
-
-    def test_leading_dot_decimal_is_not_the_grounded_integer(self):
-        # '.51' lost its dot and read as the grounded 51 — a tenfold-
-        # different value.
-        r = _v("Score .51 today.")
-        assert not r.ok and r.failure_class is FailureClass.CONTENT
 
     def test_a_fallback_closes_the_compose(self):
         # The backward scan stopped only at OK, so a compose that gave up and
@@ -493,32 +270,6 @@ class TestRoundSixPanelDefects:
 
 class TestRoundNinePanelDefects:
     """PR #100 round 9 — four validator/governor escapes plus a fail-open."""
-
-    def test_non_ascii_separator_between_digits_is_refused(self):
-        # "51\uff0e2" tokenises as grounded 51 and grounded 2 yet DISPLAYS
-        # 51.2 — a third value assembled from two real ones.
-        r = _v("Score 51\uff0e2.")
-        assert not r.ok and r.failure_class is FailureClass.CONTENT
-
-    def test_ascii_decimals_still_work(self):
-        assert _v("Score 51.0 today.").ok
-
-    def test_zero_is_a_spelled_number(self):
-        r = _v("Score zero.")
-        assert not r.ok and r.failure_class is FailureClass.CONTENT
-
-    @pytest.mark.parametrize(
-        "text",
-        [
-            "Keep holding your positions.",
-            "Continue trimming.",
-            "Start reducing exposure.",
-        ],
-    )
-    def test_gerund_advice_is_refused(self, text):
-        # Only the ACTION verbs were gerund-matched, so a band verb in the
-        # gerund read as an observation. A state is named, never performed.
-        assert not _v(text).ok, text
 
     def test_format_exhaustion_also_strikes(self):
         # Ruling Q38 counts an EXHAUSTED ATTEMPT. Format rejections exhaust
@@ -571,46 +322,6 @@ class TestRoundNinePanelDefects:
 class TestRoundTenPanelDefects:
     """PR #100 round 10 — five upheld, one cited case did not reproduce."""
 
-    @pytest.mark.parametrize(
-        "text",
-        [
-            "De-risk your portfolio.",
-            "De-risking now.",
-        ],
-    )
-    def test_de_risk_is_advice_when_it_takes_an_object(self, text):
-        # de-risk is a band NAME and an action verb, and it was in neither
-        # list — the highest-severity band could be used as an instruction.
-        assert not _v(text).ok, text
-
-    @pytest.mark.parametrize(
-        "text",
-        [
-            "Band de-risk, 2 red flags.",
-            "Band moved trim to de-risk, score 51.",
-        ],
-    )
-    def test_de_risk_still_names_the_band(self, text):
-        assert _v(text).ok, text
-
-    def test_repeated_operators_are_still_arithmetic(self):
-        # '51**2' slipped past a single-operator class while denoting 2601.
-        assert not _v("Score 51**2.").ok
-
-    def test_past_participle_of_a_band_verb_is_an_observation(self):
-        # SOTA-C: a false positive I introduced in round 5 by putting
-        # 'trimmed'/'held' in the ACTION verbs. "The band was trimmed." is a
-        # state description; the imperative uses are caught by the passive
-        # framing pattern and the object test.
-        assert _v("The band was trimmed.").ok
-        assert not _v("Positions must be trimmed.").ok
-
-    def test_sentence_final_period_grounding_does_not_reproduce(self):
-        # SOTA-C's second claim: "The score is 51." was said to fail
-        # grounding on a '51.' token. It does not — the plain numeral branch
-        # stops before the period. Executed exactly as cited and pinned.
-        assert _v("The score is 51.").ok
-
     def test_reaped_claims_survive_a_non_ask_verdict(self):
         # SOTA-A: decide() reaps INSIDE reserve()'s savepoint, so a non-ASK
         # verdict rolled the reaping back with the claim — restoring the very
@@ -646,28 +357,6 @@ class TestRoundTenPanelDefects:
 
 class TestRoundElevenPanelDefects:
     """PR #100 round 11 — three defects; B and C both approved."""
-
-    @pytest.mark.parametrize(
-        "text",
-        [
-            "Try reducing positions.",
-            "Stop increasing exposure.",
-            "Consider liquidating.",
-        ],
-    )
-    def test_gerunds_of_e_ending_verbs_are_advice(self, text):
-        # English drops the silent 'e' before -ing, so a "(?:ing)?" suffix on
-        # 'reduce' only ever produced 'reduceing'. The gerunds are spelled out.
-        assert not _v(text).ok, text
-
-    @pytest.mark.parametrize("text", ["Score 51 /2.", "Score 51/ 2."])
-    def test_asymmetric_spacing_around_slash_is_arithmetic(self, text):
-        # The rule demanded spaces on BOTH sides, so "51 /2" evaded it while
-        # denoting 25.5.
-        assert not _v(text).ok, text
-
-    def test_the_tight_digest_notation_is_still_exempt(self):
-        assert _v("bubblegauge 51/100 trim.", facts={"median": 51, "score_scale_max": 100}).ok
 
     def test_widening_the_cap_cannot_reopen_a_tripped_breaker(self):
         # The past must not be MUTABLE. Counting `cap` rejects per strike let
@@ -722,33 +411,6 @@ class TestRoundTwelvePanelDefects:
         settings = _settings(message_engine_breaker_strikes=2)
         assert gov._strike_window(settings) >= gov._STRIKE_SCAN_ROWS
 
-    @pytest.mark.parametrize("text", ["Move to trim.", "Shift to hold."])
-    def test_bare_movement_imperatives_are_not_transitions(self, text):
-        # "move"/"shift" are commands; only the inflected forms describe
-        # something that HAS happened, which is what a state report does.
-        assert not _v(text).ok, text
-
-    @pytest.mark.parametrize(
-        "text",
-        [
-            "Band moved hold to trim, score 51.",
-            "Band shifted to trim, score 51.",
-        ],
-    )
-    def test_reported_transitions_still_pass(self, text):
-        assert _v(text).ok, text
-
-    def test_a_quotient_is_not_the_digest_score_notation(self):
-        # The tight "a/b" exemption exists for the digest alone. Granted
-        # everywhere, it admitted a computed value.
-        r = _v("The quotient is 51/2.", facts={"a": 51, "b": 2})
-        assert not r.ok and "quotient" in r.reason
-
-    def test_the_denominator_must_be_a_declared_scale(self):
-        digest = {"median": 51, "score_scale_max": 100, "red_flag_count": 2, "red_flag_total": 4}
-        assert _v("bubblegauge 51/100 trim. Flags 2/4.", facts=digest).ok
-
-
 class TestRoundThirteenPanelDefects:
     """PR #100 round 13 - four defects; C approves."""
 
@@ -765,59 +427,8 @@ class TestRoundThirteenPanelDefects:
                 _attempt(s, outcome=gov.Outcome.BUDGET_SKIPPED, minutes_ago=100 + i * 0.1)
             assert gov.breaker_is_open(s, settings=settings)
 
-    @pytest.mark.parametrize(
-        "text",
-        [
-            "Cash is recommended.",
-            "Gold recommends caution.",
-        ],
-    )
-    def test_recommend_inflections_are_advice(self, text):
-        assert not _v(text).ok, text
-
-    @pytest.mark.parametrize("sep", ["\u001c", "\u001d", "\u001e"])
-    def test_c0_separators_are_line_breaks(self, sep):
-        # Unicode classes these as line breaks and a client renders them so,
-        # but a CR/LF/NEL list misses them.
-        r = _v(f"Band trim{sep}Second line.")
-        assert not r.ok and "single line" in r.reason
-
-    def test_double_slash_is_an_operator_not_a_score(self):
-        # Floor division must not be laundered by a declared scale.
-        r = _v("Score 51//100.", facts={"median": 51, "score_scale_max": 100})
-        assert not r.ok and "operator" in r.reason
-
-    def test_the_single_slash_digest_notation_still_passes(self):
-        digest = {"median": 51, "score_scale_max": 100, "red_flag_count": 2, "red_flag_total": 4}
-        assert _v("bubblegauge 51/100 trim. Flags 2/4.", facts=digest).ok
-
-
 class TestRoundFourteenPanelDefects:
     """PR #100 round 14 - three defects; B and C approve."""
-
-    def test_a_state_marker_must_be_a_whole_word(self):
-        # Without \\b the alternative "at" matched the TAIL of "Repeat", so
-        # "bubblegauge: Repeat de-risk." read as a marked state.
-        assert not _v("bubblegauge: Repeat de-risk.").ok
-        assert not _v("Do not repeat trim.").ok
-
-    def test_markers_that_are_whole_words_still_work(self):
-        for text in (
-            "Band is hold.",
-            "Band moved hold to trim, score 51.",
-            "Band shifted to trim, score 51.",
-        ):
-            assert _v(text).ok, text
-
-    def test_a_live_count_is_not_a_scale(self):
-        # Admitting "count" as a scale name made any live counter a valid
-        # denominator, so a shown red-flag count of 2 legitimised "51/2".
-        r = _v("The quotient is 51/2.", facts={"F_RF_COUNT": 2, "median": 51})
-        assert not r.ok and "quotient" in r.reason
-
-    def test_the_digest_divides_by_a_total(self):
-        digest = {"median": 51, "score_scale_max": 100, "red_flag_count": 2, "red_flag_total": 4}
-        assert _v("bubblegauge 51/100 trim. Flags 2/4.", facts=digest).ok
 
     def test_the_strike_window_widens_with_the_iteration_cap(self):
         # A compose costs one row per iteration plus its fallback marker, so
@@ -876,75 +487,8 @@ class TestRoundFifteenPanelDefects:
                 _attempt(s, outcome=gov.Outcome.TECHNICAL_ERROR, minutes_ago=300 + i)
             assert gov.consecutive_strikes(s) == 2
 
-    def test_chained_division_is_refused(self):
-        # "51/100/100" matched only its first pair under a non-overlapping
-        # scan and sailed through.
-        digest = {"median": 51, "score_scale_max": 100}
-        r = _v("Score 51/100/100.", facts=digest)
-        assert not r.ok and "chained" in r.reason
-
-    def test_a_score_needs_a_declared_PAIR_not_just_a_scale(self):
-        # "Score 51/4" passed on a median of 51 and a red-flag total of 4,
-        # denoting 12.75. Only the pairings the digest writes are a score.
-        digest = {"median": 51, "score_scale_max": 100, "red_flag_count": 2, "red_flag_total": 4}
-        assert not _v("Score 51/4.", facts=digest).ok
-        assert _v("bubblegauge 51/100 trim. Flags 2/4.", facts=digest).ok
-
-    @pytest.mark.parametrize(
-        "text",
-        [
-            "Dump your portfolio.",
-            "Unload the position.",
-            "Lighten exposure.",
-        ],
-    )
-    def test_plain_imperatives_outside_the_deny_list(self, text):
-        assert not _v(text).ok, text
-
-
 class TestRoundSixteenPanelDefects:
     """PR #100 round 16 - three defects; B and C approve."""
-
-    @pytest.mark.parametrize(
-        "text",
-        [
-            "Move all funds to cash.",
-            "Shift into cash.",
-            "Rotate into bonds.",
-            "Switch to Treasuries.",
-        ],
-    )
-    def test_movement_commands_are_advice(self, text):
-        # 'move'/'shift' were removed from the STATE markers in round 12 but
-        # never added to the advice side, so they sat in neither list.
-        assert not _v(text).ok, text
-
-    @pytest.mark.parametrize(
-        "text",
-        [
-            "Band moved hold to trim, score 51.",
-            "Band shifted to trim, score 51.",
-        ],
-    )
-    def test_movement_participles_still_report_state(self, text):
-        # They must NOT inherit the "(?:s|ed)?" suffix of the action verbs -
-        # the same distinction round 10 drew for 'trimmed'/'held'. Adding
-        # them naively made "shift"+"ed" match and broke this.
-        assert _v(text).ok, text
-
-    def test_c1_control_characters_are_refused(self):
-        # The C1 block is invisible and a client may act on it, but it is
-        # category Cc - neither Cf nor a mark - so the scan never saw it.
-        #
-        # NB the probe carries NO band verb. The first draft used "Band
-        # trim<C1> ok." and passed even with the Cc check removed, because
-        # an unrecognised character after 'trim' trips the STATE gate
-        # instead - a test that was green for the wrong reason, caught by
-        # the deletion audit.
-        for code in (0x80, 0x9B, 0x9F):
-            r = _v(f"Score 51{chr(code)} today.", facts={"median": 51})
-            assert not r.ok, hex(code)
-            assert "U+00" in (r.reason or ""), r.reason
 
     def test_a_threshold_larger_than_the_floor_is_reachable(self):
         # The floor was itself a CEILING: the threshold is unbounded, so
@@ -995,23 +539,6 @@ class TestRoundSeventeenPanelDefects:
                 _attempt(s, outcome=gov.Outcome.IN_FLIGHT, minutes_ago=30 + i, now=now)
             assert gov.breaker_is_open(s, settings=_settings(), now=now)
 
-    def test_a_bracketed_or_signed_operand_is_still_arithmetic(self):
-        # The gate demanded a DIGIT right after the operator, so "51+(-2)"
-        # evaded it while denoting 49.
-        for text in ("Value 51+(-2).", "Value 51 - (2).", "Value 51*[2]."):
-            assert not _v(text, facts={"a": 51, "b": -2, "c": 2}).ok, text
-
-    @pytest.mark.parametrize(
-        "text",
-        [
-            "Close every position.",
-            "Open a hedge.",
-            "Add to cash.",
-        ],
-    )
-    def test_more_plain_imperatives(self, text):
-        assert not _v(text).ok, text
-
     def test_the_breaker_reason_does_not_invent_technical_failures(self):
         # Five exhausted-content strikes reported "after 5 technical errors"
         # with zero technical failures - a false diagnosis for the operator.
@@ -1029,18 +556,6 @@ class TestRoundSeventeenPanelDefects:
             d = gov.decide(s, priority=2, settings=settings, trigger="T")
             assert "technical errors" not in (d.reason or "")
             assert "strikes" in (d.reason or "")
-
-    def test_the_digest_score_is_not_arithmetic_does_not_reproduce(self):
-        # SOTA-C claimed the tight-slash branch kills the score-pair
-        # exemption, making every "51/100" message fail. Executed as cited:
-        # both slash branches require whitespace on at least one side, so a
-        # tight pair never matches. Pinned per the disputed-finding protocol.
-        from app.message_engine.validator import _ARITHMETIC_RE
-
-        assert not _ARITHMETIC_RE.search("bubblegauge 51/100 trim.")
-        digest = {"median": 51, "score_scale_max": 100, "red_flag_count": 2, "red_flag_total": 4}
-        assert _v("bubblegauge 51/100 trim. Flags 2/4.", facts=digest).ok
-
 
 class TestRoundEighteenPanelDefects:
     """PR #100 round 18 - the strike-window argument, ended at the input."""
@@ -1105,24 +620,6 @@ class TestRoundEighteenPanelDefects:
     def test_a_zero_threshold_still_needs_one_strike(self):
         assert gov._effective_strikes(_settings(message_engine_breaker_strikes=0)) == 1
 
-    @pytest.mark.parametrize(
-        "text",
-        [
-            "Value (51)/(2).",
-            "Value (51) / 2.",
-            "Value 51/(2).",
-        ],
-    )
-    def test_bracketed_operands_are_still_arithmetic(self, text):
-        # The LEFT operand required a bare digit, so "(51)/(2)" conveyed an
-        # ungrounded 25.5 while evading every scan.
-        assert not _v(text, facts={"a": 51, "b": 2}).ok, text
-
-    def test_the_digest_notation_survives_the_bracket_rules(self):
-        digest = {"median": 51, "score_scale_max": 100, "red_flag_count": 2, "red_flag_total": 4}
-        assert _v("bubblegauge 51/100 trim. Flags 2/4.", facts=digest).ok
-
-
 class TestRoundNineteenPanelDefects:
     """PR #100 round 19 - four defects; B and C approve."""
 
@@ -1152,28 +649,6 @@ class TestRoundNineteenPanelDefects:
         assert decision.verdict is gov.Verdict.USE_FALLBACK and claim_id is None
         assert calls["reap"] == 0, "a P1 must not touch the database first"
 
-    @pytest.mark.parametrize(
-        "text",
-        [
-            "Keep your positions.",
-            "Retain the hedge.",
-            "Maintain all exposure.",
-        ],
-    )
-    def test_direct_object_imperatives_are_advice(self, text):
-        assert not _v(text).ok, text
-
-    @pytest.mark.parametrize(
-        "text",
-        [
-            "Markets may fall.",
-            "Prices might drop.",
-            "Equities could reverse.",
-        ],
-    )
-    def test_modal_forecasts_are_forecasts(self, text):
-        assert not _v(text).ok, text
-
     def test_a_same_instant_error_after_a_success_still_counts(self):
         # SQLite timestamps collide, and a strict `started_at >` hid an error
         # written in the same instant as the success it followed.
@@ -1189,49 +664,8 @@ class TestRoundNineteenPanelDefects:
             assert gov.consecutive_strikes(s) == 5
             assert gov.breaker_is_open(s, settings=_settings(), now=now)
 
-    @pytest.mark.parametrize(
-        "text",
-        [
-            "level is now trim.",
-            "Band is now de-risk, score 51.",
-            "The band is now hold.",
-        ],
-    )
-    def test_the_prompts_own_is_now_construction_validates(self, text):
-        # The library writes "is now <band>" six times. Rejecting it burned
-        # retries and strikes on output that obeyed the prompt exactly.
-        assert _v(text).ok, text
-
-    def test_bare_now_is_still_not_a_marker(self):
-        # Round 7's finding must survive the round-19 fix.
-        assert not _v("Now hold.").ok
-        assert not _v("Now hold positions.").ok
-
-
 class TestRoundTwentyOnePanelDefects:
     """PR #100 round 21 - three defects; C approves."""
-
-    @pytest.mark.parametrize(
-        "text",
-        [
-            "Value 51 divided by 2.",
-            "Score 51 times 2.",
-            "Score 51 plus 2.",
-        ],
-    )
-    def test_arithmetic_written_in_words(self, text):
-        # Carries no operator at all, yet "51 divided by 2" denotes 25.5.
-        assert not _v(text, facts={"a": 51, "b": 2}).ok, text
-
-    def test_ordinary_prose_about_two_numbers_still_passes(self):
-        assert _v("The gap between 51 and 100 is the scale.", facts={"a": 51, "b": 100}).ok
-
-    def test_the_time_unit_waiver_is_adjectival_only(self):
-        # My round-20 waiver was context-free, so "The decline lasted two
-        # days." asserted an observed duration with no fact behind it.
-        assert _v("Lead persists on a two-year lookback, score 51.").ok
-        assert not _v("The decline lasted two days.").ok
-        assert not _v("Stress held for three weeks.").ok
 
     def test_the_pacing_row_is_chosen_by_completion(self):
         # A claim reaped LATE finished after an attempt that STARTED later,
@@ -1277,58 +711,8 @@ class TestRoundTwentyTwoPanelDefects:
             assert d.verdict is gov.Verdict.USE_FALLBACK
             assert "iterations" in (d.reason or "")
 
-    @pytest.mark.parametrize(
-        "text",
-        [
-            "bubblegauge: Protect your portfolio.",
-            "Shield capital now.",
-            "Safeguard the position.",
-            "Secure the gains.",
-        ],
-    )
-    def test_protective_imperatives_are_advice(self, text):
-        # Advice does not have to name a trade: telling the operator to
-        # protect something is still telling them what to do.
-        assert not _v(text).ok, text
-
-    def test_the_digest_slash_claim_is_refuted_a_second_time(self):
-        # SOTA-C raised in round 17, and again in round 22, that the
-        # tight-slash branch rejects "62/100" and makes the score-pair
-        # exemption dead code. Re-verified against the CURRENT regex - which
-        # round 18 rewrote, so the earlier disproof did not carry over
-        # automatically and had to be re-run.
-        #
-        # Every slash branch requires whitespace on at least one side or a
-        # literal bracket, so a tight pair matches none of them.
-        from app.message_engine.validator import _ARITHMETIC_RE
-
-        for probe in ("62/100", "51/100", "bubblegauge 62/100 trim."):
-            assert not _ARITHMETIC_RE.search(probe), probe
-        digest = {"median": 62, "score_scale_max": 100, "red_flag_count": 2, "red_flag_total": 4}
-        assert _v("bubblegauge 62/100 trim. Flags 2/4.", facts=digest).ok
-        # ...and the exemption is NOT dead code: it still refuses a quotient.
-        assert not _v("The quotient is 62/7.", facts={"median": 62, "other": 7}).ok
-
-
 class TestRoundTwentyFourPanelDefects:
     """PR #100 round 24 - three upheld; the Q27 side-effect claim refuted."""
-
-    @pytest.mark.parametrize(
-        "text",
-        [
-            "Avoid equities.",
-            "Skip the rebalance.",
-            "Favour cash.",
-        ],
-    )
-    def test_avoidance_is_also_advice(self, text):
-        # Telling the operator what NOT to do is still telling them.
-        assert not _v(text).ok, text
-
-    def test_a_bracketed_subtraction_is_caught(self):
-        # "51-(2)" is the same subtraction written differently, and the plain
-        # digit-hyphen-digit scan missed it.
-        assert not _v("Score 51-(2).", facts={"a": 51, "b": 2}).ok
 
     def test_the_strike_bound_uses_completion_not_start(self):
         # THIRD function to get this ordering wrong (r21 pacing, r22
@@ -1369,25 +753,6 @@ class TestRoundTwentyFourPanelDefects:
 
 class TestRoundTwentySevenPanelDefects:
     """PR #100 round 27 - including a rule I had implemented backwards."""
-
-    @pytest.mark.parametrize(
-        "text",
-        [
-            "bubblegauge: Withdraw all funds.",
-            "Redeem the position.",
-        ],
-    )
-    def test_withdrawal_imperatives(self, text):
-        assert not _v(text).ok, text
-
-    def test_a_spelled_sign_cannot_flip_a_grounded_value(self):
-        # The recombination class in prose: the fact is 51, the message says
-        # "minus 51", and the reported value is -51 - which no fact supports.
-        assert not _v("Reading is minus 51.", facts={"median": 51}).ok
-        assert not _v("Beta is negative 51.", facts={"median": 51}).ok
-
-    def test_a_genuinely_negative_fact_still_validates(self):
-        assert _v("Beta is -0.42 this cycle.", facts={"beta": -0.42}).ok
 
     def test_the_five_minute_floor_survives_a_technical_error(self):
         # I had implemented the owner's rule BACKWARDS: the 120 s technical

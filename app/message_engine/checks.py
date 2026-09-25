@@ -10,13 +10,19 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from enum import StrEnum
 
 import phonenumbers
 from linkify_it import LinkifyIt
 
 from app.alerts.gsm7 import GSM7_BASIC, GSM7_EXT, septets
 from app.message_engine.iana_tlds import TLDS, U_LABELS
-from app.message_engine.validator import Channel
+
+
+class Channel(StrEnum):
+    SMS = "sms"
+    IMESSAGE = "imessage"
+
 
 #: THE iMESSAGE ALPHABET, an allowlist as GSM-7 is on SMS: printable ASCII
 #: and the line break, printable Latin-1 but the no-break space and the soft

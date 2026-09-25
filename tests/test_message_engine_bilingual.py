@@ -12,8 +12,7 @@ import pytest
 from app.config import Settings, get_settings
 from app.db import session_scope
 from app.message_engine import composer
-from app.message_engine.checks import basic_check
-from app.message_engine.validator import Channel
+from app.message_engine.checks import Channel, basic_check
 from app.models import MessageEngineAttempt, Snapshot
 from app.services import digest
 
