@@ -1369,3 +1369,57 @@ class TestRoundTenOn124:
     def test_the_words_that_only_look_like_them_stay(self, text):
         result = validate_context(text, language="de", max_chars=200)
         assert result.ok, (text, result.reason)
+
+
+class TestRoundElevenOn124:
+    """#124 round 11, SOTA-A, two defects, both executed; SOTA-B and SOTA-C
+    timed out. A comma after the nouns joins another modifier to the
+    one-count phrase unless a clause opens after it; and the words that
+    count without a number word ("beide", "both", "zweierlei", "trio", the
+    decades) are numbers in a context."""
+
+    @pytest.mark.parametrize("text", [
+        "Eine Berliner, bestätigte Warnflagge ist aktiv.",
+        "Eine Berliner, Frankfurter Warnflagge ist aktiv.",
+        "Ein Berliner, klar bestätigtes Signal ist aktiv.",
+    ])
+    def test_a_modifier_after_a_comma_stays_in_the_phrase(self, text):
+        result = validate("Der Wert liegt bei 59 von 100. " + text, channel=Channel.IMESSAGE, facts=DIGEST_FACTS,
+                          prose_rules=True, language="de", **LIMITS)
+        assert not result.ok and "spelled-out number" in (result.reason or ""), (text, result.reason)
+
+    @pytest.mark.parametrize("text", [
+        "Ein Treiber, der seit Monaten wirkt, sind die Bewertungen.",
+        "Ein Treiber, wenn auch kein großer, sind die Bewertungen im Monat.",
+        "Ein Treiber, und zwar seit Monaten, sind die Bewertungen.",
+        "Ein Treiber, Anleger sagen es seit Monaten, sind die Bewertungen.",
+    ])
+    def test_a_clause_after_the_comma_ends_the_phrase(self, text):
+        result = validate("Der Wert liegt bei 59 von 100. " + text, channel=Channel.IMESSAGE, facts=DIGEST_FACTS,
+                          prose_rules=True, language="de", **LIMITS)
+        assert result.ok, (text, result.reason)
+
+    @pytest.mark.parametrize("text, language", [
+        ("Beide Warnflaggen sind aktiv, die Bewertungen sind hoch.", "de"),
+        ("Die Bewertungen sind in beiden Blöcken hoch, die Lage bleibt ruhig.", "de"),
+        ("Es gibt zweierlei Signale, die Bewertungen sind hoch.", "de"),
+        ("Ein Trio von Signalen ist aktiv, die Bewertungen sind hoch.", "de"),
+        ("Die Bewertungen erinnern an die Zwanzigerjahre, die Lage bleibt ruhig.", "de"),
+        ("Both warning flags are active while valuations are stretched.", "en"),
+        ("The sole warning flag is active while valuations are stretched.", "en"),
+        ("A trio of flags is active while valuations are stretched.", "en"),
+        ("Valuations recall the twenties while credit stays calm.", "en"),
+    ])
+    def test_a_word_that_counts_is_refused_in_a_context(self, text, language):
+        result = validate_context(text, language=language, max_chars=200)
+        assert not result.ok and "no numbers" in (result.reason or ""), (text, result.reason)
+
+    @pytest.mark.parametrize("text, language", [
+        ("Einer der Treiber sind die hohen Bewertungen, die Lage bleibt ruhig.", "de"),
+        ("Die Kurse erleben eine Achterbahnfahrt, die Bewertungen sind hoch.", "de"),
+        ("Die Bewertungen sind hoch, vielerlei Signale bleiben ruhig.", "de"),
+        ("The ones that stand out are stretched valuations while credit stays calm.", "en"),
+    ])
+    def test_the_words_that_only_look_like_one_stay(self, text, language):
+        result = validate_context(text, language=language, max_chars=200)
+        assert result.ok, (text, result.reason)

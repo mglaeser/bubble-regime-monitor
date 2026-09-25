@@ -1127,6 +1127,20 @@ _COUNTED_HEADS_DE: tuple[str, ...] = tuple(sorted(_with_folded(frozenset({
     "ereignis", "ereignisse", "ereignissen", "ereignisses",
 })), key=len, reverse=True))
 _ARTICLE_ONE_FORMS_DE = frozenset({"ein", "eine", "einem", "einen", "einer", "eines", "eins"})
+#: The words that open a clause of their own after a comma: determiners
+#: and relative pronouns, personal pronouns, prepositions, conjunctions
+#: and a few adverbs. After a comma anything else joins another modifier
+#: to the noun phrase ("Eine Berliner, bestätigte Warnflagge").
+_CLAUSE_OPENERS_DE: frozenset[str] = _with_folded(frozenset("""
+der die das den dem des ein eine einer eines einem einen kein keine keiner keines keinem keinen
+diese dieser dieses diesem diesen jene jener jenes jede jeder jedes jedem jeden welche welcher welches
+alle ich du er sie es wir ihr man
+in im an am auf aus bei beim mit nach seit von vom zu zum zur für gegen ohne um über unter vor hinter
+neben zwischen durch trotz während wegen bis ab
+und oder aber denn sondern doch wenn weil da dass ob als wie falls sobald solange obwohl nachdem bevor
+damit sodass wo was wer
+auch nur noch schon jedoch also zwar etwa so zumal nämlich
+""".split()))
 #: A word is a hyphenated compound whole ("SPY-Warnflagge", "S&P-500-Aktien"):
 #: German writes one noun so, and its head is the last element.
 _ONE_COUNT_TOKEN_RE = re.compile(
@@ -1179,7 +1193,19 @@ def _one_count_de(text: str) -> str | None:
             if word in ".;:!?":
                 break
             if word in ",()[]\"":
-                if seen_head or (word == "," and end == start + 1):
+                if word == "," and end == start + 1:
+                    break
+                if word == "," and seen_head:
+                    # A comma after the nouns joins another modifier -
+                    # "Eine Berliner, bestätigte Warnflagge" (#124 round 11,
+                    # SOTA-A) - unless a clause of its own opens after it
+                    # ("Ein Treiber, der seit Monaten wirkt").
+                    following = tokens[end + 1] if end + 1 < len(tokens) else ""
+                    if not following[:1].isalpha() or following.lower() in _CLAUSE_OPENERS_DE:
+                        break
+                    seen_head = False
+                    continue
+                if seen_head:
                     break
                 continue
             if _counted_de(word):
@@ -1289,6 +1315,11 @@ _COMPOUND_NUMBER_DE_RE = re.compile(
     # ...and the periods that are a number of years: "seit einem
     # Jahrzehnt", "Jahrhunderthoch" (#124 round 10).
     r"|jahr(?:zehnt|hundert|tausend)\w*"
+    # ...and the number nouns and the decades: "ein Dreier", "die
+    # Zwanzigerjahre", "in den Neunzigern" (#124 round 11); never "einer",
+    # and only the noun itself - "Achterbahn" is a word.
+    r"|(?:" + "|".join(sorted(_COMPOUND_PARTS_DE - {"ein", "eins"}, key=len, reverse=True))
+    + r")er(?:n|s|jahre?n?)?"
     # "fünfeinhalb", "zweieinhalb": a number word and a half.
     r"|\w*(?:" + _COMPOUND_ALT_DE + r")einhalb"
     )
@@ -2583,6 +2614,18 @@ _CONTEXT_NUMBER_WORDS: frozenset[str] = (
         | _FRACTIONS_DE
         | {scale + ending for scale in ("dutzend", "hundert", "tausend") for ending in ("e", "en")}))
     | frozenset(scale + "s" for scale in ("dozen", "hundred", "thousand", "million", "billion"))
+    # ...and the words that count without a number word: "Beide
+    # Warnflaggen sind aktiv" is a count of two (#124 round 11, SOTA-A);
+    # "both", "zweierlei", "sole", "trio" and the plural cardinals ("tens",
+    # "the twenties") are the same ("ones" is a pronoun).
+    | _with_folded(frozenset({"beide", "beiden", "beider", "beides", "beidem"}
+                             | {cardinal + "erlei" for cardinal in _NUMBER_WORDS_DE - _NOT_CARDINAL_DE
+                                - {"null", "eins"}}
+                             | {"duo", "duos", "trio", "trios", "quartett", "quartette", "quintett",
+                                "quintette"}))
+    | frozenset("""both sole lone duo duos trio trios quartet quartets quintet quintets twin twins""".split())
+    | frozenset((cardinal[:-1] + "ies" if cardinal.endswith("y") else cardinal + "s")
+                for cardinal in _NUMBER_WORDS - {"one"})
     # ...and the periods that are a number: "the highest in a decade" is a
     # ten-year claim no fact grounds (#124 round 10).
     | frozenset("""decade decades century centuries millennium millennia fortnight fortnights fortnightly
