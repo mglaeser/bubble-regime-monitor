@@ -13,8 +13,13 @@ import re
 from app.alerts.gsm7 import GSM7_BASIC, GSM7_EXT, septets
 from app.message_engine.validator import Channel
 
-#: A link has no place in a message the monitor sends.
-_LINK_RE = re.compile(r"(?i)\bhttps?://|\bwww\.")
+#: A link has no place in a message the monitor sends: any URI scheme
+#: ("ftp://", "mailto:x", "tel:+49"; "SMS: text" is a label), "www.", and a
+#: bare domain or an address, which a phone links by itself ("example.com",
+#: "x@example.com") (#126 round 1, SOTA-A).
+_LINK_RE = re.compile(
+    r"(?i:\b[a-z][a-z0-9+.-]*://|\b(?:mailto|tel|sms|callto|data|javascript):(?=\S)|\bwww\.)"
+    r"|\b[A-Za-z0-9][A-Za-z0-9-]*\.[a-z]{2,}\b(?!\.?\d)")
 
 #: Control characters, the line break excepted.
 _CONTROL_RE = re.compile(r"[\x00-\x09\x0b-\x1f\x7f-\x9f]")

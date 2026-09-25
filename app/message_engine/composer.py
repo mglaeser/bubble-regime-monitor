@@ -498,15 +498,42 @@ def template_for(entry: dict[str, Any], language: str | None) -> str:
     return str(translation(entry, language)["fallback"])
 
 
+#: A string fact enters the prompt as a token ("trim", "IN", "s1=0.80,s2=0.61");
+#: free text does not (AGENTS.md ground rule 1) ...
+_TOKEN_RE = re.compile(r"[A-Za-z0-9_.,:;=%/+-]{1,48}")
+#: ... except the one the ground rule admits: the bounded prior LLM judgment.
+_JUDGMENT_KEY = "judgment"
+_JUDGMENT_MAX = 400
+
+
+def _prompt_value(name: str, value: object) -> object | None:
+    """A declared fact as the prompt shows it, or None when it stays out."""
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    text = str(value)
+    if name == _JUDGMENT_KEY:
+        return text[:_JUDGMENT_MAX]
+    return text if _TOKEN_RE.fullmatch(text) else None
+
+
 def prompt_for(trigger: str, entry: dict[str, Any], facts: dict[str, object],
                channel: Channel, settings: Settings) -> str:
     """What the model is given: the system, the trigger's role, task and data
-    from the library with the numbers filled in, every number by name, the
-    references, and how to write the message."""
-    sections = {name: render_fallback(body.strip(), facts)
+    from the library with the numbers filled in, every fact the entry
+    declares by name, the references, and how to write the message.
+
+    ONLY THE DECLARED FACTS: the entry's `grounding_fields` are the numbers
+    its message is about, so a fact the caller merely carried - a
+    credential, an unrelated value - never reaches the model; and a string
+    enters only as a token or as the bounded prior judgment, never as free
+    text an upstream could steer the reply with (AGENTS.md ground rule 1;
+    #126 round 1, SOTA-A)."""
+    declared = {name: _prompt_value(name, _slot_value(name, facts))
+                for name in entry.get("grounding_fields") or []}
+    shown = {name: value for name, value in declared.items() if value is not None}
+    sections = {name: render_fallback(body.strip(), shown)
                 for name, body in _SECTION_RE.findall(str(entry.get("prompt", "")))}
-    numbers = "\n".join(f"  {name} = {value}" for name, value in sorted(facts.items())
-                        if value is not None)
+    numbers = "\n".join(f"  {name} = {value}" for name, value in sorted(shown.items()))
     references = context_material.render(context_material.references_for(trigger))
     language = settings.message_language or LIBRARY_LANGUAGE
     alphabet = "; only characters an SMS can carry (GSM-7)" if channel is Channel.SMS else ""
@@ -561,6 +588,12 @@ def compose(*, trigger: str, channel: Channel,
     except Exception as exc:  # noqa: BLE001 - a malformed entry is the same class
         return _bare_event(trigger, channel, settings,
                            f"library entry is malformed: {type(exc).__name__}", known=True)
+    # THE TEMPLATE MEETS THE BASIC CHECKS TOO: a fact can carry a link into
+    # it (#126 round 1, SOTA-A and SOTA-C). The bare event is the last resort.
+    problem = basic_check(fallback, channel=channel, max_chars=_cap(channel, settings))
+    if problem is not None:
+        return _bare_event(trigger, channel, settings, f"the template fails a basic check: {problem}",
+                           known=True)
 
     if entry.get("llm") is False:
         # A FIXED trigger is never written by the model: test_message tests
