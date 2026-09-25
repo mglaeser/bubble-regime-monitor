@@ -30,14 +30,17 @@ converge, and 57 review rounds on #121 and 20 on #124 showed it.
   indicators (`app/message_engine/context.py`, repo-authored text only);
   and how to write: one message, in `MESSAGE_LANGUAGE`, within the
   channel's length. A fact the entry does not declare never reaches the
-  model, and a string enters only as a token ("trim", "s1=0.80,s2=0.61")
-  or as the bounded prior judgment, never as free text (AGENTS.md ground
-  rule 1; #126 round 1). The library's other sections (its hard rules and
-  output format, written for the replaced design) are not sent.
-- **The basic checks** (`app/message_engine/checks.py`): not empty, no
-  control character, no link (any URI scheme, "www.", a bare domain or an
-  address), within the channel's length - on SMS only characters GSM-7
-  carries, counted in septets. The template meets them too: a template a
+  model (#126 round 1), and a string fact is one of the monitor's own
+  values - an action or trend state, a number written as text, a block
+  summary - or the bounded prior judgment; anything else renders as a
+  dash and stays out of the prompt (AGENTS.md ground rule 1; #126 round
+  2). The library's other sections (its hard rules and output format,
+  written for the replaced design) are not sent.
+- **The basic checks** (`app/message_engine/checks.py`): something visible,
+  no control or invisible character, no link (any URI - a scheme and its
+  colon - "www.", a bare domain or an address in any case), within the
+  channel's length - on SMS only characters GSM-7 carries, counted in
+  septets. The template meets them too: a template a
   fact broke sends the bare event. Nothing about what the text
   says: a number the facts do not carry, or a word the old lexicon banned,
   goes out as written, and that is pinned.
@@ -337,7 +340,8 @@ composer's, every field of it is the caller's string.
 A fact is a scalar - a dict or list renders as a dash - and every string
 passes the repository's redaction chokepoint (`app.redaction.sanitize`), the
 one the failure alert uses, before it reaches the prompt or a template slot
-(#112 rounds 4 and 6). The override suffix is derived, never supplied.
+(#112 rounds 4 and 6); a string must also be one of the monitor's own values
+(decision 24). The override suffix is derived, never supplied.
 
 ## Decision 17 — the transport is the channel the Composed was made for
 

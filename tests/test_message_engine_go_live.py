@@ -52,7 +52,7 @@ def _snapshot(**over) -> Snapshot:
                 action_band="trim", override_fired=False, red_flag_count=2,
                 block_s={"indicators": {"s1": {"sub_score": 0.42}, "s2": {"sub_score": None}}},
                 block_d={"indicators": {"d1": {"sub_score": 0.11}}},
-                trend_states={"SPY": {"faber_10mo": "up"}, "QQQ": {"faber_10mo": "flat"}},
+                trend_states={"SPY": {"faber_10mo": "IN"}, "QQQ": {"faber_10mo": "OUT"}},
                 judgment_call="Breadth narrow, credit tight.")
     base.update(over)
     return Snapshot(**base)
@@ -69,7 +69,7 @@ class TestDigestFacts:
         assert facts == {
             "median": 51, "score_scale_max": 100, "action_band": "trim", "override_fired": False,
             "iqr_lo": 40, "iqr_hi": 61, "red_flag_count": 2, "red_flag_total": 4,
-            "spy_trend": "up", "qqq_trend": "flat", "s_block_summary": "s1=0.42,s2=NA",
+            "spy_trend": "IN", "qqq_trend": "OUT", "s_block_summary": "s1=0.42,s2=NA",
             "d_block_summary": "d1=0.11", "judgment": "Breadth narrow, credit tight."}
 
     def test_every_fact_is_a_scalar_and_declared(self):
@@ -82,7 +82,7 @@ class TestDigestFacts:
     def test_the_fallback_renders_the_old_deterministic_digest(self):
         entry = composer.library()["prompts"]["daily_digest"]
         text = composer.render_fallback(entry["fallback"], digest.digest_facts(_snapshot(override_fired=True)))
-        assert text == "bubblegauge 51/100 trim OVERRIDE. range 40-61. SPY up, QQQ flat. Flags 2/4."
+        assert text == "bubblegauge 51/100 trim OVERRIDE. range 40-61. SPY IN, QQQ OUT. Flags 2/4."
 
 
 class TestEngineOff:
@@ -155,7 +155,7 @@ class TestEngineOn:
         monkeypatch.setattr(composer, "complete", lambda **_kw: (_ for _ in ()).throw(RuntimeError("down")))
         out = digest.send_daily_digest()
         assert out["status"] == "sent" and out["source"] == "fallback" and out["llm_used"] is False
-        assert sends == ["bubblegauge 51/100 trim. range 40-61. SPY up, QQQ flat. Flags 2/4."]
+        assert sends == ["bubblegauge 51/100 trim. range 40-61. SPY IN, QQQ OUT. Flags 2/4."]
 
     def test_the_transport_names_its_channel_and_the_gate_binds_it(self, monkeypatch, engine_on):
         _admitted(monkeypatch)
