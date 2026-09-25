@@ -573,17 +573,19 @@ puts its verb second. The set has these parts:
   hide a word ("Káufe", "Háltén Sie"), and every umlaut admits its ASCII
   transliteration ("duerfte").
 - **A banned lexicon.** It covers probability, advice, certainty, forecast
-  and crash talk, including the verb "raten" in every form: present,
-  past, both subjunctives ("du ratest", "du rietest"), the present
-  participle, the prefixed verbs ("abraten", "zuraten", "angeraten"), and
-  "geraten" after "zu"/"zur"/"zum" ("zur Vorsicht geraten"; "unter Druck
-  geraten" is another verb) (#124 round 8). The noun "die Rate",
-  capitalised and after a determiner, is not banned; "Alle raten ..." is
-  the verb (#124 round 1). German joins its words, so
-  the stems that are always advice or forecast are banned inside a
-  compound too ("Kaufempfehlung", "Kursprognose", "Crashgefahr"); "kauf"
-  only with an advice part, since "Verkaufsdruck" describes the market
-  (#124 round 3).
+  and crash talk, including the verb "raten" in every form: present, past,
+  both subjunctives ("du ratest", "du rietest"), the present participle,
+  the prefixed verbs ("abraten", "zuraten", "angeraten"), and "geraten"
+  after "zu"/"zur"/"zum" ("zur Vorsicht geraten"; "unter Druck geraten" is
+  another verb) (#124 round 8), anywhere before it in its clause ("zu
+  großer Vorsicht am Markt geraten"; the infinitive's "um nicht unter
+  Druck zu geraten" stays), and "gut beraten" (#124 round 13). The noun
+  "die Rate", capitalised and after a determiner, is not banned; "Alle
+  raten ..." is the verb (#124 round 1). German joins its words, so the
+  stems that are always advice or forecast are banned inside a compound
+  too ("Kaufempfehlung", "Kursprognose", "Crashgefahr"); "kauf" only with
+  an advice part, since "Verkaufsdruck" describes the market (#124 round
+  3).
 - **An advice and forecast grammar.** It covers reader-directed modals,
   the subject-first modal, impersonal recommendations, the passive modal,
   "ist zu verkaufen" and "zu" infixed in a separable verb. A forecast's
@@ -638,8 +640,10 @@ puts its verb second. The set has these parts:
   run of capitalised words, ending at the first lowercase word after it. A
   counted noun anywhere in the phrase is the count, since a capitalised
   word can be an adjective ("Eine Berliner Warnflagge", #124 round 4); a
-  ticker in capitals is a modifier. A comma between two modifiers, and a
-  bracket or a quote before the nouns, stay inside the phrase ("Eine
+  ticker in capitals is a modifier. A period counts by the head of its
+  compound ("seit einem Handelstag", "Geschäftsjahr"), "Quartal" and
+  "Dekade" among them (#124 round 13). A comma between two modifiers, and
+  a bracket or a quote before the nouns, stay inside the phrase ("Eine
   aktive, bestätigte Warnflagge", #124 round 5), and so does a comma after
   the nouns ("Eine Berliner, bestätigte Warnflagge") unless a clause opens
   after it ("Ein Treiber, der ...") (#124 round 11). "achte" and "achten"
@@ -652,7 +656,9 @@ puts its verb second. The set has these parts:
   "euch", "euer", "eure-") are refused anywhere; lowercase "ihr" is "her"
   and "their" as well and stays. The formal forms ("Sie", "Ihnen", "Ihr-")
   are refused mid-sentence, where only the formal "you" is capitalised
-  (#124 round 12).
+  (#124 round 12). The English "you" in German prose addresses the reader
+  too, judged after the English-clause rules so a whole English clause is
+  judged as one (#124 round 13).
 - **A positive language check.** A German message needs at least two
   distinct German function words, outnumbering the English evidence.
   English evidence includes common English words as well as function
@@ -681,7 +687,8 @@ number word in either language:
   (#124 round 7), a fraction in a compound ("Zweidrittelmehrheit") (#124
   round 10);
 - the periods that are a number: "decade", "century", "fortnight",
-  "biweekly", "Jahrzehnt", "Jahrhundert" (#124 round 10);
+  "biweekly", "Jahrzehnt", "Jahrhundert" (#124 round 10), "Dekade" (#124
+  round 13);
 - the words that count without a number word: "both", "beide",
   "zweierlei", "sole", "trio", and the plural cardinals ("tens", "the
   twenties") (#124 round 11), and the adjectives of a count

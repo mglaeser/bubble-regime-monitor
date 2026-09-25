@@ -1500,3 +1500,49 @@ class TestRoundTwelveOn124:
 
         assert _german_ordinal_stem("milliarde") == "milliardst"
         assert "milliardste" in _ORDINALS_DE and "milliardeste" not in _ORDINALS_DE
+
+
+class TestRoundThirteenOn124:
+    """#124 round 13, SOTA-A, three defects, all executed; SOTA-C approved;
+    SOTA-B timed out. "zu ... geraten" is read across its clause (and
+    "gut beraten" is advice); the periods count by a compound's head,
+    "Quartal" and "Dekade" among them; and the English "you" in German
+    prose addresses the reader."""
+
+    @pytest.mark.parametrize("text", [
+        "Analysten haben zu großer Vorsicht am Markt geraten, die Bewertungen sind hoch.",
+        "Anleger sind gut beraten, die hohen Bewertungen ernst zu nehmen.",
+        "Die Bewertungen sind hoch, Anleger sind gut beraten, vorsichtig zu bleiben.",
+    ])
+    def test_advice_with_raten_is_refused_across_the_clause(self, text):
+        result = validate_context(text, language="de", max_chars=200)
+        assert not result.ok and "banned lexicon" in (result.reason or ""), (text, result.reason)
+
+    @pytest.mark.parametrize("text", [
+        "Die Bewertungen sind seit einem Quartal hoch, die Lage bleibt ruhig.",
+        "Die Bewertungen sind seit einem Handelstag hoch, die Lage bleibt ruhig.",
+        "Die Bewertungen sind seit einem Geschäftsjahr hoch, die Lage bleibt ruhig.",
+        "Die Bewertungen sind seit einer Dekade nicht so hoch gewesen, die Lage bleibt ruhig.",
+    ])
+    def test_one_period_is_a_count(self, text):
+        result = validate_context(text, language="de", max_chars=200)
+        assert not result.ok and ("spelled-out number" in (result.reason or "")
+                                  or "no numbers" in (result.reason or "")), (text, result.reason)
+
+    @pytest.mark.parametrize("text", [
+        "Der Wert betrifft you und die Lage bleibt angespannt.",
+        "Der Wert betrifft your Depot und die Lage bleibt angespannt.",
+    ])
+    def test_the_english_you_in_german_prose_addresses_the_reader(self, text):
+        result = validate_context(text, language="de", max_chars=200)
+        assert not result.ok and "addresses the reader" in (result.reason or ""), (text, result.reason)
+
+    @pytest.mark.parametrize("text", [
+        "Die Kurse sind unter Druck geraten, die Bewertungen bleiben hoch.",
+        "Die Bewertungen sind hoch, um nicht unter Druck zu geraten, bleibt die Breite wichtig.",
+        "Die Fed berät über die Zinsen, die Bewertungen sind hoch.",
+        "Die Bewertungen sind im Vorjahr gestiegen, die Lage bleibt ruhig.",
+    ])
+    def test_geraten_as_got_into_and_the_other_verbs_stay(self, text):
+        result = validate_context(text, language="de", max_chars=200)
+        assert result.ok, (text, result.reason)

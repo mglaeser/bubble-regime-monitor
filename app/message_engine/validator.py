@@ -1100,9 +1100,21 @@ def _raten_de(text: str) -> str | None:
     ("Alle raten zur Vorsicht" - #124 round 1, SOTA-A)."""
     tokens: list[str] = re.findall(r"[A-Za-zÄÖÜäöüß]+|[.;:!?,()]", text)
     for i, token in enumerate(tokens):
-        # "zur Vorsicht geraten" is the perfect of "raten" (#124 round 8)
-        if token.lower() == "geraten" and {t.lower() for t in tokens[max(0, i - 3):i]} & {"zu", "zur", "zum"}:
-            return "geraten"
+        # "zur Vorsicht geraten" is the perfect of "raten" (#124 round 8),
+        # with "zu" anywhere before it in its clause - "zu großer Vorsicht
+        # am Markt geraten" (#124 round 12, SOTA-A); but "zu" right before
+        # it is the infinitive's ("um nicht unter Druck zu geraten").
+        if token.lower() == "geraten" and (i == 0 or tokens[i - 1].lower() != "zu"):
+            clause: list[str] = []
+            for earlier in reversed(tokens[:i]):
+                if earlier in ".;:!?,()":
+                    break
+                clause.append(earlier.lower())
+            if {"zu", "zur", "zum"} & set(clause):
+                return "geraten"
+        # "gut beraten" is advice ("Anleger sind gut beraten, ...")
+        if token.lower() == "beraten" and i > 0 and tokens[i - 1].lower() in {"gut", "besser", "schlecht", "wohl"}:
+            return f"{tokens[i - 1].lower()} beraten"
         if token.lower() not in _RATEN_FORMS_DE:
             continue
         noun = token[0].isupper() and i > 0 and tokens[i - 1].lower() in _DETERMINERS_DE
@@ -1147,6 +1159,12 @@ _COUNTED_FORMS_DE: frozenset[str] = _with_folded(frozenset({
 _COUNTED_HEADS_DE: tuple[str, ...] = tuple(sorted(_with_folded(frozenset({
     "flagge", "flaggen", "signal", "signale", "signalen", "signals",
     "ereignis", "ereignisse", "ereignissen", "ereignisses",
+    # ...and the periods, so a compound counts by its head ("seit einem
+    # Handelstag", "Geschäftsjahr"), "Quartal" and "Dekade" among them:
+    # "seit einem Quartal" passed (#124 round 13, SOTA-A)
+    "tag", "tage", "tagen", "tages", "tags", "woche", "wochen", "monat", "monate", "monaten", "monats",
+    "jahr", "jahre", "jahren", "jahres", "jahrs", "quartal", "quartale", "quartalen", "quartals",
+    "dekade", "dekaden", "stunde", "stunden", "minute", "minuten",
 })), key=len, reverse=True))
 _ARTICLE_ONE_FORMS_DE = frozenset({"ein", "eine", "einem", "einen", "einer", "eines", "eins"})
 #: The words that open a clause of their own after a comma: determiners
@@ -2493,6 +2511,13 @@ def validate(text: str, *, channel: Channel, facts: dict[str, object],
                 return ValidationResult(
                     False, FailureClass.CONTENT,
                     f"not German: an English part ({_part.strip()[:40]!r})")
+        # ...and the English "you" in German prose that is no English clause
+        # addresses the reader too: "Der Wert betrifft you und die Lage
+        # bleibt angespannt" (#124 round 13, SOTA-A). After the rules above,
+        # so a whole English clause is judged as one.
+        you = re.search(r"\b(?:you|your|yours|yourself|yourselves)\b", lowered)
+        if you:
+            return ValidationResult(False, FailureClass.CONTENT, f"{you.group(0)!r} addresses the reader (de)")
     if prose_rules and not german:
         foreign = {w for w in re.findall(r"[a-zà-ÿ]+", lowered)} & _NON_ENGLISH_WORDS
         if foreign:
@@ -2664,6 +2689,7 @@ _CONTEXT_NUMBER_WORDS: frozenset[str] = (
                 for cardinal in _NUMBER_WORDS - {"one"})
     # ...and the periods that are a number: "the highest in a decade" is a
     # ten-year claim no fact grounds (#124 round 10).
+    | frozenset({"dekade", "dekaden"})
     | frozenset("""decade decades century centuries millennium millennia fortnight fortnights fortnightly
                    biweekly bimonthly biannual biannually semiannual semiannually biennial biennially
                    triennial triennially""".split())
