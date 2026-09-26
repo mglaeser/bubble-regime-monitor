@@ -38,7 +38,7 @@ from app.llm_gateway import complete
 from app.logging_conf import get_logger
 from app.message_engine import context as context_material
 from app.message_engine import governor as gov
-from app.message_engine.checks import EMOJI, basic_check
+from app.message_engine.checks import EMOJI, MARKS, basic_check
 from app.message_engine.validator import Channel
 from app.redaction import sanitize
 from app.references import REGISTRY
@@ -586,7 +586,8 @@ def prompt_for(trigger: str, entry: dict[str, Any], facts: dict[str, object],
     length = (f"at most {cap} characters, each of {' '.join(sorted(GSM7_EXT))} counting as two, and only "
               "characters an SMS can carry (GSM-7)" if channel is Channel.SMS else
               f"at most {cap} characters, counted in Unicode code points (an emoji may count as several), "
-              f"in Latin letters, digits and ordinary punctuation, with emoji only from {' '.join(EMOJI)}")
+              f"using only printable ASCII and Latin-1 characters (no no-break space, no soft hyphen), the "
+              f"marks {' '.join(MARKS)}, and emoji only from {' '.join(EMOJI)}")
     parts = [
         _SYSTEM,
         f"ROLE: {sections['ROLE']}" if sections.get("ROLE") else "",
@@ -599,6 +600,21 @@ def prompt_for(trigger: str, entry: dict[str, Any], facts: dict[str, object],
          f"without naming a channel, plain text without links, {length}. Reply with the message only."),
     ]
     return "\n\n".join(part for part in parts if part)
+
+
+def _prepare(trigger: str, entry: dict[str, Any], facts: dict[str, object], channel: Channel,
+             settings: Settings) -> tuple[str, str] | str:
+    """The prompt and the fitted template for one entry, or why the entry
+    cannot give them. Its own function, so the caller binds both or neither
+    (SOTA-C's UnboundLocalError claim, #126 rounds 1-7: never reproduced)."""
+    language = settings.message_language or LIBRARY_LANGUAGE
+    try:
+        admitted = _sanitized(facts)
+        prompt = prompt_for(trigger, entry, admitted, channel, settings)
+        fallback, _ = _fit_render(template_for(entry, language), admitted, channel, settings)
+    except Exception as exc:  # noqa: BLE001 - a malformed entry is the same class
+        return f"library entry is malformed: {type(exc).__name__}"
+    return prompt, fallback
 
 
 def compose(*, trigger: str, channel: Channel,
@@ -630,16 +646,10 @@ def compose(*, trigger: str, channel: Channel,
     if entry is None:
         return _bare_event(trigger, channel, settings, "trigger not in library", known=False)
 
-    language = settings.message_language or LIBRARY_LANGUAGE
-    try:
-        facts = _sanitized(facts)
-        prompt = prompt_for(trigger, entry, facts, channel, settings)
-        fallback, _ = _fit_render(template_for(entry, language), facts, channel, settings)
-    except Exception as exc:  # noqa: BLE001 - a malformed entry is the same class
-        # the bare event: this handler reads none of the names the try binds
-        # (SOTA-C's UnboundLocalError claim, #126 rounds 1-6, executed: none)
-        return _bare_event(trigger, channel, settings,
-                           f"library entry is malformed: {type(exc).__name__}", known=True)
+    prepared = _prepare(trigger, entry, facts, channel, settings)
+    if isinstance(prepared, str):
+        return _bare_event(trigger, channel, settings, prepared, known=True)
+    prompt, fallback = prepared
     # THE TEMPLATE MEETS THE BASIC CHECKS TOO: a fact can carry a link into
     # it (#126 round 1, SOTA-A and SOTA-C). The bare event is the last resort.
     problem = basic_check(fallback, channel=channel, max_chars=_cap(channel, settings))

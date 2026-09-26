@@ -13,7 +13,7 @@ import pytest
 from app.config import Settings
 from app.db import session_scope
 from app.message_engine import composer
-from app.message_engine.checks import EMOJI, basic_check
+from app.message_engine.checks import EMOJI, MARKS, basic_check
 from app.message_engine.validator import Channel
 from app.models import MessageEngineAttempt
 
@@ -444,8 +444,8 @@ class TestRoundSixOn126:
     @pytest.mark.parametrize("text", [
         "Größe und Breite: 59 von 100 – „ruhig“, ‚vorsichtig‘ … € 5 · 3 × 2 ≈ 6 → ↑ ↓ ≤ ≥ −0,5 %",
         "Reading 59/100 — ‘calm’, “stretched” • £ ° ± ½ § © ® ™ « » ‹ › † ‰ ′ ″ ≠",
-        "Déjà vu: Ça, señor, Øre, Łódź, ẞ, ﬁ \U0001f539 ▪️ \U0001f4cc \U0001f552 ℹ️ ▪ ℹ",
-        "Stand 59 %\nzweite Zeile"])
+        "Déjà vu: Ça, señor, Øre, ẞ, \U0001f539 ▪️ \U0001f4cc \U0001f552 ℹ️ ▪ ℹ",
+        "Stand 59 %\nzweite Zeile"])
     def test_what_the_alphabet_lets_through(self, text):
         assert basic_check(text, channel=Channel.IMESSAGE, max_chars=400) is None
 
@@ -458,8 +458,8 @@ class TestRoundSixOn126:
 
     def test_the_imessage_prompt_names_the_alphabet(self, monkeypatch):
         _, prompts = _compose(monkeypatch, REPLY)
-        assert ("in Latin letters, digits and ordinary punctuation, with emoji only from "
-                "\U0001f539 ▪️ \U0001f4cc \U0001f552 ℹ️") in prompts[0]
+        assert ("using only printable ASCII and Latin-1 characters (no no-break space, no soft hyphen), the marks "
+                f"{' '.join(MARKS)}, and emoji only from {' '.join(EMOJI)}") in prompts[0]
 
     @pytest.mark.parametrize("channel", [Channel.SMS, Channel.IMESSAGE])
     def test_every_template_is_in_the_alphabet(self, channel):
@@ -467,3 +467,38 @@ class TestRoundSixOn126:
             for language in (None, "de"):
                 text = composer.render_fallback(composer.template_for(entry, language), dict(FACTS))
                 assert basic_check(text, channel=channel, max_chars=10_000) is None, (trigger, language)
+
+
+class TestRoundSevenOn126:
+    """#126 round 7: SOTA-A two defects, both executed; SOTA-C repeated the
+    UnboundLocalError claim a fifth time (not reproduced; the preparation is
+    now its own function, so compose binds both names or neither); SOTA-B
+    timed out. The alphabet admits no blank but the space, and no Latin
+    letter outside Latin-1 but the capital sharp s; a channel's name counts
+    with or without accents."""
+
+    @pytest.mark.parametrize("text", ["Stand 59", "59 % today", "SᴍS: A", "IᴍSG: B",
+                                      "Łódź 59", "ﬁne 59"])
+    def test_a_blank_or_a_letter_outside_latin_1_is_outside_the_alphabet(self, text):
+        assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) == OUTSIDE
+
+    def test_small_capital_variants_are_not_sent(self, monkeypatch):
+        out, _ = _compose(monkeypatch, "SᴍS: bubblegauge 59/100 trim.\nIᴍSG: bubblegauge 59/100, band trim.")
+        assert out.source == "fallback" and out.text == _template()
+
+    @pytest.mark.parametrize("text", ["ÍMSG: B", "íMessage: C", "ÌMSG ét SMS"])
+    def test_a_channel_name_with_accents_is_a_channel_name(self, text):
+        assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) == "a channel name"
+
+    @pytest.mark.parametrize("text", ["Größe und Breite: 59 von 100. Änderung: keine.",
+                                      "Im Messebetrieb bleibt der Wert 59; Smsl-Index n/a.", "StraẞE 59"])
+    def test_german_prose_passes(self, text):
+        assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) is None
+
+    def test_the_preparation_gives_both_or_a_reason(self, monkeypatch):
+        entry = composer.library()["prompts"]["daily_digest"]
+        prompt, template = composer._prepare("daily_digest", entry, dict(FACTS), Channel.IMESSAGE, _settings())
+        assert "ALL NUMBERS" in prompt and template == _template()
+        monkeypatch.setattr(composer, "_sanitized", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x")))
+        assert composer._prepare("daily_digest", entry, dict(FACTS), Channel.IMESSAGE, _settings()) == (
+            "library entry is malformed: RuntimeError")
