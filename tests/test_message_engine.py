@@ -13,7 +13,7 @@ import pytest
 from app.config import Settings
 from app.db import session_scope
 from app.message_engine import composer
-from app.message_engine.checks import basic_check
+from app.message_engine.checks import EMOJI, basic_check
 from app.message_engine.validator import Channel
 from app.models import MessageEngineAttempt
 
@@ -25,6 +25,7 @@ FACTS = {"median": 59, "score_scale_max": 100, "action_band": "trim", "override_
          "d_block_summary": "d1=0.11", "judgment": "Valuations are stretched while credit stays calm."}
 REPLY = "bubblegauge 59/100, band trim: stretched valuations lead, credit stays calm. Flags 1/4."
 T0 = datetime(2026, 1, 1, 8, 0, tzinfo=UTC)
+OUTSIDE = "a character outside the message alphabet"
 
 
 def _settings(**overrides) -> Settings:
@@ -260,14 +261,15 @@ class TestRoundTwoOn126:
         assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) == "a link"
 
     @pytest.mark.parametrize("text, reason", [
-        ("​", "empty"), ("​​ ", "empty"), ("reading​59", "an invisible character"),
-        ("reading ‮59", "an invisible character"), ("rea­ding 59", "an invisible character"),
+        ("​", "empty"), ("​​ ", "empty"), ("reading​59", OUTSIDE),
+        ("reading ‮59", OUTSIDE), ("rea­ding 59", OUTSIDE),
     ])
     def test_an_invisible_character_is_no_content(self, text, reason):
         assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) == reason
 
-    def test_an_emoji_sequence_keeps_its_joiner(self):
-        assert basic_check("Reading 59 \U0001f469‍\U0001f4bb", channel=Channel.IMESSAGE, max_chars=200) is None
+    def test_a_joined_emoji_is_outside_the_alphabet(self):
+        """Since round 6 only the library's five emoji are in the alphabet."""
+        assert basic_check("Reading 59 \U0001f469‍\U0001f4bb", channel=Channel.IMESSAGE, max_chars=200) == OUTSIDE
 
 
 class TestRoundThreeOn126:
@@ -286,17 +288,19 @@ class TestRoundThreeOn126:
     @pytest.mark.parametrize("text", ["a͏b reading 59", "a‍b reading 59", "reading 59️",
                                       "reading⁠ 59", "reading 59\U000e0041"])
     def test_a_character_that_draws_nothing_is_refused(self, text):
-        assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) == "an invisible character"
+        assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) == OUTSIDE
 
-    @pytest.mark.parametrize("text", ["Reading 59 ℹ️ today", "Reading 59 ▪️ today",
-                                      "Flags 1️⃣ of 4", "Reading 59 \U0001f469‍\U0001f4bb",
-                                      "Reading 59 \U0001f441️‍\U0001f5e8️"])
-    def test_an_emoji_sequence_keeps_its_joiners_and_selectors(self, text):
-        assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) is None
+    @pytest.mark.parametrize("text, reason", [
+        ("Reading 59 ℹ️ today", None), ("Reading 59 ▪️ today", None),
+        ("Flags 1️⃣ of 4", OUTSIDE), ("Reading 59 \U0001f469‍\U0001f4bb", OUTSIDE),
+        ("Reading 59 \U0001f441️‍\U0001f5e8️", OUTSIDE)])
+    def test_the_librarys_emoji_keep_their_selector_and_no_other_emoji_passes(self, text, reason):
+        assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) == reason
 
-    @pytest.mark.parametrize("text", ["see bücher.de", "mail x@bücher.de", "visit пример.рф"])
-    def test_a_domain_in_any_script_is_a_link(self, text):
-        assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) == "a link"
+    @pytest.mark.parametrize("text, reason", [("see bücher.de", "a link"), ("mail x@bücher.de", "a link"),
+                                              ("visit пример.рф", OUTSIDE)])
+    def test_a_domain_in_any_script_is_refused(self, text, reason):
+        assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) == reason
 
     def test_german_prose_with_abbreviations_is_no_link(self):
         assert basic_check("Größe und Breite: 59 von 100, z.B. SPY. Nächster Lauf 14:00 UTC.",
@@ -312,12 +316,12 @@ class TestRoundFourOn126:
 
     @pytest.mark.parametrize("text", ["see example。com", "see example．com", "see example｡com",
                                       "go to ｗｗｗ．example．org"])
-    def test_an_idna_dot_is_a_dot(self, text):
-        assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) == "a link"
+    def test_an_idna_dot_is_refused(self, text):
+        assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) == OUTSIDE
 
     def test_an_idna_dot_link_is_not_sent(self, monkeypatch):
         out, _ = _compose(monkeypatch, "Reading 59, details at example。com")
-        assert out.source == "fallback" and out.text == _template() and "a link" in (out.reason or "")
+        assert out.source == "fallback" and out.text == _template() and OUTSIDE in (out.reason or "")
 
     def test_a_value_with_units_a_month_a_weekday_or_an_asset_is_kept(self):
         facts = {"F_NEXT_CHECK": "14:00 UTC", "snapshot_age": "3h", "outage_duration": "2d 4h",
@@ -351,8 +355,7 @@ class TestRoundFourOn126:
 
     @pytest.mark.parametrize("reply", ["SMS: bubblegauge 59/100 trim.\nIMSG: bubblegauge 59/100, band trim.",
                                        "SMS - bubblegauge 59/100 trim. iMessage - bubblegauge 59/100, band trim.",
-                                       "[sms] bubblegauge 59/100 trim.",
-                                       "\uff33\uff2d\uff33: bubblegauge 59/100 trim."])
+                                       "[sms] bubblegauge 59/100 trim."])
     def test_a_reply_that_names_a_channel_is_not_sent(self, monkeypatch, reply):
         out, _ = _compose(monkeypatch, reply)
         assert out.source == "fallback" and out.text == _template() and "a channel name" in (out.reason or "")
@@ -366,14 +369,14 @@ class TestRoundFiveOn126:
 
     @pytest.mark.parametrize("text", ["see nic.भारत", "see हिन्दी.com",
                                       "mail x@हिन्दी.भारत"])
-    def test_a_combining_mark_is_part_of_its_letter(self, text):
-        assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) == "a link"
+    def test_a_combining_mark_is_refused(self, text):
+        assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) == OUTSIDE
 
-    @pytest.mark.parametrize("text", ["see example.com.5", "see i\u2764\ufe0f.ws"])
-    def test_a_domain_is_any_run_up_to_a_dot(self, text):
+    @pytest.mark.parametrize("text, reason", [("see example.com.5", "a link"), ("see i\u2764\ufe0f.ws", OUTSIDE)])
+    def test_a_domain_is_any_run_up_to_a_dot(self, text, reason):
         """Swept with the marks: a label of any characters, and nothing
         after the top-level domain lets it pass."""
-        assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) == "a link"
+        assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) == reason
 
     @pytest.mark.parametrize("text", ["Kap.5 and v3.5, Stand 25.09.2026", "Weiter...Das bleibt so.",
                                       "z.B. SPY, d.h. U.S.-Aktien; e.g. QQQ, i.e. calm."])
@@ -381,7 +384,7 @@ class TestRoundFiveOn126:
         assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) is None
 
     def test_an_emoji_keeps_its_selector_and_is_no_link(self):
-        assert basic_check("Reading 59 ▪️ today. Flags 1️⃣ of 4 ℹ️",
+        assert basic_check("Reading 59 ▪️ today. Flags 1 of 4 ℹ️",
                            channel=Channel.IMESSAGE, max_chars=200) is None
 
     def test_the_sms_prompt_counts_as_the_check_counts(self, monkeypatch):
@@ -404,3 +407,63 @@ class TestRoundFiveOn126:
         monkeypatch.setattr(composer, builder, lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x")))
         out, prompts = _compose(monkeypatch, REPLY)
         assert out.source == "deterministic" and "malformed" in (out.reason or "") and prompts == []
+
+
+class TestRoundSixOn126:
+    """#126 round 6: SOTA-A two defects, both executed; SOTA-C repeated the
+    UnboundLocalError claim a fourth time (executed again, not reproduced;
+    pinned in round 5); SOTA-B timed out. A braille blank drew nothing and a
+    scheme after an underscore was no link - and rounds 2-6 had each found
+    another character the refusal list missed, so iMessage has an alphabet
+    now, as SMS has GSM-7, and the scheme may follow anything but a letter,
+    a digit or a scheme's sign."""
+
+    @pytest.mark.parametrize("text", ["⠀", "Reading ⠀ 59", "\U0001d159 59"])
+    def test_a_blank_is_outside_the_alphabet(self, text):
+        assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) == OUTSIDE
+
+    def test_a_braille_blank_reply_is_not_sent(self, monkeypatch):
+        out, _ = _compose(monkeypatch, "⠀")
+        assert out.source == "fallback" and out.text == _template() and OUTSIDE in (out.reason or "")
+
+    @pytest.mark.parametrize("text", ["_https://1.1.1.1", "1https://1.1.1.1", "see _tel:+4930123456"])
+    def test_a_scheme_after_any_sign_is_a_link(self, text):
+        assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) == "a link"
+
+    @pytest.mark.parametrize("text", ["Window 2026-08-15T14:00:00+00:00 to 2026-08-22T14:00Z.",
+                                      "Next run 14:00 UTC, flags: 1/4."])
+    def test_a_time_is_no_scheme(self, text):
+        assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) is None
+
+    @pytest.mark.parametrize("text", ["ＳＭＳ: bubblegauge 59/100 trim.", "Reading 59 \U0001f4c8",
+                                      "Private  use", "Unassigned ͸ point", "A lone \ud800 surrogate",
+                                      "Greek αβγ letters", "Combining ü mark"])
+    def test_what_the_alphabet_keeps_out(self, text):
+        assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) == OUTSIDE
+
+    @pytest.mark.parametrize("text", [
+        "Größe und Breite: 59 von 100 – „ruhig“, ‚vorsichtig‘ … € 5 · 3 × 2 ≈ 6 → ↑ ↓ ≤ ≥ −0,5 %",
+        "Reading 59/100 — ‘calm’, “stretched” • £ ° ± ½ § © ® ™ « » ‹ › † ‰ ′ ″ ≠",
+        "Déjà vu: Ça, señor, Øre, Łódź, ẞ, ﬁ \U0001f539 ▪️ \U0001f4cc \U0001f552 ℹ️ ▪ ℹ",
+        "Stand 59 %\nzweite Zeile"])
+    def test_what_the_alphabet_lets_through(self, text):
+        assert basic_check(text, channel=Channel.IMESSAGE, max_chars=400) is None
+
+    def test_a_decomposed_letter_is_composed_before_the_check(self, monkeypatch):
+        out, _ = _compose(monkeypatch, "Größe und Breite: 59 von 100.")
+        assert out.source == "generated" and out.text == "Größe und Breite: 59 von 100."
+
+    def test_the_alphabets_emoji_are_the_librarys(self):
+        assert list(EMOJI) == composer.library()["channels"]["imessage"]["emoji_allowlist"]
+
+    def test_the_imessage_prompt_names_the_alphabet(self, monkeypatch):
+        _, prompts = _compose(monkeypatch, REPLY)
+        assert ("in Latin letters, digits and ordinary punctuation, with emoji only from "
+                "\U0001f539 ▪️ \U0001f4cc \U0001f552 ℹ️") in prompts[0]
+
+    @pytest.mark.parametrize("channel", [Channel.SMS, Channel.IMESSAGE])
+    def test_every_template_is_in_the_alphabet(self, channel):
+        for trigger, entry in composer.library()["prompts"].items():
+            for language in (None, "de"):
+                text = composer.render_fallback(composer.template_for(entry, language), dict(FACTS))
+                assert basic_check(text, channel=channel, max_chars=10_000) is None, (trigger, language)

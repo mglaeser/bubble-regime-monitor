@@ -21,6 +21,7 @@ import hmac
 import json
 import re
 import secrets
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -37,7 +38,7 @@ from app.llm_gateway import complete
 from app.logging_conf import get_logger
 from app.message_engine import context as context_material
 from app.message_engine import governor as gov
-from app.message_engine.checks import basic_check
+from app.message_engine.checks import EMOJI, basic_check
 from app.message_engine.validator import Channel
 from app.redaction import sanitize
 from app.references import REGISTRY
@@ -578,13 +579,14 @@ def prompt_for(trigger: str, entry: dict[str, Any], facts: dict[str, object],
     numbers = "\n".join(f"  {name} = {value}" for name, value in sorted(shown.items()))
     references = context_material.render(context_material.references_for(trigger))
     language = settings.message_language or LIBRARY_LANGUAGE
-    # THE LENGTH AS THE CHECK COUNTS IT: septets on SMS, code points on
-    # iMessage (#126 round 5, SOTA-A: "150 characters" and a "€" at 150 was
-    # refused as 151 septets)
+    # THE LENGTH AND THE ALPHABET AS THE CHECK COUNTS THEM: septets and GSM-7
+    # on SMS, code points and the message alphabet on iMessage (#126 round 5,
+    # SOTA-A: "150 characters" and a "€" at 150 was refused as 151 septets)
     cap = _cap(channel, settings)
     length = (f"at most {cap} characters, each of {' '.join(sorted(GSM7_EXT))} counting as two, and only "
               "characters an SMS can carry (GSM-7)" if channel is Channel.SMS else
-              f"at most {cap} characters, counted in Unicode code points (an emoji may count as several)")
+              f"at most {cap} characters, counted in Unicode code points (an emoji may count as several), "
+              f"in Latin letters, digits and ordinary punctuation, with emoji only from {' '.join(EMOJI)}")
     parts = [
         _SYSTEM,
         f"ROLE: {sections['ROLE']}" if sections.get("ROLE") else "",
@@ -634,6 +636,8 @@ def compose(*, trigger: str, channel: Channel,
         prompt = prompt_for(trigger, entry, facts, channel, settings)
         fallback, _ = _fit_render(template_for(entry, language), facts, channel, settings)
     except Exception as exc:  # noqa: BLE001 - a malformed entry is the same class
+        # the bare event: this handler reads none of the names the try binds
+        # (SOTA-C's UnboundLocalError claim, #126 rounds 1-6, executed: none)
         return _bare_event(trigger, channel, settings,
                            f"library entry is malformed: {type(exc).__name__}", known=True)
     # THE TEMPLATE MEETS THE BASIC CHECKS TOO: a fact can carry a link into
@@ -675,7 +679,9 @@ def compose(*, trigger: str, channel: Channel,
                          f"gateway {type(exc).__name__}", failed_at)
     finished = moment + timedelta(seconds=monotonic() - started)
 
-    text = answer.strip()
+    # composed as the alphabet spells it: a "u" and a combining diaeresis
+    # is the "ü" the reader sees (#126 round 6)
+    text = unicodedata.normalize("NFC", answer.strip())
     problem = basic_check(text, channel=channel, max_chars=_cap(channel, settings))
     if problem is None:
         if not _close(claim_id, gov.Outcome.OK, None, finished, text=text, source="generated"):

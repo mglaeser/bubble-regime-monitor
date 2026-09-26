@@ -14,61 +14,49 @@ import unicodedata
 from app.alerts.gsm7 import GSM7_BASIC, GSM7_EXT, septets
 from app.message_engine.validator import Channel
 
+#: THE iMESSAGE ALPHABET, an allowlist as GSM-7 is on SMS: Latin letters
+#: (English, German and their neighbours), ASCII, the Latin-1 signs but the
+#: soft hyphen, a few typographic marks, and the library's five emoji
+#: (config/message_prompts.v1.json, channels.imessage.emoji_allowlist; the
+#: selector U+FE0F after one of them). Anything else is refused - a character
+#: that draws nothing or a blank, another script, a fullwidth or look-alike
+#: form, a combining mark, any other emoji. #126 rounds 2-6 found those one
+#: by one while this check listed what to refuse (U+200B, U+034F, "пример.рф",
+#: "example。com", "nic.भारत", U+2800).
+_TYPOGRAPHIC = frozenset("\u2013\u2014\u2018\u2019\u201a\u201c\u201d\u201e\u2020\u2021\u2022\u2026\u2030"
+                         "\u2032\u2033\u2039\u203a\u202f\u20ac\u2122\u2190\u2191\u2192\u2193\u2212\u2248"
+                         "\u2260\u2264\u2265")
+EMOJI = ("\U0001f539", "\u25aa\ufe0f", "\U0001f4cc", "\U0001f552", "\u2139\ufe0f")
+_EMOJI_BASES = frozenset(emoji[0] for emoji in EMOJI)
+_VS16 = "\ufe0f"
+
+
+def _in_alphabet(text: str, i: int) -> bool:
+    ch = text[i]
+    if ch == "\n" or " " <= ch <= "~" or ch in _TYPOGRAPHIC or ch in _EMOJI_BASES:
+        return True
+    if ch == _VS16:
+        return i > 0 and text[i - 1] in _EMOJI_BASES
+    if "\u00a0" <= ch <= "\u00ff":
+        return ch != "\u00ad"
+    return ch.isalpha() and unicodedata.name(ch, "").startswith("LATIN ")
+
+
 #: A link has no place in a message the monitor sends: any URI - a scheme
 #: and its colon with no space after it ("https://", "mailto:x", "tel:+49",
-#: "bitcoin:1A"; "SMS: text" is a label) - "www.", and a bare domain or an
-#: address in any case, which a phone links by itself ("example.com",
-#: "EXAMPLE.COM", "x@example.com") (#126 rounds 1 and 2, SOTA-A).
-#: ...in any script too: "bücher.de" is a link (#126 round 3, SOTA-A). A
-#: domain is any run of characters up to a dot and a word of two letters or
-#: more after it, with no space between - "i❤️.ws", "example.com.5".
+#: "bitcoin:1A"; "SMS: text" is a label) after anything but a letter, a digit
+#: or a scheme's sign ("_https://1.1.1.1"), and "://" wherever it stands -
+#: "www.", and a bare domain or an address, which a phone links by itself
+#: ("example.com", "EXAMPLE.COM", "x@bücher.de", "example.com.5"): any run of
+#: characters up to a dot and a word of two letters or more after it, with
+#: no space between (#126 rounds 1-6, SOTA-A).
 _LINK_RE = re.compile(
-    r"\b[A-Za-z][A-Za-z0-9+.-]*:(?=\S)|(?i:\bwww\.)"
+    r"(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*:(?=\S)|://|(?i:\bwww\.)"
     r"|[^\s.]+\.[^\W\d_]{2,}\b")
-
-#: Unicode's default-ignorable code points: characters that draw nothing.
-#: The zero-width joiner and the variation selectors belong to emoji
-#: sequences and are admitted there only (#126 round 3, SOTA-A: U+034F, a
-#: joiner outside an emoji).
-_IGNORABLE = ((0x00AD, 0x00AD), (0x034F, 0x034F), (0x061C, 0x061C), (0x115F, 0x1160), (0x17B4, 0x17B5),
-              (0x180B, 0x180F), (0x200B, 0x200F), (0x202A, 0x202E), (0x2060, 0x206F), (0x3164, 0x3164),
-              (0xFE00, 0xFE0F), (0xFEFF, 0xFEFF), (0xFFA0, 0xFFA0), (0xFFF0, 0xFFF8), (0x1BCA0, 0x1BCA3),
-              (0x1D173, 0x1D17A), (0xE0000, 0xE0FFF))
-_ZWJ, _VS15, _VS16 = "\u200d", "\ufe0e", "\ufe0f"
-
-#: The dots IDNA reads as dots: "example。com" is a link (#126 round 4,
-#: SOTA-A).
-_IDNA_DOTS = str.maketrans({"\u3002": ".", "\uff0e": ".", "\uff61": "."})
 
 #: A message for its channel names no channel: a reply that does is variants
 #: for several ("SMS: A", "IMSG: B"; #126 round 4, SOTA-A).
 _CHANNEL_RE = re.compile(r"(?i)\b(?:SMS|IMSG|I-?MESSAGE)\b")
-
-
-#: The emoji bases outside the symbol category: "ℹ️" is a letter by category.
-_TEXT_EMOJI_BASES = frozenset("\u2139\u203c\u2049\u2194\u2195\u2196\u2197\u2198\u2199\u21a9\u21aa"
-                              "\u3030\u303d\u00a9\u00ae\u2122\u24c2\u2934\u2935")
-_KEYCAP = "\u20e3"
-
-
-def _emoji(ch: str) -> bool:
-    return unicodedata.category(ch) == "So" or 0x1F000 <= ord(ch) <= 0x1FAFF or ch in _TEXT_EMOJI_BASES
-
-
-def _invisible(text: str, i: int) -> bool:
-    """Is text[i] a character that draws nothing, outside an emoji sequence?"""
-    ch = text[i]
-    if not (unicodedata.category(ch) == "Cf" or any(a <= ord(ch) <= b for a, b in _IGNORABLE)):
-        return False
-    before = text[i - 1] if i > 0 else ""
-    after = text[i + 1] if i + 1 < len(text) else ""
-    if ch in (_VS15, _VS16):
-        keycap = before in "#*0123456789" and after == _KEYCAP
-        return not ((before and _emoji(before)) or keycap)
-    if ch == _ZWJ:
-        joined = before and (_emoji(before) or (before == _VS16 and i > 1 and _emoji(text[i - 2])))
-        return not (joined and after and _emoji(after))
-    return True
 
 #: Control characters, the line break excepted.
 _CONTROL_RE = re.compile(r"[\x00-\x09\x0b-\x1f\x7f-\x9f]")
@@ -77,32 +65,26 @@ _CONTROL_RE = re.compile(r"[\x00-\x09\x0b-\x1f\x7f-\x9f]")
 def basic_check(text: str, *, channel: Channel, max_chars: int) -> str | None:
     """None when `text` may be sent on `channel`; otherwise the reason.
 
-    Something visible, no control or invisible character, no link, no
-    channel name, within the channel's length; on SMS only characters GSM-7 carries, counted in
-    septets.
+    Something visible, no control character, only the channel's alphabet
+    (GSM-7 on SMS, the message alphabet on iMessage), no link, no channel
+    name, within the channel's length - counted in septets on SMS.
     """
     # VISIBLE: a letter, a digit, a mark of punctuation or a symbol - a text
-    # of zero-width characters is empty (#126 round 2, SOTA-A)
+    # of spaces is empty (#126 round 2, SOTA-A)
     if not any(unicodedata.category(ch)[0] in "LNPS" for ch in text):
         return "empty"
     if _CONTROL_RE.search(text):
         return "a control character"
-    # a character that draws nothing (a zero-width space, a bidi control, a
-    # soft hyphen, a grapheme joiner) outside an emoji sequence
-    if any(_invisible(text, i) for i in range(len(text))):
-        return "an invisible character"
-    # read as a phone reads it: the compatibility forms folded ("ｗｗｗ．",
-    # "ＳＭＳ"), the dots IDNA reads as dots, and a combining mark as part of
-    # its letter ("nic.भारत", "हिन्दी.com"; #126 round 5, SOTA-A)
-    folded = "".join(ch for ch in unicodedata.normalize("NFKC", text).translate(_IDNA_DOTS)
-                     if unicodedata.category(ch)[0] != "M")
-    if _LINK_RE.search(folded):
-        return "a link"
-    if _CHANNEL_RE.search(folded):
-        return "a channel name"
     if channel is Channel.SMS:
         if any(ch not in GSM7_BASIC and ch not in GSM7_EXT for ch in text):
             return "a character SMS cannot carry"
+    elif not all(_in_alphabet(text, i) for i in range(len(text))):
+        return "a character outside the message alphabet"
+    if _LINK_RE.search(text):
+        return "a link"
+    if _CHANNEL_RE.search(text):
+        return "a channel name"
+    if channel is Channel.SMS:
         if septets(text) > max_chars:
             return f"longer than {max_chars} septets"
     elif len(text) > max_chars:

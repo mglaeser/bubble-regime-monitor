@@ -29,9 +29,10 @@ converge, and 57 review rounds on #121 and 20 on #124 showed it.
   the references for the trigger - the methodology and sources of its
   indicators (`app/message_engine/context.py`, repo-authored text only);
   and how to write: one message, in `MESSAGE_LANGUAGE`, for its channel
-  only, without links, within the channel's length as the check counts it
-  (septets on SMS, where `[ \ ] ^ { | } ~ €` count as two; code points on
-  iMessage; #126 round 5). A fact the entry does not declare
+  only, without links, within the channel's length and alphabet as the
+  check counts them (septets and GSM-7 on SMS, where `[ \ ] ^ { | } ~ €`
+  count as two; code points on iMessage, in Latin letters, digits and
+  ordinary punctuation, with the library's five emoji; #126 rounds 5-6). A fact the entry does not declare
   never reaches the model (#126 round 1), and a string fact is one of the
   monitor's own values - an action or trend state, a value written as text
   (digits, and for words only units, time zones, months, weekdays and the
@@ -43,16 +44,22 @@ converge, and 57 review rounds on #121 and 20 on #124 showed it.
   not sent, and its tasks' instruction to write an SMS and an iMessage
   variant in one reply is left out (#126 round 4).
 - **The basic checks** (`app/message_engine/checks.py`): something visible,
-  no control character and nothing that draws nothing (Unicode's
-  default-ignorable code points, admitted only inside an emoji sequence),
-  no link (any URI - a scheme and its colon - "www.", a bare domain or an
-  address in any case and script - any run of characters, a dot and a
-  word of two letters or more, with no space between - with the dots IDNA
-  reads as dots and a combining mark read as part of its letter), no
-  channel name (a reply that names one is variants for several), within
-  the channel's length - on SMS
-  only characters GSM-7 carries, counted in septets. The template meets them too: a template a
-  fact broke sends the bare event. Nothing about what the text
+  no control character, only the channel's alphabet, no link, no channel
+  name, within the channel's length. The alphabet is an allowlist: GSM-7
+  on SMS; on iMessage Latin letters, ASCII, the Latin-1 signs but the soft
+  hyphen, a few typographic marks and the library's five emoji
+  (`channels.imessage.emoji_allowlist`) - so a character that draws
+  nothing or a blank, another script, a fullwidth or look-alike form, a
+  combining mark or any other emoji is refused (the reply is NFC-composed
+  first, so a decomposed "ü" is the "ü" it shows). #126 rounds 2-6 found
+  those one at a time while the check listed what to refuse; round 6
+  turned it round. A link is any URI - a scheme and its colon after
+  anything but a letter, a digit or a scheme's sign, "://" anywhere -
+  "www.", and a bare domain or address: any run of characters, a dot and a
+  word of two letters or more, with no space between. A reply that names
+  a channel is variants for several. The length is counted in septets on
+  SMS and in code points on iMessage. The template meets the checks too: a
+  template a fact broke sends the bare event. Nothing about what the text
   says: a number the facts do not carry, or a word the old lexicon banned,
   goes out as written, and that is pinned.
 - **Otherwise the template**: a reply that fails a basic check, a gateway
