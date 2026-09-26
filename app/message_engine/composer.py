@@ -657,8 +657,28 @@ _SYSTEM = (
 
 
 def template_for(entry: dict[str, Any], language: str | None) -> str:
-    """The trigger's template in `language`: the owner's evergreen text."""
-    return str(translation(entry, language)["fallback"])
+    """The trigger's template in `language`: the owner's evergreen text -
+    text, or the entry is malformed (see _well_formed)."""
+    template = translation(entry, language)["fallback"]
+    if not isinstance(template, str):
+        raise TypeError("'fallback' is not text")
+    return template
+
+
+def _well_formed(entry: dict[str, Any]) -> None:
+    """A library entry's fields have their types, or the entry is malformed
+    and sends the bare event - never coerced: a template given as a list went
+    out as its repr, and a prompt of {} reached the model with no task
+    (#126 round 17, SOTA-A, executed)."""
+    prompt = entry.get("prompt", "")
+    if not isinstance(prompt, str):
+        raise TypeError("'prompt' is not text")
+    for key in ("grounding_fields", "authorized_prose"):
+        names = entry.get(key) or []
+        if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
+            raise TypeError(f"'{key}' is not a list of names")
+    if entry.get("llm") is not False and "TASK" not in {name for name, _ in _SECTION_RE.findall(prompt)}:
+        raise ValueError("an entry the model writes has no TASK")
 
 
 def _prompt_value(name: str, value: object) -> object | None:
@@ -683,7 +703,7 @@ def prompt_for(trigger: str, entry: dict[str, Any], facts: dict[str, object],
                 for name in entry.get("grounding_fields") or []}
     shown = {name: value for name, value in declared.items() if value is not None}
     sections = {name: render_fallback(body.strip(), shown)
-                for name, body in _SECTION_RE.findall(str(entry.get("prompt", "")))}
+                for name, body in _SECTION_RE.findall(entry.get("prompt", ""))}
     numbers = "\n".join(f"  {name} = {value}" for name, value in sorted(shown.items()))
     references = context_material.render(context_material.references_for(trigger))
     language = settings.message_language or LIBRARY_LANGUAGE
@@ -752,6 +772,7 @@ def _prepare(trigger: str, entry: dict[str, Any], facts: dict[str, object], chan
     (SOTA-C's UnboundLocalError claim, #126 rounds 1-7: never reproduced)."""
     language = settings.message_language or LIBRARY_LANGUAGE
     try:
+        _well_formed(entry)
         # ONLY THE DECLARED FACTS, for the prompt and the template alike
         # (visible_facts; K1 had dropped this for the template).
         admitted = _sanitized(visible_facts(entry, facts), frozenset(entry.get("authorized_prose") or []))

@@ -831,3 +831,38 @@ class TestRoundSixteenOn126:
         punycode = [label for label in iana_tlds.TLDS if label.startswith("xn--")]
         assert len(iana_tlds.U_LABELS) == len(punycode) > 100
         assert "vermögensberatung" in iana_tlds.U_LABELS
+
+
+
+def _library_with(monkeypatch, trigger, **fields):
+    import copy
+    library = copy.deepcopy(composer.library())
+    library["prompts"][trigger].update(fields)
+    monkeypatch.setattr(composer, "library", lambda: library)
+
+
+class TestRoundSeventeenOn126:
+    """#126 round 17: SOTA-A two defects, both executed; SOTA-B and SOTA-C
+    timed out. A malformed library entry was coerced, not refused: a
+    template given as a list went out as its Python repr, and a prompt of {}
+    reached the model with no task. An entry's fields have their types, or
+    it sends the bare event."""
+
+    def test_a_template_that_is_not_text_is_malformed(self, monkeypatch):
+        _library_with(monkeypatch, "test_message", fallback=["Sell everything now"])
+        out, prompts = _compose(monkeypatch, REPLY, trigger="test_message")
+        assert out.text == "bubblegauge: test_message fired." and "malformed" in (out.reason or "")
+        assert "Sell" not in out.text and prompts == []
+
+    @pytest.mark.parametrize("fields", [{"prompt": {}}, {"prompt": "ROLE: a writer, and no task."},
+                                        {"grounding_fields": "median"}, {"authorized_prose": {"x": 1}}])
+    def test_a_malformed_entry_sends_the_bare_event(self, monkeypatch, fields):
+        _library_with(monkeypatch, "daily_digest", **fields)
+        out, prompts = _compose(monkeypatch, REPLY)
+        assert out.text == "bubblegauge: daily_digest fired." and "malformed" in (out.reason or "") and prompts == []
+
+    def test_the_signed_library_is_well_formed(self):
+        for trigger, entry in composer.library()["prompts"].items():
+            composer._well_formed(entry)
+            for language in (None, "de"):
+                assert isinstance(composer.template_for(entry, language), str), (trigger, language)
