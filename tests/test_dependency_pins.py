@@ -37,6 +37,20 @@ def test_ci_installs_the_same_sqlalchemy_as_the_image():
     assert _ci_spec("SQLAlchemy") == CEILING
 
 
+#: Deprecated 3.0.0 (2026-09-26), a dependency of limits under slowapi, is
+#: written in Python 3.12 syntax; mypy targets 3.11 and exited 2 on it, so
+#: the type-check refused (CI on #126 at fc4e445).
+DEPRECATED = "Deprecated<3"
+
+
+def test_the_image_installs_deprecated_below_3():
+    assert _pyproject_spec("Deprecated") == DEPRECATED
+
+
+def test_ci_installs_the_same_deprecated_as_the_image():
+    assert _ci_spec("Deprecated") == DEPRECATED
+
+
 #: The message engine's link detection (the owner, 2026-09-26: a common
 #: problem goes to a well-maintained library): linkify-it-py for links,
 #: libphonenumber for numbers a phone dials. An upgrade changes what counts
