@@ -663,12 +663,12 @@ class TestLinksAreFoundByLibraries:
         assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) == "a link"
 
     @pytest.mark.parametrize("text", [
-        "pay to bitcoin:1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", "lightning:lnbc1u1p", "tel:+49", "mailto:x",
+        "pay to bitcoin:1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", "lightning:lnbc1u1p", "mailto:x",
         "T14:payload", "see example.com.5", "+49·30·1234567", "call 555-0123"])
     def test_the_scope_is_what_the_libraries_find(self, text):
-        """No phone links these: a scheme it does not know, a "tel:" with no
-        number behind it, a local number without its area code. The rules
-        that refused them are gone with the scope change."""
+        """No phone links these: a scheme it does not know, an address with
+        no domain, a local number without its area code. The rules that
+        refused them are gone with the scope change."""
         assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) is None
 
     @pytest.mark.parametrize("text", [
@@ -689,7 +689,7 @@ class TestLinksAreFoundByLibraries:
 
     def test_the_link_detector_decides(self, monkeypatch):
         class Detector:
-            def __init__(self, **_kw):
+            def __init__(self, *_a, **_kw):
                 pass
 
             def tlds(self, *_a):
@@ -786,3 +786,28 @@ class TestRoundFourteenOn126:
         monkeypatch.setattr(pathlib.Path, "read_bytes", unreadable)
         importlib.reload(checks)
         assert basic_check("see example.app", channel=Channel.IMESSAGE, max_chars=200) == "a link"
+
+
+
+class TestRoundFifteenOn126:
+    """#126 round 15: SOTA-C approved; SOTA-B timed out; SOTA-A one defect,
+    executed: "tel:112" - a tap that calls the emergency line - passed both
+    libraries. The schemes a phone dials or messages with are taught to the
+    link detector through its own API, whatever follows the colon, and a
+    scheme glued to what precedes it is shown to the detector with a space
+    before it."""
+
+    @pytest.mark.parametrize("text", [
+        "tel:112", "call tel:112 now", "TEL:112", "tel:*100#", "sms:+15551234", "callto:112",
+        "facetime:+4930123", "facetime-audio:+4930123", "-tel:112", ".tel:112", "+tel:112", "_tel:112",
+        "1tel:112", "étel:112", "tel:+49"])
+    def test_a_dial_scheme_is_a_link(self, text):
+        assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) == "a link"
+
+    def test_an_emergency_call_link_is_not_sent(self, monkeypatch):
+        out, _ = _compose(monkeypatch, "Reading 59/100. In doubt: tel:112")
+        assert out.source == "fallback" and out.text == _template() and "a link" in (out.reason or "")
+
+    @pytest.mark.parametrize("text", ["Hotel:5 Sterne", "Motel:3", "tel: 112 is written with a space"])
+    def test_a_word_ending_in_the_letters_is_no_scheme(self, text):
+        assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) is None

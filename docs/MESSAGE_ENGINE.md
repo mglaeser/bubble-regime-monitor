@@ -65,7 +65,9 @@ converge, and 57 review rounds on #121 and 20 on #124 showed it.
   makes tappable, as two maintained libraries find it: linkify-it-py for
   web and mail links, bare domains under any top-level domain IANA lists
   (`app/message_engine/iana_tlds.py` - code, so no file is read at run
-  time), e-mail and IP addresses ("://" counts wherever it stands), and
+  time), e-mail and IP addresses ("://" counts wherever it stands), taught
+  the schemes a phone dials or messages with (`tel:`, `sms:`, `callto:`,
+  `facetime:`, whatever follows the colon: "tel:112"; #126 round 15), and
   libphonenumber for a number a phone dials - valid in
   Germany or the United States, or possible in international form. A
   reply that names channels goes out as written: the prompt asks for one
@@ -89,8 +91,8 @@ converge, and 57 review rounds on #121 and 20 on #124 showed it.
   linkify-it-py with its default list missed most cases; for the characters
   the stdlib's `unicodedata` and the alphabet suffice, and GSM-7 stays the
   repository's own module. The scope moved with the libraries: a scheme no
-  phone links ("bitcoin:", a "tel:" with no number), a local number without
-  its area code, is no longer refused. The references come from the
+  phone links ("bitcoin:"), an address with no domain ("mailto:x"), a local
+  number without its area code, is no longer refused. The references come from the
   repository's own data model, and what a prompt shows of them carries no
   link (pinned), so there is nothing to harmonise for the libraries.
 - **Otherwise the template**: a reply that fails a basic check, a gateway

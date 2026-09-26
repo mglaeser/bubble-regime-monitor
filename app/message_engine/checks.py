@@ -59,11 +59,21 @@ def _in_alphabet(text: str, i: int) -> bool:
 #: found the rules this replaces).
 
 
+#: ...and the schemes a phone dials or messages with, whatever follows the
+#: colon ("tel:112" calls the emergency line; #126 round 15, SOTA-A). The
+#: detector learns them through its own API, and sees a scheme glued to what
+#: precedes it ("+tel:112") with a space before it: the text's format for
+#: the detector, not its content.
+_DIAL_SCHEMES = ("tel:", "sms:", "callto:", "facetime:", "facetime-audio:")
+_GLUED_DIAL_RE = re.compile(r"(?i)(?<![a-z])(?=(?:tel|sms|callto|facetime(?:-audio)?):)")
+
+
 def _linked(text: str) -> bool:
     # A detector per call: it keeps its last match on itself, and building one
-    # costs about 2 ms.
-    detector = LinkifyIt(options={"fuzzy_link": True, "fuzzy_email": True, "fuzzy_ip": True}).tlds(list(TLDS), True)
-    return "://" in text or bool(detector.test(text))
+    # costs a few milliseconds.
+    detector = LinkifyIt({scheme: {"validate": re.compile(r"^\S")} for scheme in _DIAL_SCHEMES},
+                         options={"fuzzy_link": True, "fuzzy_email": True, "fuzzy_ip": True}).tlds(list(TLDS), True)
+    return "://" in text or bool(detector.test(_GLUED_DIAL_RE.sub(" ", text)))
 
 
 #: ...and a number a phone dials is a link: one libphonenumber - Google's
