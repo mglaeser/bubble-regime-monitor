@@ -15,7 +15,7 @@ import phonenumbers
 from linkify_it import LinkifyIt
 
 from app.alerts.gsm7 import GSM7_BASIC, GSM7_EXT, septets
-from app.message_engine.iana_tlds import TLDS
+from app.message_engine.iana_tlds import TLDS, U_LABELS
 from app.message_engine.validator import Channel
 
 #: THE iMESSAGE ALPHABET, an allowlist as GSM-7 is on SMS: printable ASCII
@@ -51,7 +51,8 @@ def _in_alphabet(text: str, i: int) -> bool:
 #: well-maintained libraries, and a slight change of scope where needed).
 #: linkify-it-py, the markdown-it ecosystem's link detector, finds web and
 #: mail links, bare domains under any top-level domain IANA lists
-#: (iana_tlds.py), e-mail addresses and IP addresses; "://" counts
+#: (iana_tlds.py; an internationalised one as a message writes it, too),
+#: e-mail addresses and IP addresses; "://" counts
 #: wherever it stands, since the detector reads a scheme glued to a word
 #: ("_https://") as part of that word. libphonenumber finds a number a phone
 #: dials. The scope is what these libraries find: a scheme no phone links
@@ -72,7 +73,7 @@ def _linked(text: str) -> bool:
     # A detector per call: it keeps its last match on itself, and building one
     # costs a few milliseconds.
     detector = LinkifyIt({scheme: {"validate": re.compile(r"^\S")} for scheme in _DIAL_SCHEMES},
-                         options={"fuzzy_link": True, "fuzzy_email": True, "fuzzy_ip": True}).tlds(list(TLDS), True)
+                         options={"fuzzy_link": True, "fuzzy_email": True, "fuzzy_ip": True}).tlds([*TLDS, *U_LABELS], True)
     return "://" in text or bool(detector.test(_GLUED_DIAL_RE.sub(" ", text)))
 
 

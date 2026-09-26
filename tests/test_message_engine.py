@@ -811,3 +811,23 @@ class TestRoundFifteenOn126:
     @pytest.mark.parametrize("text", ["Hotel:5 Sterne", "Motel:3", "tel: 112 is written with a space"])
     def test_a_word_ending_in_the_letters_is_no_scheme(self, text):
         assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) is None
+
+
+
+class TestRoundSixteenOn126:
+    """#126 round 16: SOTA-A one defect, executed; SOTA-B and SOTA-C timed
+    out. IANA lists an internationalised top-level domain only as punycode,
+    so "evil.vermögensberatung" - its U-label, inside the Latin-1 alphabet -
+    was no link. The detector gets each one as a message writes it, decoded
+    from IANA's own entry."""
+
+    @pytest.mark.parametrize("text", ["evil.vermögensberatung", "see evil.vermögensberater/x",
+                                      "evil.xn--vermgensberatung-pwb"])
+    def test_an_internationalised_domain_is_a_link(self, text):
+        assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) == "a link"
+
+    def test_every_punycode_domain_has_its_u_label(self):
+        from app.message_engine import iana_tlds
+        punycode = [label for label in iana_tlds.TLDS if label.startswith("xn--")]
+        assert len(iana_tlds.U_LABELS) == len(punycode) > 100
+        assert "vermögensberatung" in iana_tlds.U_LABELS

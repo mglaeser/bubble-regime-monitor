@@ -65,7 +65,8 @@ converge, and 57 review rounds on #121 and 20 on #124 showed it.
   makes tappable, as two maintained libraries find it: linkify-it-py for
   web and mail links, bare domains under any top-level domain IANA lists
   (`app/message_engine/iana_tlds.py` - code, so no file is read at run
-  time), e-mail and IP addresses ("://" counts wherever it stands), taught
+  time; an internationalised one also as a message writes it,
+  "vermögensberatung", #126 round 16), e-mail and IP addresses ("://" counts wherever it stands), taught
   the schemes a phone dials or messages with (`tel:`, `sms:`, `callto:`,
   `facetime:`, whatever follows the colon: "tel:112"; #126 round 15), and
   libphonenumber for a number a phone dials - valid in

@@ -109,3 +109,10 @@ xn--xkc2al3hye2a xn--xkc2dl3a5ee0h xn--y9a3aq xn--yfro4i67o xn--ygbi2ammx xn--zf
 yahoo yamaxun yandex ye yodobashi yoga yokohama you youtube yt yun za zappos zara zero zip zm zone
 zuerich zw
 """.split())
+
+#: ...and each internationalised one as a message writes it: the U-label
+#: decoded from IANA's punycode A-label ("xn--vermgensberatung-pwb" is
+#: written with an o-umlaut; #126 round 16, SOTA-A). Derived here from the
+#: list above, not read from anywhere.
+U_LABELS: tuple[str, ...] = tuple(label[4:].encode("ascii").decode("punycode")
+                                  for label in TLDS if label.startswith("xn--"))
