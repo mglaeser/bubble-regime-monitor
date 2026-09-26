@@ -25,7 +25,9 @@ converge, and 57 review rounds on #121 and 20 on #124 showed it.
   bubblegauge is, that the owner interprets, research not advice, numbers
   as given); the entry's ROLE, TASK and DATA sections from the library with
   the numbers filled in; every fact the entry declares (`grounding_fields`:
-  for the digest, every number it reports and the judgment), by name;
+  for the digest, every number it reports and the judgment), by name - one
+  value per declared field under its declared name, which fills the
+  template too (`visible_facts`, #126 round 14);
   the references for the trigger - the methodology and sources of its
   indicators (`app/message_engine/context.py`, repo-authored text only);
   and how to write: one message, in `MESSAGE_LANGUAGE`, for its channel
@@ -62,8 +64,9 @@ converge, and 57 review rounds on #121 and 20 on #124 showed it.
   listed what to refuse; round 6 turned it round. A link is what a phone
   makes tappable, as two maintained libraries find it: linkify-it-py for
   web and mail links, bare domains under any top-level domain IANA lists
-  (`config/iana_tlds.txt`), e-mail and IP addresses ("://" counts wherever
-  it stands), and libphonenumber for a number a phone dials - valid in
+  (`app/message_engine/iana_tlds.py` - code, so no file is read at run
+  time), e-mail and IP addresses ("://" counts wherever it stands), and
+  libphonenumber for a number a phone dials - valid in
   Germany or the United States, or possible in international form. A
   reply that names channels goes out as written: the prompt asks for one
   message for its channel and no prompt asks for variants (#126 round 4);

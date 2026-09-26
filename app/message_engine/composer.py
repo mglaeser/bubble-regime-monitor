@@ -711,6 +711,40 @@ def prompt_for(trigger: str, entry: dict[str, Any], facts: dict[str, object],
     return "\n\n".join(part for part in parts if part)
 
 
+def visible_facts(entry: dict[str, Any], facts: dict[str, object]) -> dict[str, object]:
+    """The facts this entry may use - one per declared field, under its
+    declared name: the value supplied under that name, else under another
+    spelling of the same fact ("F_BAND_BASE" for "band_base", #112 round 9).
+    Nothing else reaches the prompt or the template: not an undeclared key
+    (#112 round 15), and not another spelling beside the declared one - a
+    template reads its slot's own spelling first, so "band_effective" next
+    to F_BAND_EFFECTIVE overrode the contract's value (#126 round 14,
+    SOTA-A, executed)."""
+    visible: dict[str, object] = {}
+    for name in entry.get("grounding_fields") or []:
+        if name in facts:
+            visible[name] = facts[name]
+            continue
+        for key, value in facts.items():
+            if _canonical(key) == _canonical(name):
+                visible[name] = value
+                break
+    return visible
+
+
+def _canonical(name: str) -> str:
+    """One spelling for a fact: its contract id where it has one.
+
+    "band_base", "base_action_band" and "F_BAND_BASE" are the same fact to
+    the renderer (see _slot_value); the visibility test compared raw names,
+    so a fact supplied under its id was invisible to a template that
+    declared the attribute (#112 round 9).
+    """
+    if name in _SLOT_ALIASES:
+        return _SLOT_ALIASES[name]
+    return name if name.startswith("F_") else "F_" + name.upper()
+
+
 def _prepare(trigger: str, entry: dict[str, Any], facts: dict[str, object], channel: Channel,
              settings: Settings) -> tuple[str, str] | str:
     """The prompt and the fitted template for one entry, or why the entry
@@ -718,7 +752,9 @@ def _prepare(trigger: str, entry: dict[str, Any], facts: dict[str, object], chan
     (SOTA-C's UnboundLocalError claim, #126 rounds 1-7: never reproduced)."""
     language = settings.message_language or LIBRARY_LANGUAGE
     try:
-        admitted = _sanitized(facts, frozenset(entry.get("authorized_prose") or []))
+        # ONLY THE DECLARED FACTS, for the prompt and the template alike
+        # (visible_facts; K1 had dropped this for the template).
+        admitted = _sanitized(visible_facts(entry, facts), frozenset(entry.get("authorized_prose") or []))
         prompt = prompt_for(trigger, entry, admitted, channel, settings)
         fallback, _ = _fit_render(template_for(entry, language), admitted, channel, settings)
     except Exception as exc:  # noqa: BLE001 - a malformed entry is the same class

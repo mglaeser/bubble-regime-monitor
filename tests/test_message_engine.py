@@ -716,9 +716,9 @@ class TestLinksAreFoundByLibraries:
                 assert not (checks._linked(line) or checks._dialable(line)), (trigger, line)
 
     def test_the_top_level_domains_are_ianas(self):
-        path = checks.Path(checks.__file__).resolve().parents[2] / "config" / "iana_tlds.txt"
-        assert path.read_text(encoding="ascii").startswith("# Version ")
-        assert len(checks._TLDS) > 1000 and {"app", "com", "de", "online"} <= set(checks._TLDS)
+        from app.message_engine import iana_tlds
+        assert iana_tlds.VERSION.isdigit() and checks.TLDS is iana_tlds.TLDS
+        assert len(iana_tlds.TLDS) > 1000 and {"app", "com", "de", "online"} <= set(iana_tlds.TLDS)
 
 
 class TestRoundThirteenOn126:
@@ -741,3 +741,48 @@ class TestRoundThirteenOn126:
     def test_the_prompt_asks_for_one_message_for_this_channel(self, monkeypatch):
         _, prompts = _compose(monkeypatch, REPLY)
         assert "for this channel only and without naming a channel" in prompts[0]
+
+
+
+BAND_FACTS = {"F_BAND_EFFECTIVE": "trim", "F_BAND_PREVIOUS": "hold", "F_NEXT_CHECK": "14:00"}
+BAND_TEXT = "bubblegauge: caution level moved to trim (before: hold). Next run 14:00 UTC."
+
+
+class TestRoundFourteenOn126:
+    """#126 round 14: SOTA-C approved; SOTA-B timed out; SOTA-A two
+    defects, both executed. The template read every fact the caller passed,
+    so a second spelling ("band_effective") beside the declared one
+    (F_BAND_EFFECTIVE) overrode the contract's value on the deterministic
+    paths: now one value per declared field, under its declared name, fills
+    both prompt and template. And the list of top-level domains was a file
+    read at import, so a missing or unreadable file stopped the composer:
+    it is code now."""
+
+    @pytest.mark.parametrize("extra", [{}, {"band_effective": "de-risk"}, {"median": 99}])
+    def test_the_declared_value_fills_the_slot(self, monkeypatch, extra):
+        out, prompts = _compose(monkeypatch, REPLY, trigger="BAND_TO_TRIM", facts={**BAND_FACTS, **extra},
+                                message_engine_enabled=False)
+        assert out.source == "deterministic" and out.text == BAND_TEXT and prompts == []
+
+    def test_another_spelling_alone_still_fills_the_slot(self, monkeypatch):
+        facts = {"band_effective": "trim", "band_previous": "hold", "next_check_utc": "14:00"}
+        out, _ = _compose(monkeypatch, REPLY, trigger="BAND_TO_TRIM", facts=facts, message_engine_enabled=False)
+        assert out.text == BAND_TEXT
+
+    def test_an_undeclared_fact_reaches_neither_prompt_nor_template(self, monkeypatch):
+        entry = composer.library()["prompts"]["BAND_TO_TRIM"]
+        assert composer.visible_facts(entry, {**BAND_FACTS, "median": 99, "band_effective": "de-risk"}) == BAND_FACTS
+        _, prompts = _compose(monkeypatch, REPLY, trigger="BAND_TO_TRIM", facts={**BAND_FACTS, "median": 99})
+        assert "median" not in prompts[0] and "99" not in prompts[0]
+
+    def test_importing_the_checks_reads_no_file(self, monkeypatch):
+        import importlib
+        import pathlib
+
+        def unreadable(*_a, **_kw):
+            raise OSError("unreadable")
+
+        monkeypatch.setattr(pathlib.Path, "read_text", unreadable)
+        monkeypatch.setattr(pathlib.Path, "read_bytes", unreadable)
+        importlib.reload(checks)
+        assert basic_check("see example.app", channel=Channel.IMESSAGE, max_chars=200) == "a link"
