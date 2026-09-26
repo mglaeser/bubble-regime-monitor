@@ -669,16 +669,21 @@ def _well_formed(entry: dict[str, Any]) -> None:
     """A library entry's fields have their types, or the entry is malformed
     and sends the bare event - never coerced: a template given as a list went
     out as its repr, and a prompt of {} reached the model with no task
-    (#126 round 17, SOTA-A, executed)."""
+    (#126 rounds 17 and 20, SOTA-A, executed)."""
     prompt = entry.get("prompt", "")
     if not isinstance(prompt, str):
         raise TypeError("'prompt' is not text")
+    if not isinstance(entry.get("llm", True), bool):
+        raise TypeError("'llm' is not true or false")
+    # A field that is there is a list of names; a falsy "" or {} was read as
+    # "none" (#126 round 20, SOTA-A, executed).
     for key in ("grounding_fields", "authorized_prose"):
-        names = entry.get(key) or []
-        if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
+        names = entry.get(key, [])
+        if not isinstance(names, list) or not all(isinstance(name, str) and name.strip() for name in names):
             raise TypeError(f"'{key}' is not a list of names")
-    if entry.get("llm") is not False and "TASK" not in {name for name, _ in _SECTION_RE.findall(prompt)}:
-        raise ValueError("an entry the model writes has no TASK")
+    # ...and a task is written, not a heading alone (#126 round 20)
+    if entry.get("llm", True) and not dict(_SECTION_RE.findall(prompt)).get("TASK", "").strip():
+        raise ValueError("an entry the model writes has no task")
 
 
 def _prompt_value(name: str, value: object) -> object | None:

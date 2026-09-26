@@ -907,3 +907,19 @@ class TestRoundNineteenOn126:
                                       "12-month momentum", "5-year-high", "14-Tage-RSI", "36-Monats-Fenster"])
     def test_compounds_with_numbers_stay_prose(self, text):
         assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) is None
+
+
+
+class TestRoundTwentyOn126:
+    """#126 round 20: SOTA-A one defect, executed; SOTA-B and SOTA-C timed
+    out. The entry check read a falsy "" or {} as "no fact names" and took
+    a TASK heading with nothing under it for a task. A field that is there
+    is a list of names, "llm" is true or false, and a task is written."""
+
+    @pytest.mark.parametrize("fields", [{"grounding_fields": ""}, {"grounding_fields": 0}, {"grounding_fields": None},
+                                        {"authorized_prose": {}}, {"grounding_fields": ["median", " "]},
+                                        {"prompt": "ROLE: a writer\nTASK:   \nDATA: 59"}, {"llm": "no"}])
+    def test_a_malformed_entry_sends_the_bare_event(self, monkeypatch, fields):
+        _library_with(monkeypatch, "daily_digest", **fields)
+        out, prompts = _compose(monkeypatch, REPLY)
+        assert out.text == "bubblegauge: daily_digest fired." and "malformed" in (out.reason or "") and prompts == []

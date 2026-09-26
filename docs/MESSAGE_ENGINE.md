@@ -106,9 +106,10 @@ converge, and 57 review rounds on #121 and 20 on #124 showed it.
   calling the model), the attempt rows, the library sign-off, provenance,
   and the admission gate. They are not gates on the content. Nor is the
   entry check: a library entry whose fields are not of their type - a
-  template or prompt that is not text, fact names that are not a list, an
-  entry the model writes without a TASK - sends the bare event and is
-  never coerced into a text (#126 round 17).
+  template or prompt that is not text, fact names that are not a list of
+  names (a falsy "" or {} included), an "llm" that is not true or false,
+  an entry the model writes without a written TASK - sends the bare event
+  and is never coerced into a text (#126 rounds 17 and 20).
 
 ## Why this is not llm_selector
 
