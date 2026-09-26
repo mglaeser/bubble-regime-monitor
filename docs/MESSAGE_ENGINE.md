@@ -39,9 +39,12 @@ converge, and 57 review rounds on #121 and 20 on #124 showed it.
   a value written as text
   (digits, and for words only units, time zones, months, weekdays and the
   two trend assets: "14:00 UTC", "3h", "25 Sep 14:00Z", "SPY"), a block
-  summary keyed by the indicators' own ids - or the bounded prior
+  summary keyed by the indicators' own ids, the alert renderer's text in a
+  field the entry declares `authorized_prose` (the reminder's condition
+  summary) when it proves to be a join of the phrase registry's fragments
+  (`registry_authored`, as on main since #112/#119) - or the bounded prior
   judgment; anything else renders as a dash and stays out of the prompt
-  (AGENTS.md ground rule 1; #126 rounds 2-4). The library's other sections
+  (AGENTS.md ground rule 1; #126 rounds 2-4 and 11). The library's other sections
   (its hard rules and output format, written for the replaced design) are
   not sent, and its tasks' instruction to write an SMS and an iMessage
   variant in one reply is left out (#126 round 4).
@@ -57,13 +60,16 @@ converge, and 57 review rounds on #121 and 20 on #124 showed it.
   refused (the reply is NFC-composed first, so a decomposed "ü" is the "ü"
   it shows). #126 rounds 2-7 found those one at a time while the check
   listed what to refuse; round 6 turned it round. A link is any URI - a
-  scheme and its colon wherever it starts (the time of an ISO date-time,
-  "2026-08-15T14:00Z", excepted - not "T14:payload"), "://" anywhere - "www.", a bare domain or address (any run of
+  scheme and its colon wherever it starts ("-tel:+49", "T14:payload"),
+  "://" anywhere - "www.", a bare domain or address (any run of
   characters, a dot and a word of two letters or more, with no space
   between), a numeric host ("1.2.3.4/login"), and a number a phone dials:
-  a "+" or "00" and seven digits or more, with spaces, brackets, dots,
-  slashes or the alphabet's dashes between them (#126 rounds 8 and 10). A reply that names a channel - in any case, with or
-  without accents - is variants for several. The length is counted in
+  seven digits or more in one run, with at most one space, bracket, dot,
+  hyphen, dash, minus or middle dot between two of them ("212-555-0123",
+  "+49 30 1234567"). A date is neither: the rules read the text with its
+  dates masked ("2026-09-25" and its ISO time, "25.09.2026", "2000-2002";
+  #126 rounds 8-11), and the prompt says so. A reply that names a channel
+  - in any case, with or without accents - is variants for several. The length is counted in
   septets on SMS and in code points on iMessage. The template meets the checks too: a
   template a fact broke sends the bare event. Nothing about what the text
   says: a number the facts do not carry, or a word the old lexicon banned,

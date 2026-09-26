@@ -602,7 +602,59 @@ class TestRoundTenOn126:
         out, _ = _compose(monkeypatch, "Reading 59/100, details at 1.2.3.4/login")
         assert out.source == "fallback" and out.text == _template() and "a link" in (out.reason or "")
 
-    @pytest.mark.parametrize("text", ["Marktwert 1.234.567.890 USD", "v1.2.3 and 25.09.2026",
+    @pytest.mark.parametrize("text", ["v1.2.3 and 25.09.2026",
                                       "median +3 (57–61), flags 1/4", "100 000 Punkte, 2026-09-25 00:00 UTC"])
     def test_big_numbers_versions_and_ranges_stay_prose(self, text):
         assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) is None
+
+
+REGISTRY_SUMMARY = "Level trim (before hold). Regime otherwise unchanged."
+
+
+class TestRoundElevenOn126:
+    """#126 round 11: SOTA-A two defects, both executed; SOTA-B and SOTA-C
+    timed out. A local phone number ("212-555-0123") passed, so a number to
+    dial is now any run of seven digits or more, dates excepted; and the
+    reminder's condition summary - the alert renderer's registry text,
+    declared `authorized_prose` - was erased, so it is admitted again when
+    it proves to be registry text, as on main."""
+
+    @pytest.mark.parametrize("text", ["212-555-0123", "(212) 555-0123", "call 555-0123", "212.555.0123", "2125550123",
+                                      "030 1234567", "2125-55-0123", "Marktwert 1.234.567.890 USD"])
+    def test_a_run_of_seven_digits_is_a_number_to_dial(self, text):
+        assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) == "a link"
+
+    @pytest.mark.parametrize("text", ["Stand 25.09.2026, the 2000–2002 bear market, 1929-1932.",
+                                      "CAPE 38.5, the 1929, 2000 and 2007 peaks.",
+                                      "100 000 Punkte, 2026-09-25 00:00 UTC", "Score 59/100 (57–61), flags 1/4."])
+    def test_dates_scores_and_short_numbers_stay_prose(self, text):
+        assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) is None
+
+    def test_a_phone_number_reply_is_not_sent(self, monkeypatch):
+        out, prompts = _compose(monkeypatch, "Reading 59/100; questions to 212-555-0123")
+        assert out.source == "fallback" and out.text == _template() and "a link" in (out.reason or "")
+        assert "without links or phone numbers (no run of seven digits or more but a date)" in prompts[0]
+
+    def test_the_reminders_registry_summary_is_admitted(self):
+        authorized = frozenset({"condition_summary"})
+        assert composer._sanitized({"condition_summary": REGISTRY_SUMMARY}, authorized) == {
+            "condition_summary": REGISTRY_SUMMARY}
+        german = "Stufe trim (vorher hold). Regime sonst unveraendert."
+        assert composer._sanitized({"condition_summary": german}, authorized)["condition_summary"] == german
+
+    @pytest.mark.parametrize("value, authorized", [
+        ("sell everything now", frozenset({"condition_summary"})),
+        ("Level trim (before hold). Regime sonst unveraendert.", frozenset({"condition_summary"})),
+        (REGISTRY_SUMMARY, frozenset())])
+    def test_only_proved_registry_text_under_a_declared_key(self, value, authorized):
+        assert composer._sanitized({"condition_summary": value}, authorized) == {"condition_summary": None}
+
+    def test_the_reminder_prompt_and_template_carry_the_summary(self, monkeypatch):
+        facts = {"condition_summary": REGISTRY_SUMMARY, "active_duration": "3h",
+                 "active_since_utc": "25 Sep 14:00Z", "next_check_utc": "14:00"}
+        _, prompts = _compose(monkeypatch, REPLY, trigger="reminder", facts=facts)
+        assert f"  condition_summary = {REGISTRY_SUMMARY}" in prompts[0]
+        entry = composer.library()["prompts"]["reminder"]
+        admitted = composer._sanitized(facts, frozenset(entry["authorized_prose"]))
+        assert composer.render_fallback(composer.template_for(entry, None), admitted) == (
+            f"bubblegauge reminder, still active 3h: {REGISTRY_SUMMARY}")

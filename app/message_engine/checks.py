@@ -43,24 +43,31 @@ def _in_alphabet(text: str, i: int) -> bool:
 
 #: A link has no place in a message the monitor sends: any URI - a scheme
 #: and its colon with no space after it, wherever it starts ("https://",
-#: "mailto:x", "tel:+49", "bitcoin:1A", "_https://1.1.1.1", "-tel:+49"; "SMS:
-#: text" is a label, and the time of an ISO date-time, "2026-08-15T14:00Z", is
-#: no scheme - but "T14:payload" is, #126 round 9) - "://"
-#: wherever it stands, "www.", a bare domain or an address, which a phone
-#: links by itself ("example.com", "EXAMPLE.COM", "x@bücher.de",
-#: "example.com.5": any run of characters up to a dot and a word of two
-#: letters or more, with no space between), a numeric host ("1.2.3.4/login"),
-#: and a number a phone dials: a "+" or "00" and seven digits or more, the
-#: alphabet's dashes and dots between them ("+49 30 1234567", "+49–30–1234567",
-#: "0049 30 1234567") (#126 rounds 1-10, SOTA-A).
-_ISO_TIME = r"(?<=\d{4}-\d\d-\d\d)T\d\d:\d\d(?::\d\d(?:[.,]\d+)?)?(?:Z|[+-]\d\d(?::?\d\d)?)?(?![\w:])"
+#: "mailto:x", "tel:+49", "bitcoin:1A", "_https://1.1.1.1", "-tel:+49",
+#: "T14:payload"; "SMS: text" is a label) - "://" wherever it stands, "www.",
+#: a bare domain or an address, which a phone links by itself
+#: ("example.com", "EXAMPLE.COM", "x@bücher.de", "example.com.5": any run of
+#: characters up to a dot and a word of two letters or more, with no space
+#: between), a numeric host ("1.2.3.4/login"), and a number a phone dials:
+#: seven digits or more in one run, one space, bracket, dot, hyphen, dash,
+#: minus or middle dot at most between two of them ("212-555-0123",
+#: "+49 30 1234567", "0049·30·1234567") (#126 rounds 1-11, SOTA-A).
 _OCTET = r"(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)"
-_DIAL_SEPARATOR = "[ ()./\\-\u2013\u2014\u2212\u00b7]"
 _LINK_RE = re.compile(
-    rf"(?!{_ISO_TIME})[A-Za-z][A-Za-z0-9+.-]*:(?=\S)|://|(?i:\bwww\.)"
+    r"[A-Za-z][A-Za-z0-9+.-]*:(?=\S)|://|(?i:\bwww\.)"
     r"|[^\s.]+\.[^\W\d_]{2,}\b"
     rf"|(?<![\d.]){_OCTET}(?:\.{_OCTET}){{3}}(?!\d)"
-    rf"|(?:\+|(?<!\d)00)(?:{_DIAL_SEPARATOR}*\d){{7,}}")
+    r"|(?<!\d)\d(?:[ ().\-\u2013\u2014\u2212\u00b7]?\d){6,}")
+
+#: ...but a date is neither, and the link rules read the text with its dates
+#: masked: "2026-09-25" and its ISO time ("2026-08-15T14:00:00+00:00"; a time
+#: followed by a word is no time), "25.09.2026", a span of years
+#: ("2000-2002"). A real month and day only: "2125-55-0123" is a number.
+_DATE_RE = re.compile(
+    r"(?<![\d.])(?:(?:19|20)\d\d-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])"
+    r"(?:T\d\d:\d\d(?::\d\d(?:[.,]\d+)?)?(?:Z|[+-]\d\d(?::?\d\d)?)?(?![\w:]))?"
+    r"|(?:0?[1-9]|[12]\d|3[01])\.(?:0?[1-9]|1[0-2])\.(?:19|20)\d\d"
+    r"|(?:19|20)\d\d ?[-\u2013\u2014/] ?(?:19|20)\d\d)(?!\.?\d)")
 
 #: A message for its channel names no channel: a reply that does is variants
 #: for several ("SMS: A", "IMSG: B"; #126 round 4, SOTA-A) - the name in any
@@ -93,7 +100,7 @@ def basic_check(text: str, *, channel: Channel, max_chars: int) -> str | None:
             return "a character SMS cannot carry"
     elif not all(_in_alphabet(text, i) for i in range(len(text))):
         return "a character outside the message alphabet"
-    if _LINK_RE.search(text):
+    if _LINK_RE.search(_DATE_RE.sub("#", text)):
         return "a link"
     if _CHANNEL_RE.search(_unaccented(text)):
         return "a channel name"
