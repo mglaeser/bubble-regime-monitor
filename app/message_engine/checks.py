@@ -86,12 +86,14 @@ _DIAL_PLANS = (("DE", phonenumbers.Leniency.VALID), ("US", phonenumbers.Leniency
                ("ZZ", phonenumbers.Leniency.POSSIBLE))
 
 
-#: A phoneword is a number too ("1-800-FLOWERS"; #126 round 18, SOTA-A). The
-#: matcher reads digits only, so a token of digits and capitals joined by a
-#: hyphen or a dot is shown to it through the library's own keypad
-#: conversion - a German compound ("200-Tage-Linie") keeps its lower case
-#: and stays a word.
-_PHONEWORD_RE = re.compile(r"(?<![\w.-])\+?\d[\d.-]*[.-](?=(?:[\d.-]*[A-Z]){3})[A-Z\d][A-Z\d.-]*(?<![.-])(?![\w-])")
+#: A phoneword is a number too ("1-800-FLOWERS", "1-800-Flowers"; #126 rounds
+#: 18-19, SOTA-A). The matcher reads digits only, so a token of three digits
+#: or more, then letters, joined by hyphens or dots, is shown to it through
+#: the library's own keypad conversion, and the library decides: a German
+#: compound ("200-Tage-Linie", "12-Monats-Momentum") converts to no valid
+#: number and stays a word.
+_PHONEWORD_RE = re.compile(r"(?<![\w.-])\+?(?=(?:\d[.-]?){3})\d[\d.-]*[.-](?=(?:[\d.-]*[A-Za-z]){3})"
+                           r"[A-Za-z\d][A-Za-z\d.-]*(?<![.-])(?![\w-])")
 
 
 def _dialable(text: str) -> bool:

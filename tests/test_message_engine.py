@@ -887,3 +887,23 @@ class TestRoundEighteenOn126:
                                       "bubblegauge 59/100 trim OVERRIDE. range 57-61."])
     def test_words_with_numbers_stay_prose(self, text):
         assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) is None
+
+
+
+class TestRoundNineteenOn126:
+    """#126 round 19: SOTA-A one defect, executed; SOTA-B and SOTA-C timed
+    out; CI green again with the Deprecated pin. A phoneword in mixed case
+    ("Call 1-800-Flowers") passed: the recogniser wanted capitals. Any case
+    now, after three digits or more - and libphonenumber decides whether the
+    converted token is a number, which no German compound tested is."""
+
+    @pytest.mark.parametrize("text", ["Call 1-800-Flowers", "1-800-flowers", "1-800-My-Apple", "1-888-Go-FedEx",
+                                      "1.800.Flowers", "+1-800-Flowers"])
+    def test_a_phoneword_in_any_case_is_a_link(self, text):
+        assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) == "a link"
+
+    @pytest.mark.parametrize("text", ["1-Jahres-Hoch", "52-Wochen-Hoch", "12-Monats-Momentum", "10-Jahres-Rendite",
+                                      "100-Tage-Linie", "250-Tage-Linie", "500-Punkte-Marke", "10-year yield",
+                                      "12-month momentum", "5-year-high", "14-Tage-RSI", "36-Monats-Fenster"])
+    def test_compounds_with_numbers_stay_prose(self, text):
+        assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) is None
