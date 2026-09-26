@@ -866,3 +866,24 @@ class TestRoundSeventeenOn126:
             composer._well_formed(entry)
             for language in (None, "de"):
                 assert isinstance(composer.template_for(entry, language), str), (trigger, language)
+
+
+
+class TestRoundEighteenOn126:
+    """#126 round 18: SOTA-A one defect, executed; SOTA-B and SOTA-C timed
+    out: a phoneword ("Call 1-800-FLOWERS") passed, since libphonenumber's
+    matcher reads digits only. A token of digits and capitals joined by a
+    hyphen or a dot is shown to it through the library's keypad conversion.
+    (CI's type-check also failed at fc4e445 - Deprecated 3.0.0, released
+    that hour; pinned below 3 in its own commit.)"""
+
+    @pytest.mark.parametrize("text", ["Call 1-800-FLOWERS", "1-800-FLOWERS.", "+1-800-FLOWERS", "1-800-MY-APPLE",
+                                      "call 1.800.FLOWERS today", "1-888-GO-FEDEX"])
+    def test_a_phoneword_is_a_link(self, text):
+        assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) == "a link"
+
+    @pytest.mark.parametrize("text", ["Die 200-Tage-Linie hält.", "3-Monats-Zins 4.1%", "Score 59 OVERRIDE",
+                                      "Q3-2026 RISK", "10-Q filing", "2026-QQQ", "3-PACK", "S&P500-INDEX",
+                                      "bubblegauge 59/100 trim OVERRIDE. range 57-61."])
+    def test_words_with_numbers_stay_prose(self, text):
+        assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) is None

@@ -86,8 +86,17 @@ _DIAL_PLANS = (("DE", phonenumbers.Leniency.VALID), ("US", phonenumbers.Leniency
                ("ZZ", phonenumbers.Leniency.POSSIBLE))
 
 
+#: A phoneword is a number too ("1-800-FLOWERS"; #126 round 18, SOTA-A). The
+#: matcher reads digits only, so a token of digits and capitals joined by a
+#: hyphen or a dot is shown to it through the library's own keypad
+#: conversion - a German compound ("200-Tage-Linie") keeps its lower case
+#: and stays a word.
+_PHONEWORD_RE = re.compile(r"(?<![\w.-])\+?\d[\d.-]*[.-](?=(?:[\d.-]*[A-Z]){3})[A-Z\d][A-Z\d.-]*(?<![.-])(?![\w-])")
+
+
 def _dialable(text: str) -> bool:
-    return any(next(iter(phonenumbers.PhoneNumberMatcher(text, region, leniency=leniency)), None) is not None
+    shown = _PHONEWORD_RE.sub(lambda word: phonenumbers.convert_alpha_characters_in_number(word.group()), text)
+    return any(next(iter(phonenumbers.PhoneNumberMatcher(shown, region, leniency=leniency)), None) is not None
                for region, leniency in _DIAL_PLANS)
 
 

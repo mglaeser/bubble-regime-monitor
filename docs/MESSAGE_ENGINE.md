@@ -69,8 +69,10 @@ converge, and 57 review rounds on #121 and 20 on #124 showed it.
   "vermögensberatung", #126 round 16), e-mail and IP addresses ("://" counts wherever it stands), taught
   the schemes a phone dials or messages with (`tel:`, `sms:`, `callto:`,
   `facetime:`, whatever follows the colon: "tel:112"; #126 round 15), and
-  libphonenumber for a number a phone dials - valid in
-  Germany or the United States, or possible in international form. A
+  libphonenumber for a number a phone dials - valid in Germany or the
+  United States, or possible in international form; a phoneword
+  ("1-800-FLOWERS") through the library's keypad conversion (#126 round
+  18). A
   reply that names channels goes out as written: the prompt asks for one
   message for its channel and no prompt asks for variants (#126 round 4);
   the filter that also refused channel names is gone (round 13; the
