@@ -34,7 +34,9 @@ converge, and 57 review rounds on #121 and 20 on #124 showed it.
   count as two; code points on iMessage, in printable ASCII and Latin-1,
   the marks and the library's five emoji; #126 rounds 5-7). A fact the entry does not declare
   never reaches the model (#126 round 1), and a string fact is one of the
-  monitor's own values - an action or trend state, a value written as text
+  monitor's own values - an action or trend state (the digest's band as the
+  snapshot displays it, "suppressed (block degraded)" too; #126 round 9),
+  a value written as text
   (digits, and for words only units, time zones, months, weekdays and the
   two trend assets: "14:00 UTC", "3h", "25 Sep 14:00Z", "SPY"), a block
   summary keyed by the indicators' own ids - or the bounded prior
@@ -55,8 +57,8 @@ converge, and 57 review rounds on #121 and 20 on #124 showed it.
   refused (the reply is NFC-composed first, so a decomposed "ü" is the "ü"
   it shows). #126 rounds 2-7 found those one at a time while the check
   listed what to refuse; round 6 turned it round. A link is any URI - a
-  scheme and its colon wherever it starts (the "T14:" of an ISO time
-  excepted), "://" anywhere - "www.", a bare domain or address (any run of
+  scheme and its colon wherever it starts (the time of an ISO date-time,
+  "2026-08-15T14:00Z", excepted - not "T14:payload"), "://" anywhere - "www.", a bare domain or address (any run of
   characters, a dot and a word of two letters or more, with no space
   between), and a number a phone dials: a "+" and seven digits or more
   (#126 round 8). A reply that names a channel - in any case, with or

@@ -44,14 +44,16 @@ def _in_alphabet(text: str, i: int) -> bool:
 #: A link has no place in a message the monitor sends: any URI - a scheme
 #: and its colon with no space after it, wherever it starts ("https://",
 #: "mailto:x", "tel:+49", "bitcoin:1A", "_https://1.1.1.1", "-tel:+49"; "SMS:
-#: text" is a label, and the "T14:" of an ISO time is no scheme) - "://"
+#: text" is a label, and the time of an ISO date-time, "2026-08-15T14:00Z", is
+#: no scheme - but "T14:payload" is, #126 round 9) - "://"
 #: wherever it stands, "www.", a bare domain or an address, which a phone
 #: links by itself ("example.com", "EXAMPLE.COM", "x@bücher.de",
 #: "example.com.5": any run of characters up to a dot and a word of two
 #: letters or more, with no space between), and a number a phone dials: a
 #: "+" and seven digits or more ("+49 30 1234567") (#126 rounds 1-8, SOTA-A).
+_ISO_TIME = r"(?<=\d{4}-\d\d-\d\d)T\d\d:\d\d(?::\d\d(?:[.,]\d+)?)?(?:Z|[+-]\d\d(?::?\d\d)?)?(?![\w:])"
 _LINK_RE = re.compile(
-    r"(?!T\d)[A-Za-z][A-Za-z0-9+.-]*:(?=\S)|://|(?i:\bwww\.)"
+    rf"(?!{_ISO_TIME})[A-Za-z][A-Za-z0-9+.-]*:(?=\S)|://|(?i:\bwww\.)"
     r"|[^\s.]+\.[^\W\d_]{2,}\b|\+(?:[ ()./-]*\d){7,}")
 
 #: A message for its channel names no channel: a reply that does is variants

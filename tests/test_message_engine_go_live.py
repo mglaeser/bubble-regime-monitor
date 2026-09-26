@@ -52,6 +52,7 @@ def _snapshot(**over) -> Snapshot:
                 action_band="trim", override_fired=False, red_flag_count=2,
                 block_s={"indicators": {"s1": {"sub_score": 0.42}, "s2": {"sub_score": None}}},
                 block_d={"indicators": {"d1": {"sub_score": 0.11}}},
+                # legs.faber_state's values; #118's "up"/"flat" were never produced
                 trend_states={"SPY": {"faber_10mo": "IN"}, "QQQ": {"faber_10mo": "OUT"}},
                 judgment_call="Breadth narrow, credit tight.")
     base.update(over)

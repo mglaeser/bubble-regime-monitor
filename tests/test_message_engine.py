@@ -6,16 +6,19 @@ interprets the rest."""
 from __future__ import annotations
 
 import re
+import types
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from app.config import Settings
 from app.db import session_scope
+from app.engine import legs
 from app.message_engine import composer
 from app.message_engine.checks import EMOJI, MARKS, basic_check
 from app.message_engine.validator import Channel
 from app.models import MessageEngineAttempt
+from app.services.digest import digest_facts
 
 pytestmark = pytest.mark.usefixtures("isolated_db")
 
@@ -528,4 +531,53 @@ class TestRoundEightOn126:
                                       "S&P 500 +1.2%, Nasdaq +0.8%, 10y 4.1%; +2.5 pp vs. −0.5.",
                                       "Range 57-61, Stand 2026-09-25, 14:00 UTC. Flags: 1/4."])
     def test_times_signed_numbers_and_ranges_stay_prose(self, text):
+        assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) is None
+
+
+def _snapshot(**over) -> types.SimpleNamespace:
+    """The snapshot fields digest_facts reads, as production stores them."""
+    base = {"median": 59.4, "action_band": "trim", "override_fired": False, "iqr_lo": 57.2, "iqr_hi": 61.1,
+            "red_flag_count": 1, "trend_states": {"SPY": {"faber_10mo": "IN"}, "QQQ": {"faber_10mo": "IN"}},
+            "block_s": {"indicators": {"s1": {"sub_score": 0.8}, "s2": {"sub_score": None}}},
+            "block_d": {"indicators": {"d1": {"sub_score": 0.11}}}, "judgment_call": "Valuations are stretched."}
+    base.update(over)
+    return types.SimpleNamespace(**base)
+
+
+class TestRoundNineOn126:
+    """#126 round 9: SOTA-A two defects; SOTA-B and SOTA-C timed out.
+    "up"/"flat" erased from the digest's trends - executed: the producer,
+    legs.faber_state, yields IN or OUT, compute "unknown", the digest "?",
+    and production's 342 snapshots on 2026-09-26 held IN 340 times and
+    unknown twice; "up" and "flat" were #118's fixture words. The same sweep
+    over production found the real erasure, the display band "suppressed
+    (block degraded)" (30 snapshots). And "T14:payload" was exempt as an ISO
+    time; only a time after its date is."""
+
+    def test_the_digests_trend_values_are_the_producers(self):
+        rising = [float(i) for i in range(1, 13)]
+        values = {legs.faber_state(rising), legs.faber_state(rising[::-1]), "unknown", "?"}
+        assert values == {"IN", "OUT", "unknown", "?"}
+        for value in values:
+            trends = {"SPY": {"faber_10mo": value}, "QQQ": {"faber_10mo": value}}
+            assert composer._sanitized(digest_facts(_snapshot(trend_states=trends)))["spy_trend"] == value
+
+    @pytest.mark.parametrize("band", ["hold", "trim", "de-risk", "suppressed", "suppressed (block degraded)",
+                                      "de-risk (data degraded)", "fallback"])
+    def test_every_display_band_reaches_the_prompt_and_the_template(self, monkeypatch, band):
+        facts = digest_facts(_snapshot(action_band=band))
+        _, prompts = _compose(monkeypatch, REPLY, facts=facts)
+        assert f"  action_band = {band}" in prompts[0]
+        entry = composer.library()["prompts"]["daily_digest"]
+        text = composer.render_fallback(composer.template_for(entry, None), composer._sanitized(facts))
+        assert text.startswith(f"bubblegauge 59/100 {band}. range 57-61.")
+
+    @pytest.mark.parametrize("text", ["T14:payload", "see T14:payload now", "2026-08-15T14:payload",
+                                      "2026-08-15T14:00payload"])
+    def test_a_time_scheme_without_its_date_is_a_link(self, text):
+        assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) == "a link"
+
+    @pytest.mark.parametrize("text", ["Window 2026-08-15T14:00:00+00:00 to 2026-08-22T14:00Z.",
+                                      "Stand 2026-09-25T06:01:43.119497Z, next 2026-09-26T14:00+02:00."])
+    def test_an_iso_date_time_is_prose(self, text):
         assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) is None
