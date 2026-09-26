@@ -49,12 +49,18 @@ def _in_alphabet(text: str, i: int) -> bool:
 #: wherever it stands, "www.", a bare domain or an address, which a phone
 #: links by itself ("example.com", "EXAMPLE.COM", "x@bücher.de",
 #: "example.com.5": any run of characters up to a dot and a word of two
-#: letters or more, with no space between), and a number a phone dials: a
-#: "+" and seven digits or more ("+49 30 1234567") (#126 rounds 1-8, SOTA-A).
+#: letters or more, with no space between), a numeric host ("1.2.3.4/login"),
+#: and a number a phone dials: a "+" or "00" and seven digits or more, the
+#: alphabet's dashes and dots between them ("+49 30 1234567", "+49–30–1234567",
+#: "0049 30 1234567") (#126 rounds 1-10, SOTA-A).
 _ISO_TIME = r"(?<=\d{4}-\d\d-\d\d)T\d\d:\d\d(?::\d\d(?:[.,]\d+)?)?(?:Z|[+-]\d\d(?::?\d\d)?)?(?![\w:])"
+_OCTET = r"(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)"
+_DIAL_SEPARATOR = "[ ()./\\-\u2013\u2014\u2212\u00b7]"
 _LINK_RE = re.compile(
     rf"(?!{_ISO_TIME})[A-Za-z][A-Za-z0-9+.-]*:(?=\S)|://|(?i:\bwww\.)"
-    r"|[^\s.]+\.[^\W\d_]{2,}\b|\+(?:[ ()./-]*\d){7,}")
+    r"|[^\s.]+\.[^\W\d_]{2,}\b"
+    rf"|(?<![\d.]){_OCTET}(?:\.{_OCTET}){{3}}(?!\d)"
+    rf"|(?:\+|(?<!\d)00)(?:{_DIAL_SEPARATOR}*\d){{7,}}")
 
 #: A message for its channel names no channel: a reply that does is variants
 #: for several ("SMS: A", "IMSG: B"; #126 round 4, SOTA-A) - the name in any

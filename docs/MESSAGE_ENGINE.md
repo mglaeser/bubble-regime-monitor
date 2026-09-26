@@ -60,8 +60,9 @@ converge, and 57 review rounds on #121 and 20 on #124 showed it.
   scheme and its colon wherever it starts (the time of an ISO date-time,
   "2026-08-15T14:00Z", excepted - not "T14:payload"), "://" anywhere - "www.", a bare domain or address (any run of
   characters, a dot and a word of two letters or more, with no space
-  between), and a number a phone dials: a "+" and seven digits or more
-  (#126 round 8). A reply that names a channel - in any case, with or
+  between), a numeric host ("1.2.3.4/login"), and a number a phone dials:
+  a "+" or "00" and seven digits or more, with spaces, brackets, dots,
+  slashes or the alphabet's dashes between them (#126 rounds 8 and 10). A reply that names a channel - in any case, with or
   without accents - is variants for several. The length is counted in
   septets on SMS and in code points on iMessage. The template meets the checks too: a
   template a fact broke sends the bare event. Nothing about what the text

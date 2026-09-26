@@ -581,3 +581,28 @@ class TestRoundNineOn126:
                                       "Stand 2026-09-25T06:01:43.119497Z, next 2026-09-26T14:00+02:00."])
     def test_an_iso_date_time_is_prose(self, text):
         assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) is None
+
+
+class TestRoundTenOn126:
+    """#126 round 10: SOTA-C approved; SOTA-B timed out; SOTA-A one defect,
+    executed: a numeric host ("1.2.3.4/login") and a dialable number with
+    the alphabet's own dash ("+49–30–1234567") passed. Swept: the other
+    dashes and the middle dot, and the "00" international prefix."""
+
+    @pytest.mark.parametrize("text", ["1.2.3.4/login", "see 192.168.0.1 now", "10.0.0.1:8080"])
+    def test_a_numeric_host_is_a_link(self, text):
+        assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) == "a link"
+
+    @pytest.mark.parametrize("text", ["+49–30–1234567", "+49—30—1234567", "+49−30−1234567",
+                                      "+49·30·1234567", "0049 30 1234567"])
+    def test_a_dialable_number_with_any_separator_is_a_link(self, text):
+        assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) == "a link"
+
+    def test_a_numeric_host_reply_is_not_sent(self, monkeypatch):
+        out, _ = _compose(monkeypatch, "Reading 59/100, details at 1.2.3.4/login")
+        assert out.source == "fallback" and out.text == _template() and "a link" in (out.reason or "")
+
+    @pytest.mark.parametrize("text", ["Marktwert 1.234.567.890 USD", "v1.2.3 and 25.09.2026",
+                                      "median +3 (57–61), flags 1/4", "100 000 Punkte, 2026-09-25 00:00 UTC"])
+    def test_big_numbers_versions_and_ranges_stay_prose(self, text):
+        assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) is None
