@@ -29,6 +29,7 @@ from typing import Any
 
 from sqlalchemy.exc import SQLAlchemyError
 
+from app.alerts.gsm7 import GSM7_EXT
 from app.alerts.render_context import FACT_SOURCES
 from app.config import Settings, get_settings
 from app.engine.snapshot_contract import ACTION_STATES
@@ -577,7 +578,13 @@ def prompt_for(trigger: str, entry: dict[str, Any], facts: dict[str, object],
     numbers = "\n".join(f"  {name} = {value}" for name, value in sorted(shown.items()))
     references = context_material.render(context_material.references_for(trigger))
     language = settings.message_language or LIBRARY_LANGUAGE
-    alphabet = "; only characters an SMS can carry (GSM-7)" if channel is Channel.SMS else ""
+    # THE LENGTH AS THE CHECK COUNTS IT: septets on SMS, code points on
+    # iMessage (#126 round 5, SOTA-A: "150 characters" and a "€" at 150 was
+    # refused as 151 septets)
+    cap = _cap(channel, settings)
+    length = (f"at most {cap} characters, each of {' '.join(sorted(GSM7_EXT))} counting as two, and only "
+              "characters an SMS can carry (GSM-7)" if channel is Channel.SMS else
+              f"at most {cap} characters, counted in Unicode code points (an emoji may count as several)")
     parts = [
         _SYSTEM,
         f"ROLE: {sections['ROLE']}" if sections.get("ROLE") else "",
@@ -587,8 +594,7 @@ def prompt_for(trigger: str, entry: dict[str, Any], facts: dict[str, object],
         ("REFERENCES - what the indicators measure and where their data comes from:\n"
          f"{references}") if references else "",
         (f"WRITE: one message in {_LANGUAGE_NAMES.get(language, language)}, for this channel only and "
-         f"without naming a channel, plain text, at most {_cap(channel, settings)} "
-         f"characters{alphabet}. Reply with the message only."),
+         f"without naming a channel, plain text without links, {length}. Reply with the message only."),
     ]
     return "\n\n".join(part for part in parts if part)
 

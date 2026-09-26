@@ -356,3 +356,51 @@ class TestRoundFourOn126:
     def test_a_reply_that_names_a_channel_is_not_sent(self, monkeypatch, reply):
         out, _ = _compose(monkeypatch, reply)
         assert out.source == "fallback" and out.text == _template() and "a channel name" in (out.reason or "")
+
+
+class TestRoundFiveOn126:
+    """#126 round 5: SOTA-A two defects, both executed; SOTA-C repeated the
+    UnboundLocalError claim a third time (executed again, not reproduced,
+    pinned for both builders); SOTA-B timed out. A combining mark is part of
+    its letter, and the prompt states the length as the check counts it."""
+
+    @pytest.mark.parametrize("text", ["see nic.भारत", "see हिन्दी.com",
+                                      "mail x@हिन्दी.भारत"])
+    def test_a_combining_mark_is_part_of_its_letter(self, text):
+        assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) == "a link"
+
+    @pytest.mark.parametrize("text", ["see example.com.5", "see i\u2764\ufe0f.ws"])
+    def test_a_domain_is_any_run_up_to_a_dot(self, text):
+        """Swept with the marks: a label of any characters, and nothing
+        after the top-level domain lets it pass."""
+        assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) == "a link"
+
+    @pytest.mark.parametrize("text", ["Kap.5 and v3.5, Stand 25.09.2026", "Weiter...Das bleibt so.",
+                                      "z.B. SPY, d.h. U.S.-Aktien; e.g. QQQ, i.e. calm."])
+    def test_prose_with_dots_is_no_link(self, text):
+        assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) is None
+
+    def test_an_emoji_keeps_its_selector_and_is_no_link(self):
+        assert basic_check("Reading 59 ▪️ today. Flags 1️⃣ of 4 ℹ️",
+                           channel=Channel.IMESSAGE, max_chars=200) is None
+
+    def test_the_sms_prompt_counts_as_the_check_counts(self, monkeypatch):
+        _, prompts = _compose(monkeypatch, REPLY, channel=Channel.SMS)
+        cap = _settings().sms_max_len
+        assert f"at most {cap} characters, each of [ \\ ] ^ {{ | }} ~ € counting as two" in prompts[0]
+        at_cap = "Kurs 59 von 100 " + "x" * (cap - 18) + "€"
+        assert basic_check(at_cap, channel=Channel.SMS, max_chars=cap) is None
+        assert basic_check(at_cap + "x", channel=Channel.SMS, max_chars=cap) == f"longer than {cap} septets"
+
+    def test_the_imessage_prompt_counts_code_points_and_asks_for_no_links(self, monkeypatch):
+        _, prompts = _compose(monkeypatch, REPLY)
+        assert "counted in Unicode code points" in prompts[0] and "without links" in prompts[0]
+
+    @pytest.mark.parametrize("builder", ["_sanitized", "prompt_for"])
+    def test_a_failing_builder_sends_the_bare_event(self, monkeypatch, builder):
+        """SOTA-C, the third time: "UnboundLocalError ... if _sanitized or
+        prompt_for fails, the 'fallback' variable is not yet bound". Executed:
+        that handler returns the bare event and never reads the template."""
+        monkeypatch.setattr(composer, builder, lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x")))
+        out, prompts = _compose(monkeypatch, REPLY)
+        assert out.source == "deterministic" and "malformed" in (out.reason or "") and prompts == []

@@ -29,7 +29,9 @@ converge, and 57 review rounds on #121 and 20 on #124 showed it.
   the references for the trigger - the methodology and sources of its
   indicators (`app/message_engine/context.py`, repo-authored text only);
   and how to write: one message, in `MESSAGE_LANGUAGE`, for its channel
-  only, within the channel's length. A fact the entry does not declare
+  only, without links, within the channel's length as the check counts it
+  (septets on SMS, where `[ \ ] ^ { | } ~ €` count as two; code points on
+  iMessage; #126 round 5). A fact the entry does not declare
   never reaches the model (#126 round 1), and a string fact is one of the
   monitor's own values - an action or trend state, a value written as text
   (digits, and for words only units, time zones, months, weekdays and the
@@ -44,7 +46,9 @@ converge, and 57 review rounds on #121 and 20 on #124 showed it.
   no control character and nothing that draws nothing (Unicode's
   default-ignorable code points, admitted only inside an emoji sequence),
   no link (any URI - a scheme and its colon - "www.", a bare domain or an
-  address in any case and script, with the dots IDNA reads as dots), no
+  address in any case and script - any run of characters, a dot and a
+  word of two letters or more, with no space between - with the dots IDNA
+  reads as dots and a combining mark read as part of its letter), no
   channel name (a reply that names one is variants for several), within
   the channel's length - on SMS
   only characters GSM-7 carries, counted in septets. The template meets them too: a template a

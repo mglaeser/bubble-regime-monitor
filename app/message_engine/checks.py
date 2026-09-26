@@ -19,10 +19,12 @@ from app.message_engine.validator import Channel
 #: "bitcoin:1A"; "SMS: text" is a label) - "www.", and a bare domain or an
 #: address in any case, which a phone links by itself ("example.com",
 #: "EXAMPLE.COM", "x@example.com") (#126 rounds 1 and 2, SOTA-A).
-#: ...in any script too: "bücher.de" is a link (#126 round 3, SOTA-A).
+#: ...in any script too: "bücher.de" is a link (#126 round 3, SOTA-A). A
+#: domain is any run of characters up to a dot and a word of two letters or
+#: more after it, with no space between - "i❤️.ws", "example.com.5".
 _LINK_RE = re.compile(
     r"\b[A-Za-z][A-Za-z0-9+.-]*:(?=\S)|(?i:\bwww\.)"
-    r"|\b[^\W_][\w-]*\.[^\W\d_]{2,}\b(?!\.?\d)")
+    r"|[^\s.]+\.[^\W\d_]{2,}\b")
 
 #: Unicode's default-ignorable code points: characters that draw nothing.
 #: The zero-width joiner and the variation selectors belong to emoji
@@ -90,8 +92,10 @@ def basic_check(text: str, *, channel: Channel, max_chars: int) -> str | None:
     if any(_invisible(text, i) for i in range(len(text))):
         return "an invisible character"
     # read as a phone reads it: the compatibility forms folded ("ｗｗｗ．",
-    # "ＳＭＳ"), and the dots IDNA reads as dots
-    folded = unicodedata.normalize("NFKC", text).translate(_IDNA_DOTS)
+    # "ＳＭＳ"), the dots IDNA reads as dots, and a combining mark as part of
+    # its letter ("nic.भारत", "हिन्दी.com"; #126 round 5, SOTA-A)
+    folded = "".join(ch for ch in unicodedata.normalize("NFKC", text).translate(_IDNA_DOTS)
+                     if unicodedata.category(ch)[0] != "M")
     if _LINK_RE.search(folded):
         return "a link"
     if _CHANNEL_RE.search(folded):
