@@ -20,6 +20,10 @@ dependencies = [
     "APScheduler>=3.10,<4",
     "structlog>=24.1",
     "slowapi>=0.1.9",
+    # Deprecated 3.0.0 (2026-09-26, pulled in by slowapi -> limits) is written
+    # in Python 3.12 syntax, and mypy, targeting 3.11, stops at it before it
+    # checks the tree. Production runs 1.3.1; 3.x is an upgrade of its own.
+    "Deprecated<3",
     # <2.3 / <3.0: newer numpy wheels raise the x86-64 CPU baseline and die
     # with SIGILL (Illegal instruction) on older CPUs and on VMs with generic
     # CPU models (qemu64/kvm64). Relax only if all deploy targets expose
@@ -32,6 +36,12 @@ dependencies = [
     "lxml>=5.2",
     # The alert ruleset is a YAML artifact; the loader parses it with safe_load.
     "PyYAML>=6.0",
+    # A message carries no link: linkify-it-py finds links, libphonenumber the
+    # numbers a phone dials (app/message_engine/checks.py). Exact pins - an
+    # upgrade changes what counts, so it is made on purpose. The lite build of
+    # phonenumbers has no geocoder or carrier data.
+    "linkify-it-py==2.2.0",
+    "phonenumberslite==9.0.40",
     "lppls==0.6.24",
 ]
 
