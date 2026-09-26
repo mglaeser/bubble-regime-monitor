@@ -28,20 +28,25 @@ converge, and 57 review rounds on #121 and 20 on #124 showed it.
   - for the digest, every number it reports and the judgment), by name;
   the references for the trigger - the methodology and sources of its
   indicators (`app/message_engine/context.py`, repo-authored text only);
-  and how to write: one message, in `MESSAGE_LANGUAGE`, within the
-  channel's length. A fact the entry does not declare never reaches the
-  model (#126 round 1), and a string fact is one of the monitor's own
-  values - an action or trend state, a number written as text, a block
+  and how to write: one message, in `MESSAGE_LANGUAGE`, for its channel
+  only, within the channel's length. A fact the entry does not declare
+  never reaches the model (#126 round 1), and a string fact is one of the
+  monitor's own values - an action or trend state, a value written as text
+  (digits, and for words only units, time zones, months, weekdays and the
+  two trend assets: "14:00 UTC", "3h", "25 Sep 14:00Z", "SPY"), a block
   summary keyed by the indicators' own ids - or the bounded prior
-  judgment; anything else renders as a
-  dash and stays out of the prompt (AGENTS.md ground rule 1; #126 round
-  2). The library's other sections (its hard rules and output format,
-  written for the replaced design) are not sent.
+  judgment; anything else renders as a dash and stays out of the prompt
+  (AGENTS.md ground rule 1; #126 rounds 2-4). The library's other sections
+  (its hard rules and output format, written for the replaced design) are
+  not sent, and its tasks' instruction to write an SMS and an iMessage
+  variant in one reply is left out (#126 round 4).
 - **The basic checks** (`app/message_engine/checks.py`): something visible,
   no control character and nothing that draws nothing (Unicode's
   default-ignorable code points, admitted only inside an emoji sequence),
   no link (any URI - a scheme and its colon - "www.", a bare domain or an
-  address in any case and script), within the channel's length - on SMS
+  address in any case and script, with the dots IDNA reads as dots), no
+  channel name (a reply that names one is variants for several), within
+  the channel's length - on SMS
   only characters GSM-7 carries, counted in septets. The template meets them too: a template a
   fact broke sends the bare event. Nothing about what the text
   says: a number the facts do not carry, or a word the old lexicon banned,

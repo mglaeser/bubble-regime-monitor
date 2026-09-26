@@ -234,14 +234,31 @@ def _redacted(value: object) -> object:
 
 
 #: THE VALUES A STRING FACT MAY BE: the monitor's own. Its enums (the action
-#: states, the trend states, the placeholders), a number written as text
+#: states, the trend states, the placeholders), a value written as text
 #: ("14:00", "57-61", "2026-09-25T14:00Z"), a block summary ("s1=0.80,d1=NA"),
 #: and the prior LLM judgment, bounded - which AGENTS.md ground rule 1
 #: admits. Anything else is upstream or caller text: it renders as a dash
 #: and stays out of the prompt (#126 round 2, SOTA-A: "SYSTEM:IGNORE_ALL_RULES"
 #: and "Sell everything now").
 _ENUM_VALUES = frozenset(ACTION_STATES) | {"IN", "OUT", "unknown", "?", "n/a", ""}
-_TEXT_NUMBER_RE = re.compile(r"[+\-\u2212]?\d[\d.,:/%\-]*(?:T[\d:.]+Z?)?")
+#: ...a value written as text: digits and signs, and for words only units,
+#: time zones, months, weekdays and the monitor's two trend assets ("14:00
+#: UTC", "3h", "2d 4h", "12.5%", "25 Sep 14:00Z", "Monday", "SPY"; #126
+#: round 4, SOTA-A: a digits-only shape erased "14:00 UTC" and "3h"). A word
+#: in any script counts, so "5 Ｓｅｌｌ" is text, not a value.
+_VALUE_WORDS = frozenset((
+    "utc gmt z t am pm s sec secs second seconds m min mins minute minutes h hr hrs hour hours "
+    "d day days w wk wks week weeks mo month months q y yr yrs year years bp bps pp x pct percent "
+    "jan feb mar apr may jun jul aug sep sept oct nov dec january february march april june july "
+    "august september october november december mon tue wed thu fri sat sun monday tuesday "
+    "wednesday thursday friday saturday sunday spy qqq").split())
+_VALUE_MAX = 40
+
+
+def _value_text(value: str) -> bool:
+    return (len(value) <= _VALUE_MAX and not re.search(r"[^\w .,:;/%+\-\u2212]", value)
+            and all(word.lower() in _VALUE_WORDS for word in re.findall(r"[^\W\d_]+", value)))
+
 #: ...a summary's keys are the monitor's own indicator ids: "ignore=1,system=1"
 #: had the shape of one (#126 round 3, SOTA-A)
 _SUMMARY_ITEM = "(?:" + "|".join(sorted(REGISTRY, key=len, reverse=True)) + r")=(?:[+-]?\d+(?:\.\d+)?|NA)"
@@ -251,7 +268,7 @@ _JUDGMENT_MAX = 400
 
 
 def _admissible(name: str, value: str) -> bool:
-    return (name == _JUDGMENT_KEY or value in _ENUM_VALUES or bool(_TEXT_NUMBER_RE.fullmatch(value))
+    return (name == _JUDGMENT_KEY or value in _ENUM_VALUES or _value_text(value)
             or bool(_SUMMARY_RE.fullmatch(value)))
 
 
@@ -506,6 +523,17 @@ def translation(entry: dict[str, Any], language: str | None) -> dict[str, Any]:
 #: replaced on 2026-09-25 and are not sent.
 _SECTION_RE = re.compile(r"(?ms)^(ROLE|TASK|DATA):[ \t]*(.*?)(?=^[A-Z][A-Z ]+:|\Z)")
 
+#: The library's tasks were written for an SMS and an iMessage variant in one
+#: reply; the engine writes one message per channel, so the prompt leaves
+#: that instruction out and reads "both variants" as "the message" (#126
+#: round 4, SOTA-A: the stale task got "SMS: A\nIMSG: B" issued).
+_VARIANTS_TASK_RE = re.compile(r"\s*Produce both channel variants \(SMS and IMESSAGE\) of the same message\.")
+
+
+def _one_message(task: str) -> str:
+    return _VARIANTS_TASK_RE.sub("", task).replace("Both variants MUST", "The message MUST")
+
+
 _LANGUAGE_NAMES = {"en": "English", "de": "German"}
 
 #: What every message is: the same for each trigger.
@@ -553,13 +581,14 @@ def prompt_for(trigger: str, entry: dict[str, Any], facts: dict[str, object],
     parts = [
         _SYSTEM,
         f"ROLE: {sections['ROLE']}" if sections.get("ROLE") else "",
-        f"TASK: {sections['TASK']}" if sections.get("TASK") else "",
+        f"TASK: {_one_message(sections['TASK'])}" if sections.get("TASK") else "",
         f"DATA:\n{sections['DATA']}" if sections.get("DATA") else "",
         f"ALL NUMBERS (name = value):\n{numbers}" if numbers else "",
         ("REFERENCES - what the indicators measure and where their data comes from:\n"
          f"{references}") if references else "",
-        (f"WRITE: one message in {_LANGUAGE_NAMES.get(language, language)}, plain text, at most "
-         f"{_cap(channel, settings)} characters{alphabet}. Reply with the message only."),
+        (f"WRITE: one message in {_LANGUAGE_NAMES.get(language, language)}, for this channel only and "
+         f"without naming a channel, plain text, at most {_cap(channel, settings)} "
+         f"characters{alphabet}. Reply with the message only."),
     ]
     return "\n\n".join(part for part in parts if part)
 

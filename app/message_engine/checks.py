@@ -34,6 +34,14 @@ _IGNORABLE = ((0x00AD, 0x00AD), (0x034F, 0x034F), (0x061C, 0x061C), (0x115F, 0x1
               (0x1D173, 0x1D17A), (0xE0000, 0xE0FFF))
 _ZWJ, _VS15, _VS16 = "\u200d", "\ufe0e", "\ufe0f"
 
+#: The dots IDNA reads as dots: "example。com" is a link (#126 round 4,
+#: SOTA-A).
+_IDNA_DOTS = str.maketrans({"\u3002": ".", "\uff0e": ".", "\uff61": "."})
+
+#: A message for its channel names no channel: a reply that does is variants
+#: for several ("SMS: A", "IMSG: B"; #126 round 4, SOTA-A).
+_CHANNEL_RE = re.compile(r"(?i)\b(?:SMS|IMSG|I-?MESSAGE)\b")
+
 
 #: The emoji bases outside the symbol category: "ℹ️" is a letter by category.
 _TEXT_EMOJI_BASES = frozenset("\u2139\u203c\u2049\u2194\u2195\u2196\u2197\u2198\u2199\u21a9\u21aa"
@@ -67,8 +75,8 @@ _CONTROL_RE = re.compile(r"[\x00-\x09\x0b-\x1f\x7f-\x9f]")
 def basic_check(text: str, *, channel: Channel, max_chars: int) -> str | None:
     """None when `text` may be sent on `channel`; otherwise the reason.
 
-    Something visible, no control or invisible character, no link, within
-    the channel's length; on SMS only characters GSM-7 carries, counted in
+    Something visible, no control or invisible character, no link, no
+    channel name, within the channel's length; on SMS only characters GSM-7 carries, counted in
     septets.
     """
     # VISIBLE: a letter, a digit, a mark of punctuation or a symbol - a text
@@ -81,8 +89,13 @@ def basic_check(text: str, *, channel: Channel, max_chars: int) -> str | None:
     # soft hyphen, a grapheme joiner) outside an emoji sequence
     if any(_invisible(text, i) for i in range(len(text))):
         return "an invisible character"
-    if _LINK_RE.search(text):
+    # read as a phone reads it: the compatibility forms folded ("ｗｗｗ．",
+    # "ＳＭＳ"), and the dots IDNA reads as dots
+    folded = unicodedata.normalize("NFKC", text).translate(_IDNA_DOTS)
+    if _LINK_RE.search(folded):
         return "a link"
+    if _CHANNEL_RE.search(folded):
+        return "a channel name"
     if channel is Channel.SMS:
         if any(ch not in GSM7_BASIC and ch not in GSM7_EXT for ch in text):
             return "a character SMS cannot carry"
