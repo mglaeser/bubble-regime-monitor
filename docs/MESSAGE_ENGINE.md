@@ -54,13 +54,14 @@ converge, and 57 review rounds on #121 and 20 on #124 showed it.
   fullwidth or look-alike form, a combining mark or any other emoji is
   refused (the reply is NFC-composed first, so a decomposed "ü" is the "ü"
   it shows). #126 rounds 2-7 found those one at a time while the check
-  listed what to refuse; round 6 turned it round. A link is any URI - a scheme and its colon after
-  anything but a letter, a digit or a scheme's sign, "://" anywhere -
-  "www.", and a bare domain or address: any run of characters, a dot and a
-  word of two letters or more, with no space between. A reply that names
-  a channel - in any case, with or without accents - is variants for
-  several. The length is counted in septets on
-  SMS and in code points on iMessage. The template meets the checks too: a
+  listed what to refuse; round 6 turned it round. A link is any URI - a
+  scheme and its colon wherever it starts (the "T14:" of an ISO time
+  excepted), "://" anywhere - "www.", a bare domain or address (any run of
+  characters, a dot and a word of two letters or more, with no space
+  between), and a number a phone dials: a "+" and seven digits or more
+  (#126 round 8). A reply that names a channel - in any case, with or
+  without accents - is variants for several. The length is counted in
+  septets on SMS and in code points on iMessage. The template meets the checks too: a
   template a fact broke sends the bare event. Nothing about what the text
   says: a number the facts do not carry, or a word the old lexicon banned,
   goes out as written, and that is pinned.

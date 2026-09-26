@@ -502,3 +502,30 @@ class TestRoundSevenOn126:
         monkeypatch.setattr(composer, "_sanitized", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x")))
         assert composer._prepare("daily_digest", entry, dict(FACTS), Channel.IMESSAGE, _settings()) == (
             "library entry is malformed: RuntimeError")
+
+
+class TestRoundEightOn126:
+    """#126 round 8: SOTA-C approved; SOTA-B timed out; SOTA-A one defect,
+    executed: a scheme after "-", "+" or "." was no link, so "-tel:+49"
+    passed. A scheme counts wherever it starts (the "T14:" of an ISO time
+    excepted), and - the defect's own harm, a number the phone dials - a
+    "+" with seven digits or more is a link too."""
+
+    @pytest.mark.parametrize("text", ["-tel:+49", "+tel:+49", ".tel:+49", "1tel:+4930123456", "étel:+49",
+                                      "Reading 59 -tel:+4930123456"])
+    def test_a_scheme_counts_wherever_it_starts(self, text):
+        assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) == "a link"
+
+    @pytest.mark.parametrize("text", ["Call +49 30 1234567", "+1-555-123-4567", "(+49) 301234567"])
+    def test_a_number_the_phone_dials_is_a_link(self, text):
+        assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) == "a link"
+
+    def test_a_call_link_is_not_sent(self, monkeypatch):
+        out, _ = _compose(monkeypatch, "Reading 59/100, questions -tel:+4930123456")
+        assert out.source == "fallback" and out.text == _template() and "a link" in (out.reason or "")
+
+    @pytest.mark.parametrize("text", ["Window 2026-08-15T14:00:00+00:00 to 2026-08-22T14:00Z.",
+                                      "S&P 500 +1.2%, Nasdaq +0.8%, 10y 4.1%; +2.5 pp vs. −0.5.",
+                                      "Range 57-61, Stand 2026-09-25, 14:00 UTC. Flags: 1/4."])
+    def test_times_signed_numbers_and_ranges_stay_prose(self, text):
+        assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) is None
