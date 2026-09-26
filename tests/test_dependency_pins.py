@@ -10,6 +10,8 @@ import re
 import tomllib
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 CEILING = "SQLAlchemy>=2.0,<2.1"
 
@@ -33,3 +35,20 @@ def test_the_image_installs_sqlalchemy_below_2_1():
 
 def test_ci_installs_the_same_sqlalchemy_as_the_image():
     assert _ci_spec("SQLAlchemy") == CEILING
+
+
+#: The message engine's link detection (the owner, 2026-09-26: a common
+#: problem goes to a well-maintained library): linkify-it-py for links,
+#: libphonenumber for numbers a phone dials. An upgrade changes what counts
+#: as a link, so each version is exact and moved on purpose.
+DETECTORS = {"linkify-it-py": "linkify-it-py==2.2.0", "phonenumberslite": "phonenumberslite==9.0.40"}
+
+
+@pytest.mark.parametrize("name", sorted(DETECTORS))
+def test_the_image_pins_each_detector(name):
+    assert _pyproject_spec(name) == DETECTORS[name]
+
+
+@pytest.mark.parametrize("name", sorted(DETECTORS))
+def test_ci_installs_the_same_detector_as_the_image(name):
+    assert _ci_spec(name) == DETECTORS[name]

@@ -24,8 +24,8 @@ converge, and 57 review rounds on #121 and 20 on #124 showed it.
 - **The prompt** (`composer.prompt_for`): one fixed system paragraph (what
   bubblegauge is, that the owner interprets, research not advice, numbers
   as given); the entry's ROLE, TASK and DATA sections from the library with
-  the numbers filled in; every fact the entry declares (`grounding_fields`
-  - for the digest, every number it reports and the judgment), by name;
+  the numbers filled in; every fact the entry declares (`grounding_fields`:
+  for the digest, every number it reports and the judgment), by name;
   the references for the trigger - the methodology and sources of its
   indicators (`app/message_engine/context.py`, repo-authored text only);
   and how to write: one message, in `MESSAGE_LANGUAGE`, for its channel
@@ -59,21 +59,35 @@ converge, and 57 review rounds on #121 and 20 on #124 showed it.
   fullwidth or look-alike form, a combining mark or any other emoji is
   refused (the reply is NFC-composed first, so a decomposed "ü" is the "ü"
   it shows). #126 rounds 2-7 found those one at a time while the check
-  listed what to refuse; round 6 turned it round. A link is any URI - a
-  scheme and its colon wherever it starts ("-tel:+49", "T14:payload"),
-  "://" anywhere - "www.", a bare domain or address (any run of
-  characters, a dot and a word of two letters or more, with no space
-  between), a numeric host ("1.2.3.4/login"), and a number a phone dials:
-  seven digits or more in one run, with at most one space, bracket, dot,
-  hyphen, dash, minus or middle dot between two of them ("212-555-0123",
-  "+49 30 1234567"). A date is neither: the rules read the text with its
-  dates masked ("2026-09-25" and its ISO time, "25.09.2026", "2000-2002";
-  #126 rounds 8-11), and the prompt says so. A reply that names a channel
-  - in any case, with or without accents - is variants for several. The length is counted in
+  listed what to refuse; round 6 turned it round. A link is what a phone
+  makes tappable, as two maintained libraries find it: linkify-it-py for
+  web and mail links, bare domains under any top-level domain IANA lists
+  (`config/iana_tlds.txt`), e-mail and IP addresses ("://" counts wherever
+  it stands), and libphonenumber for a number a phone dials - valid in
+  Germany or the United States, or possible in international form. A
+  reply that names a channel (in any case, with or without accents) is
+  variants for several. The length is counted in
   septets on SMS and in code points on iMessage. The template meets the checks too: a
   template a fact broke sends the bare event. Nothing about what the text
   says: a number the facts do not carry, or a word the old lexicon banned,
   goes out as written, and that is pinned.
+- **Libraries over rules of our own** (the owner, 2026-09-26: robustness
+  through simplification and well-maintained libraries, with a slight change
+  of scope where needed). Eleven panel rounds on #126 had grown rules of our
+  own for links and phone numbers, one counterexample at a time. Evaluated
+  against every case those rounds raised: linkify-it-py (MIT, released
+  2026-08-29, no dependencies) finds every web link, domain, address and IP
+  once given IANA's list of top-level domains; libphonenumber
+  (`phonenumberslite`, Apache-2.0, Google's numbering plans, released
+  monthly) finds the phone numbers and, knowing real numbering plans, none
+  in our dates, scores or ranges. urlextract (unreleased since 2024) and
+  linkify-it-py with its default list missed most cases; for the characters
+  the stdlib's `unicodedata` and the alphabet suffice, and GSM-7 stays the
+  repository's own module. The scope moved with the libraries: a scheme no
+  phone links ("bitcoin:", a "tel:" with no number), a local number without
+  its area code, is no longer refused. The references come from the
+  repository's own data model, and what a prompt shows of them carries no
+  link (pinned), so there is nothing to harmonise for the libraries.
 - **Otherwise the template**: a reply that fails a basic check, a gateway
   failure, a paced or budgeted-out call, a fixed trigger, a disabled engine
   or a P1 - each sends the owner's template with the current numbers.

@@ -44,7 +44,7 @@ jobs:
           python -m pip install --upgrade pip "setuptools>=83"   # setuptools>=83 clears PYSEC-2026-3447
           pip install fastapi "uvicorn[standard]" "pydantic>=2.7" pydantic-settings \
             "SQLAlchemy>=2.0,<2.1" alembic httpx tenacity "APScheduler<4" structlog slowapi \
-            "numpy<2.3" "pandas<3.0" openpyxl xlrd beautifulsoup4 lxml PyYAML \
+            "numpy<2.3" "pandas<3.0" openpyxl xlrd beautifulsoup4 lxml PyYAML "linkify-it-py==2.2.0" "phonenumberslite==9.0.40" \
             pytest ruff mypy pip-audit detect-secrets \
             "openapi-spec-validator==0.9.0" "jsonschema==4.26.0"
       - name: Install optional LPPLS engine (best-effort; suite skips it if absent)

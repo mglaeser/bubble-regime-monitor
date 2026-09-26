@@ -705,8 +705,8 @@ def prompt_for(trigger: str, entry: dict[str, Any], facts: dict[str, object],
         ("REFERENCES - what the indicators measure and where their data comes from:\n"
          f"{references}") if references else "",
         (f"WRITE: one message in {_LANGUAGE_NAMES.get(language, language)}, for this channel only and "
-         f"without naming a channel, plain text without links or phone numbers (no run of seven digits or "
-         f"more but a date), {length}. Reply with the message only."),
+         f"without naming a channel, plain text without links or phone numbers, {length}. Reply with the "
+         f"message only."),
     ]
     return "\n\n".join(part for part in parts if part)
 

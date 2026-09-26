@@ -10,6 +10,10 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from pathlib import Path
+
+import phonenumbers
+from linkify_it import LinkifyIt
 
 from app.alerts.gsm7 import GSM7_BASIC, GSM7_EXT, septets
 from app.message_engine.validator import Channel
@@ -41,33 +45,42 @@ def _in_alphabet(text: str, i: int) -> bool:
     return ch in MARKS or ch in _EMOJI_BASES
 
 
-#: A link has no place in a message the monitor sends: any URI - a scheme
-#: and its colon with no space after it, wherever it starts ("https://",
-#: "mailto:x", "tel:+49", "bitcoin:1A", "_https://1.1.1.1", "-tel:+49",
-#: "T14:payload"; "SMS: text" is a label) - "://" wherever it stands, "www.",
-#: a bare domain or an address, which a phone links by itself
-#: ("example.com", "EXAMPLE.COM", "x@bücher.de", "example.com.5": any run of
-#: characters up to a dot and a word of two letters or more, with no space
-#: between), a numeric host ("1.2.3.4/login"), and a number a phone dials:
-#: seven digits or more in one run, one space, bracket, dot, hyphen, dash,
-#: minus or middle dot at most between two of them ("212-555-0123",
-#: "+49 30 1234567", "0049·30·1234567") (#126 rounds 1-11, SOTA-A).
-_OCTET = r"(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)"
-_LINK_RE = re.compile(
-    r"[A-Za-z][A-Za-z0-9+.-]*:(?=\S)|://|(?i:\bwww\.)"
-    r"|[^\s.]+\.[^\W\d_]{2,}\b"
-    rf"|(?<![\d.]){_OCTET}(?:\.{_OCTET}){{3}}(?!\d)"
-    r"|(?<!\d)\d(?:[ ().\-\u2013\u2014\u2212\u00b7]?\d){6,}")
+#: A LINK has no place in a message the monitor sends - a link being what a
+#: phone makes tappable, found by maintained libraries rather than by rules
+#: of our own (the owner, 2026-09-26: robustness through simplification and
+#: well-maintained libraries, and a slight change of scope where needed).
+#: linkify-it-py, the markdown-it ecosystem's link detector, finds web and
+#: mail links, bare domains under any top-level domain IANA lists
+#: (config/iana_tlds.txt), e-mail addresses and IP addresses; "://" counts
+#: wherever it stands, since the detector reads a scheme glued to a word
+#: ("_https://") as part of that word. libphonenumber finds a number a phone
+#: dials. The scope is what these libraries find: a scheme no phone links
+#: ("bitcoin:1A", "T14:payload") is no longer refused (#126 rounds 1-11
+#: found the rules this replaces).
+_TLDS = tuple(line.strip().lower() for line in (Path(__file__).resolve().parents[2] / "config" / "iana_tlds.txt")
+              .read_text(encoding="ascii").splitlines() if line.strip() and not line.startswith("#"))
 
-#: ...but a date is neither, and the link rules read the text with its dates
-#: masked: "2026-09-25" and its ISO time ("2026-08-15T14:00:00+00:00"; a time
-#: followed by a word is no time), "25.09.2026", a span of years
-#: ("2000-2002"). A real month and day only: "2125-55-0123" is a number.
-_DATE_RE = re.compile(
-    r"(?<![\d.])(?:(?:19|20)\d\d-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])"
-    r"(?:T\d\d:\d\d(?::\d\d(?:[.,]\d+)?)?(?:Z|[+-]\d\d(?::?\d\d)?)?(?![\w:]))?"
-    r"|(?:0?[1-9]|[12]\d|3[01])\.(?:0?[1-9]|1[0-2])\.(?:19|20)\d\d"
-    r"|(?:19|20)\d\d ?[-\u2013\u2014/] ?(?:19|20)\d\d)(?!\.?\d)")
+
+def _linked(text: str) -> bool:
+    # A detector per call: it keeps its last match on itself, and building one
+    # costs about 2 ms.
+    detector = LinkifyIt(options={"fuzzy_link": True, "fuzzy_email": True, "fuzzy_ip": True}).tlds(list(_TLDS), True)
+    return "://" in text or bool(detector.test(text))
+
+
+#: ...and a number a phone dials is a link: one libphonenumber - Google's
+#: library, which Android's own number detection builds on - finds in the
+#: text, valid in Germany or the United States, or possible in international
+#: form ("+49 30 1234567", "212-555-0123", "030 1234567"). It knows the real
+#: numbering plans, so a date, a score or a range is no number.
+_DIAL_PLANS = (("DE", phonenumbers.Leniency.VALID), ("US", phonenumbers.Leniency.VALID),
+               ("ZZ", phonenumbers.Leniency.POSSIBLE))
+
+
+def _dialable(text: str) -> bool:
+    return any(next(iter(phonenumbers.PhoneNumberMatcher(text, region, leniency=leniency)), None) is not None
+               for region, leniency in _DIAL_PLANS)
+
 
 #: A message for its channel names no channel: a reply that does is variants
 #: for several ("SMS: A", "IMSG: B"; #126 round 4, SOTA-A) - the name in any
@@ -100,7 +113,7 @@ def basic_check(text: str, *, channel: Channel, max_chars: int) -> str | None:
             return "a character SMS cannot carry"
     elif not all(_in_alphabet(text, i) for i in range(len(text))):
         return "a character outside the message alphabet"
-    if _LINK_RE.search(_DATE_RE.sub("#", text)):
+    if _linked(text) or _dialable(text):
         return "a link"
     if _CHANNEL_RE.search(_unaccented(text)):
         return "a channel name"

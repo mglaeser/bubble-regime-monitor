@@ -32,6 +32,12 @@ dependencies = [
     "lxml>=5.2",
     # The alert ruleset is a YAML artifact; the loader parses it with safe_load.
     "PyYAML>=6.0",
+    # A message carries no link: linkify-it-py finds links, libphonenumber the
+    # numbers a phone dials (app/message_engine/checks.py). Exact pins - an
+    # upgrade changes what counts, so it is made on purpose. The lite build of
+    # phonenumbers has no geocoder or carrier data.
+    "linkify-it-py==2.2.0",
+    "phonenumberslite==9.0.40",
     "lppls==0.6.24",
 ]
 

@@ -14,7 +14,7 @@ import pytest
 from app.config import Settings
 from app.db import session_scope
 from app.engine import legs
-from app.message_engine import composer
+from app.message_engine import checks, composer
 from app.message_engine.checks import EMOJI, MARKS, basic_check
 from app.message_engine.validator import Channel
 from app.models import MessageEngineAttempt
@@ -258,8 +258,7 @@ class TestRoundTwoOn126:
         _, prompts = _compose(monkeypatch, REPLY, facts={**FACTS, "spy_trend": value})
         assert f"  spy_trend = {value}" in prompts[0]
 
-    @pytest.mark.parametrize("text", ["see EXAMPLE.COM", "pay to bitcoin:1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa",
-                                      "lightning:lnbc1u1p", "open Evil.Com now"])
+    @pytest.mark.parametrize("text", ["see EXAMPLE.COM", "open Evil.Com now"])
     def test_every_link_form_is_refused(self, text):
         assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) == "a link"
 
@@ -375,7 +374,7 @@ class TestRoundFiveOn126:
     def test_a_combining_mark_is_refused(self, text):
         assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) == OUTSIDE
 
-    @pytest.mark.parametrize("text, reason", [("see example.com.5", "a link"), ("see i\u2764\ufe0f.ws", OUTSIDE)])
+    @pytest.mark.parametrize("text, reason", [("see i\u2764\ufe0f.ws", OUTSIDE)])
     def test_a_domain_is_any_run_up_to_a_dot(self, text, reason):
         """Swept with the marks: a label of any characters, and nothing
         after the top-level domain lets it pass."""
@@ -514,9 +513,8 @@ class TestRoundEightOn126:
     excepted), and - the defect's own harm, a number the phone dials - a
     "+" with seven digits or more is a link too."""
 
-    @pytest.mark.parametrize("text", ["-tel:+49", "+tel:+49", ".tel:+49", "1tel:+4930123456", "étel:+49",
-                                      "Reading 59 -tel:+4930123456"])
-    def test_a_scheme_counts_wherever_it_starts(self, text):
+    @pytest.mark.parametrize("text", ["1tel:+4930123456", "Reading 59 -tel:+4930123456"])
+    def test_a_tel_link_with_its_number_is_a_link(self, text):
         assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) == "a link"
 
     @pytest.mark.parametrize("text", ["Call +49 30 1234567", "+1-555-123-4567", "(+49) 301234567"])
@@ -572,11 +570,6 @@ class TestRoundNineOn126:
         text = composer.render_fallback(composer.template_for(entry, None), composer._sanitized(facts))
         assert text.startswith(f"bubblegauge 59/100 {band}. range 57-61.")
 
-    @pytest.mark.parametrize("text", ["T14:payload", "see T14:payload now", "2026-08-15T14:payload",
-                                      "2026-08-15T14:00payload"])
-    def test_a_time_scheme_without_its_date_is_a_link(self, text):
-        assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) == "a link"
-
     @pytest.mark.parametrize("text", ["Window 2026-08-15T14:00:00+00:00 to 2026-08-22T14:00Z.",
                                       "Stand 2026-09-25T06:01:43.119497Z, next 2026-09-26T14:00+02:00."])
     def test_an_iso_date_time_is_prose(self, text):
@@ -594,7 +587,7 @@ class TestRoundTenOn126:
         assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) == "a link"
 
     @pytest.mark.parametrize("text", ["+49–30–1234567", "+49—30—1234567", "+49−30−1234567",
-                                      "+49·30·1234567", "0049 30 1234567"])
+                                      "0049 30 1234567"])
     def test_a_dialable_number_with_any_separator_is_a_link(self, text):
         assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) == "a link"
 
@@ -619,8 +612,8 @@ class TestRoundElevenOn126:
     declared `authorized_prose` - was erased, so it is admitted again when
     it proves to be registry text, as on main."""
 
-    @pytest.mark.parametrize("text", ["212-555-0123", "(212) 555-0123", "call 555-0123", "212.555.0123", "2125550123",
-                                      "030 1234567", "2125-55-0123", "Marktwert 1.234.567.890 USD"])
+    @pytest.mark.parametrize("text", ["212-555-0123", "(212) 555-0123", "212.555.0123", "2125550123",
+                                      "030 1234567", "2125-55-0123"])
     def test_a_run_of_seven_digits_is_a_number_to_dial(self, text):
         assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) == "a link"
 
@@ -633,7 +626,7 @@ class TestRoundElevenOn126:
     def test_a_phone_number_reply_is_not_sent(self, monkeypatch):
         out, prompts = _compose(monkeypatch, "Reading 59/100; questions to 212-555-0123")
         assert out.source == "fallback" and out.text == _template() and "a link" in (out.reason or "")
-        assert "without links or phone numbers (no run of seven digits or more but a date)" in prompts[0]
+        assert "without links or phone numbers," in prompts[0]
 
     def test_the_reminders_registry_summary_is_admitted(self):
         authorized = frozenset({"condition_summary"})
@@ -658,3 +651,80 @@ class TestRoundElevenOn126:
         admitted = composer._sanitized(facts, frozenset(entry["authorized_prose"]))
         assert composer.render_fallback(composer.template_for(entry, None), admitted) == (
             f"bubblegauge reminder, still active 3h: {REGISTRY_SUMMARY}")
+
+
+
+class TestLinksAreFoundByLibraries:
+    """The owner, 2026-09-26: a common problem goes to a well-maintained
+    library, robustness comes through simplification, and a slight change of
+    scope is fine. So a link is what a phone makes tappable as two libraries
+    find it - linkify-it-py (web and mail links, bare domains under any IANA
+    top-level domain, e-mail and IP addresses) and libphonenumber (numbers a
+    phone dials) - instead of the rules rounds 1-11 of #126 grew."""
+
+    @pytest.mark.parametrize("text", [
+        "See https://example.com for the reading.", "go to www.example.com", "see EXAMPLE.COM", "see bücher.de",
+        "see example.app", "visit shop.example.online", "docs at example.dev/x", "x@example.com",
+        "mail x@bücher.de", "_https://1.1.1.1", "1https://1.1.1.1", "1.2.3.4/login", "see 192.168.0.1 now",
+        "10.0.0.1:8080", "Call +49 30 1234567", "212-555-0123", "(212) 555-0123", "030 1234567",
+        "0049 30 1234567", "+49–30–1234567", "questions -tel:+4930123456"])
+    def test_what_a_phone_makes_tappable_is_refused(self, text):
+        assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) == "a link"
+
+    @pytest.mark.parametrize("text", [
+        "pay to bitcoin:1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", "lightning:lnbc1u1p", "tel:+49", "mailto:x",
+        "T14:payload", "see example.com.5", "+49·30·1234567", "call 555-0123"])
+    def test_the_scope_is_what_the_libraries_find(self, text):
+        """No phone links these: a scheme it does not know, a "tel:" with no
+        number behind it, a local number without its area code. The rules
+        that refused them are gone with the scope change."""
+        assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) is None
+
+    @pytest.mark.parametrize("text", [
+        "Marktwert 1.234.567.890 USD", "Größe:5 Punkte, Flags:1/4",
+        "Window 2026-08-15T14:00:00+00:00 to 2026-08-22T14:00Z.", "Score 59/100 (57–61), flags 1/4.",
+        "CAPE 38.5, the 1929, 2000 and 2007 peaks.", "z.B. SPY, d.h. U.S.-Aktien; e.g. QQQ, i.e. calm."])
+    def test_prose_is_no_link(self, text):
+        assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) is None
+
+    @pytest.mark.parametrize("text", ["Call +1 (212) 555 - 0123.", "212 - 555 - 0123", "+49 30 - 123 45 67",
+                                      "030 / 123 45 67", "+49 (0) 30 123 45 67", "Call 212 . 555 . 0123",
+                                      "+1 212  555  0123"])
+    def test_a_number_formatted_any_way_is_a_link(self, text):
+        """#126 round 12, SOTA-A (executed): the rule of our own allowed one
+        formatting character between two digits, so "Call +1 (212) 555 -
+        0123." passed. libphonenumber parses numbers as they are written."""
+        assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) == "a link"
+
+    def test_the_link_detector_decides(self, monkeypatch):
+        class Detector:
+            def __init__(self, **_kw):
+                pass
+
+            def tlds(self, *_a):
+                return self
+
+            def test(self, _text):
+                return True
+
+        monkeypatch.setattr(checks, "LinkifyIt", Detector)
+        assert basic_check("plain words", channel=Channel.IMESSAGE, max_chars=200) == "a link"
+
+    def test_the_number_detector_decides(self, monkeypatch):
+        monkeypatch.setattr(checks.phonenumbers, "PhoneNumberMatcher", lambda *_a, **_kw: iter([object()]))
+        assert basic_check("plain words", channel=Channel.IMESSAGE, max_chars=200) == "a link"
+
+    def test_the_prompts_references_carry_no_link(self):
+        """The references come from the repository's own data model; what a
+        prompt shows of them - names, what each measures, why it matters,
+        the sources' names - holds nothing either library calls a link, so
+        a link in a reply is never one the model was shown."""
+        from app.message_engine import context
+        for trigger in composer.library()["prompts"]:
+            for line in context.render(context.references_for(trigger)).splitlines():
+                assert not (checks._linked(line) or checks._dialable(line)), (trigger, line)
+
+    def test_the_top_level_domains_are_ianas(self):
+        path = checks.Path(checks.__file__).resolve().parents[2] / "config" / "iana_tlds.txt"
+        assert path.read_text(encoding="ascii").startswith("# Version ")
+        assert len(checks._TLDS) > 1000 and {"app", "com", "de", "online"} <= set(checks._TLDS)
