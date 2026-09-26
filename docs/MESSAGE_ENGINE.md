@@ -49,8 +49,8 @@ converge, and 57 review rounds on #121 and 20 on #124 showed it.
   not sent, and its tasks' instruction to write an SMS and an iMessage
   variant in one reply is left out (#126 round 4).
 - **The basic checks** (`app/message_engine/checks.py`): something visible,
-  no control character, only the channel's alphabet, no link, no channel
-  name, within the channel's length. The alphabet is an allowlist: GSM-7
+  no control character, only the channel's alphabet, no link, within the
+  channel's length. The alphabet is an allowlist: GSM-7
   on SMS; on iMessage printable ASCII, printable Latin-1 but the no-break
   space and the soft hyphen, the capital sharp s and a few typographic
   marks (`checks.MARKS`), and the library's five emoji
@@ -65,8 +65,10 @@ converge, and 57 review rounds on #121 and 20 on #124 showed it.
   (`config/iana_tlds.txt`), e-mail and IP addresses ("://" counts wherever
   it stands), and libphonenumber for a number a phone dials - valid in
   Germany or the United States, or possible in international form. A
-  reply that names a channel (in any case, with or without accents) is
-  variants for several. The length is counted in
+  reply that names channels goes out as written: the prompt asks for one
+  message for its channel and no prompt asks for variants (#126 round 4);
+  the filter that also refused channel names is gone (round 13; the
+  owner's rulings of 2026-09-25/26). The length is counted in
   septets on SMS and in code points on iMessage. The template meets the checks too: a
   template a fact broke sends the bare event. Nothing about what the text
   says: a number the facts do not carry, or a word the old lexicon banned,

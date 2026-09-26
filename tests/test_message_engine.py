@@ -355,12 +355,6 @@ class TestRoundFourOn126:
         prompt = composer.prompt_for("failure_alert_failing", entry, {}, Channel.IMESSAGE, _settings())
         assert "The message MUST begin with 'bubblegauge FAILING:'" in prompt
 
-    @pytest.mark.parametrize("reply", ["SMS: bubblegauge 59/100 trim.\nIMSG: bubblegauge 59/100, band trim.",
-                                       "SMS - bubblegauge 59/100 trim. iMessage - bubblegauge 59/100, band trim.",
-                                       "[sms] bubblegauge 59/100 trim."])
-    def test_a_reply_that_names_a_channel_is_not_sent(self, monkeypatch, reply):
-        out, _ = _compose(monkeypatch, reply)
-        assert out.source == "fallback" and out.text == _template() and "a channel name" in (out.reason or "")
 
 
 class TestRoundFiveOn126:
@@ -488,9 +482,6 @@ class TestRoundSevenOn126:
         out, _ = _compose(monkeypatch, "SᴍS: bubblegauge 59/100 trim.\nIᴍSG: bubblegauge 59/100, band trim.")
         assert out.source == "fallback" and out.text == _template()
 
-    @pytest.mark.parametrize("text", ["ÍMSG: B", "íMessage: C", "ÌMSG ét SMS"])
-    def test_a_channel_name_with_accents_is_a_channel_name(self, text):
-        assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) == "a channel name"
 
     @pytest.mark.parametrize("text", ["Größe und Breite: 59 von 100. Änderung: keine.",
                                       "Im Messebetrieb bleibt der Wert 59; Smsl-Index n/a.", "StraẞE 59"])
@@ -728,3 +719,25 @@ class TestLinksAreFoundByLibraries:
         path = checks.Path(checks.__file__).resolve().parents[2] / "config" / "iana_tlds.txt"
         assert path.read_text(encoding="ascii").startswith("# Version ")
         assert len(checks._TLDS) > 1000 and {"app", "com", "de", "online"} <= set(checks._TLDS)
+
+
+class TestRoundThirteenOn126:
+    """#126 round 13: SOTA-C approved; SOTA-B timed out; SOTA-A one defect,
+    executed: "SMS_output: A / IMSG_output: B" passed the channel-name filter
+    of round 4. That filter guarded a cause fixed at its root in round 4 -
+    no prompt asks for variants, pinned - and rounds 7 and 13 found its
+    edges. The owner's rulings (2026-09-25: the reader interprets;
+    2026-09-26: simplification and a slight change of scope over rules of
+    our own) settle it: the filter is removed, the prompt still asks for one
+    message for its channel, and a reply that names channels goes out."""
+
+    @pytest.mark.parametrize("reply", ["SMS_output: A\nIMSG_output: B",
+                                       "SMS: bubblegauge 59/100 trim.\nIMSG: bubblegauge 59/100, band trim.",
+                                       "ÍMSG: bubblegauge 59/100 trim."])
+    def test_a_reply_that_names_channels_goes_out_as_written(self, monkeypatch, reply):
+        out, _ = _compose(monkeypatch, reply)
+        assert out.source == "generated" and out.text == reply
+
+    def test_the_prompt_asks_for_one_message_for_this_channel(self, monkeypatch):
+        _, prompts = _compose(monkeypatch, REPLY)
+        assert "for this channel only and without naming a channel" in prompts[0]

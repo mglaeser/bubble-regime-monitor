@@ -82,15 +82,6 @@ def _dialable(text: str) -> bool:
                for region, leniency in _DIAL_PLANS)
 
 
-#: A message for its channel names no channel: a reply that does is variants
-#: for several ("SMS: A", "IMSG: B"; #126 round 4, SOTA-A) - the name in any
-#: case, with or without accents ("ÍMSG", "íMessage"; #126 round 7, SOTA-A).
-_CHANNEL_RE = re.compile(r"(?i)\b(?:SMS|IMSG|I-?MESSAGE)\b")
-
-
-def _unaccented(text: str) -> str:
-    return "".join(ch for ch in unicodedata.normalize("NFKD", text) if not unicodedata.combining(ch))
-
 #: Control characters, the line break excepted.
 _CONTROL_RE = re.compile(r"[\x00-\x09\x0b-\x1f\x7f-\x9f]")
 
@@ -99,8 +90,8 @@ def basic_check(text: str, *, channel: Channel, max_chars: int) -> str | None:
     """None when `text` may be sent on `channel`; otherwise the reason.
 
     Something visible, no control character, only the channel's alphabet
-    (GSM-7 on SMS, the message alphabet on iMessage), no link, no channel
-    name, within the channel's length - counted in septets on SMS.
+    (GSM-7 on SMS, the message alphabet on iMessage), no link, within the
+    channel's length - counted in septets on SMS.
     """
     # VISIBLE: a letter, a digit, a mark of punctuation or a symbol - a text
     # of spaces is empty (#126 round 2, SOTA-A)
@@ -115,8 +106,6 @@ def basic_check(text: str, *, channel: Channel, max_chars: int) -> str | None:
         return "a character outside the message alphabet"
     if _linked(text) or _dialable(text):
         return "a link"
-    if _CHANNEL_RE.search(_unaccented(text)):
-        return "a channel name"
     if channel is Channel.SMS:
         if septets(text) > max_chars:
             return f"longer than {max_chars} septets"
