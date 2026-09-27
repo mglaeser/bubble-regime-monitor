@@ -46,10 +46,12 @@ converge, and 57 review rounds on #121 and 20 on #124 showed it.
   summary) when it proves to be a join of the phrase registry's fragments
   (`registry_authored`, as on main since #112/#119) - or the bounded prior
   judgment; anything else renders as a dash and stays out of the prompt
-  (AGENTS.md ground rule 1; #126 rounds 2-4 and 11). The library's other sections
-  (its hard rules and output format, written for the replaced design) are
-  not sent, and its tasks' instruction to write an SMS and an iMessage
-  variant in one reply is left out (#126 round 4).
+  (AGENTS.md ground rule 1; #126 rounds 2-4 and 11). The library's other
+  sections (its hard rules, output format and SMS notes, written for the
+  replaced two-variant design) are never sent, and its tasks' instruction
+  to write an SMS and an iMessage variant in one reply is left out (#126
+  round 4); ten alert entries call their data "INJECTED DATA", which is
+  sent as their DATA (#126 round 22).
 - **The basic checks** (`app/message_engine/checks.py`): something visible,
   no control character, only the channel's alphabet, no link, within the
   channel's length. The alphabet is an allowlist: GSM-7

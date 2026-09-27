@@ -610,9 +610,8 @@ def _cap(channel: Channel, settings: Settings) -> int:
     return settings.sms_max_len if channel is Channel.SMS else settings.message_engine_imessage_max_chars
 
 
-#: The library's own language: the `fallback`/`phrasings`/`must_mention`
-#: keys are in it, and `translations.<lang>` carries the same keys for any
-#: other language the owner authored.
+#: The library's own language: the `fallback` key is in it, and
+#: `translations.<lang>` carries it for any other language the owner authored.
 LIBRARY_LANGUAGE = "en"
 
 
@@ -631,7 +630,11 @@ def translation(entry: dict[str, Any], language: str | None) -> dict[str, Any]:
 #: The sections of a library prompt the message is written from. Its other
 #: sections (the hard rules, the output format) belong to a design the owner
 #: replaced on 2026-09-25 and are not sent.
-_SECTION_RE = re.compile(r"(?ms)^(ROLE|TASK|DATA):[ \t]*(.*?)(?=^[A-Z][A-Z ]+:|\Z)")
+#: The sections a prompt takes from the library: ROLE, TASK and DATA - ten
+#: alert entries call their data "INJECTED DATA". The library's other
+#: sections (HARD RULES, OUTPUT, OUTPUT FORMAT, SMS), written for the replaced
+#: two-variant design, are never sent (#126 round 22, pinned).
+_SECTION_RE = re.compile(r"(?ms)^(ROLE|TASK|DATA|INJECTED DATA):[ \t]*(.*?)(?=^[A-Z][A-Z ]+:|\Z)")
 
 #: The library's tasks were written for an SMS and an iMessage variant in one
 #: reply; the engine writes one message per channel, so the prompt leaves
@@ -707,7 +710,7 @@ def prompt_for(trigger: str, entry: dict[str, Any], facts: dict[str, object],
     declared = {name: _prompt_value(name, _slot_value(name, facts))
                 for name in entry.get("grounding_fields") or []}
     shown = {name: value for name, value in declared.items() if value is not None}
-    sections = {name: render_fallback(body.strip(), shown)
+    sections = {("DATA" if name == "INJECTED DATA" else name): render_fallback(body.strip(), shown)
                 for name, body in _SECTION_RE.findall(entry.get("prompt", ""))}
     numbers = "\n".join(f"  {name} = {value}" for name, value in sorted(shown.items()))
     references = context_material.render(context_material.references_for(trigger))

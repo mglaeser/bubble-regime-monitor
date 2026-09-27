@@ -348,7 +348,8 @@ class TestRoundFourOn126:
     def test_no_prompt_asks_for_channel_variants(self, channel):
         for trigger, entry in composer.library()["prompts"].items():
             prompt = composer.prompt_for(trigger, entry, {}, channel, _settings())
-            assert not re.search(r"(?i)\bvariants?\b|\bIMESSAGE\b|\bIMSG\b", prompt), trigger
+            assert not re.search(r"(?i)channel variants?|(?:sms|imessage|imsg) variant|two variants|both variants"
+                                 r"|\bIMESSAGE\b|\bIMSG\b", prompt), trigger
 
     def test_both_variants_read_as_the_message(self):
         entry = composer.library()["prompts"]["failure_alert_failing"]
@@ -941,3 +942,36 @@ class TestRoundTwentyOneOn126:
     @pytest.mark.parametrize("text", ["200–Tage–Linie", "3–Monats–Tief", "12/Monats/Momentum"])
     def test_a_compound_with_dashes_stays_prose(self, text):
         assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) is None
+
+
+
+class TestRoundTwentyTwoOn126:
+    """#126 round 22: SOTA-A one defect, SOTA-C one refutation, SOTA-B timed
+    out. SOTA-A: "unchanged TASK bullets can produce and send SMS: A /
+    IMSG: B" - executed and not reproduced: the two-variant bullets stand in
+    the library's HARD RULES, OUTPUT, OUTPUT FORMAT and SMS sections, which
+    no prompt carries (pinned below; round 4 pinned the TASK). The sweep
+    found ten alerts' "INJECTED DATA" unsent; it is their DATA now. SOTA-C:
+    "the model's JSON selection" - the engine was select-mode once, and
+    engine_delivery.py still said so; the model writes (decision 24)."""
+
+    @pytest.mark.parametrize("channel", [Channel.SMS, Channel.IMESSAGE])
+    def test_a_prompt_carries_the_library_s_role_task_and_data_only(self, channel):
+        for trigger, entry in composer.library()["prompts"].items():
+            prompt = composer.prompt_for(trigger, entry, {}, channel, _settings())
+            headers = set(re.findall(r"(?m)^([A-Z][A-Z ]+):", prompt))
+            assert headers <= {"ROLE", "TASK", "DATA", "ALL NUMBERS (name = value)",
+                               "REFERENCES - what the indicators measure and where their data comes from",
+                               "WRITE"}, (trigger, headers)
+            for section in ("HARD RULES", "OUTPUT", "SMS variant", "INJECTED DATA"):
+                assert section not in prompt, (trigger, section)
+
+    def test_an_alert_s_injected_data_is_its_data(self):
+        entry = composer.library()["prompts"]["MARGIN_ROLLOVER"]
+        prompt = composer.prompt_for("MARGIN_ROLLOVER", entry, {"F_D2": 1.0}, Channel.IMESSAGE, _settings())
+        assert "DATA:\n- Rollover marker value now: 1.0" in prompt
+
+    def test_the_delivery_wiring_says_the_model_writes(self):
+        from app.services import engine_delivery
+        assert "the model writes the message" in (engine_delivery.__doc__ or "")
+        assert "selects an" not in (engine_delivery.__doc__ or "")
