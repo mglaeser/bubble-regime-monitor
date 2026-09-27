@@ -975,3 +975,22 @@ class TestRoundTwentyTwoOn126:
         from app.services import engine_delivery
         assert "the model writes the message" in (engine_delivery.__doc__ or "")
         assert "selects an" not in (engine_delivery.__doc__ or "")
+
+
+
+class TestRoundTwentyThreeOn126:
+    """#126 round 23: SOTA-C approved; SOTA-B timed out; SOTA-A one defect,
+    executed: a value of punctuation alone ("... --- ...") passed the
+    value-text rule - "every word is a known one" holds of no words - and
+    reached the prompt and the template. A value is a number, or one known
+    word alone."""
+
+    @pytest.mark.parametrize("value", ["... --- ...", ".-.. . -", "-- .- -.--", "...", "-", "_ _ _", "--- / ---"])
+    def test_punctuation_alone_is_no_value(self, monkeypatch, value):
+        assert composer._sanitized({"F_NEXT_CHECK": value}) == {"F_NEXT_CHECK": None}
+        _, prompts = _compose(monkeypatch, REPLY, facts={**FACTS, "spy_trend": value})
+        assert f"spy_trend = {value}" not in prompts[0]
+
+    @pytest.mark.parametrize("value", ["Monday", "SPY", "UTC", "14:00 UTC", "3h", "25 Sep 14:00Z", "-0.5", "57-61"])
+    def test_a_number_or_one_known_word_is_a_value(self, value):
+        assert composer._sanitized({"F_NEXT_CHECK": value}) == {"F_NEXT_CHECK": value}

@@ -40,7 +40,8 @@ converge, and 57 review rounds on #121 and 20 on #124 showed it.
   snapshot displays it, "suppressed (block degraded)" too; #126 round 9),
   a value written as text
   (digits, and for words only units, time zones, months, weekdays and the
-  two trend assets: "14:00 UTC", "3h", "25 Sep 14:00Z", "SPY"), a block
+  two trend assets: "14:00 UTC", "3h", "25 Sep 14:00Z" - or one such word
+  alone, "SPY"; never punctuation alone, #126 round 23), a block
   summary keyed by the indicators' own ids, the alert renderer's text in a
   field the entry declares `authorized_prose` (the reminder's condition
   summary) when it proves to be a join of the phrase registry's fragments

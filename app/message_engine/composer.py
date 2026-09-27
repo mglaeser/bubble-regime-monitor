@@ -266,8 +266,12 @@ _VALUE_MAX = 40
 
 
 def _value_text(value: str) -> bool:
+    words = re.findall(r"[^\W\d_]+", value)
     return (len(value) <= _VALUE_MAX and not re.search(r"[^\w .,:;/%+\-\u2212]", value)
-            and all(word.lower() in _VALUE_WORDS for word in re.findall(r"[^\W\d_]+", value)))
+            and all(word.lower() in _VALUE_WORDS for word in words)
+            # a number, or one known word alone - never punctuation alone, where
+            # "all words known" held of no words ("... --- ...", #126 round 23)
+            and (any(ch.isdigit() for ch in value) or [value.strip()] == words))
 
 #: ...a summary's keys are the monitor's own indicator ids: "ignore=1,system=1"
 #: had the shape of one (#126 round 3, SOTA-A)
