@@ -15,6 +15,16 @@
 5. **Secrets fail closed.** Never weaken the admin-key guard (`app/security.py`); never commit `.env`.
 6. **Reproducibility is pinned.** The Monte Carlo seed (`MC_SEED=20260711`) and golden fixtures (`tests/test_golden_fixture.py`) are the acceptance gate for the deterministic score. A change that moves them must update them deliberately and explain why.
 
+## The guideline: simple, and library-first (the owner, 2026-09-26)
+
+Robustness comes from simplification and from well-maintained libraries, not from rules of our own. A slight change of scope beats chasing edge cases, and overhead stays small.
+
+- **A common problem goes to a library.** Before writing a parser, detector, encoder, retry loop, scheduler or validator, look for a maintained library: released within the last year, a licence a proprietary repository may use (MIT, BSD, Apache — never GPL/AGPL), and Python 3.12 support. Evaluate it against the real cases before adopting it. Examples: links are found by linkify-it-py and phone numbers by libphonenumber (`app/message_engine/checks.py`, docs/MESSAGE_ENGINE.md decision 24).
+- **Our own data fits the library.** Data this repository owns (references, the prompt library, fixtures) may be harmonised in format, never in identity, so that a library works on it fully.
+- **When a check keeps losing to the next edge case, narrow the contract.** If review rounds keep finding one more case a rule of our own misses, stop extending the rule. Define the contract as what the library decides, pin the scope change in a test, and say so in the change.
+- **No side tasks.** One concern per change. Harden only what a finding or the owner names; no speculative extensions.
+- **Delete before you add.** Dead code, compatibility shims (none are kept: the owner ruled on 2026-09-20 that there is no backward compatibility anywhere) and defences against what a single-tenant deployment cannot meet are removed, not maintained.
+
 ## How to make a change (the gate)
 
 Every change must pass `.github/workflows/ci.yml`, which is **blocking**:
@@ -33,12 +43,12 @@ Type-checking (`mypy app`) is **blocking**, as a ratchet: CI fails if the error 
 | Docs / comments | CI green. |
 | Indicator math / aggregation / Monte Carlo | Update + justify golden fixtures; explain the numeric delta in the commit. |
 | Auth / secrets / deploy / CI gate | Write a red→green test from the spec; note the blast-radius; do not weaken a fail-closed control. |
-| Dependencies | Confirm the package exists on the real registry; pin it; `pip-audit` must stay clean. |
+| Dependencies | Confirm the package exists on the real registry and meets the guideline above (maintained, permissive licence); pin it exactly in `pyproject.toml` and the CI install list (`tests/test_dependency_pins.py` holds them equal); `pip-audit` must stay clean. |
 
 ## Test-first, small, atomic
 
-One concern per change. Write the test from the **spec/README invariants above**, not from the code under test. Run it red, make the smallest change, run it green, keep the whole suite green. Sweep for clones of any pattern you fix.
+One concern per change. Write the test from the **spec/README invariants above**, not from the code under test. Run it red, make the smallest change, run it green, keep the whole suite green. Sweep for clones of any pattern you fix: the same defect elsewhere, not the next edge case of your own rule (see the guideline).
 
 ## Where things live
 
-`app/indicators/` (s1–s5, d1–d4, v) · `app/engine/` (aggregate, montecarlo, judgment, sms, legs) · `app/sources/` (external data adapters, each a fixed host) · `app/services/compute.py` (the pipeline) · `app/routers/` (API) · `app/references.py` (the methodology registry + science audit — the de-facto spec) · `migrations/` (Alembic, authoritative) · `r/gsadf.R` + `app/indicators/d4_lppls.py` (subprocess-isolated heavy engines).
+`app/indicators/` (s1–s5, d1–d4, v) · `app/engine/` (aggregate, montecarlo, judgment, sms, legs) · `app/sources/` (external data adapters, each a fixed host) · `app/services/compute.py` (the pipeline) · `app/message_engine/` (the message engine: `composer.py` builds the prompt, `checks.py` the basic checks) · `app/routers/` (API) · `app/references.py` (the methodology registry + science audit — the de-facto spec) · `migrations/` (Alembic, authoritative) · `r/gsadf.R` + `app/indicators/d4_lppls.py` (subprocess-isolated heavy engines).
