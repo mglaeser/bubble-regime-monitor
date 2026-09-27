@@ -40,8 +40,7 @@ from app.llm_gateway import complete
 from app.logging_conf import get_logger
 from app.message_engine import context as context_material
 from app.message_engine import governor as gov
-from app.message_engine.checks import EMOJI, MARKS, basic_check
-from app.message_engine.validator import Channel
+from app.message_engine.checks import EMOJI, MARKS, Channel, basic_check
 from app.redaction import sanitize
 from app.references import REGISTRY
 
@@ -614,8 +613,9 @@ def _cap(channel: Channel, settings: Settings) -> int:
     return settings.sms_max_len if channel is Channel.SMS else settings.message_engine_imessage_max_chars
 
 
-#: The library's own language: the `fallback` key is in it, and
-#: `translations.<lang>` carries it for any other language the owner authored.
+#: The library's own language: the `fallback` template is in it, and
+#: `translations.<lang>` carries a `fallback` for any other language the
+#: owner authored.
 LIBRARY_LANGUAGE = "en"
 
 

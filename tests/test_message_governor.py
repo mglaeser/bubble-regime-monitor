@@ -24,8 +24,6 @@ FACTS = {
     "F_NEXT_CHECK": "14:00 UTC",
 }
 
-LIMITS = {"sms_max_len": 150, "imessage_max_chars": 200, "imessage_max_emoji": 2}
-
 
 def _settings(**overrides) -> Settings:
     base = {

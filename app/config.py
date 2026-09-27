@@ -316,11 +316,9 @@ class Settings(BaseSettings):
     # the exhaustion is reported in the next digest — never a dropped message.
     message_engine_daily_budget: int = 100
 
-    # Channel contracts (rulings Q27/Q29/Q30). SMS_MAX_LEN already defaults to
-    # 150; iMessage counts CODE POINTS, not septets, and allows a couple of
-    # emoji for emphasis.
+    # Channel length (rulings Q27/Q29/Q30). SMS_MAX_LEN already defaults to
+    # 150; iMessage counts CODE POINTS, not septets.
     message_engine_imessage_max_chars: int = 200
-    message_engine_imessage_max_emoji: int = 2
 
     @property
     def llm_configured(self) -> bool:

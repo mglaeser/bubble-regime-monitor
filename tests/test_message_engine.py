@@ -15,8 +15,7 @@ from app.config import Settings
 from app.db import session_scope
 from app.engine import legs
 from app.message_engine import checks, composer
-from app.message_engine.checks import EMOJI, MARKS, basic_check
-from app.message_engine.validator import Channel
+from app.message_engine.checks import EMOJI, MARKS, Channel, basic_check
 from app.models import MessageEngineAttempt
 from app.services.digest import digest_facts
 
@@ -777,7 +776,10 @@ class TestRoundFourteenOn126:
         assert "median" not in prompts[0] and "99" not in prompts[0]
 
     def test_importing_the_checks_reads_no_file(self, monkeypatch):
-        import importlib
+        """A probe copy of the module, not a reload: reloading the real one
+        would mint a second Channel enum under everything that imported the
+        first."""
+        import importlib.util
         import pathlib
 
         def unreadable(*_a, **_kw):
@@ -785,9 +787,11 @@ class TestRoundFourteenOn126:
 
         monkeypatch.setattr(pathlib.Path, "read_text", unreadable)
         monkeypatch.setattr(pathlib.Path, "read_bytes", unreadable)
-        importlib.reload(checks)
-        assert basic_check("see example.app", channel=Channel.IMESSAGE, max_chars=200) == "a link"
-
+        spec = importlib.util.spec_from_file_location("checks_probe", checks.__file__)
+        assert spec is not None and spec.loader is not None
+        probe = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(probe)
+        assert probe.basic_check("see example.app", channel=probe.Channel.IMESSAGE, max_chars=200) == "a link"
 
 
 class TestRoundFifteenOn126:

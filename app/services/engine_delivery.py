@@ -28,7 +28,7 @@ from app.config import Settings, get_settings
 from app.db import session_scope
 from app.logging_conf import get_logger
 from app.message_engine import composer, gate
-from app.message_engine.validator import Channel
+from app.message_engine.checks import Channel
 from app.notify.imessage import send_imessage
 from app.notify.sipgate import send_sms
 
