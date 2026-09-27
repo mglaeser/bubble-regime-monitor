@@ -923,3 +923,21 @@ class TestRoundTwentyOn126:
         _library_with(monkeypatch, "daily_digest", **fields)
         out, prompts = _compose(monkeypatch, REPLY)
         assert out.text == "bubblegauge: daily_digest fired." and "malformed" in (out.reason or "") and prompts == []
+
+
+
+class TestRoundTwentyOneOn126:
+    """#126 round 21, attempt 3: SOTA-C approved; SOTA-B timed out; SOTA-A
+    one defect, executed: "1–800–FLOWERS" with the en dash the alphabet
+    admits passed - the phoneword token took ASCII hyphens and dots only.
+    It takes the separators libphonenumber reads in a number now: its
+    dashes, the dot, the slash."""
+
+    @pytest.mark.parametrize("text", ["1–800–FLOWERS", "Call 1–800–Flowers", "1—800—FLOWERS",
+                                      "1−800−FLOWERS", "1/800/FLOWERS", "+1–800–FLOWERS"])
+    def test_a_phoneword_with_any_dash_is_a_link(self, text):
+        assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) == "a link"
+
+    @pytest.mark.parametrize("text", ["200–Tage–Linie", "3–Monats–Tief", "12/Monats/Momentum"])
+    def test_a_compound_with_dashes_stays_prose(self, text):
+        assert basic_check(text, channel=Channel.IMESSAGE, max_chars=200) is None
