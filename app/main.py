@@ -40,14 +40,14 @@ async def lifespan(app: FastAPI):
             log.warning("gsadf_selfcheck_skipped", error=str(exc))
 
     def _breadth_backfill() -> None:
-        # Cold-start breadth backfill: warms breadth_symbol_cache so D1 comes
+        # Cold-start breadth backfill: warms the Polygon daily_close cache so D1 comes
         # alive without waiting for the first scheduled 01:00/13:00 sweep. It
         # is self-limiting — a warm cache leaves few stale/missing symbols, so
         # this returns quickly on restarts.
         try:
-            from app.sources.breadth import DEFAULT_BACKFILL, refresh_breadth
+            from app.sources.breadth import refresh_breadth
 
-            refresh_breadth(max_symbols=DEFAULT_BACKFILL)  # Polygon cold-start when keyed, else TD
+            refresh_breadth()  # Polygon cold start (~210 calls at 5/min)
         except Exception as exc:
             log.warning("breadth_backfill_skipped", error=str(exc))
 

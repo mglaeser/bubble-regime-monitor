@@ -197,3 +197,41 @@ class TestSourceChains:
         assert len(result.value) == 300
         assert result.value[0] == pytest.approx(10.01)              # oldest first
         assert result.value[-1] == pytest.approx(13.00)
+
+
+class TestBreadthIsPolygonOnly:
+    """Owner decision D9 (2026-09-28): breadth comes from Polygon grouped-daily
+    only. Without a Polygon key there is no sweep to fall back to: the refresh
+    does nothing and the read raises, so D1 is dropped and renormalized."""
+
+    def test_without_a_polygon_key_the_read_raises(self, isolated_db, monkeypatch):
+        from app.sources import breadth
+
+        class _Unkeyed:
+            polygon_api_key = ""
+
+        monkeypatch.setattr(breadth, "get_settings", lambda: _Unkeyed())
+        with pytest.raises(SourceError, match="POLYGON_API_KEY"):
+            breadth.pct_above_200dma()
+
+    def test_without_a_polygon_key_the_refresh_touches_no_provider(self, monkeypatch):
+        from app.sources import breadth
+
+        class _Unkeyed:
+            polygon_api_key = ""
+
+        def _no_network(*_a, **_kw):
+            raise AssertionError("a provider was called")
+
+        monkeypatch.setattr(breadth, "get_settings", lambda: _Unkeyed())
+        monkeypatch.setattr(breadth, "fetch_polygon_grouped", _no_network)
+        monkeypatch.setattr(breadth, "sp500_symbols", _no_network)
+        assert breadth.refresh_breadth() == {}
+
+    def test_the_twelve_data_sweep_is_gone(self):
+        from app.sources import breadth, prices
+
+        for name in ("refresh_breadth_cache", "_pct_from_td_cache"):
+            assert not hasattr(breadth, name), name
+        for name in ("constituent_closes", "twelvedata_credits_left"):
+            assert not hasattr(prices, name), name

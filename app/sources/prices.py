@@ -337,48 +337,6 @@ def fetch_twelvedata_series(symbol: str, interval: str = "1day",
     return parse_twelvedata(resp.json(), symbol, min_rows=1)
 
 
-def _daily_credits_left(body: dict) -> int | None:
-    """DAILY credits remaining from a Twelve Data /api_usage body, or None when
-    the daily budget can't be confidently identified.
-
-    IMPORTANT: this deliberately does NOT use the `api-credits-left` response
-    header. That header is the PER-MINUTE rate-limit window (<= 8 on the free
-    Basic plan), not the daily budget — reading it as the daily estimate made
-    the breadth governor trip on the very first symbol (<= 8 < CREDIT_RESERVE),
-    so the sweep fetched nothing and breadth_symbol_cache stayed empty forever.
-    """
-    limit = body.get("plan_daily_limit", body.get("plan_limit"))
-    used = body.get("daily_usage", body.get("current_usage"))
-    if limit is None or used is None:
-        return None
-    try:
-        limit_i, used_i = int(limit), int(used)
-    except (TypeError, ValueError):
-        return None
-    if limit_i < 100:
-        # Looks like a per-minute limit, not the daily budget -> treat as
-        # unknown so the caller proceeds and relies on 429 handling + pacing.
-        return None
-    return max(0, limit_i - used_i)
-
-
-def twelvedata_credits_left() -> int | None:
-    """Best-effort probe of remaining DAILY credits (governor for breadth).
-
-    Returns None (unknown -> caller proceeds, relying on the 429 RateLimited
-    handling and the 8/min pacing) when the daily budget can't be read."""
-    settings = get_settings()
-    if not settings.twelve_data_api_key:
-        return None
-    try:
-        with httpx.Client(timeout=TIMEOUT) as client:
-            resp = client.get("https://api.twelvedata.com/api_usage",
-                              params={"apikey": settings.twelve_data_api_key})
-        return _daily_credits_left(resp.json())
-    except Exception:
-        return None
-
-
 def fetch_alphavantage(canonical: str) -> tuple[list[tuple[str, float]], str, bool]:
     settings = get_settings()
     if not settings.alphavantage_api_key:
@@ -662,14 +620,3 @@ def total_return_pct(closes: list[tuple[str, float]], trading_days: int, smooth:
         start = sum(vals[lo:hi]) / (hi - lo)
         end = sum(vals[-smooth:]) / smooth
     return (end / start - 1.0) * 100.0
-
-
-def constituent_closes(ticker: str, outputsize: int = 260) -> list[tuple[str, float]]:
-    """Constituent closes for the breadth sweep: Twelve Data ONLY.
-
-    Budget rationale (spec 2.8): Tiingo's 500-unique-symbols/month cap cannot
-    absorb 503 constituents, and Alpha Vantage's 25/day never touches breadth.
-    Twelve Data's 800 credits/day covers a full refresh; the caller throttles
-    to 8/min and governs on remaining credits."""
-    rows, _, _ = fetch_twelvedata(ticker, outputsize=outputsize)
-    return rows

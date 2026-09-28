@@ -151,26 +151,12 @@ class ProviderHealth(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
-class BreadthSymbolCache(Base):
-    """Per-constituent last close + SMA200 for the D1 breadth computation.
-
-    Only symbols older than the SLA are re-fetched each run, so a full
-    ~500-symbol sweep happens once and later runs touch only stale entries."""
-
-    __tablename__ = "breadth_symbol_cache"
-
-    symbol: Mapped[str] = mapped_column(String(16), primary_key=True)
-    as_of: Mapped[date] = mapped_column(Date)
-    last_close: Mapped[float] = mapped_column(Float)
-    sma200: Mapped[float] = mapped_column(Float)
-
-
 class DailyClose(Base):
     """Per-symbol daily close for the D1 breadth 200-DMA, populated from the
     Polygon/Massive grouped-daily endpoint (one call = the whole US market for
     one day). Keyed (symbol, date); the 200-day SMA is computed on read from the
-    most recent 200 rows per symbol. Complements breadth_symbol_cache, which
-    stores a pre-computed SMA from the per-symbol Twelve Data fallback path."""
+    most recent 200 rows per symbol. The only breadth source (owner decision
+    D9, 2026-09-28)."""
 
     __tablename__ = "daily_close"
 
