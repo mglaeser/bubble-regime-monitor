@@ -326,7 +326,9 @@ def notify_recompute_outcome(error: str | None,
                     reason=_compress_reason(error or ""), limit=limit)
             # Marked right BEFORE the send (module docstring) and after the text
             # is built: nothing before the send can have told anybody (#139
-            # round 3, SOTA-A).
+            # round 3, SOTA-A). The record is written before EVERY send, so for
+            # an all-clear it holds `recovered_at`: a death after delivery
+            # leaves the recovery on disk (#139 round 5, executed).
             was_announced = outage.announced
             if kind == "failure":
                 outage.announced = True

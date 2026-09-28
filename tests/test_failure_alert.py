@@ -1422,3 +1422,38 @@ class TestRoundFourOn139:
         state = json.loads(pathlib.Path(failure_alert._state_path()).read_text())
         assert set(state) == {"first_seen", "failures", "last_sent", "announced",
                               "counted_attempt", "recovered_at"}
+
+
+class _Death(BaseException):
+    """The process dies: nothing after the raise runs, and nothing catches it."""
+
+
+class TestRoundFiveOn139:
+    """#139 round 5, SOTA-A: "recovered_at is not persisted before sending the
+    all-clear - if delivery precedes process death, disk retains the old
+    last_sent and a new failure within the quiet period is throttled although
+    the recipient last saw OK". Executed, and not reproduced: the record is
+    written before every send, so it holds `recovered_at` when the all-clear
+    leaves; after a restart, a new failure opens a new outage, which alarms at
+    once. This is the ledger's scenario, pinned."""
+
+    def test_a_delivered_all_clear_survives_a_death_before_it_is_recorded(self, monkeypatch, sent):
+        assert notify_recompute_outcome(EBP_ERROR)["status"] == "sent"
+        delivered: list[str] = []
+
+        def deliver_then_die(transport, text):
+            delivered.append(text)
+            raise _Death()
+
+        monkeypatch.setattr(failure_alert, "_send", deliver_then_die)
+        with pytest.raises(_Death):
+            notify_recompute_outcome(None)
+        assert delivered[0].startswith("bubblegauge OK")
+        disk = json.loads(pathlib.Path(failure_alert._state_path()).read_text())
+        assert disk["recovered_at"] is not None
+
+        failure_alert._current, failure_alert._loaded = None, False       # a new process
+        monkeypatch.setattr(failure_alert, "_send",
+                            lambda transport, text: (sent.append(text) is None, 202, None))
+        result = notify_recompute_outcome("a new failure inside the quiet period")
+        assert result["status"] == "sent" and "FAILING" in sent[-1]
