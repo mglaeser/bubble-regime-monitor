@@ -185,3 +185,51 @@ def test_record_fallback_is_audit_only():
     with session_scope() as s:
         assert s.get(MessageEngineAttempt, row_id).outcome == gov.Outcome.NOT_ASKED.value
     assert _reserve()[0].may_ask
+
+
+class TestRoundOneOn140:
+    """#140 round 1: SOTA-A three findings, SOTA-C one (the same as SOTA-A's
+    second). Executed."""
+
+    def test_a_call_in_flight_admits_no_other(self):
+        """SOTA-A and SOTA-C: the floor alone held a call in flight, so a
+        call - the half-open probe above all - running past the floor let
+        another one in. At most one call is in flight."""
+        decision, claim = _reserve()
+        assert decision.may_ask and claim is not None
+        later = NOW + timedelta(seconds=301)
+        decision, second = _reserve(now=later)
+        assert not decision.may_ask and second is None and decision.reason == "a call in flight"
+
+    def test_the_half_open_probe_is_the_only_call(self):
+        for minutes in (1500, 1499, 1498, 1497, 1496):      # five failures, the last a day ago
+            _row(gov.Outcome.TECHNICAL_ERROR, minutes_ago=minutes, finished_minutes_ago=minutes)
+        probe_at = NOW
+        decision, probe = _reserve(now=probe_at)
+        assert decision.may_ask and probe is not None
+        decision, other = _reserve(now=probe_at + timedelta(seconds=600))
+        assert not decision.may_ask and other is None
+
+    def test_a_reaped_claim_failed_when_its_lifetime_ended(self):
+        """SOTA-A: the reaper stamped an abandoned claim's failure with the
+        reap instant, so a claim abandoned days ago restarted the 24-hour
+        cooldown now. Its failure is dated to its expiry."""
+        for minutes in (4 * 1440 + 4, 4 * 1440 + 3, 4 * 1440 + 2, 4 * 1440 + 1):
+            _row(gov.Outcome.TECHNICAL_ERROR, minutes_ago=minutes, finished_minutes_ago=minutes)
+        _row(gov.Outcome.IN_FLIGHT, minutes_ago=4 * 1440)        # abandoned four days ago
+        decision, claim = _reserve()
+        assert decision.may_ask and claim is not None, decision.reason
+        with session_scope() as s:
+            reaped = s.query(MessageEngineAttempt).filter(
+                MessageEngineAttempt.failure_reason == "claim expired").one()
+            assert reaped.finished_at == reaped.started_at + timedelta(seconds=gov.CLAIM_TTL_S)
+
+    def test_no_call_outcome_is_missing_from_the_call_rows(self):
+        """SOTA-A: "legacy CONTENT_REJECTED omitted from call sets". No code on
+        main ever wrote it (it was an enum value only), and production's
+        attempts held only `ok` rows on 2026-09-28; this pins that every
+        outcome the engine writes for a call paces, spends and strikes."""
+        written_for_calls = {gov.Outcome.IN_FLIGHT, gov.Outcome.OK,
+                             gov.Outcome.FORMAT_REJECTED, gov.Outcome.TECHNICAL_ERROR}
+        assert set(gov._CALLS) == written_for_calls
+        assert set(gov.Outcome) - written_for_calls == {gov.Outcome.FALLBACK_USED, gov.Outcome.NOT_ASKED}

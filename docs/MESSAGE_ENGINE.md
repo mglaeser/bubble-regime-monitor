@@ -255,6 +255,8 @@ app/message_engine/governor.py went from 1,219 lines to one small rule set,
 still derived from the attempt rows alone:
 
 * a P1 never waits, and the engine switched off asks nothing;
+* at most one call in flight, so the probe after a cooldown is the only call
+  (#140 round 1);
 * at least `MESSAGE_ENGINE_MIN_INTERVAL_S` between two model calls;
 * at most `MESSAGE_ENGINE_DAILY_BUDGET` model calls per UTC day;
 * after `MESSAGE_ENGINE_BREAKER_STRIKES` failed calls in a row (a reply that
@@ -273,7 +275,8 @@ still derived from the attempt rows alone:
 Only calls pace, spend and strike, so decision 6's rule survives by
 construction: a refusal the engine issued to itself is never evidence about
 the provider. A claim left in flight past `CLAIM_TTL_S` (a worker that died
-mid-call) is closed as a technical error before any decision.
+mid-call) is closed as a technical error before any decision, dated to its
+expiry rather than to the moment it was noticed (#140 round 1).
 
 ## Decision 6 — "did not ask" is not "tried and failed" (round 32)
 

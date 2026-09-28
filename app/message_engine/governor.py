@@ -7,6 +7,7 @@ The rules (owner rulings; Q38 as amended on 2026-09-28, decision D1):
 
   * a P1 never waits: it renders the template at once, and so does every
     message while the engine is switched off;
+  * at most one call in flight, so the probe after a cooldown is the only one;
   * at least MESSAGE_ENGINE_MIN_INTERVAL_S between two model calls;
   * at most MESSAGE_ENGINE_DAILY_BUDGET model calls per UTC day;
   * ANY FAILED CALL IS A STRIKE: after MESSAGE_ENGINE_BREAKER_STRIKES failed
@@ -57,7 +58,10 @@ class Outcome(StrEnum):
     NOT_ASKED = "not_asked"
 
 
-#: The rows that are model calls: they pace, spend and strike.
+#: The rows that are model calls: they pace, spend and strike. The old
+#: CONTENT_REJECTED and BUDGET_SKIPPED outcomes are gone: no code on main ever
+#: wrote either, and production's attempts held only `ok` rows when this
+#: shipped (2026-09-28, #140 round 1).
 _CALLS = (Outcome.IN_FLIGHT, Outcome.OK, Outcome.FORMAT_REJECTED, Outcome.TECHNICAL_ERROR)
 _FAILED = (Outcome.FORMAT_REJECTED.value, Outcome.TECHNICAL_ERROR.value)
 
@@ -91,6 +95,11 @@ def short_circuit(priority: int, settings: Settings) -> Decision | None:
 def refusal(session: Session, *, settings: Settings, now: datetime) -> str | None:
     """Why the model may not be asked at `now`, or None."""
     moment = _naive_utc(now)
+    # One call at a time: the floor alone let a call running past it - the
+    # half-open probe above all - admit another (#140 round 1, SOTA-A, SOTA-C).
+    if session.execute(select(MessageEngineAttempt.id).where(
+            MessageEngineAttempt.outcome == Outcome.IN_FLIGHT.value).limit(1)).first():
+        return "a call in flight"
     calls = select(MessageEngineAttempt).where(
         MessageEngineAttempt.outcome.in_([o.value for o in _CALLS]))
     newest = session.execute(
@@ -131,13 +140,17 @@ def reserve(*, trigger: str, channel: str, priority: int, settings: Settings,
         return short, None
     moment = now or datetime.now(UTC)
     with _lock, scope() as session:
-        session.execute(
-            update(MessageEngineAttempt)
-            .where(MessageEngineAttempt.outcome == Outcome.IN_FLIGHT.value)
-            .where(MessageEngineAttempt.started_at
-                   < _naive_utc(moment) - timedelta(seconds=CLAIM_TTL_S))
-            .values(outcome=Outcome.TECHNICAL_ERROR.value, failure_reason="claim expired",
-                    finished_at=_naive_utc(moment)))
+        lifetime = timedelta(seconds=CLAIM_TTL_S)
+        for expired in session.execute(select(MessageEngineAttempt).where(
+                MessageEngineAttempt.outcome == Outcome.IN_FLIGHT.value,
+                MessageEngineAttempt.started_at < _naive_utc(moment) - lifetime)).scalars():
+            # It failed when its lifetime ended, not when it was noticed: a
+            # claim abandoned days ago must not restart the cooldown now (#140
+            # round 1, SOTA-A).
+            expired.outcome = Outcome.TECHNICAL_ERROR.value
+            expired.failure_reason = "claim expired"
+            expired.finished_at = expired.started_at + lifetime
+        session.flush()
         reason = refusal(session, settings=settings, now=moment)
         if reason is not None:
             return Decision(False, reason), None
