@@ -116,7 +116,10 @@ def refusal(session: Session, *, settings: Settings, now: datetime) -> str | Non
         calls.order_by(MessageEngineAttempt.started_at.desc(), MessageEngineAttempt.id.desc())
         .limit(_strikes(settings))
     ).scalars().all()
-    if newest and moment - newest[0].started_at < timedelta(
+    # The floor counts from the end of the last call, as the old governor's
+    # did: from its start, a call longer than the floor let the next one in a
+    # second after it finished (#140 round 3, SOTA-A).
+    if newest and moment - (newest[0].finished_at or newest[0].started_at) < timedelta(
             seconds=settings.message_engine_min_interval_s):
         return "pacing floor"
     day_start = moment.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -175,8 +178,10 @@ def resolve(claim_id: int, *, outcome: Outcome, reason: str | None,
             finished_at: datetime, text: str | None = None,
             source: str | None = None,
             scope: SessionScope = immediate_session_scope) -> bool:
-    """Close a claim by id. Only an IN_FLIGHT row closes: False means the
-    claim had already expired, and that recorded failure stands."""
+    """Close a claim by id. Only an IN_FLIGHT row within its lifetime closes:
+    False means the claim had expired - reaped or not yet - and its failure
+    stands; a reply after CLAIM_TTL_S is not taken even before the reaper has
+    run (#140 round 3, SOTA-A)."""
     values: dict[str, object] = {
         "outcome": outcome.value,
         "failure_reason": (reason or "")[:200] or None,
@@ -189,6 +194,8 @@ def resolve(claim_id: int, *, outcome: Outcome, reason: str | None,
             update(MessageEngineAttempt)
             .where(MessageEngineAttempt.id == claim_id)
             .where(MessageEngineAttempt.outcome == Outcome.IN_FLIGHT.value)
+            .where(MessageEngineAttempt.started_at
+                   >= _naive_utc(finished_at) - timedelta(seconds=CLAIM_TTL_S))
             .values(**values))
         return int(getattr(result, "rowcount", 0) or 0) == 1
 

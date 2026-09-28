@@ -74,7 +74,8 @@ class TestTheClaim:
                            finished_at=NOW) is False
 
     def test_a_claim_left_in_flight_past_its_lifetime_is_a_failed_call(self):
-        _row(gov.Outcome.IN_FLIGHT, minutes_ago=gov.CLAIM_TTL_S / 60 + 1)
+        # expired ten minutes ago: its failure ends there, and the floor after it has passed
+        _row(gov.Outcome.IN_FLIGHT, minutes_ago=gov.CLAIM_TTL_S / 60 + 10)
         decision, _claim = _reserve()
         assert decision.may_ask
         with session_scope() as s:
@@ -250,3 +251,26 @@ class TestRoundTwoOn140:
 
     def test_a_threshold_above_a_thousand_is_a_thousand(self):
         assert gov._strikes(_settings(message_engine_breaker_strikes=10**9)) == 1000
+
+
+class TestRoundThreeOn140:
+    """#140 round 3, SOTA-A (executed): the floor counted from a call's start,
+    so a call longer than the floor let the next one in a second after it
+    finished; and resolve() took a reply that arrived after the claim's
+    lifetime whenever no reserve() had reaped the claim yet. (Its third
+    finding, the tracked-.venv check the deleted pins file carried, lives in
+    tests/test_repository_hygiene.py now.)"""
+
+    def test_the_floor_counts_from_the_end_of_the_last_call(self):
+        _row(gov.Outcome.OK, minutes_ago=400 / 60, finished_minutes_ago=10 / 60)
+        decision, claim = _reserve()
+        assert not decision.may_ask and claim is None and decision.reason == "pacing floor"
+
+    def test_a_reply_after_the_claims_lifetime_is_not_taken(self):
+        decision, claim = _reserve()
+        assert decision.may_ask and claim is not None
+        late = NOW + timedelta(seconds=gov.CLAIM_TTL_S + 1)
+        assert gov.resolve(claim, outcome=gov.Outcome.OK, reason=None, finished_at=late,
+                           text="bubblegauge 59/100", source="generated") is False
+        with session_scope() as s:
+            assert s.get(MessageEngineAttempt, claim).outcome == gov.Outcome.IN_FLIGHT.value

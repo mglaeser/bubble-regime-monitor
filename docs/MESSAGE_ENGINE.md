@@ -257,7 +257,8 @@ still derived from the attempt rows alone:
 * a P1 never waits, and the engine switched off asks nothing;
 * at most one call in flight, so the probe after a cooldown is the only call
   (#140 round 1);
-* at least `MESSAGE_ENGINE_MIN_INTERVAL_S` between two model calls;
+* at least `MESSAGE_ENGINE_MIN_INTERVAL_S` from the end of one model call to the
+  start of the next;
 * at most `MESSAGE_ENGINE_DAILY_BUDGET` model calls per UTC day;
 * after `MESSAGE_ENGINE_BREAKER_STRIKES` failed calls in a row (a reply that
   fails the basic checks, or a gateway failure), no call for
