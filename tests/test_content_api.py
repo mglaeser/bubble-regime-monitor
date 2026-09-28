@@ -949,9 +949,9 @@ class TestBlockArtifact:
         import app.content_registry as reg
 
         reg._clear_artifact_cache()
-        assert reg.content_version() == 1
+        assert reg.content_version() == 2
         payload = reg.dashboard_payload()
-        assert payload["content_version"] == 1
+        assert payload["content_version"] == 2
         assert len(payload["blocks"]) >= 211
         reg._clear_artifact_cache()
 

@@ -22,9 +22,8 @@ EPISTEMIC GUARDRAILS (verbatim):
    fundamentals; hence the GSADF indicator carries a low weight and a
    permanent CONTESTED flag.
 4. NOMINAL != EFFECTIVE WEIGHTS. Nominal weights rarely equal a variable's
-   realized influence (Paruolo, Saisana & Saltelli 2013). The service ships
-   an annual sensitivity script computing first-order main effects and
-   comparing them to nominal weights, flagging any |nominal - effective| > 0.10.
+   realized influence (Paruolo, Saisana & Saltelli 2013); read the weights as
+   design intent, not as measured influence.
 5. NEVER HTTP 500 ON DATA FAILURE. On any upstream data failure the service
    must fall back down a defined chain, or drop the indicator and renormalize
    its block, always attaching a provenance note. Upstream failure must never
