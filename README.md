@@ -102,7 +102,7 @@ Red-flag count 0 → override not fired. **Deterministic point score 52.43; MC m
 | Semis run-up (S3) | Stooq `smh.us`/`spy.us` | SOXX substitute | 3d |
 | GSADF (S4) | `Rscript r/gsadf.R` (exuber) | floor 0.05 + provenance note | 35d |
 | HY OAS (S5) | FRED `BAMLH0A0HYM2` (**truncated to rolling 3 yr since Apr 2026** — own `hy_oas_history` table, seeded on first boot, appended daily) | persisted history | 3d |
-| Breadth (D1) | constituents + Stooq SMA200 | StockCharts/Barchart best-effort only | 3d |
+| Breadth (D1) | S&P 500 constituents (SSGA) + Polygon grouped-daily closes, 200-DMA on read | none: D1 is dropped and its block renormalized | 3d |
 | Margin (D2) | FINRA XLSX (3–4-week publication lag) | none — cache & tolerate staleness | 45d |
 | Hyperscaler FCF (D3) | SEC EDGAR companyfacts (mandatory UA, ≤8 req/s self-cap) | total-revenue gate proxy | 100d |
 | LPPLS (D4) | `lppls==0.6.24` (pinned; maintenance-inactive) | **drop + renormalize Block D** | 3d |

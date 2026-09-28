@@ -115,7 +115,6 @@ class TestBreadthOnSSGA:
         assert "en.wikipedia.org" not in src
         assert "WIKIPEDIA_URL" not in src
         assert "ssga.sp500_constituents" in src
-        assert hasattr(breadth, "refresh_breadth_cache")  # sweep is a background job
 
     def test_ssga_constituents_parse_from_xlsx(self):
         import openpyxl
@@ -142,22 +141,15 @@ class TestBreadthOnSSGA:
         assert "USD" not in tickers        # cash/FX line dropped (denylist)
         assert len(tickers) >= 400
 
-    def test_twelvedata_credit_governor_ignores_per_minute_header(self):
-        # The breadth sweep must not trip on Twelve Data's per-minute counter.
-        from app.sources.prices import _daily_credits_left
-
-        # per-minute-looking body -> unknown (None) so the sweep proceeds
-        assert _daily_credits_left({"plan_limit": 8, "current_usage": 3}) is None
-        # real daily budget -> remaining
-        assert _daily_credits_left({"plan_daily_limit": 800, "daily_usage": 120}) == 680
-        assert _daily_credits_left({"plan_limit": 800, "current_usage": 750}) == 50
-        assert _daily_credits_left({}) is None
-
-    def test_pct_above_200dma_reads_cache_only(self, isolated_db):
-        # Recompute path must not hit the network; an empty cache raises (D1
-        # then drops until the background sweep populates it) rather than
-        # sweeping Twelve Data inline.
+    def test_pct_above_200dma_reads_cache_only(self, isolated_db, monkeypatch):
+        # Recompute path must not hit the network; an empty Polygon cache
+        # raises (D1 then drops until the background refresh populates it).
         from app.sources import SourceError, breadth
 
-        with pytest.raises(SourceError, match="cache empty"):
+        class _Keyed:
+            polygon_api_key = "x"
+
+        monkeypatch.setattr(breadth, "get_settings", lambda: _Keyed())
+        monkeypatch.setattr(breadth, "sp500_symbols", lambda: [f"S{i:03d}" for i in range(30)])
+        with pytest.raises(SourceError, match="Polygon closes"):
             breadth.pct_above_200dma()

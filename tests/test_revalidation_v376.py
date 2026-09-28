@@ -93,27 +93,6 @@ def test_b07_common_cross_section(isolated_db):
 
 # ---- B-02: breadth never fabricates today; returns the real newest date -----
 
-def test_b02_td_fallback_uses_real_cache_date(isolated_db, monkeypatch):
-    import app.sources.breadth as breadth
-    from app.db import session_scope
-    from app.models import BreadthSymbolCache
-
-    # v3.7.8/B-02+B-07: the fallback synchronizes on ONE common date carrying
-    # >= MIN_RESOLVED constituents. Put 28 on the newer date (07-02) so it is the
-    # chosen common date, and its REAL date (not today) is stamped.
-    syms = [f"S{i:03d}" for i in range(30)]
-    monkeypatch.setattr(breadth, "sp500_symbols", lambda: syms)
-    with session_scope() as s:
-        for i, sym in enumerate(syms):
-            s.merge(BreadthSymbolCache(
-                symbol=sym, as_of=date(2026, 7, 2) if i < 28 else date(2026, 7, 1),
-                last_close=110.0, sma200=100.0))
-    res = breadth._pct_from_td_cache()
-    assert res.provenance.as_of == "2026-07-02"    # newest common date, not today
-    assert res.metadata["common_date"] == "2026-07-02"
-    assert res.metadata["resolved"] == 28 and res.metadata["universe"] == 30
-
-
 def test_b02_polygon_none_obsdate_is_not_today(isolated_db, monkeypatch):
     import app.sources.breadth as breadth
 

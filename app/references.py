@@ -359,8 +359,8 @@ REGISTRY: dict[str, Methodology] = {
             "Primary (v3.3.0): full-universe constituent computation — S&P 500 membership from "
             "the SSGA SPY holdings XLSX, daily closes for the whole US market from the "
             "Polygon/Massive grouped-daily endpoint (1 call/day, daily_close cache), "
-            "pct = 100*#{close > SMA200}/N with a binomial CI on partial coverage. Fallback: "
-            "the credit-governed Twelve Data sweep cache (breadth_symbol_cache). "
+            "pct = 100*#{close > SMA200}/N with a binomial CI on partial coverage. No fallback "
+            "(since 2026-09-28): without Polygon, D1 is dropped and its block renormalized. "
             "sub_score = max(0.05, clip((hi - pct)/(hi - lo), 0, 1)) with baseline lo = 35, "
             "hi = 90 and a 0.05 soft floor (v3.3.0 — hi=75 clipped normal bull-market breadth "
             "to 0); MC anchors lo ~ U(30,40), hi ~ U(85,95). Lower breadth => higher sub-score."
@@ -1117,7 +1117,7 @@ SOURCE_REGISTRY: list[SourceSpec] = [
                "FRED truncated BAMLH0A0HYM2 to a rolling 3-year window (Apr 2026); the HY-OAS "
                "percentile is only as deep as our own accrued history table.",
                ("fred_baa_dgs10", "fred_BAMLH0A0HYM2")),
-    SourceSpec("breadth", "S&P 500 constituents (SSGA holdings) + Twelve Data closes", "D1 breadth",
+    SourceSpec("breadth", "S&P 500 constituents (SSGA holdings) + Polygon grouped-daily closes", "D1 breadth",
                "Constituent-level computation of % > 200-day SMA; no published keyless "
                "%>200DMA source is machine-readable.", 3, "",
                "Partial coverage is published (N/503) rather than dropped; keyless scrape "

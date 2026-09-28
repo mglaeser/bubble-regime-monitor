@@ -27,7 +27,6 @@ import pytest
 # defect (a migration stricter than the model rejects rows the model allows).
 WAIVED_DIRECTION = (0, 1)
 KNOWN_NOTNULL_DIVERGENCES: dict[str, set[str]] = {
-    "breadth_symbol_cache": {"as_of", "last_close", "sma200"},
     "daily_close": {"close", "fetched_at", "provider"},
     "falsification_outcomes": {"criterion", "tripped_at"},
     "hy_oas_history": {"oas_bps"},
@@ -454,7 +453,7 @@ def test_admin_atomicity_migration_upgrade_downgrade_upgrade(tmp_path):
     # Bump this in the same PR that adds a migration — that is the point of
     # pinning it rather than reading `head`, which would pass vacuously.
     assert connection.execute(
-        "select version_num from alembic_version").fetchone() == ("0018",)
+        "select version_num from alembic_version").fetchone() == ("0019",)
     connection.close()
 
 
