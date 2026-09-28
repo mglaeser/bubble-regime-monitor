@@ -906,6 +906,8 @@ def _fallback(trigger: str, channel: Channel, priority: int,
 
     `asked` says whether the model was called on the way (the call's own row
     already carries its outcome); the record is audit only and decides nothing.
+    A P1 never gets here: `short_circuit` issues it before any database work
+    (decision 8), so no held writer can delay it (#140 round 4, executed).
     """
     try:
         gov.record_fallback(trigger=trigger, channel=channel.value, priority=priority,

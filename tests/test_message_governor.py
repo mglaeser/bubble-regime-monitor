@@ -274,3 +274,37 @@ class TestRoundThreeOn140:
                            text="bubblegauge 59/100", source="generated") is False
         with session_scope() as s:
             assert s.get(MessageEngineAttempt, claim).outcome == gov.Outcome.IN_FLIGHT.value
+
+
+class TestRoundFourOn140:
+    """#140 round 4, SOTA-A: "synchronous audit precedes fallback issuance -
+    a held DB writer makes P1 wait on immediate_session_scope/busy timeout
+    before _issue". Executed, not reproduced: a P1 is issued by the composer's
+    short circuit before any database work (decision 8) and never reaches the
+    audit. The ledger's scenario, pinned: another writer holds the database."""
+
+    def test_a_p1_is_issued_while_another_writer_holds_the_database(self, monkeypatch):
+        import sqlite3
+        import time
+
+        from app.db import get_engine
+        from app.message_engine import composer
+        from app.message_engine.checks import Channel
+
+        monkeypatch.setattr(composer, "library_sign_off", lambda lib=None: None)
+        monkeypatch.setattr(composer, "complete",
+                            lambda **_kw: (_ for _ in ()).throw(AssertionError("a P1 asks no model")))
+        with session_scope():
+            pass                                            # the schema exists
+        holder = sqlite3.connect(get_engine().url.database, timeout=0)
+        holder.execute("BEGIN IMMEDIATE")
+        try:
+            started = time.monotonic()
+            out = composer.compose(trigger="daily_digest", channel=Channel.IMESSAGE, priority=gov.P1,
+                                   facts={"median": 59}, settings=_settings())
+            took = time.monotonic() - started
+        finally:
+            holder.rollback()
+            holder.close()
+        assert out.source == "deterministic" and out.reason == "P1 renders deterministically"
+        assert took < 1.0
