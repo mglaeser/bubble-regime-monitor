@@ -1,4 +1,4 @@
-.PHONY: install dev lock lint type test run build up deploy migrate sensitivity
+.PHONY: install dev lock lint type test run build up deploy migrate
 
 # Installs come from the locks, hash-checked: the image and CI get exactly the
 # versions that were tested. `make lock` re-resolves after pyproject.toml changes.
@@ -47,5 +47,3 @@ deploy:
 migrate:
 	alembic upgrade head
 
-sensitivity:
-	python scripts/sensitivity.py

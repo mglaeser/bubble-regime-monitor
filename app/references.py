@@ -19,9 +19,8 @@ every scoring API response `meta` block, and the README):
    fundamentals; hence the GSADF indicator carries a low weight and a
    permanent CONTESTED flag.
 4. NOMINAL != EFFECTIVE WEIGHTS. Nominal weights rarely equal a variable's
-   realized influence (Paruolo, Saisana & Saltelli 2013). The service ships
-   an annual sensitivity script computing first-order main effects and
-   comparing them to nominal weights, flagging any |nominal - effective| > 0.10.
+   realized influence (Paruolo, Saisana & Saltelli 2013); read the weights as
+   design intent, not as measured influence.
 5. NEVER HTTP 500 ON DATA FAILURE. On any upstream data failure the service
    must fall back down a defined chain, or drop the indicator and renormalize
    its block, always attaching a provenance note. Upstream failure must never
@@ -36,7 +35,7 @@ EPISTEMIC_CAVEATS: list[str] = [
     "NOT-A-PROBABILITY: 0-100 regime heuristic = structured expert judgment; uncalibrated.",
     "n≈4 CALIBRATION IMPOSSIBILITY: reference class {1929,2000,2007,2021}.",
     "REFERENCE-CLASS CAVEAT: may be rational GPT repricing (Chen-Chen-Huang 2026).",
-    "NOMINAL≠EFFECTIVE WEIGHTS: see annual PSS sensitivity script.",
+    "NOMINAL≠EFFECTIVE WEIGHTS: weights are design intent, not measured influence (PSS 2013).",
     "Service never returns 500 on upstream failure: fallback or drop+renormalize.",
 ]
 
@@ -1204,7 +1203,7 @@ KNOWN_ISSUES: list[dict[str, str]] = [
     {"id": "judgmental-anchors", "severity": "info", "category": "judgmental-parameter",
      "title": "Several anchors/weights are expert-judgmental, not estimated",
      "detail": "S2 concentration lo/hi, D1 breadth lo/hi and weight, and the alpha split have no "
-     "labeled-crash-dataset calibration; see the annual PSS sensitivity script.",
+     "labeled-crash-dataset calibration.",
      "ref": "indicators s2,d1"},
     {"id": "alphavantage-unadjusted", "severity": "info", "category": "data-quality",
      "title": "Alpha Vantage tier serves UNADJUSTED prices",
