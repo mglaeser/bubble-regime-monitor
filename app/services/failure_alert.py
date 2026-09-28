@@ -264,9 +264,12 @@ def notify_recompute_outcome(error: str | None,
         settings = get_settings()
         if not settings.failure_alerts_enabled:
             return {"status": "skipped", "reason": "failure alerts disabled"}
-        now = datetime.now(UTC)
         repeat_after = timedelta(hours=max(1, settings.failure_alert_repeat_h))
         with _lock:
+            # Read under the lock, which is held across a send: read before
+            # it, a report that waited was stamped early by the wait (the
+            # clone of #140 round 5).
+            now = datetime.now(UTC)
             if precondition is not None and not precondition():
                 return {"status": "superseded", "reason": "precondition no longer holds"}
             if not _loaded:
