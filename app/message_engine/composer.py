@@ -852,10 +852,10 @@ def compose(*, trigger: str, channel: Channel,
             settings=settings, now=moment)
     except SQLAlchemyError as exc:
         return _fallback(trigger, channel, priority, fallback,
-                         f"reservation failed: {type(exc).__name__}", moment)
+                         f"reservation failed: {type(exc).__name__}", moment, asked=False)
     if not decision.may_ask or claim_id is None:
         return _fallback(trigger, channel, priority, fallback, decision.reason, moment,
-                         exhausted=decision.reason == _EXHAUSTED_REASON, settings=settings)
+                         asked=False)
 
     started = monotonic()
     try:
@@ -864,7 +864,7 @@ def compose(*, trigger: str, channel: Channel,
         failed_at = moment + timedelta(seconds=monotonic() - started)
         _close(claim_id, gov.Outcome.TECHNICAL_ERROR, type(exc).__name__, failed_at)
         return _fallback(trigger, channel, priority, fallback,
-                         f"gateway {type(exc).__name__}", failed_at)
+                         f"gateway {type(exc).__name__}", failed_at, asked=True)
     finished = moment + timedelta(seconds=monotonic() - started)
 
     # composed as the alphabet spells it: a "u" and a combining diaeresis
@@ -875,10 +875,11 @@ def compose(*, trigger: str, channel: Channel,
         if not _close(claim_id, gov.Outcome.OK, None, finished, text=text, source="generated"):
             # The reaper already closed this claim: the call outran its TTL.
             return _fallback(trigger, channel, priority, fallback,
-                             "reply arrived after the claim expired", finished)
+                             "reply arrived after the claim expired", finished, asked=True)
         return _issue(text=text, source="generated", trigger=trigger, channel=channel.value)
     _close(claim_id, gov.Outcome.FORMAT_REJECTED, problem, finished)
-    return _rejected(trigger, channel, priority, fallback, f"rejected: {problem}", finished, settings)
+    return _fallback(trigger, channel, priority, fallback, f"rejected: {problem}", finished,
+                     asked=True)
 
 
 def _close(claim_id: int, outcome: gov.Outcome, reason: str | None,
@@ -899,65 +900,19 @@ def _close(claim_id: int, outcome: gov.Outcome, reason: str | None,
         return False
 
 
-#: The ONE refusal that means the engine tried and gave up. Every other
-#: refusal in `decide()` is the engine declining to ask, which is not a
-#: failure of anything (round 32).
-_EXHAUSTED_REASON = "content iterations exhausted"
-
-
 def _fallback(trigger: str, channel: Channel, priority: int,
-              text: str, reason: str | None, moment: datetime,
-              *, exhausted: bool = False,
-              settings: Settings | None = None) -> Composed:
-    """Record that this compose ended in the evergreen text, and return it.
+              text: str, reason: str | None, moment: datetime, *, asked: bool) -> Composed:
+    """Record that this compose ended in the template, and return it.
 
-    The OUTCOME is the whole point, and getting it wrong is what round 32
-    caught. Two different things end in the same evergreen sentence:
-
-    - the engine ASKED and gave up (content iterations exhausted). That is a
-      strike and it closes the compose: `FALLBACK_USED`, exactly as round 6
-      established, so an exhausted trigger does not stay capped forever.
-    - the engine was NOT PERMITTED TO ASK — the pacing floor, the engine
-      switched off, a P1 rendering deterministically, the daily budget, or a
-      breaker already open. No model call was made and no attempt was spent:
-      `NOT_ASKED`, which strikes nothing and closes nothing.
-
-    Writing FALLBACK_USED for both made ordinary operation look like a broken
-    provider. Five triggers inside the five-minute floor — a completely normal
-    burst — wrote five strikes and opened the 24-hour breaker; and while it was
-    open every suppressed trigger wrote another, so the state fed itself. A
-    single gateway timeout cost TWO strikes (the TECHNICAL_ERROR row plus this
-    one), so a threshold of five opened after three real failures.
+    `asked` says whether the model was called on the way (the call's own row
+    already carries its outcome); the record is audit only and decides nothing.
     """
     try:
-        gov.record_fallback(trigger=trigger, channel=channel.value,
-                            priority=priority, text=text, reason=reason,
-                            moment=moment, exhausted=exhausted,
-                            settings=settings)
+        gov.record_fallback(trigger=trigger, channel=channel.value, priority=priority,
+                            text=text, reason=reason, moment=moment, asked=asked)
     except SQLAlchemyError:
         # Recording is bookkeeping; the text is the promise. A locked database
         # loses this row, never the message.
         pass
     return _issue(text=text, source="fallback", trigger=trigger,
-                    channel=channel.value, reason=reason)
-
-
-def _rejected(trigger: str, channel: Channel, priority: int, text: str,
-              reason: str, finished: datetime, settings: Settings) -> Composed:
-    """The fallback after a REJECTED attempt: the writer records exhaustion.
-
-    The rejection is already on the attempt row. If it was the cap-th, the
-    compose is exhausted NOW - a strike, and the row that closes the compose
-    is written at this instant rather than when the trigger next fires (the
-    offline review before #106 round 8, C4/C5: a marker written late was a
-    strike the scan could not see and a cooldown restarted by bookkeeping).
-    Otherwise the attempt budget must survive for a later invocation, and the
-    row records only that the evergreen text went out.
-    """
-    try:
-        exhausted = gov.compose_is_exhausted(trigger, settings=settings)
-    except SQLAlchemyError:
-        exhausted = False
-    return _fallback(trigger, channel, priority, text,
-                     _EXHAUSTED_REASON if exhausted else reason, finished,
-                     exhausted=exhausted, settings=settings)
+                  channel=channel.value, reason=reason)

@@ -287,14 +287,11 @@ class Settings(BaseSettings):
     # Reuses the existing LLM_* gateway route and model (ruling Q26); it has
     # no model/provider settings of its own by design.
 
-    # The six pacing constants. Defaults are the rules as given, expressed as
-    # settings so an operator can widen them without a code change (Q42).
-    message_engine_min_interval_s: int = 300     # floor between two LLM requests
-    message_engine_format_retry_s: int = 30      # a FORMAT-only retry may pause just this
-    message_engine_max_content_iterations: int = 3   # content attempts before fallback
-    message_engine_technical_backoff_s: int = 120    # after a 4xx/5xx/timeout
-    message_engine_breaker_strikes: int = 5      # consecutive technical errors -> all-fallback
-    message_engine_breaker_cooldown_s: int = 86400   # all-fallback dwell before retrying
+    # The governor (docs/MESSAGE_ENGINE.md, decision 27): settings so an
+    # operator can widen them without a code change (Q42).
+    message_engine_min_interval_s: int = 300     # floor between two model calls
+    message_engine_breaker_strikes: int = 5      # failed calls in a row -> cooldown
+    message_engine_breaker_cooldown_s: int = 86400   # no call for this long after them
 
     # Volume cap (ruling Q40). At the cap the evergreen fallback is used and
     # the exhaustion is reported in the next digest — never a dropped message.

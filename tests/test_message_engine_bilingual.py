@@ -20,8 +20,7 @@ pytestmark = pytest.mark.usefixtures("isolated_db")
 
 def _settings(**overrides) -> Settings:
     base = {"message_engine_enabled": True, "message_engine_min_interval_s": 300,
-            "message_engine_format_retry_s": 30, "message_engine_max_content_iterations": 3,
-            "message_engine_technical_backoff_s": 120, "message_engine_breaker_strikes": 5,
+            "message_engine_breaker_strikes": 5,
             "message_engine_breaker_cooldown_s": 86400, "message_engine_daily_budget": 100}
     base.update(overrides)
     return Settings(_env_file=None, **base)
