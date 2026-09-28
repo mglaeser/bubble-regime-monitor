@@ -72,6 +72,16 @@ SessionScope = Callable[[], AbstractContextManager[Session]]
 _lock = threading.Lock()
 
 
+#: A breaker threshold outside [1, 1000] is a typo and reads as the nearest
+#: bound, as the old governor clamped it: a zero must not switch the breaker
+#: off (#140 round 2, SOTA-A).
+_MAX_STRIKES = 1_000
+
+
+def _strikes(settings: Settings) -> int:
+    return max(1, min(settings.message_engine_breaker_strikes, _MAX_STRIKES))
+
+
 @dataclass(frozen=True)
 class Decision:
     may_ask: bool
@@ -104,7 +114,7 @@ def refusal(session: Session, *, settings: Settings, now: datetime) -> str | Non
         MessageEngineAttempt.outcome.in_([o.value for o in _CALLS]))
     newest = session.execute(
         calls.order_by(MessageEngineAttempt.started_at.desc(), MessageEngineAttempt.id.desc())
-        .limit(max(1, settings.message_engine_breaker_strikes))
+        .limit(_strikes(settings))
     ).scalars().all()
     if newest and moment - newest[0].started_at < timedelta(
             seconds=settings.message_engine_min_interval_s):
@@ -116,9 +126,8 @@ def refusal(session: Session, *, settings: Settings, now: datetime) -> str | Non
     ).scalar_one()
     if spent >= settings.message_engine_daily_budget:
         return "daily budget spent"
-    strikes = settings.message_engine_breaker_strikes
-    if (strikes > 0 and len(newest) == strikes
-            and all(row.outcome in _FAILED for row in newest)):
+    strikes = _strikes(settings)
+    if len(newest) == strikes and all(row.outcome in _FAILED for row in newest):
         last = newest[0]
         resume = (last.finished_at or last.started_at) + timedelta(
             seconds=settings.message_engine_breaker_cooldown_s)

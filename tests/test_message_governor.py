@@ -233,3 +233,20 @@ class TestRoundOneOn140:
                              gov.Outcome.FORMAT_REJECTED, gov.Outcome.TECHNICAL_ERROR}
         assert set(gov._CALLS) == written_for_calls
         assert set(gov.Outcome) - written_for_calls == {gov.Outcome.FALLBACK_USED, gov.Outcome.NOT_ASKED}
+
+
+class TestRoundTwoOn140:
+    """#140 round 2, SOTA-A (executed): the rewrite dropped the old governor's
+    clamp on the breaker threshold, so MESSAGE_ENGINE_BREAKER_STRIKES=0
+    switched the breaker off. A threshold outside [1, 1000] is read as the
+    nearest bound again, as before."""
+
+    @pytest.mark.parametrize("strikes", [0, -3])
+    def test_a_threshold_below_one_is_one(self, strikes):
+        _row(gov.Outcome.TECHNICAL_ERROR, minutes_ago=10, finished_minutes_ago=10)
+        decision, claim = _reserve(_settings(message_engine_breaker_strikes=strikes))
+        assert not decision.may_ask and claim is None
+        assert decision.reason == "breaker open: 1 failed calls in a row"
+
+    def test_a_threshold_above_a_thousand_is_a_thousand(self):
+        assert gov._strikes(_settings(message_engine_breaker_strikes=10**9)) == 1000

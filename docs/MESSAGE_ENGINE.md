@@ -231,7 +231,7 @@ deployment is not authorised to send" into "try again in two minutes", forever.
 | Setting | Default | Meaning |
 |---|---|---|
 | `MESSAGE_ENGINE_MIN_INTERVAL_S` | 300 | floor between two model calls |
-| `MESSAGE_ENGINE_BREAKER_STRIKES` | 5 | failed calls in a row before the cooldown |
+| `MESSAGE_ENGINE_BREAKER_STRIKES` | 5 | failed calls in a row before the cooldown; read within [1, 1000], so a zero never switches the breaker off |
 | `MESSAGE_ENGINE_BREAKER_COOLDOWN_S` | 86400 | no model call for this long after them |
 | `MESSAGE_ENGINE_DAILY_BUDGET` | 100 | model calls per UTC day (ruling Q40) |
 
