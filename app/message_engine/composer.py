@@ -847,9 +847,11 @@ def compose(*, trigger: str, channel: Channel,
         return _issue(text=fallback, source="deterministic", trigger=trigger,
                       channel=channel.value, reason=short.reason)
     try:
+        # The caller's instant, if it gave one; otherwise the governor reads
+        # the clock itself once it holds the lock (#140 round 5).
         decision, claim_id = gov.reserve(
             trigger=trigger, channel=channel.value, priority=priority,
-            settings=settings, now=moment)
+            settings=settings, now=now)
     except SQLAlchemyError as exc:
         return _fallback(trigger, channel, priority, fallback,
                          f"reservation failed: {type(exc).__name__}", moment, asked=False)
@@ -857,6 +859,8 @@ def compose(*, trigger: str, channel: Channel,
         return _fallback(trigger, channel, priority, fallback, decision.reason, moment,
                          asked=False)
 
+    # The call's own clock starts after the claim, however long the claim waited.
+    moment = now or datetime.now(UTC)
     started = monotonic()
     try:
         answer = complete(user=prompt, deadline_s=_DEADLINE_S, settings=settings).text

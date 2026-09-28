@@ -308,3 +308,33 @@ class TestRoundFourOn140:
             holder.close()
         assert out.source == "deterministic" and out.reason == "P1 renders deterministically"
         assert took < 1.0
+
+
+class TestRoundFiveOn140:
+    """#140 round 5, SOTA-A (executed): reserve() read the clock before it
+    had the lock and the database, so a claim that waited for them was
+    stamped with the moment it began to wait - early enough to shorten the
+    floor and the cooldown after it by the wait, and to count a call made
+    after midnight on the day before. The clock is read once both are held."""
+
+    def test_the_claim_is_stamped_when_the_lock_is_held(self):
+        release = threading.Event()
+        holding = threading.Event()
+
+        def hold_the_lock():
+            with gov._lock:
+                holding.set()
+                release.wait(5)
+
+        holder = threading.Thread(target=hold_the_lock)
+        holder.start()
+        holding.wait(5)
+        called = datetime.now(UTC)
+        threading.Timer(0.5, release.set).start()
+        decision, claim = gov.reserve(trigger="BAND_TO_TRIM", channel="imessage", priority=2,
+                                      settings=_settings())
+        holder.join()
+        assert decision.may_ask and claim is not None
+        with session_scope() as s:
+            stamped = s.get(MessageEngineAttempt, claim).started_at
+        assert stamped >= (called + timedelta(seconds=0.4)).replace(tzinfo=None), (called, stamped)

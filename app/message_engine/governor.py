@@ -150,8 +150,12 @@ def reserve(*, trigger: str, channel: str, priority: int, settings: Settings,
     short = short_circuit(priority, settings)
     if short is not None:
         return short, None
-    moment = now or datetime.now(UTC)
     with _lock, scope() as session:
+        # The clock is read once the lock and the database are held: read
+        # before, a claim that waited for them was stamped early, which
+        # shortened the floor and the cooldown after it by the wait and put a
+        # call made after midnight on the day before (#140 round 5, SOTA-A).
+        moment = now or datetime.now(UTC)
         lifetime = timedelta(seconds=CLAIM_TTL_S)
         for expired in session.execute(select(MessageEngineAttempt).where(
                 MessageEngineAttempt.outcome == Outcome.IN_FLIGHT.value,
