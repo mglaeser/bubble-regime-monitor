@@ -14,8 +14,15 @@ the project accumulated before migrations were authoritative:
 
 Used both at app boot (main.lifespan) and by deploy.sh (via
 `python -m app.db_migrate`), so an update self-migrates with or without the
-deploy script. Never raises out of ensure_schema(): on any failure it falls
-back to create_all so a fresh boot still comes up.
+deploy script.
+
+A migration that fails fails the boot; nothing falls back. The fallback this
+replaced ran create_all, which only adds tables that are missing and never
+alters one that exists: after a migration that failed part-way on an
+existing database, the service came up on a schema between two revisions.
+deploy.sh runs the upgrade before it replaces the container and aborts on
+failure; a boot that fails anyway fails the health check, and the deploy
+rolls back.
 """
 
 from __future__ import annotations
@@ -56,7 +63,7 @@ def upgrade_to_head() -> str:
     """Run migrations to head, self-healing a legacy unstamped DB.
 
     Returns a short status string ("upgraded" | "stamped+upgraded"). Raises on
-    a genuine migration failure (the caller decides whether to fall back)."""
+    a genuine migration failure."""
     from alembic import command
 
     cfg = _alembic_config()
@@ -70,20 +77,6 @@ def upgrade_to_head() -> str:
         return "stamped+upgraded"
     command.upgrade(cfg, "head")
     return "upgraded"
-
-
-def ensure_schema() -> None:
-    """Boot-time schema guarantee. Alembic first; create_all as a fallback so
-    the service always comes up even if migrations are misconfigured."""
-    try:
-        status = upgrade_to_head()
-        log.info("schema_ready", via="alembic", status=status)
-    except Exception as exc:
-        log.warning("alembic_upgrade_failed_falling_back", error=str(exc))
-        from app.models import Base
-
-        Base.metadata.create_all(get_engine())
-        log.info("schema_ready", via="create_all_fallback")
 
 
 if __name__ == "__main__":  # `python -m app.db_migrate` — used by deploy.sh

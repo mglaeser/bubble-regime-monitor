@@ -21,9 +21,9 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     configure_logging(settings.log_level)
 
-    from app.db_migrate import ensure_schema
+    from app.db_migrate import upgrade_to_head
 
-    ensure_schema()  # Alembic upgrade head (create_all fallback); self-heals legacy DBs
+    upgrade_to_head()  # Alembic upgrade head (self-heals an unstamped create_all DB); a failure fails the boot
 
     def _seed() -> None:
         try:
