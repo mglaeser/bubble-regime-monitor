@@ -164,8 +164,7 @@ def _patch_vix_to_fred(monkeypatch, vix_date, vix3m_date):
     def _boom(*a, **k):
         raise SourceError("upstream down")
 
-    monkeypatch.setattr(vixmod, "fetch", _boom)          # vixcentral primary
-    monkeypatch.setattr(vixmod, "_cboe_last", _boom)     # cboe secondary
+    monkeypatch.setattr(vixmod, "_cboe_last", _boom)     # cboe primary
 
     def _fred(series_id):
         d, v = {"VIXCLS": (vix_date, 18.0), "VIX3M": (vix3m_date, 20.0)}[series_id]

@@ -1,8 +1,8 @@
 """Shiller CAPE adapter (S1 raw input).
 
-Fallback chain: multpl scrape -> GuruFocus economic_indicators/56 ->
-shillerdata.com ie_data.xls (compute CAPE from real price / 10-yr avg real
-EPS). Freshness SLA 35 days.
+Fallback chain: multpl scrape -> shillerdata.com ie_data.xls (compute CAPE
+from real price / 10-yr avg real EPS). Freshness SLA 35 days. GuruFocus,
+once the second tier, answers 403 since 2026-09.
 """
 
 from __future__ import annotations
@@ -17,7 +17,6 @@ from app.sources import Provenance, SourceError, SourceResult
 
 MULTPL_URL = "https://www.multpl.com/shiller-pe"
 MULTPL_TABLE_URL = "https://www.multpl.com/shiller-pe/table/by-month"
-GURUFOCUS_URL = "https://www.gurufocus.com/economic_indicators/56"
 SHILLERDATA_URL = "https://img1.wsimg.com/blobby/go/e5e77e0b-59d1-44d9-ab25-4763ac982e53/downloads/ie_data.xls"
 
 
@@ -32,13 +31,6 @@ def _current_from_multpl(html: str) -> float:
     return cape
 
 
-def _current_from_gurufocus(html: str) -> float:
-    m = re.search(r"Shiller[^\d]{0,120}?([\d]{2}\.[\d]{1,2})", html)
-    if not m:
-        raise SourceError("gurufocus: could not parse CAPE")
-    return float(m.group(1))
-
-
 def _history_from_shillerdata(content: bytes) -> list[float]:
     df = pd.read_excel(io.BytesIO(content), sheet_name="Data", header=7)
     cape_col = next((c for c in df.columns if "CAPE" in str(c).upper()), None)
@@ -49,18 +41,13 @@ def _history_from_shillerdata(content: bytes) -> list[float]:
 
 
 def current_cape() -> SourceResult:
-    """Current CAPE with the multpl -> GuruFocus -> shillerdata chain."""
+    """Current CAPE with the multpl -> shillerdata chain."""
     errors: list[str] = []
     try:
         return SourceResult(_current_from_multpl(fetch("multpl", MULTPL_URL).text),
                             Provenance(source="multpl"))
     except Exception as e:
         errors.append(f"multpl: {e}")
-    try:
-        return SourceResult(_current_from_gurufocus(fetch("gurufocus", GURUFOCUS_URL).text),
-                            Provenance(source="gurufocus", fallback_used=True))
-    except Exception as e:
-        errors.append(f"gurufocus: {e}")
     try:
         history = _history_from_shillerdata(fetch("shillerdata", SHILLERDATA_URL).content)
         return SourceResult(history[-1],
@@ -82,20 +69,9 @@ def monthly_cape_history() -> SourceResult:
     except Exception as e:
         errors.append(f"shillerdata: {e}")
     try:
-        from bs4 import BeautifulSoup
-
-        html = fetch("multpl", MULTPL_TABLE_URL).text
-        soup = BeautifulSoup(html, "lxml")
-        values: list[float] = []
-        for row in soup.select("table tr"):
-            cells = row.find_all("td")
-            if len(cells) >= 2:
-                try:
-                    v = float(cells[-1].get_text(strip=True).replace(",", ""))
-                except ValueError:
-                    continue
-                if 3.0 < v < 100.0:  # plausible CAPE range
-                    values.append(v)
+        table = pd.read_html(io.StringIO(fetch("multpl", MULTPL_TABLE_URL).text), flavor="lxml")[0]
+        column = pd.to_numeric(table.iloc[:, -1].astype(str).str.replace(",", ""), errors="coerce")
+        values = [float(v) for v in column.dropna() if 3.0 < v < 100.0]  # plausible CAPE range
         values.reverse()  # table is newest-first
         if len(values) < 240:
             raise SourceError(f"multpl table: too little history ({len(values)} rows)")

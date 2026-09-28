@@ -138,6 +138,11 @@ The complete real `metrics` block, verbatim:
 > degrades independently, and either falls back to `available:false` (source
 > `imf:COFER` / `imf:IFS`) where the deploy host cannot reach `imf.org` or the
 > series is missing — a value is never fabricated.
+>
+> **2026-09-27 — not connected again.** The IMF retired the SDMX service the
+> adapter read (`dataservices.imf.org` no longer resolves), so the adapter is
+> gone. Both keys stay in the contract as `available:false` (source `imf:COFER`
+> / `imf:IFS`, note naming the retirement); a value is never fabricated.
 
 A real full series (capture #2, `usd_broad_index`, first/last points shown — all 61 present in the artifact):
 
@@ -256,7 +261,7 @@ And a REAL degradation row (capture #1, before the min_rows fix) — this is pre
 2. DXY → Fed Broad Dollar Index (`usd_broad_index`), never labeled DXY (ICE licensing).
 3. BTC ATH basis = max(provider monthly closes, current spot), coverage start in `detail` — not a curated record. Drawdown is computed against that basis and is ≤ 0 by construction.
 4. `vix_term_state` is categorical: `value` is null (the contract requires numeric values) and the reading lives in `detail.state`; the numeric companion is `vix_term_ratio`.
-5. ~~COFER reserve shares ship `available:false` (new IMF provider = out of scope).~~ **Resolved in v3.7.5:** both are connected via `app/sources/imf_reserves.py`. `cofer_ust_share_pct` IS COFER (USD share of allocated FX reserves); `cofer_gold_share_pct` is IMF **IFS** (gold ÷ total reserves), NOT COFER — COFER is FX-only, so the key name stays a labeled historical misnomer. Quarterly (~1-quarter lag), non-scoring, per-item graceful degradation. Requires a deploy-host network policy that allows `imf.org`.
+5. ~~COFER reserve shares ship `available:false` (new IMF provider = out of scope).~~ **Resolved in v3.7.5:** both are connected via `app/sources/imf_reserves.py`. `cofer_ust_share_pct` IS COFER (USD share of allocated FX reserves); `cofer_gold_share_pct` is IMF **IFS** (gold ÷ total reserves), NOT COFER — COFER is FX-only, so the key name stays a labeled historical misnomer. Quarterly (~1-quarter lag), non-scoring, per-item graceful degradation. Requires a deploy-host network policy that allows `imf.org`. **Not connected again since 2026-09-27:** the IMF retired that service, both keys ship `available:false`.
 6. §5 now carries real capture-#2 bytes (metrics block verbatim + envelope); the complete per-point byte contract is committed at `docs/dashboard-feed-capture2.json`. The pre-capture sketch is retained under "5-legacy" for history only.
 7. **`silver_spot` is permanently the labeled SLV-close fallback on the free Twelve Data tier** (XAG/USD needs the Grow plan; XAU/USD works free — confirmed by capture #1). The dashboard's "render prose spot only when source is true spot" rule handles this by design; `gold_silver_ratio` states its `mixed` basis. If a paid TD plan is ever added, true silver spot activates automatically with no code change.
 8. Twelve Data 1-month bars are dated at the month **start** (the current partial bar reads `YYYY-MM-01`), so the `btc` series uses a 35-day stale SLA; `btc_spot` (daily) carries the fresh date.

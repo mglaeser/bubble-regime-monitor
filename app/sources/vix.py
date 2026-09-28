@@ -1,31 +1,19 @@
 """VIX term-structure adapter (V multiplier + fast-alarm inputs).
 
-Source order: vixcentral.com scrape (primary, anonymously accessible July
-2026) -> CBOE delayed CSV (>= 20 min delay) -> FRED VIXCLS/VIX3M ratio.
+Source order: CBOE delayed quotes (>= 20 min delay) -> FRED VIXCLS/VIX3M
+ratio. The vixcentral.com scrape that led the chain until 2026-09 is gone:
+the site moved to volchart.io and the page no longer carries the numbers.
 """
 
 from __future__ import annotations
-
-import re
 
 from app.http_client import fetch
 from app.sources import Provenance, SourceError, SourceResult
 from app.sources.fred import latest as fred_latest
 
-VIXCENTRAL_URL = "https://vixcentral.com"
 CBOE_VIX_URL = "https://cdn.cboe.com/api/global/delayed_quotes/quotes/_VIX.json"
 CBOE_VIX3M_URL = "https://cdn.cboe.com/api/global/delayed_quotes/quotes/_VIX3M.json"
 CBOE_SKEW_URL = "https://cdn.cboe.com/api/global/delayed_quotes/quotes/_SKEW.json"
-
-
-def _ratio_from_vixcentral(html: str) -> float:
-    m = re.search(r"VIX[:\s]*([\d.]+).{0,400}?VIX3M[:\s]*([\d.]+)", html, re.S)
-    if not m:
-        raise SourceError("vixcentral: could not parse VIX/VIX3M")
-    vix, vix3m = float(m.group(1)), float(m.group(2))
-    if vix3m <= 0:
-        raise SourceError("vixcentral: bad VIX3M")
-    return vix / vix3m
 
 
 def _cboe_last(url: str, source: str) -> float:
@@ -46,15 +34,9 @@ def term_structure_ratio() -> SourceResult:
     """VIX / VIX3M ratio, walking the fallback chain."""
     errors: list[str] = []
     try:
-        return SourceResult(_ratio_from_vixcentral(fetch("vixcentral", VIXCENTRAL_URL).text),
-                            Provenance(source="vixcentral"))
-    except Exception as e:
-        errors.append(f"vixcentral: {e}")
-    try:
         vix = _cboe_last(CBOE_VIX_URL, "cboe_vix")
         vix3m = _cboe_last(CBOE_VIX3M_URL, "cboe_vix3m")
-        return SourceResult(vix / vix3m, Provenance(source="cboe_delayed", fallback_used=True,
-                                                    note=">=20-min delayed"))
+        return SourceResult(vix / vix3m, Provenance(source="cboe_delayed", note=">=20-min delayed"))
     except Exception as e:
         errors.append(f"cboe: {e}")
     try:

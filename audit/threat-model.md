@@ -11,7 +11,7 @@ STRIDE per trust boundary, for the architecture as built (`audit/00-system-map.m
         [Operator] --X-API-Key--> admin endpoints         |
                                                           v
    outbound HTTPS (app code, hosts fixed in code): FRED, Tiingo, TwelveData, AlphaVantage, Polygon,
-        SSGA, SEC, FINRA, CBOE, multpl/GuruFocus, sipgate(SMS)
+        SSGA, SEC, FINRA, CBOE, multpl/shillerdata, sipgate(SMS)
    outbound HTTPS (hosts from CONFIG, not code): LLM gateway (contained computed/model output only),
         imessage-proxy (POST /api/messages, Bearer key)
 ```
