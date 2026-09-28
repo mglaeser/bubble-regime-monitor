@@ -135,9 +135,13 @@ jobs:
             echo "::notice::mypy errors fell to $n — lower MYPY_CEILING to $n to pin the gain."
           fi
       - name: Security — dependency audit (BLOCKING)
-        # Audits the locks themselves: requirements.lock is exactly what the
-        # image installs (pyarrow included), requirements-dev.lock what CI runs.
-        run: pip-audit --progress-spinner off --disable-pip --require-hashes -r requirements.lock -r requirements-dev.lock
+        # Two scopes, both blocking. The environment is what CI actually runs,
+        # including pip and setuptools, which the bootstrap line installs
+        # outside the lock. The locks are what the image installs:
+        # requirements.lock carries pyarrow, which CI never installs.
+        run: |
+          pip-audit --progress-spinner off
+          pip-audit --progress-spinner off --disable-pip --require-hashes -r requirements.lock -r requirements-dev.lock
       - name: Security — secret scan over tracked files (BLOCKING)
         # NB: `detect-secrets scan --baseline` exits 0 even on NEW secrets (it just
         # re-emits an updated baseline) — it does NOT gate. `detect-secrets-hook`

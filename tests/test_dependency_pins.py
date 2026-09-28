@@ -94,3 +94,16 @@ def test_ci_installs_only_the_dev_lock():
     for args in installs:
         assert args.startswith(bootstrap) or (
             "--require-hashes" in args and "-r requirements-dev.lock" in args), args
+
+
+def test_the_audit_covers_what_ci_runs_and_what_the_image_installs():
+    """The environment audit sees pip and setuptools, which CI installs outside
+    the lock; the lock audit sees pyarrow, which only the image installs.
+    Dropping either narrows the gate (the panel on #133 caught the first)."""
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    step = workflow.split("name: Security — dependency audit (BLOCKING)")[1].split("- name:")[0]
+    audits = re.findall(r"pip-audit[^\n]*", step)
+    assert any(" -r " not in f" {audit} " for audit in audits), (
+        f"no audit of the installed environment: {audits}")
+    assert any("-r requirements.lock" in audit and "-r requirements-dev.lock" in audit
+               for audit in audits), f"no audit of the locks: {audits}"
