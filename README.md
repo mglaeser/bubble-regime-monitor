@@ -153,7 +153,7 @@ It performs, in order (each step announced with a `==>` banner):
 
 Configuration is via environment variables (all optional, sensible defaults): `BRANCH`, `IMAGE`, `CONTAINER`, `DATA_DIR`, `PORT`, `ENV_FILE`, `ENGINE` (podman/docker), `HEALTH_TIMEOUT`, `KEEP_IMAGES`, plus `SKIP_PULL=1` / `SKIP_BUILD=1`. Example: `PORT=8080 BRANCH=main ./deploy.sh`.
 
-The app also **self-migrates at boot** (`app.db_migrate.ensure_schema` runs `alembic upgrade head` with a `create_all` fallback), so a plain `podman-compose up -d --build` stays valid too — `deploy.sh` just makes the pull/build/migrate/health-check flow explicit and safe. To apply migrations locally without a container: `make migrate`.
+The app also **self-migrates at boot** (`app.db_migrate.upgrade_to_head` runs `alembic upgrade head`; a failed migration fails the boot rather than falling back), so a plain `podman-compose up -d --build` stays valid too — `deploy.sh` just makes the pull/build/migrate/health-check flow explicit and safe. To apply migrations locally without a container: `make migrate`.
 
 ### Auto-deploy on merged PRs (v3.5.0)
 

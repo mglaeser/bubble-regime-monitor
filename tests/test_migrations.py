@@ -359,10 +359,21 @@ def test_legacy_create_all_db_is_self_healed(tmp_path):
     c.close()
 
 
-def test_ensure_schema_never_raises(tmp_path):
-    from app.db_migrate import ensure_schema
+def test_a_failed_migration_fails_the_boot(isolated_db, monkeypatch):
+    """Nothing falls back: create_all only adds missing tables, so after a
+    migration that failed part-way the service would run on a schema between
+    two revisions. The boot must stop instead (deploy.sh then rolls back)."""
+    from alembic import command
+    from fastapi.testclient import TestClient
 
-    _run_with_db(str(tmp_path / "boot.db"), ensure_schema)  # must not raise
+    from app.main import app
+
+    def _failed(*_a, **_kw):
+        raise RuntimeError("migration 0019 failed half-way")
+
+    monkeypatch.setattr(command, "upgrade", _failed)
+    with pytest.raises(RuntimeError, match="0019"), TestClient(app):
+        pass
 
 
 def test_alert_admin_atomicity_indexes_exist_in_create_all_and_alembic(tmp_path):
