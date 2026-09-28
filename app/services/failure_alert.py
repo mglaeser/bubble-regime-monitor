@@ -275,8 +275,14 @@ def notify_recompute_outcome(error: str | None,
                     outage.recovered_at = now
             else:
                 if outage is not None and outage.recovered_at is not None:
-                    outage = None            # that outage ended; this is a new one
-                if outage is None:
+                    # That outage ended - a run succeeded - so this failure is a
+                    # new one, on its own timeline. But its all-clear was never
+                    # delivered (a delivered one closes the record): the reader
+                    # still holds FAILING, and the debt carries over to the new
+                    # outage (#139 round 2, SOTA-A).
+                    outage = _Outage(first_seen=since or now, failures=1,
+                                     counted_attempt=attempt, announced=outage.announced)
+                elif outage is None:
                     outage = _Outage(first_seen=since or now, failures=1,
                                      counted_attempt=attempt)
                 elif attempt is None or attempt != outage.counted_attempt:

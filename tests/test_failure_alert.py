@@ -1353,3 +1353,39 @@ class TestRoundOneOn139:
         failure_alert._loaded = False
         assert notify_recompute_outcome(None)["status"] == "noop"
         assert sent == []
+
+
+class TestRoundTwoOn139:
+    """#139 round 2, SOTA-A (executed): a failure after an undelivered
+    all-clear opened a NEW outage and erased the old one's debt; when that
+    outage's alarm failed as well, the final success sent nothing and the
+    reader kept the first FAILING. A record with `recovered_at` set is always
+    owed its all-clear (a delivered one closes the record). The new failure
+    still starts its own timeline (TestAnEndedOutageDoesNotLendItsTimeline),
+    and the debt carries over to it."""
+
+    def test_the_owed_all_clear_survives_a_failed_recurrence(self, monkeypatch, sent):
+        deliver = {"ok": True}
+        monkeypatch.setattr(failure_alert, "send_imessage",
+                            lambda text: sent.append(text) or _Result(ok=deliver["ok"]))
+        assert notify_recompute_outcome(EBP_ERROR)["status"] == "sent"   # FAILING reaches the reader
+        deliver["ok"] = False
+        assert notify_recompute_outcome(None)["kind"] == "recovery"      # the all-clear is lost
+        notify_recompute_outcome(EBP_ERROR)                              # the service fails again
+        deliver["ok"] = True
+        result = notify_recompute_outcome(None)
+        assert result["status"] == "sent" and result["kind"] == "recovery"
+        assert sent[-1].startswith("bubblegauge OK")
+
+    def test_the_new_outage_has_its_own_timeline_and_the_old_debt(self, monkeypatch, sent):
+        deliver = {"ok": True}
+        monkeypatch.setattr(failure_alert, "send_imessage",
+                            lambda text: sent.append(text) or _Result(ok=deliver["ok"]))
+        notify_recompute_outcome(EBP_ERROR)
+        first_seen = failure_alert._current.first_seen
+        deliver["ok"] = False
+        notify_recompute_outcome(None)
+        notify_recompute_outcome(EBP_ERROR)
+        current = failure_alert._current
+        assert current.first_seen > first_seen and current.failures == 1
+        assert current.recovered_at is None and current.announced is True
