@@ -4,6 +4,10 @@ Found while completing the alert system. Each is out of scope for that target,
 so per instruction none of these were touched.
 
 ## U-01 — pyproject caps numpy/pandas for a CPU the deploy host no longer is
+**Resolved 2026-09-28 (owner decision D8):** Python 3.12 only; the `[parquet]` extra and both SIGILL
+probes are gone (pyarrow is a regular dependency). The numpy/pandas caps stay, restated in
+pyproject.toml as deliberate upgrade gates against the golden fixture, not as a CPU constraint.
+
 `pyproject.toml:23-28` pins `numpy>=1.26,<2.3` / `pandas>=2.2,<3.0` with the
 rationale "newer numpy wheels raise the x86-64 CPU baseline and die with SIGILL
 on older CPUs ... Relax only if all deploy targets expose x86-64-v2+".
