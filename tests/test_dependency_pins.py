@@ -1,9 +1,14 @@
-"""The SQLAlchemy ceiling (AGENTS.md: a dependency is pinned). SQLAlchemy
-2.1.0 was released on 2026-09-24 and CI installed it unasked: the type-check
-ratchet rose from 158 to 161 (three new errors in app/alerts/cli.py and
-app/alerts/health.py), and the Containerfile, which installs from
-pyproject.toml, would have shipped it on the next deploy. Production runs
-2.0; moving to 2.1 is an upgrade of its own, made on purpose."""
+"""Dependencies are locked (AGENTS.md: a dependency is pinned, and the image
+and CI run what was tested).
+
+requirements.lock is what the image installs; requirements-dev.lock is what
+CI installs: the image's packages at the image's versions (pyarrow, the
+optional Parquet extra, aside) plus the dev tools. `make lock` writes both
+from pyproject.toml. They replace a CI install list kept equal to
+pyproject.toml by hand, whose ceilings still let a release reach CI unasked:
+SQLAlchemy 2.1.0 (2026-09-24) and Deprecated 3.0.0 (2026-09-26) each broke
+the type-check ratchet, and the Containerfile, which resolved from
+pyproject.toml at build time, would have shipped them on the next deploy."""
 from __future__ import annotations
 
 import re
@@ -11,71 +16,81 @@ import tomllib
 from pathlib import Path
 
 import pytest
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
 
 ROOT = Path(__file__).resolve().parents[1]
-CEILING = "SQLAlchemy>=2.0,<2.1"
+RUNTIME_LOCK = ROOT / "requirements.lock"
+DEV_LOCK = ROOT / "requirements-dev.lock"
+LOCKS = [(RUNTIME_LOCK, ("parquet",)), (DEV_LOCK, ("dev",))]
+
+_PIN = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)==([^\s\;]+)")
 
 
-def _pyproject_spec(name: str) -> str:
-    deps = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["dependencies"]
-    (spec,) = [dep for dep in deps if re.match(rf"{name}\b", dep, re.IGNORECASE)]
-    return spec
+def _locked(path: Path) -> dict[str, str]:
+    """Package name -> version, for every package in a lock."""
+    pins: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        match = _PIN.match(line)
+        if match:
+            pins[canonicalize_name(match.group(1))] = match.group(2)
+    return pins
 
 
-def _ci_spec(name: str) -> str:
+def _declared(*extras: str) -> list[Requirement]:
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    declared = [Requirement(dep) for dep in project["dependencies"]]
+    for extra in extras:
+        declared += [Requirement(dep) for dep in project["optional-dependencies"][extra]]
+    return declared
+
+
+def _pip_installs(text: str) -> list[str]:
+    """The arguments of every `pip install` in a build or workflow file."""
+    return [args.strip() for args in re.findall(r"pip install([^\n&|]*)", text)]
+
+
+@pytest.mark.parametrize(("lock", "extras"), LOCKS, ids=["image", "ci"])
+def test_every_declared_dependency_is_locked_within_its_specifier(lock, extras):
+    locked = _locked(lock)
+    for requirement in _declared(*extras):
+        name = canonicalize_name(requirement.name)
+        assert name in locked, f"{requirement.name} is declared but not in {lock.name}"
+        assert requirement.specifier.contains(locked[name], prereleases=True), (
+            f"{lock.name} holds {requirement.name}=={locked[name]}, "
+            f"outside {requirement.specifier}")
+
+
+@pytest.mark.parametrize(("lock", "_extras"), LOCKS, ids=["image", "ci"])
+def test_every_locked_package_carries_a_hash(lock, _extras):
+    entries = re.split(r"\n(?=[A-Za-z0-9])", lock.read_text(encoding="utf-8"))
+    unhashed = [entry.split()[0] for entry in entries
+                if _PIN.match(entry) and "--hash=sha256:" not in entry]
+    assert not unhashed, f"{lock.name}: no hash for {unhashed}"
+
+
+def test_ci_runs_the_images_versions():
+    image, ci = _locked(RUNTIME_LOCK), _locked(DEV_LOCK)
+    differ = {name: (version, ci[name]) for name, version in image.items()
+              if name in ci and ci[name] != version}
+    assert not differ, f"CI and the image lock different versions: {differ}"
+
+
+def test_the_image_installs_only_the_runtime_lock():
+    installs = _pip_installs((ROOT / "Containerfile").read_text(encoding="utf-8"))
+    assert any("--require-hashes" in args and "-r requirements.lock" in args
+               for args in installs), installs
+    for args in installs:
+        assert ("--require-hashes" in args and "-r requirements.lock" in args) or \
+            "--no-deps" in args, args
+
+
+def test_ci_installs_only_the_dev_lock():
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-    step = workflow.split("Install Python deps (aligned to pyproject)")[1].split("- name:")[0]
-    (spec,) = re.findall(rf'"?({name}[^"\s]*)"?', step, re.IGNORECASE)
-    return spec
-
-
-def test_the_image_installs_sqlalchemy_below_2_1():
-    assert _pyproject_spec("SQLAlchemy") == CEILING
-
-
-def test_ci_installs_the_same_sqlalchemy_as_the_image():
-    assert _ci_spec("SQLAlchemy") == CEILING
-
-
-#: Deprecated 3.0.0 (2026-09-26), a dependency of limits under slowapi, is
-#: written in Python 3.12 syntax; mypy targets 3.11 and exited 2 on it, so
-#: the type-check refused (CI on #126 at fc4e445).
-DEPRECATED = "Deprecated<3"
-
-
-def test_the_image_installs_deprecated_below_3():
-    assert _pyproject_spec("Deprecated") == DEPRECATED
-
-
-def test_ci_installs_the_same_deprecated_as_the_image():
-    assert _ci_spec("Deprecated") == DEPRECATED
-
-
-#: The message engine's link detection (the owner, 2026-09-26: a common
-#: problem goes to a well-maintained library): linkify-it-py for links,
-#: libphonenumber for numbers a phone dials. An upgrade changes what counts
-#: as a link, so each version is exact and moved on purpose.
-DETECTORS = {"linkify-it-py": "linkify-it-py==2.2.0", "phonenumberslite": "phonenumberslite==9.0.40"}
-
-
-@pytest.mark.parametrize("name", sorted(DETECTORS))
-def test_the_image_pins_each_detector(name):
-    assert _pyproject_spec(name) == DETECTORS[name]
-
-
-@pytest.mark.parametrize("name", sorted(DETECTORS))
-def test_ci_installs_the_same_detector_as_the_image(name):
-    assert _ci_spec(name) == DETECTORS[name]
-
-
-#: The NYSE calendar (app/alerts/calendars.py). A release can add a closure,
-#: which moves trading-day arithmetic, so the version is exact.
-HOLIDAYS = "holidays==0.105"
-
-
-def test_the_image_pins_the_calendar():
-    assert _pyproject_spec("holidays") == HOLIDAYS
-
-
-def test_ci_installs_the_same_calendar_as_the_image():
-    assert _ci_spec("holidays") == HOLIDAYS
+    installs = _pip_installs(workflow)
+    assert any("--require-hashes" in args and "-r requirements-dev.lock" in args
+               for args in installs), installs
+    bootstrap = '--upgrade pip "setuptools>=83"'
+    for args in installs:
+        assert args.startswith(bootstrap) or (
+            "--require-hashes" in args and "-r requirements-dev.lock" in args), args

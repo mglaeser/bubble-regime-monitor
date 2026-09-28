@@ -25,9 +25,9 @@ def test_l01_sub_score_rejects_nonfinite():
 
 
 def test_l01_nonpositive_price_floors_before_fit():
-    # compute_confidence imports the optional lppls engine at call time
-    # (app/indicators/d4_lppls.py). ci.yml installs it best-effort and states
-    # the suite self-skips without it; this makes that statement true.
+    # compute_confidence imports the lppls engine at call time
+    # (app/indicators/d4_lppls.py). The image and CI install it from the
+    # locks; a local environment without it self-skips here.
     pytest.importorskip("lppls")
     from app.indicators.d4_lppls import MIN_CLOSES, compute_confidence
 

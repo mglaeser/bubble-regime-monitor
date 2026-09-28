@@ -72,6 +72,9 @@ dev = [
     # Blocking OpenAPI 3.1 structure and JSON Schema 2020-12 example gates.
     "openapi-spec-validator==0.9.0",
     "jsonschema==4.26.0",
+    # CI's security gates.
+    "pip-audit",
+    "detect-secrets",
 ]
 
 [tool.setuptools.packages.find]
