@@ -39,6 +39,18 @@ IMAGE="${IMAGE:-localhost/bubblegauge}"
 CONTAINER="${CONTAINER:-bubblegauge}"
 DATA_DIR="${DATA_DIR:-./data}"
 PORT="${PORT:-8000}"
+# Loopback only: the reverse proxy (nginx-proxy-manager, host network) is the
+# one way in. Rootless Podman's port handler rewrites every forwarded
+# connection's source to 10.0.2.100 inside the container, so uvicorn trusts
+# X-Forwarded-For from exactly that hop and keys each visitor by the address
+# the proxy appended; without it every visitor shared one rate-limit bucket.
+# Trusting "*" instead would take the LEFTMOST entry, which a client writes.
+# The trust boundary is the HOST: every local process that connects to the
+# loopback port arrives as the same hop, so it is trusted like the proxy
+# (uvicorn's own default draws the same line at 127.0.0.1). leaf is
+# single-tenant; the internet cannot reach the port any more.
+PUBLISH="127.0.0.1:$PORT:8000"
+PROXY_HOP="10.0.2.100"
 ENV_FILE="${ENV_FILE:-.env}"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-90}"
 KEEP_IMAGES="${KEEP_IMAGES:-5}"
@@ -177,7 +189,7 @@ $ENGINE run -d --name "$CONTAINER" \
   --env-file "$ENV_FILE" \
   --cap-drop=ALL --security-opt no-new-privileges \
   -v "$(realpath "$DATA_DIR")":/data"$VOL_SUFFIX" \
-  -p "$PORT":8000 \
+  -p "$PUBLISH" -e FORWARDED_ALLOW_IPS="$PROXY_HOP" \
   --restart unless-stopped \
   "$DEPLOY_TAG" >/dev/null 9>&-
 echo "    started from $DEPLOY_TAG"
@@ -219,7 +231,7 @@ if [[ -n "$PREV_IMAGE_ID" ]]; then
     --env-file "$ENV_FILE" \
     --cap-drop=ALL --security-opt no-new-privileges \
     -v "$(realpath "$DATA_DIR")":/data"$VOL_SUFFIX" \
-    -p "$PORT":8000 --restart unless-stopped \
+    -p "$PUBLISH" -e FORWARDED_ALLOW_IPS="$PROXY_HOP" --restart unless-stopped \
     "$PREV_IMAGE_ID" >/dev/null 9>&- && echo "    rolled back."
   die "deploy failed health check; rolled back to the previous image."
 fi
