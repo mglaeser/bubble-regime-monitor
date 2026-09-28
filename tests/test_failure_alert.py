@@ -18,7 +18,6 @@ from app.services import failure_alert
 from app.services.failure_alert import (
     build_failure_message,
     build_recovery_message,
-    failure_signature,
     notify_recompute_outcome,
 )
 
@@ -105,20 +104,6 @@ class TestItDoesNotShout:
         notify_recompute_outcome(EBP_ERROR)
         failure_alert._current.last_sent = datetime.now(UTC) - timedelta(hours=25)
         notify_recompute_outcome(EBP_ERROR)
-        assert len(sent) == 2
-
-    def test_one_defect_on_many_rows_is_bounded_not_merged(self, sent):
-        """The identity is LOSSLESS, so these are two causes and both are news.
-        What stops the spam is the budget, not a lossy signature — every attempt
-        to make one identity cover several messages merged a distinct cause into
-        another one's quiet period instead."""
-        for row in range(12):
-            notify_recompute_outcome(f"invalid literal for int() with base 10: '{row}/1/'")
-        assert len(sent) == 4       # first alert + three bypasses, then throttled
-
-    def test_a_different_failure_is_news_even_inside_the_quiet_period(self, sent):
-        notify_recompute_outcome(EBP_ERROR)
-        notify_recompute_outcome("R engine unavailable: Rscript not found")
         assert len(sent) == 2
 
     def test_an_undelivered_alert_is_retried_rather_than_throttled(self, monkeypatch, sent):
@@ -288,33 +273,6 @@ class TestPanelFindings:
         monkeypatch.setattr(failure_alert, "send_imessage", _spy)
         notify_recompute_outcome(EBP_ERROR)
         assert observed == [True]
-
-
-class TestPanelFindingsSecondRound:
-    def test_the_all_clear_survives_a_signature_change(self, monkeypatch, sent):
-        """`announced` is not `last_sent`.
-
-        Told about failure A, the operator is owed an all-clear even if the
-        service went on to fail with B and B's alert never left the host.
-        Deriving "were they told?" from the throttle clock dropped that
-        all-clear silently."""
-        notify_recompute_outcome(EBP_ERROR)          # A: delivered
-        assert failure_alert._current.announced is True
-
-        monkeypatch.setattr(failure_alert, "send_imessage",
-                            lambda text: _Result(ok=False, status_code=503, error="down"))
-        result = notify_recompute_outcome("Rscript not found")   # B: new signature
-        # B is attempted at once rather than waiting out A's quiet period —
-        # asserted on the OUTCOME, not on `last_sent`. The clock used to be
-        # reset to express that; it now carries, and the decision is explicit.
-        assert result["status"] == "failed"               # attempted, transport refused
-        assert failure_alert._current.announced is True   # and they WERE told about A
-
-        monkeypatch.setattr(failure_alert, "send_imessage",
-                            lambda text: sent.append(text) or _Result())
-        result = notify_recompute_outcome(None)
-        assert result["kind"] == "recovery"
-        assert "OK" in sent[-1]
 
 
 class TestRecomputeHook:
@@ -572,9 +530,6 @@ class TestAMalformedStateFileCannotSilenceOrLie:
     @staticmethod
     def _write(sent_fixture, **overrides):
         payload = {
-            # the REAL signature of EBP_ERROR, so the throttle path is exercised
-            # rather than the new-signature path
-            "signature": failure_signature(EBP_ERROR),
             "first_seen": datetime.now(UTC).isoformat(),
             "failures": 3,
             "last_sent": datetime.now(UTC).isoformat(),
@@ -786,12 +741,9 @@ class TestAFutureTimestampCannotMuteTheAlerter:
 
 class TestTheCrashGapBetweenSendingAndRecording:
     """A process that dies between handing the message to the transport and
-    recording the result leaves the delivery state UNKNOWN.
-
-    Collapsing unknown into "not delivered" dropped the all-clear for an outage
-    that had in fact reached the operator — raised three times by the panel and
-    dismissed twice by me as irreducible. It is not irreducible: it is a third
-    state, and it only needed writing down."""
+    recording the result leaves the delivery UNKNOWN, and unknown must still
+    earn the all-clear: the record is marked announced BEFORE the send. A
+    transport that answers "not delivered" is the known case and undoes it."""
 
     def test_a_crash_mid_send_still_earns_an_all_clear(self, monkeypatch, sent):
         """The marker is written BEFORE the transport call, so it survives."""
@@ -803,8 +755,7 @@ class TestTheCrashGapBetweenSendingAndRecording:
             notify_recompute_outcome(EBP_ERROR)
 
         state = json.loads(failure_alert._state_path().read_text())
-        assert state["sending"] is True, "the attempt must be on disk before the send"
-        assert state["announced"] is False
+        assert state["announced"] is True, "the mark must be on disk before the send"
 
         # a new process
         failure_alert._current = None
@@ -816,20 +767,20 @@ class TestTheCrashGapBetweenSendingAndRecording:
         assert "OK" in sent[-1]
 
     def test_a_transport_that_says_no_does_not_earn_one(self, monkeypatch, sent):
-        """Known-not-delivered is NOT the crash gap: the marker is cleared."""
+        """Known-not-delivered is NOT the crash gap: the mark is undone."""
         monkeypatch.setattr(failure_alert, "send_imessage",
                             lambda text: _Result(ok=False, status_code=503, error="down"))
         notify_recompute_outcome(EBP_ERROR)
         state = json.loads(failure_alert._state_path().read_text())
-        assert state["sending"] is False and state["announced"] is False
+        assert state["announced"] is False
         failure_alert._current = None
         failure_alert._loaded = False
         assert notify_recompute_outcome(None)["status"] == "noop"
 
-    def test_a_delivered_send_clears_the_marker(self, sent):
+    def test_a_delivered_send_is_announced(self, sent):
         notify_recompute_outcome(EBP_ERROR)
         state = json.loads(failure_alert._state_path().read_text())
-        assert state["announced"] is True and state["sending"] is False
+        assert state["announced"] is True
 
 
 class TestThePreconditionIsHonouredUnderTheLock:
@@ -871,183 +822,6 @@ class TestThePreconditionIsHonouredUnderTheLock:
         admin.notify_if_stuck()
         assert sent == []
         get_settings.cache_clear()
-
-
-class TestTheSignatureIsLossless:
-    """Two failures are the same outage when their sanitised text is the same.
-
-    Two earlier versions tried to make one identity cover several messages —
-    flattening digit runs merged "HTTP 500 from FRED" with "HTTP 429 from FRED";
-    flattening quoted literals merged `KeyError: 'spy'` with `KeyError: 'qqq'`.
-    Each suppressed a distinct cause behind another one's quiet period, and each
-    was found by the panel. Bounding how often you are told is a better tool
-    than deciding, wrongly, that two failures are the same one."""
-
-    #: Same for 160 characters, different root cause at the end — the shape a
-    #: chain-of-fallbacks message actually has.
-    _LONG = "provider chain exhausted for SPY: " + "tiingo timeout; " * 12 + "FINAL CAUSE: "
-
-    @pytest.mark.parametrize(("a", "b"), [
-        ("HTTP 500 from fred", "HTTP 429 from fred"),                # status codes
-        ("s1 valuation dropped", "s5 credit dropped"),
-        ("timeout after 30s", "timeout after 1800s"),
-        ("KeyError: 'spy'", "KeyError: 'qqq'"),                      # quoted, distinct
-        ('bad date "3/1/2026" in column 0', 'bad date "7/1/2026" in column 0'),
-        (_LONG + "rate limit", _LONG + "bad api key"),               # beyond any prefix cut
-    ])
-    def test_different_text_is_a_different_outage(self, a, b):
-        assert failure_signature(a) != failure_signature(b)
-
-    def test_identical_text_is_the_same_outage(self):
-        assert failure_signature("HTTP 500 from fred") == failure_signature("HTTP 500 from fred")
-
-    def test_whitespace_and_case_do_not_split_one(self):
-        assert failure_signature("HTTP 500  from\n fred") == failure_signature("http 500 from fred")
-
-    def test_a_second_distinct_failure_is_not_throttled_away(self, sent):
-        """The end-to-end consequence: the operator hears about both."""
-        notify_recompute_outcome("HTTP 500 from fred")
-        notify_recompute_outcome("HTTP 429 from fred")
-        assert len(sent) == 2
-
-    def test_a_prefix_is_not_an_identity(self, sent):
-        notify_recompute_outcome(self._LONG + "rate limit")
-        notify_recompute_outcome(self._LONG + "bad api key")
-        assert len(sent) == 2
-
-
-class TestAMovingNumberDoesNotReAlert:
-    """A caller whose own message counts something must state its identity.
-
-    The stuck watchdog reports hours in flight, and those move every slot while
-    the condition does not. Deriving the signature from that text would re-alert
-    every four hours; flattening all digits to avoid it merged genuinely
-    different failures. The caller knows which it has, so it says so."""
-
-    def test_an_explicit_signature_survives_a_changing_message(self, sent):
-        for hours in (5, 9, 13, 17):
-            notify_recompute_outcome(f"recompute stuck: in flight {hours}h",
-                                     signature="recompute stuck holding the single-flight lock")
-        assert len(sent) == 1
-
-    def test_without_one_the_moving_number_would_re_alert(self, sent):
-        """Pins WHY the parameter exists — remove it and this is the behaviour."""
-        for hours in (5, 9):
-            notify_recompute_outcome(f"recompute stuck: in flight {hours}h")
-        assert len(sent) == 2
-
-    def test_the_watchdog_passes_one(self, monkeypatch, sent):
-        from app.routers import admin
-
-        monkeypatch.setenv("FAILURE_ALERT_STUCK_AFTER_H", "4")
-        from app.config import get_settings
-
-        get_settings.cache_clear()
-        admin.recompute_lock.acquire(blocking=False)
-        try:
-            for hours in (5, 9, 13):
-                admin._last.update(
-                    started_at=(datetime.now(UTC) - timedelta(hours=hours)).isoformat(),
-                    finished_at=None)
-                admin.run_recompute_guarded()
-            assert len(sent) == 1
-        finally:
-            if admin.recompute_lock.locked():
-                admin.recompute_lock.release()
-            admin._last.update(started_at=None, finished_at=None)
-            get_settings.cache_clear()
-
-
-class TestASignatureChangeCarriesTheWholeDeliveryState:
-    """Twice now, this branch dropped a field it should have carried.
-
-    First `announced`: an outage the operator HAD been told about lost its
-    all-clear when the error changed. Then, one field later, `sending`: an
-    outage whose delivery was UNKNOWN lost it the same way. Both were found by
-    the panel, not by me, which is why the construction is now `replace` — the
-    default is carry, and forgetting is no longer possible."""
-
-    def test_an_unknown_delivery_survives_a_signature_change(self, monkeypatch, sent):
-        """The exact regression: crash mid-send, RESTART, then a different
-        failure whose own send definitively fails.
-
-        A crash means the process dies, so the unknown is only ever discovered
-        on reload — which is where it is resolved. The later failed send must
-        clear its own attempt without erasing what the interrupted one may
-        already have delivered."""
-        monkeypatch.setattr(failure_alert, "send_imessage",
-                            lambda text: (_ for _ in ()).throw(KeyboardInterrupt("killed")))
-        with pytest.raises(KeyboardInterrupt):
-            notify_recompute_outcome(EBP_ERROR)
-        assert json.loads(failure_alert._state_path().read_text())["sending"] is True
-
-        failure_alert._current = None          # the process died
-        failure_alert._loaded = False
-        monkeypatch.setattr(failure_alert, "send_imessage",
-                            lambda text: _Result(ok=False, status_code=503, error="down"))
-        notify_recompute_outcome("Rscript not found")      # different signature
-        assert failure_alert._current.operator_may_be_waiting is True, (
-            "the unknown delivery must survive both the reload and the change")
-
-    def test_the_all_clear_then_actually_fires(self, monkeypatch, sent):
-        """End to end, because the point is the operator, not the flag."""
-        monkeypatch.setattr(failure_alert, "send_imessage",
-                            lambda text: (_ for _ in ()).throw(KeyboardInterrupt("killed")))
-        with pytest.raises(KeyboardInterrupt):
-            notify_recompute_outcome(EBP_ERROR)
-        failure_alert._current = None
-        failure_alert._loaded = False
-        monkeypatch.setattr(failure_alert, "send_imessage",
-                            lambda text: sent.append(text) or _Result())
-        notify_recompute_outcome("Rscript not found")
-        assert notify_recompute_outcome(None)["kind"] == "recovery"
-
-    def test_a_known_delivery_still_survives_one(self, sent):
-        notify_recompute_outcome(EBP_ERROR)
-        notify_recompute_outcome("Rscript not found")
-        assert failure_alert._current.announced is True
-
-    def test_the_timeline_still_carries_and_the_throttle_still_resets(self, sent):
-        notify_recompute_outcome(EBP_ERROR)
-        started = failure_alert._current.first_seen
-        notify_recompute_outcome("Rscript not found")
-        assert failure_alert._current.first_seen == started
-        assert failure_alert._current.failures == 2
-        assert failure_alert._current.last_sent is not None   # it just sent
-
-    def test_every_field_survives_a_round_trip(self, sent):
-        """Stronger than naming the fields: each one must actually be written
-        AND read back. `bypasses_used` existed, was carried by replace(), and
-        was still silently refilled on every restart because nothing wrote it."""
-        import dataclasses
-
-        notify_recompute_outcome(EBP_ERROR)
-        for n in range(3):
-            notify_recompute_outcome(f"other failure {n}")
-        before = failure_alert._current
-        failure_alert._current = None
-        failure_alert._loaded = False
-        notify_recompute_outcome(EBP_ERROR)          # forces a load
-        after = failure_alert._current
-
-        for field in dataclasses.fields(failure_alert._Outage):
-            if field.name in {"signature", "failures", "last_sent", "sending"}:
-                continue     # legitimately changed by the call that reloaded
-            assert getattr(after, field.name) == getattr(before, field.name), (
-                f"{field.name} did not survive persist -> load")
-
-    def test_every_field_is_accounted_for(self):
-        """A guard for the NEXT field. If someone adds one to _Outage, this says
-        out loud that the signature-change branch must have a decision for it."""
-        import dataclasses
-
-        fields = {f.name for f in dataclasses.fields(failure_alert._Outage)}
-        assert fields == {"signature", "first_seen", "failures", "last_sent",
-                          "announced", "sending", "bypasses_used",
-                          "announced_on", "pending_destinations", "cleared_on",
-                          "recovered_at", "counted_attempt"}, (
-            "a new _Outage field must be given an explicit carry/reset decision "
-            "in the signature-change branch")
 
 
 class TestTheWatchdogHasItsOwnClock:
@@ -1123,218 +897,6 @@ class TestTheWatchdogHasItsOwnClock:
         admin._last.update(started_at=None, finished_at=None)
 
 
-class TestAMovingIdentityCannotBypassTheThrottleForever:
-    """A changed signature skips the quiet period, so it must not be able to
-    skip it without limit.
-
-    An error whose text carries a moving UNQUOTED number — a row count, an id,
-    an elapsed figure — produces a fresh signature every time and is therefore
-    "news" every time, which bypasses the throttle by the door marked news.
-    Found by an adversarial review of this branch.
-
-    The bound is a BUDGET, not a time floor: a floor would delay a genuinely
-    distinct failure, which is the one thing a changed signature exists to make
-    immediate."""
-
-    def test_a_moving_identity_is_bounded(self, sent):
-        for n in range(12):
-            notify_recompute_outcome(f"persist failed for snapshot {n}")
-        assert len(sent) == 4, "3 bypasses plus the first alert, then throttled"
-
-    def test_genuinely_distinct_failures_are_still_immediate(self, sent):
-        notify_recompute_outcome("HTTP 500 from fred")
-        notify_recompute_outcome("HTTP 429 from fred")
-        notify_recompute_outcome("Rscript not found")
-        assert len(sent) == 3, "within budget, each is news and goes at once"
-
-    def test_the_budget_refills_after_an_ordinary_alert(self, sent):
-        for n in range(6):
-            notify_recompute_outcome(f"persist failed for snapshot {n}")
-        spent = len(sent)
-        # the quiet period elapses and an ordinary alert goes out
-        failure_alert._current.last_sent = datetime.now(UTC) - timedelta(hours=25)
-        notify_recompute_outcome(failure_alert._current.signature.replace("#", "9"))
-        assert len(sent) > spent
-        assert failure_alert._current.bypasses_used == 0
-
-    def test_the_budget_carries_across_a_restart(self, sent):
-        for n in range(12):
-            notify_recompute_outcome(f"persist failed for snapshot {n}")
-        spent = len(sent)
-        failure_alert._current = None
-        failure_alert._loaded = False
-        for n in range(12, 20):
-            notify_recompute_outcome(f"persist failed for snapshot {n}")
-        assert len(sent) == spent, "a restart must not refill the budget"
-
-
-class TestABoundedBudgetNeverBecomesSilence:
-    """The budget delays a moving identity; it must never cancel it.
-
-    The first version returned "throttled" the moment the budget was spent and
-    never consulted the ordinary quiet period, while the budget refilled only on
-    the same-signature path — which a perpetually-moving error text never
-    reaches. An outage of exactly the kind the budget was added for therefore
-    went PERMANENTLY silent after its opening burst. Two panel verifiers caught
-    it; my own tests did not, because they only ever exercised the window."""
-
-    def test_a_moving_identity_still_reports_once_per_quiet_period(self, sent):
-        for n in range(12):
-            notify_recompute_outcome(f"persist failed for snapshot {n}")
-        burst = len(sent)
-        assert burst == 4                       # first alert plus three bypasses
-
-        # a day passes, the outage is still going, the identity still moving
-        failure_alert._current.last_sent = datetime.now(UTC) - timedelta(hours=25)
-        notify_recompute_outcome("persist failed for snapshot 99")
-        assert len(sent) == burst + 1, "a moving identity must never go silent"
-
-    def test_it_keeps_reporting_day_after_day(self, sent):
-        notify_recompute_outcome("persist failed for snapshot 0")
-        for day in range(1, 6):
-            failure_alert._current.last_sent = datetime.now(UTC) - timedelta(hours=25)
-            notify_recompute_outcome(f"persist failed for snapshot {day * 100}")
-        assert len(sent) == 6
-
-    def test_a_zero_budget_still_reports_once_per_quiet_period(self, monkeypatch, sent):
-        """FAILURE_ALERT_MAX_SIGNATURE_CHANGES=0 must mean "no bypasses", not
-        "no alerts after the first"."""
-        from app.config import get_settings
-
-        monkeypatch.setenv("FAILURE_ALERT_MAX_SIGNATURE_CHANGES", "0")
-        get_settings.cache_clear()
-        notify_recompute_outcome("persist failed for snapshot 0")
-        assert len(sent) == 1
-        notify_recompute_outcome("persist failed for snapshot 1")
-        assert len(sent) == 1                   # no bypass, correctly throttled
-        failure_alert._current.last_sent = datetime.now(UTC) - timedelta(hours=25)
-        notify_recompute_outcome("persist failed for snapshot 2")
-        assert len(sent) == 2, "the ordinary quiet period must still apply"
-        get_settings.cache_clear()
-
-    def test_the_same_signature_path_is_unchanged(self, sent):
-        for _ in range(20):
-            notify_recompute_outcome(EBP_ERROR)
-        assert len(sent) == 1
-
-
-class TestAFailedBypassIsRetriedNotMuted:
-    """An undelivered alert is always retried — including one for a CHANGED
-    cause, which inherits the previous cause's throttle clock.
-
-    Left in place, that clock muted the new cause for the remainder of the old
-    one's quiet period: the operator was never told what the service had started
-    failing with. Panel finding on #64 (combo/SOTA-A)."""
-
-    def test_a_changed_cause_whose_send_fails_is_retried(self, monkeypatch, sent):
-        notify_recompute_outcome(EBP_ERROR)                 # cause A, delivered
-        assert len(sent) == 1
-
-        monkeypatch.setattr(failure_alert, "send_imessage",
-                            lambda text: _Result(ok=False, status_code=503, error="down"))
-        notify_recompute_outcome("Rscript not found")       # cause B, undelivered
-        assert len(sent) == 1
-
-        monkeypatch.setattr(failure_alert, "send_imessage",
-                            lambda text: sent.append(text) or _Result())
-        notify_recompute_outcome("Rscript not found")       # B again, must retry
-        assert len(sent) == 2, "an undelivered alert must never inherit a quiet period"
-
-    def test_a_delivered_changed_cause_does_start_one(self, sent):
-        notify_recompute_outcome(EBP_ERROR)
-        notify_recompute_outcome("Rscript not found")       # delivered
-        notify_recompute_outcome("Rscript not found")       # same cause, throttled
-        assert len(sent) == 2
-
-    def test_the_budget_is_still_bounded_across_failed_sends(self, monkeypatch, sent):
-        """Clearing the clock must not hand back budget."""
-        for n in range(12):
-            notify_recompute_outcome(f"persist failed for snapshot {n}")
-        assert len(sent) == 4
-
-
-class TestTheAllClearFollowsTheAlarm:
-    """The recovery belongs on the channel the alarm went out on.
-
-    An operator who switches transports mid-outage would otherwise keep
-    "FAILING" on the channel they were told on — forever — while the all-clear
-    arrived somewhere they were not watching. Panel finding on #64."""
-
-    def test_the_recovery_uses_the_announcing_transport(self, monkeypatch, sent):
-        """The alarm went out over SMS; iMessage is switched on afterwards, so
-        the DEFAULT flips to iMessage. The all-clear must still follow the
-        alarm — both channels are live, and only one of them heard the alarm."""
-        from app.config import get_settings
-
-        monkeypatch.setenv("IMESSAGE_ENABLED", "false")
-        monkeypatch.setenv("SMS_ENABLED", "true")
-        monkeypatch.setenv("SIPGATE_TOKEN_ID", "token-id")
-        monkeypatch.setenv("SIPGATE_TOKEN", "token-secret")
-        monkeypatch.setenv("SIPGATE_RECIPIENT", "+491510000000")
-        get_settings.cache_clear()
-        assert notify_recompute_outcome(EBP_ERROR)["transport"] == "sipgate"
-
-        monkeypatch.setenv("IMESSAGE_ENABLED", "true")      # default would now flip
-        get_settings.cache_clear()
-        result = notify_recompute_outcome(None)
-        assert result["kind"] == "recovery"
-        assert result["transport"] == "sipgate", "the all-clear follows the alarm"
-
-    def test_a_switched_off_channel_is_not_used(self, monkeypatch, sent):
-        """A channel the operator DISABLED is not a destination, and the channel
-        they switched TO never heard the alarm — so there is nobody left to
-        clear, and the outage closes silently rather than announcing itself to
-        the wrong audience."""
-        from app.config import get_settings
-
-        assert notify_recompute_outcome(EBP_ERROR)["transport"] == "imessage"
-        monkeypatch.setenv("IMESSAGE_ENABLED", "false")     # off, credentials intact
-        monkeypatch.setenv("SMS_ENABLED", "true")
-        monkeypatch.setenv("SIPGATE_TOKEN_ID", "token-id")
-        monkeypatch.setenv("SIPGATE_TOKEN", "token-secret")
-        monkeypatch.setenv("SIPGATE_RECIPIENT", "+491510000000")
-        get_settings.cache_clear()
-
-        result = notify_recompute_outcome(None)
-        assert result["status"] == "noop"
-        assert not any("OK" in m for m in sent)
-
-    def test_a_removed_channel_leaves_nobody_to_clear(self, monkeypatch, sent):
-        """A preference cannot resurrect a transport the operator removed, and
-        the replacement never heard the alarm."""
-        from app.config import get_settings
-
-        notify_recompute_outcome(EBP_ERROR)
-        monkeypatch.setenv("IMESSAGE_API_KEY", "")          # iMessage now unconfigured
-        monkeypatch.setenv("SMS_ENABLED", "true")
-        monkeypatch.setenv("SIPGATE_TOKEN_ID", "token-id")
-        monkeypatch.setenv("SIPGATE_TOKEN", "token-secret")
-        monkeypatch.setenv("SIPGATE_RECIPIENT", "+491510000000")
-        get_settings.cache_clear()
-
-        assert notify_recompute_outcome(None)["status"] == "noop"
-
-    def test_it_survives_a_restart(self, sent):
-        notify_recompute_outcome(EBP_ERROR)
-        failure_alert._current = None
-        failure_alert._loaded = False
-        assert notify_recompute_outcome(None)["transport"] == "imessage"
-
-    def test_a_failure_alert_never_prefers_a_stale_channel(self, monkeypatch, sent):
-        """Only the recovery follows the alarm; a NEW alarm goes wherever the
-        operator is configured now."""
-        from app.config import get_settings
-
-        notify_recompute_outcome(EBP_ERROR)
-        monkeypatch.setenv("IMESSAGE_ENABLED", "false")
-        monkeypatch.setenv("SMS_ENABLED", "true")
-        monkeypatch.setenv("SIPGATE_TOKEN_ID", "token-id")
-        monkeypatch.setenv("SIPGATE_TOKEN", "token-secret")
-        monkeypatch.setenv("SIPGATE_RECIPIENT", "+491510000000")
-        get_settings.cache_clear()
-        assert notify_recompute_outcome("Rscript not found")["transport"] == "sipgate"
-
-
 class TestTheWatchdogRaceUnderRealThreads:
     """Driven with real threads rather than reasoned about.
 
@@ -1397,187 +959,6 @@ class TestAnUnknownTransportIsNotAnSMS:
         assert ok is False and sent == []
         assert "unknown transport" in (error or "")
 
-    def test_a_corrupt_persisted_transport_does_not_route_to_sms(self, monkeypatch, sent):
-        """The end-to-end shape: a garbage channel on disk must not become an
-        SMS."""
-        import json
-
-        notify_recompute_outcome(EBP_ERROR)
-        state = json.loads(failure_alert._state_path().read_text())
-        state["announced_on"] = ["carrier-pigeon"]
-        failure_alert._state_path().write_text(json.dumps(state))
-        failure_alert._current = None
-        failure_alert._loaded = False
-
-        result = notify_recompute_outcome(None)
-        assert result["status"] == "noop", "an unrecognised destination is not a fallback"
-        assert not any("OK" in m for m in sent)
-
-    def test_a_known_but_unavailable_preference_is_ignored(self, monkeypatch, sent):
-        from app.config import get_settings
-
-        assert "sipgate" not in failure_alert._available_transports(get_settings())
-        transport, problem = failure_alert._select_transport(prefer="sipgate")
-        assert transport == "imessage" and problem is None
-
-
-class TestEveryChannelThatHeardTheAlarmHearsTheAllClear:
-    """An outage can span a transport change, and the all-clear is owed to
-    everyone who heard the alarm.
-
-    Announced over SMS, then iMessage switched on, then a second alert over
-    iMessage: a single remembered channel left SMS — still live, still watched —
-    holding "FAILING" forever. Panel finding on #64 (combo/SOTA-A)."""
-
-    @staticmethod
-    def _enable_sipgate(monkeypatch):
-        monkeypatch.setenv("SMS_ENABLED", "true")
-        monkeypatch.setenv("SIPGATE_TOKEN_ID", "token-id")
-        monkeypatch.setenv("SIPGATE_TOKEN", "token-secret")
-        monkeypatch.setenv("SIPGATE_RECIPIENT", "+491510000000")
-
-    def test_both_channels_are_remembered_and_both_are_cleared(self, monkeypatch, sent):
-        from app.config import get_settings
-
-        monkeypatch.setenv("IMESSAGE_ENABLED", "false")
-        self._enable_sipgate(monkeypatch)
-        get_settings.cache_clear()
-        assert notify_recompute_outcome(EBP_ERROR)["transport"] == "sipgate"
-
-        monkeypatch.setenv("IMESSAGE_ENABLED", "true")     # both live now
-        get_settings.cache_clear()
-        # The second alarm addresses the AUDIENCE, so sipgate — which was told
-        # about this outage — hears it too, not just the newly-current channel.
-        second = notify_recompute_outcome("Rscript not found")["transport"]
-        assert "sipgate" in second and "imessage" in second
-        assert {d.split("#")[0] for d in failure_alert._current.announced_on} == {
-            "sipgate", "imessage"}
-
-        result = notify_recompute_outcome(None)
-        assert result["kind"] == "recovery"
-        assert "sipgate" in result["transport"] and "imessage" in result["transport"]
-
-    def test_a_channel_that_went_away_is_not_attempted(self, monkeypatch, sent):
-        from app.config import get_settings
-
-        monkeypatch.setenv("IMESSAGE_ENABLED", "false")
-        self._enable_sipgate(monkeypatch)
-        get_settings.cache_clear()
-        notify_recompute_outcome(EBP_ERROR)
-        monkeypatch.setenv("IMESSAGE_ENABLED", "true")
-        get_settings.cache_clear()
-        notify_recompute_outcome("Rscript not found")
-
-        monkeypatch.setenv("SMS_ENABLED", "false")         # SMS retired
-        get_settings.cache_clear()
-        result = notify_recompute_outcome(None)
-        assert result["transport"] == "imessage"
-
-    def test_the_outage_stays_open_until_every_channel_is_told(self, monkeypatch, sent):
-        """A channel that did not get the all-clear is a channel still holding
-        FAILING, so one failed delivery must not close the outage."""
-        from app.config import get_settings
-
-        monkeypatch.setenv("IMESSAGE_ENABLED", "false")
-        self._enable_sipgate(monkeypatch)
-        get_settings.cache_clear()
-        notify_recompute_outcome(EBP_ERROR)
-        monkeypatch.setenv("IMESSAGE_ENABLED", "true")
-        get_settings.cache_clear()
-        notify_recompute_outcome("Rscript not found")
-
-        monkeypatch.setattr(failure_alert, "send_sms",
-                            lambda text: _Result(ok=False, status_code=503, error="down"))
-        assert notify_recompute_outcome(None)["status"] == "failed"
-        assert failure_alert._current is not None, "the outage must stay open"
-
-        monkeypatch.setattr(failure_alert, "send_sms",
-                            lambda text: sent.append(text) or _Result())
-        assert notify_recompute_outcome(None)["kind"] == "recovery"
-        assert failure_alert._current is None
-
-    def test_a_single_channel_outage_is_unchanged(self, sent):
-        notify_recompute_outcome(EBP_ERROR)
-        assert [d.split("#")[0] for d in failure_alert._current.announced_on] == ["imessage"]
-        assert notify_recompute_outcome(None)["transport"] == "imessage"
-
-
-class TestTheRecipientIsPartOfTheDestination:
-    """A transport is not a destination.
-
-    An operator who changes IMESSAGE_RECIPIENT mid-outage keeps the channel and
-    changes the audience: the all-clear would reach someone who never heard the
-    alarm, while the person who did keeps "FAILING". Panel finding on #64.
-
-    The recipient is a phone number or an Apple ID and this module masks it
-    everywhere it appears, so identity is a DIGEST — enough to answer "same
-    destination?", never enough to record who it is."""
-
-    def test_a_changed_recipient_is_a_different_destination(self, monkeypatch, sent):
-        from app.config import get_settings
-
-        notify_recompute_outcome(EBP_ERROR)
-        monkeypatch.setenv("IMESSAGE_RECIPIENT", "+491519999999")
-        get_settings.cache_clear()
-        result = notify_recompute_outcome(None)
-        assert result["status"] == "noop", (
-            "the new recipient never heard the alarm and is owed no all-clear")
-        assert not any("OK" in m for m in sent)
-
-    def test_the_same_recipient_still_gets_it(self, sent):
-        notify_recompute_outcome(EBP_ERROR)
-        assert notify_recompute_outcome(None)["kind"] == "recovery"
-
-    def test_no_recipient_handle_is_written_to_disk(self, sent):
-        """The digest exists so the state file never carries a handle."""
-        notify_recompute_outcome(EBP_ERROR)
-        raw = failure_alert._state_path().read_text()
-        assert "+491510000000" not in raw
-        assert "imessage#" in raw          # the channel is named, the audience is not
-
-    def test_a_crash_mid_send_still_knows_where_it_was_going(self, monkeypatch, sent):
-        """The destination is written BEFORE the send, so an interrupted attempt
-        can still route its all-clear. Without it the crash-gap fix would know
-        an all-clear was owed and be unable to say to whom."""
-        import json
-
-        monkeypatch.setattr(failure_alert, "send_imessage",
-                            lambda text: (_ for _ in ()).throw(KeyboardInterrupt("killed")))
-        with pytest.raises(KeyboardInterrupt):
-            notify_recompute_outcome(EBP_ERROR)
-        state = json.loads(failure_alert._state_path().read_text())
-        assert state["sending"] is True
-        assert any(d.startswith("imessage#") for d in state["pending_destinations"])
-
-        failure_alert._current = None
-        failure_alert._loaded = False
-        monkeypatch.setattr(failure_alert, "send_imessage",
-                            lambda text: sent.append(text) or _Result())
-        assert notify_recompute_outcome(None)["kind"] == "recovery"
-
-    def test_a_refused_send_records_no_destination(self, monkeypatch, sent):
-        """Known-not-delivered: nobody was told there, so nothing is owed."""
-        monkeypatch.setattr(failure_alert, "send_imessage",
-                            lambda text: _Result(ok=False, status_code=503, error="down"))
-        notify_recompute_outcome(EBP_ERROR)
-        assert failure_alert._current.announced_on == []
-        assert failure_alert._current.pending_destinations == []
-
-    def test_an_outage_that_knows_nothing_falls_back(self, sent):
-        """A state file from an older version knows it was announced and not
-        where. Dropping the all-clear over a bookkeeping gap would be worse than
-        sending it to the current channel."""
-        import json
-
-        notify_recompute_outcome(EBP_ERROR)
-        state = json.loads(failure_alert._state_path().read_text())
-        state["announced_on"] = []                     # as an older version wrote it
-        failure_alert._state_path().write_text(json.dumps(state))
-        failure_alert._current = None
-        failure_alert._loaded = False
-        assert notify_recompute_outcome(None)["kind"] == "recovery"
-
-
 class TestTheWatchdogDoesNotInflateTheCount:
     """One attempt is one failure however many times it is reported.
 
@@ -1618,57 +999,6 @@ class TestTheWatchdogDoesNotInflateTheCount:
         assert failure_alert._current.failures == 2
 
 
-class TestAPartialRecoveryDoesNotReTellTheCleared:
-    """A channel that got the all-clear must not get it again every cycle.
-
-    The outage stays open while any channel is still holding FAILING, so it is
-    retried — but the retry re-told the channels that had already heard, once
-    per recompute, for as long as the failing one stayed down. Panel finding."""
-
-    @staticmethod
-    def _two_channels(monkeypatch):
-        from app.config import get_settings
-
-        monkeypatch.setenv("IMESSAGE_ENABLED", "false")
-        monkeypatch.setenv("SMS_ENABLED", "true")
-        monkeypatch.setenv("SIPGATE_TOKEN_ID", "token-id")
-        monkeypatch.setenv("SIPGATE_TOKEN", "token-secret")
-        monkeypatch.setenv("SIPGATE_RECIPIENT", "+491510000000")
-        get_settings.cache_clear()
-        notify_recompute_outcome(EBP_ERROR)                # announced on sipgate
-        monkeypatch.setenv("IMESSAGE_ENABLED", "true")
-        get_settings.cache_clear()
-        notify_recompute_outcome("Rscript not found")      # announced on imessage
-
-    def test_a_cleared_channel_is_not_told_twice(self, monkeypatch, sent):
-        self._two_channels(monkeypatch)
-        monkeypatch.setattr(failure_alert, "send_sms",
-                            lambda text: _Result(ok=False, status_code=503, error="down"))
-        imessage_sends = []
-        monkeypatch.setattr(failure_alert, "send_imessage",
-                            lambda text: imessage_sends.append(text) or _Result())
-
-        for _ in range(5):                                  # five recompute cycles
-            notify_recompute_outcome(None)
-        assert len(imessage_sends) == 1, (
-            f"the cleared channel was re-told {len(imessage_sends)} times")
-        assert failure_alert._current is not None           # sipgate still owed
-
-    def test_the_missing_channel_is_still_retried_and_closes(self, monkeypatch, sent):
-        self._two_channels(monkeypatch)
-        monkeypatch.setattr(failure_alert, "send_sms",
-                            lambda text: _Result(ok=False, status_code=503, error="down"))
-        notify_recompute_outcome(None)
-        assert failure_alert._current is not None
-
-        sms_sends = []
-        monkeypatch.setattr(failure_alert, "send_sms",
-                            lambda text: sms_sends.append(text) or _Result())
-        assert notify_recompute_outcome(None)["kind"] == "recovery"
-        assert len(sms_sends) == 1
-        assert failure_alert._current is None
-
-
 class TestTheOpeningStuckAlertCountsAtLeastOne:
     """`occurrence=False` means "do not count this check as another attempt",
     not "no attempt has failed".
@@ -1705,314 +1035,6 @@ class TestTheOpeningStuckAlertCountsAtLeastOne:
         for _ in range(18):
             wedged.notify_if_stuck()
         assert failure_alert._current.failures == 1
-
-
-class TestCorruptDestinationStateIsUnknownNotUnreachable:
-    """A value of the wrong TYPE must read as "we do not know", which falls back
-    to the current channel — never as "we know, and none of them is reachable",
-    which drops the all-clear.
-
-    A bare string is iterable, so filtering items without checking the container
-    turned "imessage#abc" into eleven single-character destinations that match
-    nothing. Panel finding on #64."""
-
-    @pytest.mark.parametrize("corrupt", [
-        "imessage#abc123",          # a string iterates into characters
-        {"imessage#abc": 1},        # a dict iterates into keys
-        42,
-        None,
-    ])
-    def test_a_mistyped_destination_list_falls_back(self, sent, corrupt):
-        import json
-
-        notify_recompute_outcome(EBP_ERROR)
-        state = json.loads(failure_alert._state_path().read_text())
-        state["announced_on"] = corrupt
-        failure_alert._state_path().write_text(json.dumps(state))
-        failure_alert._current = None
-        failure_alert._loaded = False
-
-        result = notify_recompute_outcome(None)
-        assert result["kind"] == "recovery", "unknown must fall back, not drop"
-        assert any("OK" in m for m in sent)
-
-    def test_a_mistyped_cleared_list_does_not_suppress_delivery(self, sent):
-        import json
-
-        notify_recompute_outcome(EBP_ERROR)
-        state = json.loads(failure_alert._state_path().read_text())
-        state["cleared_on"] = "imessage#abc123"
-        failure_alert._state_path().write_text(json.dumps(state))
-        failure_alert._current = None
-        failure_alert._loaded = False
-        assert notify_recompute_outcome(None)["kind"] == "recovery"
-
-    def test_a_genuinely_unreachable_destination_still_closes_silently(self, sent):
-        """The real case must keep working: a well-formed list none of whose
-        destinations is live."""
-        import json
-
-        notify_recompute_outcome(EBP_ERROR)
-        state = json.loads(failure_alert._state_path().read_text())
-        state["announced_on"] = ["imessage#0000000000000000"]
-        failure_alert._state_path().write_text(json.dumps(state))
-        failure_alert._current = None
-        failure_alert._loaded = False
-        assert notify_recompute_outcome(None)["status"] == "noop"
-
-
-class TestClearedIsNotPermanent:
-    """A channel told the service is failing AGAIN is holding FAILING again.
-
-    Leaving it marked cleared excluded it from the final all-clear permanently:
-    partial recovery clears A, a new alarm goes to A, and the closing all-clear
-    then went only to B — A left holding FAILING forever, which is the exact
-    invariant this module claims. Panel finding on #64, in my own fix for the
-    retry flood."""
-
-    @staticmethod
-    def _two_channels(monkeypatch):
-        from app.config import get_settings
-
-        monkeypatch.setenv("IMESSAGE_ENABLED", "false")
-        monkeypatch.setenv("SMS_ENABLED", "true")
-        monkeypatch.setenv("SIPGATE_TOKEN_ID", "token-id")
-        monkeypatch.setenv("SIPGATE_TOKEN", "token-secret")
-        monkeypatch.setenv("SIPGATE_RECIPIENT", "+491510000000")
-        get_settings.cache_clear()
-        notify_recompute_outcome(EBP_ERROR)                # announced on sipgate
-        monkeypatch.setenv("IMESSAGE_ENABLED", "true")
-        get_settings.cache_clear()
-        notify_recompute_outcome("Rscript not found")      # announced on imessage
-
-    def test_a_rearmed_channel_gets_the_final_all_clear(self, monkeypatch, sent):
-        self._two_channels(monkeypatch)
-
-        # partial recovery: imessage hears it, sipgate does not
-        monkeypatch.setattr(failure_alert, "send_sms",
-                            lambda text: _Result(ok=False, status_code=503, error="down"))
-        notify_recompute_outcome(None)
-        assert failure_alert._current is not None
-
-        # the service fails again and imessage is told, so it is no longer clear
-        notify_recompute_outcome("a different failure entirely")
-        assert not any(d.startswith("imessage#") for d in failure_alert._current.cleared_on)
-
-        imessage_all_clears = []
-        monkeypatch.setattr(failure_alert, "send_imessage",
-                            lambda text: imessage_all_clears.append(text) or _Result())
-        monkeypatch.setattr(failure_alert, "send_sms",
-                            lambda text: sent.append(text) or _Result())
-        assert notify_recompute_outcome(None)["kind"] == "recovery"
-        assert any("OK" in m for m in imessage_all_clears), (
-            "the re-alarmed channel must hear the final all-clear")
-        assert failure_alert._current is None
-
-    def test_partial_recovery_progress_survives_a_restart(self, monkeypatch, sent):
-        """A failed recovery must persist which channels already heard, or the
-        next process re-tells one that did."""
-        import json
-
-        self._two_channels(monkeypatch)
-        monkeypatch.setattr(failure_alert, "send_sms",
-                            lambda text: _Result(ok=False, status_code=503, error="down"))
-        notify_recompute_outcome(None)
-
-        on_disk = json.loads(failure_alert._state_path().read_text())
-        assert any(d.startswith("imessage#") for d in on_disk["cleared_on"]), (
-            "partial progress must reach the state file")
-
-        failure_alert._current = None
-        failure_alert._loaded = False
-        imessage_sends = []
-        monkeypatch.setattr(failure_alert, "send_imessage",
-                            lambda text: imessage_sends.append(text) or _Result())
-        monkeypatch.setattr(failure_alert, "send_sms",
-                            lambda text: sent.append(text) or _Result())
-        notify_recompute_outcome(None)
-        assert imessage_sends == [], "a channel that already heard must not be re-told"
-
-
-class TestAnAudienceIsNotAChannel:
-    """An alarm addresses everyone who has been told about this outage.
-
-    Sending only to the currently-selected channel left every other destination
-    that had heard about the outage — and possibly heard it had ENDED —
-    believing the service was healthy while it was not. And a quiet period
-    assumes its audience knows things are bad; an audience holding an all-clear
-    does not. Panel finding on #64."""
-
-    @staticmethod
-    def _two_channels(monkeypatch):
-        from app.config import get_settings
-
-        monkeypatch.setenv("IMESSAGE_ENABLED", "false")
-        monkeypatch.setenv("SMS_ENABLED", "true")
-        monkeypatch.setenv("SIPGATE_TOKEN_ID", "token-id")
-        monkeypatch.setenv("SIPGATE_TOKEN", "token-secret")
-        monkeypatch.setenv("SIPGATE_RECIPIENT", "+491510000000")
-        get_settings.cache_clear()
-        notify_recompute_outcome(EBP_ERROR)
-        monkeypatch.setenv("IMESSAGE_ENABLED", "true")
-        get_settings.cache_clear()
-
-    def test_a_recurrence_reaches_a_channel_that_heard_the_all_clear(self, monkeypatch, sent):
-        """The sequence the panel named: partial recovery clears one channel,
-        the service fails again, and that channel must not be left believing
-        everything is fine."""
-        self._two_channels(monkeypatch)
-        notify_recompute_outcome("Rscript not found")       # both alarmed
-
-        sms_msgs, im_msgs = [], []
-        monkeypatch.setattr(failure_alert, "send_sms",
-                            lambda t: _Result(ok=False, status_code=503, error="down"))
-        monkeypatch.setattr(failure_alert, "send_imessage", lambda t: im_msgs.append(t) or _Result())
-        notify_recompute_outcome(None)                      # imessage told OK, sipgate not
-        assert any("OK" in m for m in im_msgs)
-
-        monkeypatch.setattr(failure_alert, "send_sms", lambda t: sms_msgs.append(t) or _Result())
-        notify_recompute_outcome("a different failure entirely")
-        assert any("FAILING" in m for m in im_msgs[1:]), (
-            "the channel holding an all-clear must hear the recurrence")
-
-    def test_the_quiet_period_does_not_mute_a_recurrence_after_an_all_clear(self, sent):
-        notify_recompute_outcome(EBP_ERROR)
-        notify_recompute_outcome(None)                      # all-clear delivered
-        before = len(sent)
-        notify_recompute_outcome(EBP_ERROR)                 # same signature, at once
-        assert len(sent) == before + 1
-
-    def test_an_alarm_reaches_the_audience_if_any_channel_takes_it(self, monkeypatch, sent):
-        """One dead channel must not stop the alarm reaching the others."""
-        self._two_channels(monkeypatch)
-        monkeypatch.setattr(failure_alert, "send_sms",
-                            lambda t: _Result(ok=False, status_code=503, error="down"))
-        result = notify_recompute_outcome("Rscript not found")
-        assert result["status"] == "sent"
-
-    def test_the_first_alarm_still_goes_to_one_channel(self, sent):
-        """With no audience yet, there is nothing to broadcast to."""
-        result = notify_recompute_outcome(EBP_ERROR)
-        assert result["transport"] == "imessage"
-
-
-class TestOnlyDeliveredDestinationsAreRecorded:
-    """A channel that REFUSED the alarm was written down as having heard it, and
-    was later sent an all-clear for an outage it was never told about.
-
-    The attempted list and the delivered list are different lists. Panel finding
-    on #64, in my own multi-target alarm."""
-
-    @staticmethod
-    def _two_channels(monkeypatch):
-        from app.config import get_settings
-
-        monkeypatch.setenv("IMESSAGE_ENABLED", "false")
-        monkeypatch.setenv("SMS_ENABLED", "true")
-        monkeypatch.setenv("SIPGATE_TOKEN_ID", "token-id")
-        monkeypatch.setenv("SIPGATE_TOKEN", "token-secret")
-        monkeypatch.setenv("SIPGATE_RECIPIENT", "+491510000000")
-        get_settings.cache_clear()
-        notify_recompute_outcome(EBP_ERROR)
-        monkeypatch.setenv("IMESSAGE_ENABLED", "true")
-        get_settings.cache_clear()
-
-    def test_a_refused_channel_is_not_recorded_as_told(self, monkeypatch, sent):
-        self._two_channels(monkeypatch)
-        monkeypatch.setattr(failure_alert, "send_imessage",
-                            lambda t: _Result(ok=False, status_code=503, error="down"))
-        notify_recompute_outcome("Rscript not found")       # sipgate ok, imessage refuses
-        channels = {d.split("#")[0] for d in failure_alert._current.announced_on}
-        assert channels == {"sipgate"}, f"recorded {channels}"
-
-    def test_and_therefore_gets_no_all_clear(self, monkeypatch, sent):
-        self._two_channels(monkeypatch)
-        monkeypatch.setattr(failure_alert, "send_imessage",
-                            lambda t: _Result(ok=False, status_code=503, error="down"))
-        notify_recompute_outcome("Rscript not found")
-
-        im = []
-        monkeypatch.setattr(failure_alert, "send_imessage", lambda t: im.append(t) or _Result())
-        notify_recompute_outcome(None)
-        assert im == [], "a channel never told of the outage is owed no all-clear"
-
-    def test_a_crash_records_every_destination_it_was_attempting(self, monkeypatch, sent):
-        """The marker must name real destinations. Hashing the joined display
-        string "sipgate, imessage" produced an id matching nothing, so a crash
-        lost its own recovery route."""
-        import json
-
-        self._two_channels(monkeypatch)
-        monkeypatch.setattr(failure_alert, "send_imessage",
-                            lambda t: (_ for _ in ()).throw(KeyboardInterrupt("killed")))
-        with pytest.raises(KeyboardInterrupt):
-            notify_recompute_outcome("Rscript not found")
-
-        pending = json.loads(failure_alert._state_path().read_text())["pending_destinations"]
-        assert {d.split("#")[0] for d in pending} == {"sipgate", "imessage"}
-        assert not any("," in d for d in pending), "a joined display string is not a destination"
-
-    def test_the_crash_route_still_delivers_an_all_clear(self, monkeypatch, sent):
-        self._two_channels(monkeypatch)
-        monkeypatch.setattr(failure_alert, "send_imessage",
-                            lambda t: (_ for _ in ()).throw(KeyboardInterrupt("killed")))
-        with pytest.raises(KeyboardInterrupt):
-            notify_recompute_outcome("Rscript not found")
-        failure_alert._current = None
-        failure_alert._loaded = False
-        monkeypatch.setattr(failure_alert, "send_imessage", lambda t: sent.append(t) or _Result())
-        assert notify_recompute_outcome(None)["kind"] == "recovery"
-
-
-class TestATemporarilyUnreachableDestinationKeepsItsAllClear:
-    """A transport disabled for a restart or a key rotation is not gone forever.
-
-    The recovery path used to DISCARD the outage when no alarmed destination was
-    reachable, so a service that recovered during that minute lost its all-clear
-    permanently and the operator kept holding "FAILING" once the channel came
-    back. Panel finding on #64; reproduced before and after the fix."""
-
-    def test_the_all_clear_waits_for_the_channel_to_return(self, monkeypatch, sent):
-        from app.config import get_settings
-
-        notify_recompute_outcome(EBP_ERROR)
-        assert len(sent) == 1
-
-        monkeypatch.setenv("IMESSAGE_ENABLED", "false")     # a minute of maintenance
-        get_settings.cache_clear()
-        assert notify_recompute_outcome(None)["status"] == "noop"
-        assert failure_alert._current is not None, "the obligation must survive"
-
-        monkeypatch.setenv("IMESSAGE_ENABLED", "true")
-        get_settings.cache_clear()
-        assert notify_recompute_outcome(None)["kind"] == "recovery"
-        assert sum(1 for m in sent if m.startswith("bubblegauge OK")) == 1
-        assert failure_alert._current is None
-
-    def test_repeated_successes_while_unreachable_send_nothing(self, monkeypatch, sent):
-        """Staying open must not mean retrying into the void every cycle."""
-        from app.config import get_settings
-
-        notify_recompute_outcome(EBP_ERROR)
-        monkeypatch.setenv("IMESSAGE_ENABLED", "false")
-        get_settings.cache_clear()
-        for _ in range(5):
-            assert notify_recompute_outcome(None)["status"] == "noop"
-        assert len(sent) == 1
-
-    def test_it_survives_a_restart_while_unreachable(self, monkeypatch, sent):
-        from app.config import get_settings
-
-        notify_recompute_outcome(EBP_ERROR)
-        monkeypatch.setenv("IMESSAGE_ENABLED", "false")
-        get_settings.cache_clear()
-        notify_recompute_outcome(None)
-
-        failure_alert._current = None
-        failure_alert._loaded = False
-        monkeypatch.setenv("IMESSAGE_ENABLED", "true")
-        get_settings.cache_clear()
-        assert notify_recompute_outcome(None)["kind"] == "recovery"
 
 
 class TestAnEndedOutageDoesNotLendItsTimeline:
@@ -2187,119 +1209,6 @@ class TestTheAllClearReportsTheOutageNotTheWait:
         assert recovered is not None
 
 
-class TestAMixedRecoveryDoesNotAbandonTheUnreachable:
-    """A recovery closes when every ANNOUNCED destination has been told, not
-    when every REACHABLE one has.
-
-    Asking only about the targets it could reach meant a mixed recovery — one
-    channel live, another down for a restart — delivered to the live one and
-    closed, and the channel that was merely unreachable at that moment never got
-    an all-clear at all. The same defect as the all-unreachable case, hiding
-    behind a sibling that succeeded. Panel finding on #64."""
-
-    @staticmethod
-    def _alarm_both(monkeypatch):
-        from app.config import get_settings
-
-        monkeypatch.setenv("IMESSAGE_ENABLED", "false")
-        monkeypatch.setenv("SMS_ENABLED", "true")
-        monkeypatch.setenv("SIPGATE_TOKEN_ID", "token-id")
-        monkeypatch.setenv("SIPGATE_TOKEN", "token-secret")
-        monkeypatch.setenv("SIPGATE_RECIPIENT", "+491510000000")
-        get_settings.cache_clear()
-        notify_recompute_outcome("boom A")                  # sipgate
-        monkeypatch.setenv("IMESSAGE_ENABLED", "true")
-        get_settings.cache_clear()
-        notify_recompute_outcome("boom B")                  # audience: both
-
-    def test_the_unreachable_channel_still_gets_its_all_clear(self, monkeypatch, sent):
-        from app.config import get_settings
-
-        self._alarm_both(monkeypatch)
-        sms, im = [], []
-        monkeypatch.setattr(failure_alert, "send_sms", lambda t: sms.append(t) or _Result())
-        monkeypatch.setattr(failure_alert, "send_imessage", lambda t: im.append(t) or _Result())
-
-        monkeypatch.setenv("SMS_ENABLED", "false")          # sipgate down for a restart
-        get_settings.cache_clear()
-        notify_recompute_outcome(None)
-        assert failure_alert._current is not None, "an untold audience keeps it open"
-
-        monkeypatch.setenv("SMS_ENABLED", "true")           # sipgate returns
-        get_settings.cache_clear()
-        notify_recompute_outcome(None)
-
-        assert sum(1 for m in sms if m.startswith("bubblegauge OK")) == 1
-        assert sum(1 for m in im if m.startswith("bubblegauge OK")) == 1
-        assert failure_alert._current is None
-
-    def test_the_reachable_channel_is_not_told_twice(self, monkeypatch, sent):
-        from app.config import get_settings
-
-        self._alarm_both(monkeypatch)
-        im = []
-        monkeypatch.setattr(failure_alert, "send_imessage", lambda t: im.append(t) or _Result())
-        monkeypatch.setenv("SMS_ENABLED", "false")
-        get_settings.cache_clear()
-        for _ in range(4):
-            notify_recompute_outcome(None)
-        assert sum(1 for m in im if m.startswith("bubblegauge OK")) == 1
-
-    def test_a_fully_reachable_recovery_still_closes_at_once(self, sent):
-        notify_recompute_outcome(EBP_ERROR)
-        assert notify_recompute_outcome(None)["kind"] == "recovery"
-        assert failure_alert._current is None
-
-
-class TestAnUnreachableAudienceIsReportedOnce:
-    """A destination retired for good used to produce a WARNING and a state-file
-    write on EVERY recompute — 78 of each over a fortnight of healthy running,
-    from the subsystem whose warnings are supposed to mean something. Found by a
-    worker attacking the previous fix."""
-
-    def test_the_state_file_is_written_once_not_every_cycle(self, monkeypatch, sent):
-        from app.config import get_settings
-
-        notify_recompute_outcome(EBP_ERROR)
-        monkeypatch.setenv("IMESSAGE_ENABLED", "false")
-        get_settings.cache_clear()
-
-        writes = []
-        original = failure_alert._persist_locked
-        monkeypatch.setattr(failure_alert, "_persist_locked",
-                            lambda: (writes.append(1), original())[1])
-        for _ in range(78):
-            notify_recompute_outcome(None)
-        assert len(writes) == 1, f"{len(writes)} writes during healthy running"
-
-    def test_the_warning_is_emitted_once(self, monkeypatch, sent):
-        from app.config import get_settings
-
-        notify_recompute_outcome(EBP_ERROR)
-        monkeypatch.setenv("IMESSAGE_ENABLED", "false")
-        get_settings.cache_clear()
-
-        warnings = []
-        monkeypatch.setattr(failure_alert.log, "warning",
-                            lambda event, **kw: warnings.append(event))
-        for _ in range(78):
-            notify_recompute_outcome(None)
-        assert warnings.count("failure_alert_recovery_unreachable") == 1
-
-    def test_the_all_clear_still_arrives_afterwards(self, monkeypatch, sent):
-        """Quieting the branch must not quiet the obligation."""
-        from app.config import get_settings
-
-        notify_recompute_outcome(EBP_ERROR)
-        monkeypatch.setenv("IMESSAGE_ENABLED", "false")
-        get_settings.cache_clear()
-        for _ in range(10):
-            notify_recompute_outcome(None)
-        monkeypatch.setenv("IMESSAGE_ENABLED", "true")
-        get_settings.cache_clear()
-        assert notify_recompute_outcome(None)["kind"] == "recovery"
-
-
 class TestOneAttemptIsOneFailure:
     """The watchdog and the wedged run describe the SAME attempt — the watchdog
     while it hangs, the run when it finally gives up — and it was counted twice.
@@ -2365,95 +1274,40 @@ class TestTheWedgedRunIsDatedFromWhenItStuck:
             get_settings.cache_clear()
 
 
-class TestTheCrashMarkerNamesOnlyWhatWasAttempted:
-    """The marker says who an all-clear may be owed to, so it must name what was
-    ATTEMPTED, not the whole audience.
 
-    Written all up front, a crash on the FIRST target promoted a channel that
-    was never contacted — and that channel then received an all-clear for an
-    alarm it had never been sent. Panel finding on #64."""
 
-    @staticmethod
-    def _alarm_both(monkeypatch):
+class TestOneOutageRecord:
+    """Owner decision D11 (2026-09-28): one outage record, one clock, the
+    current transport. A changed failure text is the same outage: it waits for
+    the ordinary repeat, and the all-clear goes where the digest goes now."""
+
+    def test_a_different_failure_inside_the_quiet_period_is_throttled(self, sent):
+        assert notify_recompute_outcome(EBP_ERROR)["status"] == "sent"
+        assert notify_recompute_outcome("HTTP 429 from fred")["status"] == "throttled"
+        assert len(sent) == 1
+
+    def test_the_alarm_repeats_after_the_quiet_period_whatever_the_cause(self, sent):
+        notify_recompute_outcome(EBP_ERROR)
+        failure_alert._current.last_sent = datetime.now(UTC) - timedelta(hours=25)
+        result = notify_recompute_outcome("HTTP 429 from fred")
+        assert result["status"] == "sent" and "x2" in sent[-1]
+
+    def test_the_all_clear_goes_to_the_current_transport(self, monkeypatch, sent):
         from app.config import get_settings
 
+        assert notify_recompute_outcome(EBP_ERROR)["transport"] == "imessage"
         monkeypatch.setenv("IMESSAGE_ENABLED", "false")
         monkeypatch.setenv("SMS_ENABLED", "true")
         monkeypatch.setenv("SIPGATE_TOKEN_ID", "token-id")
         monkeypatch.setenv("SIPGATE_TOKEN", "token-secret")
         monkeypatch.setenv("SIPGATE_RECIPIENT", "+491510000000")
         get_settings.cache_clear()
-        notify_recompute_outcome("boom A")                  # sipgate only
-        monkeypatch.setenv("IMESSAGE_ENABLED", "true")
-        get_settings.cache_clear()
+        result = notify_recompute_outcome(None)
+        assert result["kind"] == "recovery" and result["transport"] == "sipgate"
 
-    def test_a_channel_never_contacted_is_not_recorded(self, monkeypatch, sent):
-        import json
-
-        self._alarm_both(monkeypatch)
-
-        def _die(text):
-            raise KeyboardInterrupt("killed on the first target")
-
-        monkeypatch.setattr(failure_alert, "send_sms", _die)
-        with pytest.raises(KeyboardInterrupt):
-            notify_recompute_outcome("boom B")              # audience is both
-
-        pending = json.loads(failure_alert._state_path().read_text())["pending_destinations"]
-        assert {d.split("#")[0] for d in pending} == {"sipgate"}, (
-            "only the target actually attempted may be recorded")
-
-    def test_and_therefore_receives_no_all_clear(self, monkeypatch, sent):
-        self._alarm_both(monkeypatch)
-        im = []
-        monkeypatch.setattr(failure_alert, "send_imessage", lambda t: im.append(t) or _Result())
-        monkeypatch.setattr(failure_alert, "send_sms",
-                            lambda t: (_ for _ in ()).throw(KeyboardInterrupt("killed")))
-        with pytest.raises(KeyboardInterrupt):
-            notify_recompute_outcome("boom B")
-
-        failure_alert._current = None
-        failure_alert._loaded = False
-        monkeypatch.setattr(failure_alert, "send_sms", lambda t: sent.append(t) or _Result())
-        notify_recompute_outcome(None)
-        assert not any(m.startswith("bubblegauge OK") for m in im), (
-            "a channel that was never contacted is owed nothing"
-        )
-
-    def test_the_attempted_target_still_gets_one(self, monkeypatch, sent):
-        """Its delivery is genuinely unknown, which still resolves to owed."""
-        self._alarm_both(monkeypatch)
-        sms = []
-        monkeypatch.setattr(failure_alert, "send_sms",
-                            lambda t: (_ for _ in ()).throw(KeyboardInterrupt("killed")))
-        with pytest.raises(KeyboardInterrupt):
-            notify_recompute_outcome("boom B")
-
-        failure_alert._current = None
-        failure_alert._loaded = False
-        monkeypatch.setattr(failure_alert, "send_sms", lambda t: sms.append(t) or _Result())
-        notify_recompute_outcome(None)
-        assert any(m.startswith("bubblegauge OK") for m in sms)
-
-    def test_the_ordinary_case_does_not_pay_for_the_multi_target_fix(self, monkeypatch, sent):
-        """One target writes the marker once.
-
-        Three writes total for a single-target alert — the throttle decision,
-        the marker, and the outcome — which is what it was before the marker
-        moved into the loop. The property under test is that the loop adds
-        nothing per target beyond the one it must."""
-        writes = []
-        original = failure_alert._persist_locked
-        monkeypatch.setattr(failure_alert, "_persist_locked",
-                            lambda: (writes.append(1), original())[1])
+    def test_the_record_holds_no_recipient_and_no_error_text(self, sent):
         notify_recompute_outcome(EBP_ERROR)
-        assert len(writes) == 3, f"{len(writes)} writes for one single-target alert"
-
-    def test_two_targets_write_one_marker_each(self, monkeypatch, sent):
-        self._alarm_both(monkeypatch)
-        writes = []
-        original = failure_alert._persist_locked
-        monkeypatch.setattr(failure_alert, "_persist_locked",
-                            lambda: (writes.append(1), original())[1])
-        notify_recompute_outcome("boom B")                  # audience of two
-        assert len(writes) == 4, f"{len(writes)} writes for a two-target alert"
+        state = failure_alert._state_path().read_text()
+        assert "+491510000000" not in state and "base 10" not in state
+        assert set(json.loads(state)) == {"first_seen", "failures", "last_sent", "announced",
+                                          "counted_attempt", "recovered_at"}

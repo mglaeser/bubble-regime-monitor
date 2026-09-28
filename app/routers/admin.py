@@ -32,10 +32,9 @@ _last: dict[str, Any] = {"started_at": None, "finished_at": None, "snapshot_id":
 def notify_if_stuck() -> None:
     """Report a recompute that has held the single-flight lock too long.
 
-    The elapsed time is deliberately part of the message but not of the outage
-    identity: `failure_signature` collapses digits, so "stuck after 5h" and
-    "stuck after 9h" are one outage and the operator gets one alert a day, not
-    one per slot. Never raises — this runs on the scheduler thread."""
+    It is one outage however often it is reported (the alarm repeats on the
+    outage's own clock, once a day by default). Never raises — this runs on
+    the scheduler thread."""
     try:
         started_at = _last.get("started_at")
         if not started_at or _last.get("finished_at"):
@@ -63,9 +62,6 @@ def notify_if_stuck() -> None:
         hours = int(elapsed.total_seconds() // 3600)
         notify_recompute_outcome(
             f"recompute stuck: in flight {hours}h with no result, later slots skipped",
-            # The hours move every slot while the condition does not, so the
-            # identity is stated rather than derived from the text.
-            signature="recompute stuck holding the single-flight lock",
             # The attempt this is about, and when it began. Naming the attempt
             # keeps repeated checks — this job runs every 30 minutes while a
             # recompute is wedged, against four-hourly recomputes — and the

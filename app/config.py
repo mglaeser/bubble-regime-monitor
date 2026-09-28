@@ -120,9 +120,8 @@ class Settings(BaseSettings):
     # failure it reports is one the operator learned about, last time, twelve
     # days late. A monitor that must be switched on is a monitor that is off.
     failure_alerts_enabled: bool = True
-    # How long the SAME failure stays quiet before repeating. A new failure
-    # signature always sends immediately; this only throttles repeats, which
-    # would otherwise arrive six times a day for as long as the outage lasts.
+    # How long an outage's alarm stays quiet before repeating; without it the
+    # alarm would arrive six times a day for as long as the outage lasts.
     failure_alert_repeat_h: int = 24
     # Where the current outage is remembered across a restart. Deploying a fix
     # IS a restart, and that is the usual way an outage ends — without this the
@@ -133,13 +132,6 @@ class Settings(BaseSettings):
     # is reported as a wedged run. Slots are 4h apart and a full gather runs
     # well under an hour, so a run still in flight at the next slot is stuck.
     failure_alert_stuck_after_h: int = 4
-    # How many times a CHANGED failure signature may skip the quiet period
-    # before the ordinary one applies again. A changed signature is news and
-    # sends at once — but an error whose text carries a moving unquoted number
-    # is "news" every single time, which bypasses the throttle entirely. A
-    # budget bounds that without delaying a genuinely distinct failure, which a
-    # time floor would.
-    failure_alert_max_signature_changes: int = 3
 
     # --- ALERT SYSTEM (docs/ALERT_SYSTEM.md) --------------------------------
     # Two INDEPENDENT switches. Evidence capture may run with alerting fully
