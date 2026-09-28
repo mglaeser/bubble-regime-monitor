@@ -41,7 +41,7 @@ Rootless Podman notes: the `:Z` suffix on the `./data:/data` bind mount applies 
                           │                                                  │
   FRED / SSGA / Stooq     │  BLOCK S — Structural Fragility                  │
   EDGAR / FINRA / CBOE ──▶│   S1 Valuation (0.33)  S2 Concentration (0.27)   │
-  multpl / vixcentral     │   S3 Semis GSY (0.20)  S4 GSADF (0.07, CONTESTED)│
+  multpl / shillerdata    │   S3 Semis GSY (0.20)  S4 GSADF (0.07, CONTESTED)│
   Wikipedia constituents  │   S5 Credit (0.13)                               │
                           │        S = Π(sᵢ+ε)^wᵢ − ε                        │
                           │                                                  │
@@ -96,7 +96,7 @@ Red-flag count 0 → override not fired. **Deterministic point score 52.43; MC m
 
 | Indicator | Primary source | Fallback chain | SLA |
 |-----------|---------------|----------------|-----|
-| CAPE (S1) | multpl scrape | GuruFocus → shillerdata `ie_data.xls` | 35d |
+| CAPE (S1) | multpl scrape | shillerdata `ie_data.xls` | 35d |
 | Real 10-yr (S1) | FRED `DFII10` | none (FRED core) | 3d |
 | Concentration (S2) | SSGA SPY holdings XLSX (top-10 **holdings** sum, not a sector weight) | Slickcharts → JPMAM cross-check | 3d |
 | Semis run-up (S3) | Stooq `smh.us`/`spy.us` | SOXX substitute | 3d |
@@ -106,7 +106,7 @@ Red-flag count 0 → override not fired. **Deterministic point score 52.43; MC m
 | Margin (D2) | FINRA XLSX (3–4-week publication lag) | none — cache & tolerate staleness | 45d |
 | Hyperscaler FCF (D3) | SEC EDGAR companyfacts (mandatory UA, ≤8 req/s self-cap) | total-revenue gate proxy | 100d |
 | LPPLS (D4) | `lppls==0.6.24` (pinned; maintenance-inactive) | **drop + renormalize Block D** | 3d |
-| VIX curve (V) | vixcentral | CBOE delayed CSV → FRED `VIXCLS`/`VIX3M` | 2d |
+| VIX curve (V) | CBOE delayed quotes | FRED `VIXCLS`/`VIX3M` | 2d |
 
 ## API
 

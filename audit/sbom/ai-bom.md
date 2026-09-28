@@ -15,13 +15,13 @@ A machine-readable CycloneDX SBOM should be generated per build in CI (Wave 2). 
 
 ## Data-source providers (egress AI-BOM adjunct)
 
-FRED · Tiingo · Twelve Data · Alpha Vantage · Polygon/Massive · SSGA (SPDR holdings) · SEC EDGAR · FINRA · CBOE · multpl/GuruFocus/shillerdata · sipgate (SMS). All accessed via fixed-host REST in `app/sources/*`; each with its own static API key (rotate — B-06).
+FRED · Tiingo · Twelve Data · Alpha Vantage · Polygon/Massive · SSGA (SPDR holdings) · SEC EDGAR · FINRA · CBOE · multpl/shillerdata · sipgate (SMS). All accessed via fixed-host REST in `app/sources/*`; each with its own static API key (rotate — B-06).
 
 **imessage-proxy** (`POST {IMESSAGE_API_BASE_URL}/api/messages`, `app/notify/imessage.py`) — the daily digest's alternative delivery transport. Listed here and **deliberately not in the AI-BOM table above**: it hosts no model, holds no prompt or dataset, and performs no inference. It carries model-written text; it is not an AI component. Two properties set it apart from every other row: its host comes from configuration rather than from a literal in code, and its credential (`IMESSAGE_API_KEY`, scoped `messages:send`, `imp_` prefix) **expires** — 90 days by default. Contract of record: `imessage-proxy/openapi.yaml` (operationId `sendMessage`) + `docs/api.md`. Version pinning: **none** — this service consumes a contract, not a package, and nothing here detects the contract changing under it. Worth stating plainly, because it is the dependency in this inventory with the weakest version story.
 
 ## Software dependency inventory (from `pyproject.toml`)
 
-Runtime: fastapi, uvicorn[standard], pydantic, pydantic-settings, SQLAlchemy, alembic, httpx, tenacity, APScheduler(<4), structlog, slowapi, numpy(<2.3), pandas(<3.0), openpyxl, xlrd, beautifulsoup4, lxml, **lppls==0.6.24**, PyYAML. Optional: pyarrow (`.[parquet]`), yfinance (`.[yfinance]`). Native: R `exuber` 1.1.0 (CRAN) via subprocess. Dev: pytest, ruff, mypy.
+Runtime: fastapi, uvicorn[standard], pydantic, pydantic-settings, SQLAlchemy, alembic, httpx, tenacity, APScheduler(<4), structlog, slowapi, numpy(<2.3), pandas(<3.0), openpyxl, xlrd, lxml, **lppls==0.6.24**, PyYAML. Optional: pyarrow (`.[parquet]`), yfinance (`.[yfinance]`). Native: R `exuber` 1.1.0 (CRAN) via subprocess. Dev: pytest, ruff, mypy.
 
 **Existence verification (finding B-04/C-03):** every package above was resolved to a real registry entry during this engagement; **no hallucinated or newly-registered/typo-adjacent dependency was found.** The gap is that this verification is manual and one-off — there is no lockfile/hash pinning and no pre-install existence gate.
 

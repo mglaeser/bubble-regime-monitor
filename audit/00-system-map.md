@@ -57,7 +57,7 @@ No personal data of third parties is stored. The PII in the system is **two of t
 
 ## External egress paths (all outbound HTTPS)
 
-Hosted LLM gateway (HTTPS endpoint from `LLM_API_BASE_URL`) · FRED (`fredgraph.csv` + api) · Tiingo · Twelve Data · Alpha Vantage · **Polygon/Massive** (grouped-daily breadth) · **SSGA** (SPDR holdings XLSX → S&P 500 constituents) · SEC EDGAR · FINRA (margin debt) · multpl / GuruFocus / shillerdata (CAPE) · CBOE (VIX) · Stooq (disabled by default) · **sipgate** (SMS) · **imessage-proxy** (`POST {IMESSAGE_API_BASE_URL}/api/messages`, Bearer `IMESSAGE_API_KEY`).
+Hosted LLM gateway (HTTPS endpoint from `LLM_API_BASE_URL`) · FRED (`fredgraph.csv` + api) · Tiingo · Twelve Data · Alpha Vantage · **Polygon/Massive** (grouped-daily breadth) · **SSGA** (SPDR holdings XLSX → S&P 500 constituents) · SEC EDGAR · FINRA (margin debt) · multpl / shillerdata (CAPE) · CBOE (VIX) · Stooq (disabled by default) · **sipgate** (SMS) · **imessage-proxy** (`POST {IMESSAGE_API_BASE_URL}/api/messages`, Bearer `IMESSAGE_API_KEY`).
 
 **Egress is not allowlisted at the platform** (no egress firewall / network policy). Two destinations come from operator configuration: iMessage and the LLM gateway. Both now enforce HTTPS before opening a socket. The LLM client additionally rejects credentials/query/fragment in the base, validates the auth-header name, disables environment proxies and redirects, and bounds streamed input/output. A wrong but valid HTTPS host remains an operator-controlled disclosure risk; an egress allowlist is still the defence-in-depth gap (A-11/B-22).
 

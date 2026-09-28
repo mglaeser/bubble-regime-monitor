@@ -97,8 +97,8 @@ REGISTRY: dict[str, Methodology] = {
             "without double-counting."
         ),
         how=(
-            "cape = current Shiller CAPE (multpl primary; GuruFocus, then shillerdata ie_data.xls, "
-            "as fallbacks). pct = percentile rank of cape within a rolling window of the last W "
+            "cape = current Shiller CAPE (multpl primary; shillerdata ie_data.xls as the "
+            "fallback). pct = percentile rank of cape within a rolling window of the last W "
             "years of monthly CAPE, W MC-sampled on integers U[20,40], baseline W = 30; pct in [0,1]. "
             "real10y = FRED DFII10 latest value / 100. ecy = (1/cape) - real10y in percentage points. "
             "ecy_extremity = clip((4 - ecy)/4, 0, 1). sub_score = 0.5*pct + 0.5*ecy_extremity."
@@ -524,11 +524,11 @@ REGISTRY: dict[str, Methodology] = {
             "weighted sub-score. Label: LAGGING CONFIRMATION."
         ),
         how=(
-            "Compute ratio = VIX / VIX3M (FRED VIXCLS / VIX3M, or the vixcentral / CBOE futures "
-            "curve). State: ratio < 0.95 -> contango -> V = 1.00; 0.95 <= ratio <= 1.0 -> flat -> "
+            "Compute ratio = VIX / VIX3M (CBOE delayed quotes, or FRED VIXCLS / VIX3M). "
+            "State: ratio < 0.95 -> contango -> V = 1.00; 0.95 <= ratio <= 1.0 -> flat -> "
             "V = 1.05; ratio > 1.0 -> backwardation -> V = 1.15. Applied as "
-            "D = min(D_raw * V, 1.0). Source order: vixcentral scrape (primary) -> CBOE delayed "
-            "CSV -> FRED ratio (second fallback)."
+            "D = min(D_raw * V, 1.0). Source order: CBOE delayed quotes (primary) -> FRED ratio "
+            "(fallback)."
         ),
         why=(
             "In calm markets longer-dated implied volatility exceeds near-dated (contango), which "
@@ -1079,9 +1079,9 @@ class SourceSpec:
 
 
 SOURCE_REGISTRY: list[SourceSpec] = [
-    SourceSpec("cape", "Shiller CAPE (multpl / GuruFocus / shillerdata)", "S1 valuation",
+    SourceSpec("cape", "Shiller CAPE (multpl / shillerdata)", "S1 valuation",
                "Robert Shiller's cyclically-adjusted P/E series (Campbell & Shiller 1988); "
-               "multpl and GuruFocus republish it, shillerdata is Shiller's own spreadsheet.",
+               "multpl republishes it, shillerdata is Shiller's own spreadsheet.",
                35, "https://www.multpl.com/shiller-pe",
                "Scraped from HTML/spreadsheet, not an API; post-1990 GAAP changes bias CAPE "
                "upward (Siegel 2016).", ("cape", "cape_history")),
@@ -1135,9 +1135,9 @@ SOURCE_REGISTRY: list[SourceSpec] = [
                "Johansen-Ledoit-Sornette log-periodic power-law singularity confidence.", 3, "",
                "Package maintenance-inactive; ~29% precision (fires in ordinary bull markets); "
                "runs on the QQQ index proxy.", ("lppls",)),
-    SourceSpec("vix", "VIX term structure + level + SKEW (vixcentral/CBOE/FRED)",
+    SourceSpec("vix", "VIX term structure + level + SKEW (CBOE/FRED)",
                "V multiplier, fast alarm",
-               "CBOE VIX/VIX3M methodology; vixcentral republishes the futures curve.", 2, "",
+               "CBOE VIX/VIX3M methodology.", 2, "",
                "SKEW is COINCIDENT CONTEXT ONLY (no forward skill).",
                ("vix_term_structure", "vix_level", "cboe_skew")),
 ]

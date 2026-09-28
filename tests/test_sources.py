@@ -125,3 +125,75 @@ class TestStaleness:
         assert data.freshness.get("d1") == "0d"
         payload = data.indicators["s1"].payload()
         assert payload["stale"] is False and payload["age_days"] == 0
+
+
+class _Response:
+    def __init__(self, text: str = "", content: bytes = b"", payload: dict | None = None):
+        self.text, self.content, self._payload = text, content, payload
+
+    def json(self):
+        return self._payload
+
+
+class TestSourceChains:
+    """README "Data sources": the VIX curve comes from CBOE delayed quotes with
+    FRED as the fallback, CAPE from multpl with Shiller's ie_data.xls as the
+    fallback. vixcentral.com (now a redirect to volchart.io) and GuruFocus
+    (403) left the chains on 2026-09-27."""
+
+    def test_the_vix_curve_is_read_from_cboe_first(self, monkeypatch):
+        import app.sources.vix as vix
+
+        prices = {vix.CBOE_VIX_URL: 18.0, vix.CBOE_VIX3M_URL: 20.0}
+        fetched: list[str] = []
+
+        def fake_fetch(source, url, **kwargs):
+            fetched.append(url)
+            return _Response(payload={"data": {"current_price": prices[url]}})
+
+        monkeypatch.setattr(vix, "fetch", fake_fetch)
+        result = vix.term_structure_ratio()
+        assert result.value == pytest.approx(18.0 / 20.0)
+        assert result.provenance.source == "cboe_delayed"
+        assert result.provenance.fallback_used is False
+        assert fetched == [vix.CBOE_VIX_URL, vix.CBOE_VIX3M_URL]
+
+    def test_shillerdata_follows_multpl_for_the_current_cape(self, monkeypatch):
+        import app.sources.cape as cape
+
+        fetched: list[str] = []
+
+        def fake_fetch(source, url, **kwargs):
+            fetched.append(source)
+            if source == "multpl":
+                raise SourceError("multpl down")
+            return _Response(content=b"xls")
+
+        monkeypatch.setattr(cape, "fetch", fake_fetch)
+        monkeypatch.setattr(cape, "_history_from_shillerdata", lambda content: [30.0, 31.5])
+        result = cape.current_cape()
+        assert result.value == 31.5
+        assert result.provenance.fallback_used is True
+        assert fetched == ["multpl", "shillerdata"]
+
+    def test_the_multpl_monthly_table_needs_no_beautifulsoup(self, monkeypatch):
+        import sys
+
+        import app.sources.cape as cape
+
+        rows = "".join(f"<tr><td>Month {i}</td><td>{10.0 + i / 100:.2f}</td></tr>"
+                       for i in range(300, 0, -1))                  # newest first
+        html = f"<table><tr><th>Date</th><th>Value</th></tr>{rows}</table>"
+
+        def fake_fetch(source, url, **kwargs):
+            if source == "shillerdata":
+                raise SourceError("shillerdata down")
+            return _Response(text=html)
+
+        monkeypatch.setitem(sys.modules, "bs4", None)               # not installed
+        monkeypatch.setattr(cape, "fetch", fake_fetch)
+        result = cape.monthly_cape_history()
+        assert result.provenance.source == "multpl_table"
+        assert len(result.value) == 300
+        assert result.value[0] == pytest.approx(10.01)              # oldest first
+        assert result.value[-1] == pytest.approx(13.00)
