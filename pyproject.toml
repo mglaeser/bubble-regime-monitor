@@ -33,6 +33,9 @@ dependencies = [
     "openpyxl>=3.1",
     "xlrd>=2.0.1",  # legacy .xls support (shillerdata ie_data.xls CAPE fallback)
     "lxml>=5.2",
+    # The NYSE calendar, one-off closures included. Exact: a release can add a
+    # closure, which moves trading-day arithmetic, so the version moves on purpose.
+    "holidays==0.105",
     # The alert ruleset is a YAML artifact; the loader parses it with safe_load.
     "PyYAML>=6.0",
     # A message carries no link: linkify-it-py finds links, libphonenumber the

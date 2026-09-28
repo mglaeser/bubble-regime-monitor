@@ -275,7 +275,7 @@ class TestRM2Sufficiency:
     def test_nyse_holiday_calendar(self):
         from datetime import date
 
-        from app.services.replay import is_trading_day, us_market_holidays
+        from app.alerts.calendars import is_trading_day, us_market_holidays
 
         h = us_market_holidays(2026)
         assert len(h) == 10
