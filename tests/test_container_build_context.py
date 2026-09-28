@@ -61,7 +61,7 @@ REQUIRED_BUILD_INPUTS = (
     "r/gsadf.R",
     "frozen_methodology.json",
     "deploy.sh",
-    "deploy/deploy-watch.sh",
+    "deploy/quadlet/bubblegauge.container",
     "deploy/systemd/bubblegauge-deploy.service",
     "compose.yml",
 )

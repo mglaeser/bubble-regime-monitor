@@ -149,6 +149,11 @@ def run_recompute_guarded() -> None:
             notify_recompute_outcome(failure, attempt=str(_last.get("started_at") or ""))
         finally:
             recompute_lock.release()
+    # The dead-man's switch (owner decision D6), outside the lock: it orders
+    # nothing, and it never raises.
+    from app.services.healthchecks import ping
+
+    ping(failure)
 
 
 @router.post(
@@ -214,25 +219,3 @@ def record_falsification(body: dict[str, Any],
         # panel finding: an empty criterion must be a client error, never a 500
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"data": {"id": outcome_id, "recorded": True}, "meta": {}}
-
-
-@router.post(
-    "/deploy",
-    status_code=202,
-    summary="Request an auto-deploy now (X-API-Key required)",
-    description=(
-        "Writes a deploy-trigger file on /data; the host-side systemd watchdog then "
-        "fetches the pinned DEPLOY_BRANCH and runs deploy.sh (with its own health-check "
-        "auto-rollback). The app never runs deploy.sh itself. Returns 202 immediately. "
-        "Requires DEPLOY_BRANCH to be configured (the watchdog decides what to deploy)."
-    ),
-)
-def request_deploy(_: None = Depends(require_admin_key)) -> dict[str, Any]:
-    from app.config import get_settings
-    from app.services.deploy_trigger import write_deploy_trigger
-
-    if not get_settings().deploy_branch:
-        return {"data": {"status": "not_configured",
-                         "detail": "set DEPLOY_BRANCH to enable host-side auto-deploy"}, "meta": {}}
-    trigger = write_deploy_trigger(source="admin-api")
-    return {"data": {"status": "deploy_triggered", "trigger": trigger}, "meta": {}}

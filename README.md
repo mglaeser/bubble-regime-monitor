@@ -131,8 +131,6 @@ Base path `/api/v1`; every response is `{"data": ..., "meta": ...}` with the fiv
 | `GET /api/v1/admin/refresh/status` | Running state + last recompute outcome (X-API-Key) |
 | `POST /api/v1/admin/send-sms` | Send the daily digest now over the configured transport (iMessage or SMS) — test path (X-API-Key) |
 | `POST /api/v1/admin/falsification` | Record a falsification outcome — append-only (X-API-Key) |
-| `POST /api/v1/admin/deploy` | Write a deploy-trigger for the host watchdog — manual auto-deploy path (X-API-Key) |
-| `POST /api/v1/webhooks/github` | GitHub auto-deploy webhook — HMAC-verified, fail-closed (v3.5.0, `docs/AUTO_DEPLOY.md`) |
 
 ## Deployment & updates
 
@@ -154,9 +152,9 @@ Configuration is via environment variables (all optional, sensible defaults): `B
 
 The app also **self-migrates at boot** (`app.db_migrate.upgrade_to_head` runs `alembic upgrade head`; a failed migration fails the boot rather than falling back), so a plain `podman-compose up -d --build` stays valid too — `deploy.sh` just makes the pull/build/migrate/health-check flow explicit and safe. To apply migrations locally without a container: `make migrate`.
 
-### Auto-deploy on merged PRs (v3.5.0)
+### Auto-deploy (systemd timer + Podman Quadlet, since 2026-09-28)
 
-A merged PR into the deploy branch (or a push to it) redeploys the service automatically: GitHub calls the HMAC-verified in-app webhook (`POST /api/v1/webhooks/github`), the app writes one atomic trigger file on the `/data` volume, and a host-side `systemd --user` path watchdog runs `./deploy.sh` — the container itself holds no host-control capability. Fail-closed: the webhook returns 503 until **both** `GITHUB_WEBHOOK_SECRET` and `DEPLOY_BRANCH` are set in `.env`; the watchdog deploys only its pinned branch, ignoring anything a trigger names. `deploy.sh` self-provisions the watchdog on a healthy deploy (`SETUP_AUTODEPLOY=0` opts out). Full setup guide incl. the GitHub webhook configuration: **`docs/AUTO_DEPLOY.md`**.
+The container is a **Podman Quadlet** unit (`deploy/quadlet/bubblegauge.container`): systemd starts it at boot and restarts it when it dies. A **systemd timer** (`deploy/systemd/bubblegauge-deploy.timer`) runs `./deploy.sh` every five minutes; it fetches `main` and returns at once unless the running image is behind it. When `main` moved, it builds, migrates, points `:latest` at the new image, restarts the unit and health-checks it, rolling back to the previous image if it does not become healthy. There is no webhook, no trigger file and no lock: systemd never runs two instances of the oneshot deploy service at once. A **Healthchecks** dead-man's switch (`HEALTHCHECKS_PING_URL`) is pinged after every recompute, so an outage the service cannot report itself (host, container or scheduler gone) still reaches you. Setup: **`docs/AUTO_DEPLOY.md`**.
 
 ## Status & spec UI
 

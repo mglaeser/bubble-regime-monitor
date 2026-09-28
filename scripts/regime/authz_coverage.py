@@ -42,14 +42,7 @@ AUTH_DEPENDENCIES = frozenset({
 # Kept separate from PUBLIC_ALLOWLIST on purpose: calling an HMAC-verified
 # webhook "public" would be false, and a control that files authorised routes
 # under "public" teaches its readers to distrust it.
-IN_HANDLER_AUTH: dict[str, str] = {
-    "POST /github": (
-        "GitHub webhook: constant-time HMAC-SHA256 over the RAW body "
-        "(X-Hub-Signature-256), app/routers/webhooks.py:32-37, enforced at :55 "
-        "with 401 on mismatch. Fail-closed — :49 refuses outright unless both "
-        "GITHUB_WEBHOOK_SECRET and DEPLOY_BRANCH are configured."
-    ),
-}
+IN_HANDLER_AUTH: dict[str, str] = {}
 
 # Routes that are PUBLIC BY DECISION, each with the reason it is safe to be.
 # Adding a line here is the deliberate act the control exists to force.

@@ -47,16 +47,6 @@ class Settings(BaseSettings):
     admin_api_key: str = "change-me-to-a-long-random-string"
     read_endpoints_public: bool = True
 
-    # Auto-deploy webhook (v3.5.0, docs/AUTO_DEPLOY.md). The endpoint is
-    # FAIL-CLOSED: it returns 503 unless BOTH values are set. The secret is the
-    # GitHub webhook HMAC secret (X-Hub-Signature-256), verified constant-time —
-    # never an API key in the URL. The app only WRITES a trigger file on /data;
-    # the host-side systemd watchdog runs deploy.sh (a container cannot and
-    # must not replace itself).
-    github_webhook_secret: str = ""
-    deploy_branch: str = ""          # e.g. claude/bubblegauge-build-spec-fzthju
-    deploy_trigger_dir: str = "/data/deploy-trigger"
-
     # SEC EDGAR etiquette (MANDATORY, format: "Name email").
     # SEC_EDGAR_UA is the v3.1 name; SEC_USER_AGENT remains accepted.
     sec_user_agent: str = "bubblegauge-monitor admin@example.com"
@@ -132,6 +122,10 @@ class Settings(BaseSettings):
     # is reported as a wedged run. Slots are 4h apart and a full gather runs
     # well under an hour, so a run still in flight at the next slot is stuck.
     failure_alert_stuck_after_h: int = 4
+    # The dead-man's switch (owner decision D6): a Healthchecks check's ping
+    # URL, pinged after every recompute (<url>/fail on a failure). When the
+    # pings stop, Healthchecks alerts on its own channels. Empty: off.
+    healthchecks_ping_url: str = ""
 
     # --- ALERT SYSTEM (docs/ALERT_SYSTEM.md) --------------------------------
     # Two INDEPENDENT switches. Evidence capture may run with alerting fully

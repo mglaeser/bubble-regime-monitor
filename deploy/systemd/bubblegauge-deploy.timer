@@ -1,0 +1,13 @@
+# Deploy bubblegauge when main moves (owner decision D6, 2026-09-28).
+# Every five minutes deploy.sh fetches main and returns at once unless the
+# running image is behind it.
+
+[Unit]
+Description=bubblegauge deploy check (every 5 minutes)
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target
