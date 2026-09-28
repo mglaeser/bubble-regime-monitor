@@ -9,7 +9,7 @@ from sqlalchemy import select
 
 from app.config import get_settings, near_miss_env_keys
 from app.db import session_scope
-from app.engine.sms_report import _block_summary, generate_sms_body
+from app.engine.sms_report import _block_summary, deterministic_report
 from app.logging_conf import get_logger
 from app.models import Snapshot
 from app.notify.imessage import send_imessage
@@ -105,7 +105,7 @@ def send_daily_digest(*, force: bool = False) -> dict[str, Any]:
         if settings.message_engine_enabled:
             facts = digest_facts(snap)
         else:
-            body, llm_used = generate_sms_body(snap)
+            body = deterministic_report(snap, settings.sms_max_len)
 
     if settings.message_engine_enabled:
         # THE ENGINE PATH (decision 22). Composed outside the session above
@@ -118,9 +118,10 @@ def send_daily_digest(*, force: bool = False) -> dict[str, Any]:
         return {**outcome, "snapshot_computed_at": computed_at.isoformat(),
                 "llm_used": outcome.get("source") == "generated"}
 
+    # With the engine off the digest is the template: no model is called.
     common: dict[str, Any] = {
         "transport": transport,
-        "llm_used": llm_used,
+        "llm_used": False,
         "chars": len(body),
         "message": body,
         "snapshot_computed_at": computed_at.isoformat(),
@@ -128,7 +129,7 @@ def send_daily_digest(*, force: bool = False) -> dict[str, Any]:
 
     if transport == "imessage":
         result = send_imessage(body)
-        log.info("daily_digest", transport=transport, sent=result.ok, llm_used=llm_used,
+        log.info("daily_digest", transport=transport, sent=result.ok,
                  chars=len(body), status=result.status_code,
                  snapshot_at=computed_at.isoformat())
         return {
@@ -140,7 +141,7 @@ def send_daily_digest(*, force: bool = False) -> dict[str, Any]:
         }
 
     sms = send_sms(body)
-    log.info("daily_digest", transport=transport, sent=sms.ok, llm_used=llm_used,
+    log.info("daily_digest", transport=transport, sent=sms.ok,
              chars=len(body), status=sms.status_code, snapshot_at=computed_at.isoformat())
     return {
         **common,

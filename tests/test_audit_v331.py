@@ -146,22 +146,6 @@ class TestPromptIsNumbersOnly:
         assert fields, "template has no interpolated fields?"
         assert fields <= self.ALLOWED, f"unexpected prompt field(s): {fields - self.ALLOWED}"
 
-    def test_sms_prompt_only_prior_llm_free_text(self):
-        # The SMS prompt is a SECOND model prompt (adversarial-verifier finding:
-        # the judgment-prompt test gave false assurance of covering "the LLM
-        # prompt"). Its fields must be the numeric/enum set plus exactly two
-        # documented non-numeric fields: `limit` (an int) and `judgment` — which
-        # is PRIOR, length-capped LLM output, never external source/API/DB text.
-        from app.engine.sms_report import SMS_PROMPT
-
-        numeric = {"median", "band", "iqr_lo", "iqr_hi", "flags", "override",
-                   "spy", "qqq", "s", "d", "limit"}
-        allowed = numeric | {"judgment"}
-        fields = {fn for _, fn, _, _ in string.Formatter().parse(SMS_PROMPT) if fn}
-        assert fields <= allowed, f"unexpected SMS prompt field(s): {fields - allowed}"
-        # the only non-numeric interpolation is the prior LLM note
-        assert (fields - numeric) <= {"judgment"}
-
 
 class TestRecipientMasking:
     """C-23: the SMS recipient (personal data) must be masked before logging."""
