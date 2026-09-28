@@ -53,7 +53,7 @@ REQUIRED_BUILD_INPUTS = (
     ".env.example",
     "Containerfile",
     "pyproject.toml",
-    "requirements.lock",
+    "requirements-image.lock",
     "alembic.ini",
     "app/main.py",
     "config/alert_rules.v3.2.yaml",

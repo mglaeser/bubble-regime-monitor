@@ -2,6 +2,9 @@
 
 # Installs come from the locks, hash-checked: the image and CI get exactly the
 # versions that were tested. `make lock` re-resolves after pyproject.toml changes.
+# requirements.lock carries no pyarrow: the Parquet extra is CPU-unsafe on hosts
+# without SSE4.2, so only the image installs it (requirements-image.lock),
+# behind the Containerfile's CPU probe.
 install:
 	pip install --require-hashes -r requirements.lock
 	pip install --no-deps .
@@ -14,7 +17,8 @@ dev:
 # what pyproject.toml now demands; add --upgrade-package NAME to move one on purpose.
 LOCK_TARGET = --generate-hashes --python-version 3.12 --python-platform x86_64-manylinux_2_28
 lock:
-	uv pip compile pyproject.toml --extra parquet $(LOCK_TARGET) -o requirements.lock
+	uv pip compile pyproject.toml $(LOCK_TARGET) -o requirements.lock
+	uv pip compile pyproject.toml --extra parquet -c requirements.lock $(LOCK_TARGET) -o requirements-image.lock
 	uv pip compile pyproject.toml --extra dev -c requirements.lock $(LOCK_TARGET) -o requirements-dev.lock
 
 lint:

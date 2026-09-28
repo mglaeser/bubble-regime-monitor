@@ -16,7 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     R -e "install.packages('exuber', repos='https://cloud.r-project.org', Ncpus=max(1L, parallel::detectCores()-1L)); stopifnot('exuber' %in% rownames(installed.packages()))" && \
     rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-COPY pyproject.toml requirements.lock ./
+COPY pyproject.toml requirements-image.lock ./
 # pyarrow is an optional extra: pandas imports it EAGERLY when present
 # (pandas/compat/pyarrow.py), and pyarrow's Arrow C++ wheels require SSE4.2 —
 # on older CPUs that is an uncatchable SIGILL at pandas import, i.e. at
@@ -24,9 +24,10 @@ COPY pyproject.toml requirements.lock ./
 # probe here: keep pyarrow where it works, remove it where it would crash
 # (Parquet export then disables itself via its own runtime probe), and fail
 # the build loudly if pandas still cannot import.
-# The packages come from the lock, hash-checked (`make lock` writes it from
-# pyproject.toml); the project itself installs without resolving anything.
-RUN pip install --no-cache-dir --require-hashes -r requirements.lock && \
+# The packages come from the image lock, hash-checked: the plain lock plus
+# the parquet extra (`make lock` writes both from pyproject.toml). The project
+# itself installs without resolving anything.
+RUN pip install --no-cache-dir --require-hashes -r requirements-image.lock && \
     pip install --no-cache-dir --no-deps . && \
     (python -c "import pandas" 2>/dev/null || \
      (echo "pyarrow unusable on this CPU; removing (Parquet export will disable itself)" && \

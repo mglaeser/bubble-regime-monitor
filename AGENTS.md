@@ -43,7 +43,7 @@ Type-checking (`mypy app`) is **blocking**, as a ratchet: CI fails if the error 
 | Docs / comments | CI green. |
 | Indicator math / aggregation / Monte Carlo | Update + justify golden fixtures; explain the numeric delta in the commit. |
 | Auth / secrets / deploy / CI gate | Write a red→green test from the spec; note the blast-radius; do not weaken a fail-closed control. |
-| Dependencies | Confirm the package exists on the real registry and meets the guideline above (maintained, permissive licence); declare it in `pyproject.toml` and re-lock (`make lock` writes `requirements.lock`, what the image installs, and `requirements-dev.lock`, what CI installs; `tests/test_dependency_pins.py` holds them to `pyproject.toml` and to each other); `pip-audit` must stay clean. |
+| Dependencies | Confirm the package exists on the real registry and meets the guideline above (maintained, permissive licence); declare it in `pyproject.toml` and re-lock (`make lock` writes `requirements.lock`, the plain install, `requirements-image.lock`, what the image installs, and `requirements-dev.lock`, what CI installs; `tests/test_dependency_pins.py` holds them to `pyproject.toml` and to each other); `pip-audit` must stay clean. |
 
 ## Test-first, small, atomic
 
