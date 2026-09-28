@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import select
 
-from app.alerts.budgets import BudgetLimits, check_budget, user_load
+from app.alerts.budgets import BudgetLimits, check_budget
 from app.alerts.canonical import new_ulid
 from app.alerts.enums import (
     DeliveryKind,
@@ -300,7 +300,7 @@ def test_dispatch_does_not_reserve_for_a_later_ready_delivery():
     assert check_budget(2, usage, LIMITS).allowed is True
 
 
-def test_digest_reported_in_user_load_but_not_market_cap():
+def test_the_digest_is_counted_apart_from_the_market_cap():
     from app.alerts.outbox import planner_budget_usage
 
     episode_id = _prepare_graph()
@@ -328,4 +328,3 @@ def test_digest_reported_in_user_load_but_not_market_cap():
 
     assert usage.sent_168h == 1
     assert usage.digest_168h == 1
-    assert user_load(usage)["total_168h"] == 2

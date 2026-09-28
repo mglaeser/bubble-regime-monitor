@@ -12,7 +12,7 @@ has no network client and no provider import to reach for.
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -222,15 +222,3 @@ class PhraseSelection(BaseModel):
     caveat_codes: list[str] = Field(default_factory=list, max_length=4)
 
 
-class RenderStatus(BaseModel):
-    """Per-member condition status at render time (mandate 17.5)."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal[
-        "STILL_FIRING",
-        "RESOLVED_BEFORE_SEND",
-        "MATERIALLY_CHANGED_BUT_ACTIVE",
-        "UNKNOWN_AT_RENDER",
-    ]
-    detail: str | None = None

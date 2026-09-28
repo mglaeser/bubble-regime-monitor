@@ -108,19 +108,5 @@ def check_budget(priority: int, usage: BudgetUsage, limits: BudgetLimits) -> Bud
     return BudgetDecision(True, None, usage, limits)
 
 
-def user_load(usage: BudgetUsage) -> dict[str, int]:
-    """What the human actually received, digest included.
-
-    Reported separately from the caps: the digest is real load on a person even
-    though it does not consume the interruption budget.
-    """
-    return {
-        "sms_24h": usage.sent_24h,
-        "sms_168h": usage.sent_168h,
-        "digest_168h": usage.digest_168h,
-        "total_168h": usage.sent_168h + usage.digest_168h,
-    }
-
-
 def window_start(now: datetime, window: timedelta) -> datetime:
     return now - window

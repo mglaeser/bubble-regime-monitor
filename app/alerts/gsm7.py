@@ -43,10 +43,6 @@ class Gsm7Error(ValueError):
         self.position = position
 
 
-def is_gsm7(text: str) -> bool:
-    return all(ch in GSM7_BASIC or ch in GSM7_EXT for ch in text)
-
-
 def first_non_gsm7(text: str) -> tuple[str, int] | None:
     """The first character GSM-7 cannot encode, with its index — or None."""
     for index, ch in enumerate(text):
@@ -69,17 +65,6 @@ def fits_single_sms(text: str) -> bool:
         return septets(text) <= SINGLE_SMS_SEPTETS
     except Gsm7Error:
         return False
-
-
-def assert_single_sms(text: str) -> int:
-    """Return the septet count, or raise. The hard gate before any send."""
-    count = septets(text)
-    if count > SINGLE_SMS_SEPTETS:
-        raise ValueError(
-            f"message is {count} GSM-7 septets, over the {SINGLE_SMS_SEPTETS} single-SMS "
-            "limit; shorten the phrase set rather than truncating the body"
-        )
-    return count
 
 
 def worst_case_septets(template: str, slot_widths: dict[str, int]) -> int:

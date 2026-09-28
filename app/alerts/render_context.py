@@ -37,29 +37,6 @@ FACT_SOURCES: dict[str, str] = {
     "F_BAND_SCORE": "score_action_band",
 }
 
-#: Facts that can only come from the input BEFORE the trigger.
-#:
-#: A transition phrase says what the state moved FROM, and no single input
-#: carries that: `BAND_TO_DERISK` is "Stufe {F_BAND_EFFECTIVE} erreicht (vorher
-#: {F_BAND_PREVIOUS})". Without the predecessor the slot is unfillable, the
-#: render is rejected as an unauthorized fact, and the delivery dies in
-#: RENDER_FAILED — which is exactly where the whole P1 band path stopped.
-PREVIOUS_FACT_SOURCES: dict[str, str] = {
-    "F_BAND_PREVIOUS": "effective_action_state",
-}
-
-#: Facts read from typed evidence rather than a top-level field.
-EVIDENCE_FACTS: dict[str, tuple[str, str]] = {
-    "F_BREADTH": ("indicator.d1.breadth", "percent"),
-    "F_CAPE": ("indicator.s1.cape", ""),
-    "F_TOP10": ("indicator.s2.top10_share", "percent"),
-    "F_S3": ("indicator.s3.semi_runup", "pp"),
-    "F_D4": ("indicator.d4.lppls_endpoint", ""),
-    "F_D2": ("indicator.d2.finra_release", ""),
-    "F_HY_OAS": ("credit.hy_oas.daily", "bps"),
-}
-
-
 @dataclass(frozen=True)
 class MemberContext:
     """One bundle member's isolated view."""
@@ -240,6 +217,8 @@ MEMBER_FACT_BUILDERS: dict[str, FactBuilder] = {
     "F_BAND_EFFECTIVE": _source_attr("effective_action_state"),
     "F_BAND_BASE": _source_attr("base_action_band"),
     "F_BAND_SCORE": _source_attr("score_action_band"),
+    # A transition phrase says what the state moved FROM; only the persisted
+    # predecessor carries that, so without it the slot is unfillable.
     "F_BAND_PREVIOUS": _previous_attr("effective_action_state"),
     "F_ASSET": _label("asset"),
     "F_RF_COUNT": _active_fireable_red_flags,

@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import pytest
 
-from app.alerts.budgets import BudgetLimits, BudgetUsage, check_budget, user_load
+from app.alerts.budgets import BudgetLimits, BudgetUsage, check_budget
 from app.alerts.dominance import resolve
 from app.alerts.enums import (
     DeliveryKind,
@@ -72,10 +72,9 @@ def test_reservations_count_against_the_budget():
     assert check_budget(2, BudgetUsage(2, 2, 1, 0), LIMITS).reason == "cap_24h"
 
 
-def test_digest_is_reported_as_load_but_does_not_consume_the_caps():
+def test_the_digest_does_not_consume_the_caps():
     usage = BudgetUsage(sent_24h=2, sent_168h=5, reserved=0, digest_168h=1)
     assert check_budget(2, usage, LIMITS).allowed is True
-    assert user_load(usage)["total_168h"] == 6
 
 
 def test_p1_is_never_held_by_quiet_hours():
