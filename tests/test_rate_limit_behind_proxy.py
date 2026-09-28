@@ -6,6 +6,10 @@ Podman's port handler rewrites every forwarded connection's source to
 10.0.2.100 inside the container (measured on leaf 2026-09-28). Uvicorn trusts
 X-Forwarded-For only from FORWARDED_ALLOW_IPS (default 127.0.0.1), so until
 the deploy set it, every visitor was keyed as 10.0.2.100: one bucket for all.
+
+The trust boundary is the host: a local process connecting to the loopback
+port arrives as the same hop and is trusted like the proxy, as uvicorn's
+default trusts 127.0.0.1. The port is no longer reachable from outside.
 """
 from __future__ import annotations
 

@@ -45,6 +45,10 @@ PORT="${PORT:-8000}"
 # X-Forwarded-For from exactly that hop and keys each visitor by the address
 # the proxy appended; without it every visitor shared one rate-limit bucket.
 # Trusting "*" instead would take the LEFTMOST entry, which a client writes.
+# The trust boundary is the HOST: every local process that connects to the
+# loopback port arrives as the same hop, so it is trusted like the proxy
+# (uvicorn's own default draws the same line at 127.0.0.1). leaf is
+# single-tenant; the internet cannot reach the port any more.
 PUBLISH="127.0.0.1:$PORT:8000"
 PROXY_HOP="10.0.2.100"
 ENV_FILE="${ENV_FILE:-.env}"
