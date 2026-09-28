@@ -31,6 +31,7 @@ from typing import Any
 from sqlalchemy import select
 
 from app import methodology as _M
+from app.alerts.calendars import is_trading_day
 from app.db import session_scope
 from app.engine.aggregate import RedFlags, deterministic_score
 from app.logging_conf import get_logger
@@ -45,79 +46,6 @@ S5_GATE_TRADING_DAYS = 60
 
 _S5_TIERS = ("fed_ebp", "fred_BAA_DGS10", "fred_BAMLH0A0HYM2")
 
-
-def _easter_sunday(year: int):
-    """Gregorian Easter (Anonymous/Meeus computus) — pure arithmetic."""
-    from datetime import date as _date
-
-    a = year % 19
-    b, c = divmod(year, 100)
-    d, e = divmod(b, 4)
-    g = (8 * b + 13) // 25
-    h = (19 * a + b - d - g + 15) % 30
-    i, k = divmod(c, 4)
-    l = (32 + 2 * e + 2 * i - h - k) % 7  # noqa: E741 -- canonical computus variable names
-    m = (a + 11 * h + 22 * l) // 451
-    month, day = divmod(h + l - 7 * m + 114, 31)
-    return _date(year, month, day + 1)
-
-
-def _nth_weekday(year: int, month: int, weekday: int, n: int):
-    from datetime import date as _date
-    from datetime import timedelta as _td
-
-    d = _date(year, month, 1)
-    d += _td(days=(weekday - d.weekday()) % 7)
-    return d + _td(days=7 * (n - 1))
-
-
-def _last_weekday(year: int, month: int, weekday: int):
-    import calendar as _cal
-    from datetime import date as _date
-    from datetime import timedelta as _td
-
-    d = _date(year, month, _cal.monthrange(year, month)[1])
-    return d - _td(days=(d.weekday() - weekday) % 7)
-
-
-def us_market_holidays(year: int) -> set:
-    """NYSE full-day holidays (public calendar; pure date arithmetic).
-    Observance: Saturday holidays are observed the preceding Friday EXCEPT
-    New Year's (NYSE stays open at year-end); Sunday holidays the following
-    Monday. One-off special closures (e.g. days of mourning) cannot be
-    derived and remain a documented residual."""
-    from datetime import date as _date
-    from datetime import timedelta as _td
-
-    def observed(d, new_years: bool = False):
-        if d.weekday() == 5:                       # Saturday
-            return None if new_years else d - _td(days=1)
-        if d.weekday() == 6:                       # Sunday
-            return d + _td(days=1)
-        return d
-
-    days = {
-        observed(_date(year, 1, 1), new_years=True),
-        _nth_weekday(year, 1, 0, 3),               # MLK: 3rd Monday of Jan
-        _nth_weekday(year, 2, 0, 3),               # Washington's Birthday
-        _easter_sunday(year) - _td(days=2),        # Good Friday
-        _last_weekday(year, 5, 0),                 # Memorial Day
-        # Juneteenth: NYSE first observed it in 2022 (panel round-3 finding —
-        # applying it earlier excludes valid pre-2022 trading days).
-        observed(_date(year, 6, 19)) if year >= 2022 else None,
-        observed(_date(year, 7, 4)),               # Independence Day
-        _nth_weekday(year, 9, 0, 1),               # Labor Day
-        _nth_weekday(year, 11, 3, 4),              # Thanksgiving: 4th Thursday
-        observed(_date(year, 12, 25)),             # Christmas
-    }
-    days.discard(None)
-    return days
-
-
-def is_trading_day(d) -> bool:
-    """Mon-Fri and not an NYSE full-day holiday (panel round-2 finding on this
-    PR: plain weekdays let holiday snapshots advance the activation gate)."""
-    return d.weekday() < 5 and d not in us_market_holidays(d.year)
 
 _WS = _M.as_dict("aggregation", "block_s_weights")
 _WD = _M.as_dict("aggregation", "block_d_weights")

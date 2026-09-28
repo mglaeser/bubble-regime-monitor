@@ -488,6 +488,34 @@ def test_holidays_are_not_trading_days():
     assert is_trading_day(date(2026, 8, 14))
 
 
+def test_the_one_off_nyse_closures_are_not_trading_days():
+    """NYSE also closed on days no rule predicts: days of mourning, 9/11,
+    Hurricane Sandy. The calendar is the holidays library's, which lists them."""
+    from app.alerts.calendars import is_trading_day
+
+    for closed in ("1994-04-27", "2001-09-11", "2001-09-12", "2001-09-13", "2001-09-14",
+                   "2004-06-11", "2007-01-02", "2012-10-29", "2012-10-30", "2018-12-05",
+                   "2025-01-09"):
+        assert not is_trading_day(date.fromisoformat(closed)), closed
+    assert is_trading_day(date(2025, 1, 10))
+
+
+def test_mlk_day_is_a_trading_day_before_1998():
+    """NYSE first closed for Martin Luther King Jr. Day in 1998."""
+    from app.alerts.calendars import is_trading_day
+
+    assert is_trading_day(date(1997, 1, 20))
+    assert not is_trading_day(date(1998, 1, 19))
+
+
+def test_a_feed_is_current_the_session_after_a_one_off_closure():
+    """2025-01-09 was a closure (Jimmy Carter's day of mourning), so on 01-10
+    the newest bar a daily feed must have printed is 01-08's."""
+    from app.services.compute import _feed_is_current
+
+    assert _feed_is_current([("2025-01-08", 100.0)], "2025-01-10") is True
+
+
 def test_month_end_is_the_last_session_not_the_last_day():
     from app.alerts.calendars import is_month_end_trading_day
 

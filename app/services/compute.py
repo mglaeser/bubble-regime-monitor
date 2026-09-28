@@ -855,8 +855,8 @@ def _closed_months(daily: list[tuple[str, float]]) -> frozenset[str]:
     through: a feed publishing 2026-07-02 and then nothing until 2026-08-15
     would have July "closed" on a July-2 close.
 
-    Uses the market calendar the repository already computes, so nothing here
-    is a tolerance an operator would tune.
+    Uses the NYSE calendar (app.alerts.calendars), so nothing here is a
+    tolerance an operator would tune.
     """
     last_bar: dict[str, date] = {}
     for stamp, _close in daily:
@@ -902,8 +902,8 @@ def _feed_is_current(daily: list[tuple[str, float]], as_of_date: str | None) -> 
         return False
 
     def _session_on_or_before(day: date) -> date:
-        # Terminates: `is_trading_day` excludes weekends and a fixed holiday
-        # set, so a trading day is never more than a few days back. No literal
+        # Terminates: `is_trading_day` excludes weekends and the NYSE closures,
+        # so a trading day is never more than a few days back. No literal
         # bound, because a number here would read as a tunable and is not one.
         while not is_trading_day(day):
             day -= timedelta(days=1)

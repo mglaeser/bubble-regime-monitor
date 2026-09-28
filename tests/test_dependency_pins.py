@@ -66,3 +66,16 @@ def test_the_image_pins_each_detector(name):
 @pytest.mark.parametrize("name", sorted(DETECTORS))
 def test_ci_installs_the_same_detector_as_the_image(name):
     assert _ci_spec(name) == DETECTORS[name]
+
+
+#: The NYSE calendar (app/alerts/calendars.py). A release can add a closure,
+#: which moves trading-day arithmetic, so the version is exact.
+HOLIDAYS = "holidays==0.105"
+
+
+def test_the_image_pins_the_calendar():
+    assert _pyproject_spec("holidays") == HOLIDAYS
+
+
+def test_ci_installs_the_same_calendar_as_the_image():
+    assert _ci_spec("holidays") == HOLIDAYS

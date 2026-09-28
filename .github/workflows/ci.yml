@@ -44,7 +44,7 @@ jobs:
           python -m pip install --upgrade pip "setuptools>=83"   # setuptools>=83 clears PYSEC-2026-3447
           pip install fastapi "uvicorn[standard]" "pydantic>=2.7" pydantic-settings \
             "SQLAlchemy>=2.0,<2.1" alembic httpx tenacity "APScheduler<4" structlog slowapi "Deprecated<3" \
-            "numpy<2.3" "pandas<3.0" openpyxl xlrd lxml PyYAML "linkify-it-py==2.2.0" "phonenumberslite==9.0.40" \
+            "numpy<2.3" "pandas<3.0" openpyxl xlrd lxml "holidays==0.105" PyYAML "linkify-it-py==2.2.0" "phonenumberslite==9.0.40" \
             pytest ruff mypy pip-audit detect-secrets \
             "openapi-spec-validator==0.9.0" "jsonschema==4.26.0"
       - name: Install optional LPPLS engine (best-effort; suite skips it if absent)
@@ -69,7 +69,9 @@ jobs:
           # merged tree — the ratchet may fall, never rise.
           # 158 -> 153: deleting the retired IMF reserves adapter deleted its
           # five errors (three in the adapter, two in its dashboard-feed caller).
-          MYPY_CEILING: "153"
+          # 153 -> 146: the NYSE calendar's second, untyped copy in
+          # app/services/replay.py is gone (the holidays library replaced both).
+          MYPY_CEILING: "146"
           # The floor constrains REACH, not DEPTH: it proves mypy READ the tree.
           # It does NOT make a low count mean "little is wrong" -- an earlier
           # version of this comment claimed that, and it is false. Measured:

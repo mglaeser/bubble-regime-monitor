@@ -7,19 +7,21 @@ and resolved here — never as a multiplication of hours.
 
 Pure module: every function takes the instants it needs. No clock of its own.
 
-The US trading calendar is computed, not tabulated: NYSE's rules are
-deterministic (fixed dates with weekend observance, nth-weekday holidays, and
-Good Friday from the Gregorian Easter algorithm), so a hard-coded table would
-just be a thing to forget to update. Ad-hoc closures (national days of
-mourning, weather) are NOT modelled — they make a TTL slightly longer than
-reality, which is the safe direction: a candidate lives a little longer rather
-than expiring early and losing a real signal.
+The US trading calendar is the NYSE calendar of the holidays library: the
+rule-based holidays and the one-off closures NYSE actually took (days of
+mourning, 9/11, Hurricane Sandy). A closure announced after the pinned release
+is missing until the pin moves, which makes a TTL slightly longer than
+reality: the safe direction, since a candidate then lives a little longer
+rather than expiring early and losing a real signal.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
+from functools import cache
+
+import holidays
 
 from app.engine.recompute_slots import advance_slots
 
@@ -36,61 +38,11 @@ class Calendar(StrEnum):
 # ---------------------------------------------------------------------------
 
 
-def easter_sunday(year: int) -> date:
-    """Gregorian Easter (Meeus/Jones/Butcher). Needed only for Good Friday."""
-    a = year % 19
-    b, c = divmod(year, 100)
-    d, e = divmod(b, 4)
-    f = (b + 8) // 25
-    g = (b - f + 1) // 3
-    h = (19 * a + b - d - g + 15) % 30
-    i, k = divmod(c, 4)
-    m = (32 + 2 * e + 2 * i - h - k) % 7
-    n = (a + 11 * h + 22 * m) // 451
-    month, day = divmod(h + m - 7 * n + 114, 31)
-    return date(year, month, day + 1)
-
-
-def _nth_weekday(year: int, month: int, weekday: int, nth: int) -> date:
-    """The nth `weekday` (Mon=0) of a month; nth=-1 means the last one."""
-    if nth > 0:
-        first = date(year, month, 1)
-        offset = (weekday - first.weekday()) % 7
-        return first + timedelta(days=offset + 7 * (nth - 1))
-    next_month = date(year + (month == 12), month % 12 + 1, 1)
-    last = next_month - timedelta(days=1)
-    return last - timedelta(days=(last.weekday() - weekday) % 7)
-
-
-def _observed(day: date) -> date:
-    """NYSE weekend observance: Saturday -> preceding Friday, Sunday -> Monday."""
-    if day.weekday() == 5:
-        return day - timedelta(days=1)
-    if day.weekday() == 6:
-        return day + timedelta(days=1)
-    return day
-
-
+@cache
 def us_market_holidays(year: int) -> frozenset[date]:
-    """The nine-and-a-half NYSE full-day closures for a calendar year.
-
-    Juneteenth is included from 2022 (its first observance as a market
-    holiday); asking for an earlier year correctly omits it.
-    """
-    days = {
-        _observed(date(year, 1, 1)),                       # New Year's Day
-        _nth_weekday(year, 1, 0, 3),                       # MLK Jr Day
-        _nth_weekday(year, 2, 0, 3),                       # Washington's Birthday
-        easter_sunday(year) - timedelta(days=2),           # Good Friday
-        _nth_weekday(year, 5, 0, -1),                      # Memorial Day
-        _observed(date(year, 7, 4)),                       # Independence Day
-        _nth_weekday(year, 9, 0, 1),                       # Labor Day
-        _nth_weekday(year, 11, 3, 4),                      # Thanksgiving
-        _observed(date(year, 12, 25)),                     # Christmas
-    }
-    if year >= 2022:
-        days.add(_observed(date(year, 6, 19)))             # Juneteenth
-    return frozenset(days)
+    """NYSE full-day closures in a calendar year. Immutable, so each year's
+    set is built once and shared."""
+    return frozenset(holidays.financial_holidays("NYSE", years=year))
 
 
 def is_trading_day(day: date) -> bool:
