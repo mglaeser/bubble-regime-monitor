@@ -536,18 +536,17 @@ def test_removed_rule_closes_under_its_origin_and_cancels_unsent_delivery(
         assert member.drop_reason == "RESOLVED_BEFORE_SEND"
 
 
-def test_lkg_fallback_never_escalates_the_mode(isolated_db, tmp_path, monkeypatch):
-    """An invalid candidate falls back — it does NOT enable anything."""
+def test_the_fallback_to_the_promoted_ruleset_never_escalates_the_mode(
+        isolated_db, tmp_path, monkeypatch):
+    """An invalid candidate falls back to the promoted ruleset — it does NOT
+    enable anything."""
     from app.alerts.artifacts import load_active
 
     good = _artifacts(stage=1, tmp_path=tmp_path / "good")
     broken = tmp_path / "broken.yaml"
     broken.write_text("meta: {this: is not a ruleset}\n", encoding="utf-8")
-    lkg = tmp_path / "lkg.yaml"
-    lkg.write_text(good.ruleset.canonical_yaml, encoding="utf-8")
 
     monkeypatch.setenv("ALERTS_RULES_PATH", str(broken))
-    monkeypatch.setenv("ALERTS_LKG_PATH", str(lkg))
     monkeypatch.setenv("ALERTS_PHRASE_PATH", "config/alert_phrases.v3.5.json")
     monkeypatch.setenv("ALERTS_MODE", "disabled")
     from app.config import get_settings
@@ -555,8 +554,11 @@ def test_lkg_fallback_never_escalates_the_mode(isolated_db, tmp_path, monkeypatc
     get_settings.cache_clear()
 
     with session_scope() as session:
+        register_promoted(session, good, now=NOW)
+    with session_scope() as session:
         loaded = load_active(session)
-    assert loaded.source == "last_known_good"
+    assert loaded.source == "registry"
+    assert loaded.ruleset.rules_sha256 == good.ruleset.rules_sha256
     assert loaded.fallback_reason
     assert get_settings().alerts_mode == "disabled"
     get_settings.cache_clear()
@@ -569,7 +571,6 @@ def test_alerting_unavailable_when_nothing_is_valid(isolated_db, tmp_path, monke
     broken = tmp_path / "broken.yaml"
     broken.write_text("meta: {this: is not a ruleset}\n", encoding="utf-8")
     monkeypatch.setenv("ALERTS_RULES_PATH", str(broken))
-    monkeypatch.setenv("ALERTS_LKG_PATH", str(broken))
     monkeypatch.setenv("ALERTS_PHRASE_PATH", "config/alert_phrases.v3.5.json")
     from app.config import get_settings
 

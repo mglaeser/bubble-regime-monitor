@@ -67,34 +67,6 @@ def advance_trading_days(start: date, sessions: int) -> date:
     return cursor
 
 
-def trading_days_between(start: date, end: date) -> int:
-    """Sessions strictly after `start` up to and including `end`."""
-    if end <= start:
-        return 0
-    count, cursor = 0, start
-    while cursor < end:
-        cursor = next_trading_day(cursor)
-        if cursor <= end:
-            count += 1
-    return count
-
-
-def is_month_end_trading_day(day: date) -> bool:
-    """True when `day` is the last SESSION of its month — when Faber updates."""
-    if not is_trading_day(day):
-        return False
-    return next_trading_day(day).month != day.month
-
-
-def trading_days_to_month_end(day: date) -> int:
-    """Sessions remaining from `day` to that month's final session (0 if today)."""
-    cursor, count = day, 0
-    while not is_month_end_trading_day(cursor):
-        cursor = next_trading_day(cursor)
-        count += 1
-    return count
-
-
 # ---------------------------------------------------------------------------
 # release / filing cadences
 # ---------------------------------------------------------------------------

@@ -516,13 +516,6 @@ def test_a_feed_is_current_the_session_after_a_one_off_closure():
     assert _feed_is_current([("2025-01-08", 100.0)], "2025-01-10") is True
 
 
-def test_month_end_is_the_last_session_not_the_last_day():
-    from app.alerts.calendars import is_month_end_trading_day
-
-    assert is_month_end_trading_day(date(2026, 5, 29))       # Sat 30 / Sun 31
-    assert not is_month_end_trading_day(date(2026, 5, 31))
-
-
 def test_recompute_slot_ttl_uses_slots_not_hours():
     from app.alerts.calendars import Calendar, resolve_ttl
 
@@ -734,7 +727,6 @@ def test_an_unloadable_ruleset_does_not_stop_capture(isolated_db, monkeypatch, t
     broken = tmp_path / "broken.yaml"
     broken.write_text("meta: {this: is not a ruleset}\n", encoding="utf-8")
     monkeypatch.setenv("ALERTS_RULES_PATH", str(broken))
-    monkeypatch.setenv("ALERTS_LKG_PATH", str(broken))
     get_settings.cache_clear()
 
     snap_id = _persist_snapshot(isolated_db)

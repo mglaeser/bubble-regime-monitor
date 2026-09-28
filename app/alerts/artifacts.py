@@ -48,7 +48,7 @@ REPO_PHRASES = Path(__file__).resolve().parents[2] / "config" / "alert_phrases.v
 class LoadedArtifacts:
     ruleset: ValidatedRuleset
     phrase_set: ValidatedPhraseSet
-    source: str                    # "candidate" | "last_known_good" | "registry"
+    source: str                    # "candidate" | "registry"
     fallback_reason: str | None = None
 
 
@@ -59,13 +59,9 @@ def _read(path: Path) -> str | None:
         return None
 
 
-def _candidate_paths() -> tuple[Path, Path, Path]:
+def _candidate_paths() -> tuple[Path, Path]:
     settings = get_settings()
-    return (
-        Path(settings.alerts_rules_path),
-        Path(settings.alerts_lkg_path),
-        Path(settings.alerts_phrase_path),
-    )
+    return Path(settings.alerts_rules_path), Path(settings.alerts_phrase_path)
 
 
 def validate_from_disk(
@@ -103,10 +99,10 @@ def validate_from_disk(
 
 
 def load_active(session: Session, *, service_version: str | None = None) -> LoadedArtifacts:
-    """The artifacts evaluation should actually use, with the LKG fallback.
+    """The artifacts evaluation should actually use.
 
-    Order: the candidate on disk, then the last-known-good file, then whatever
-    is already PROMOTED in the registry. A fallback is reported, never silent.
+    Order: the candidate on disk, then whatever is already PROMOTED in the
+    registry, the last known good. A fallback is reported, never silent.
 
     THIS FUNCTION IS MODE-BLIND ON PURPOSE, and takes no `mode` argument.
     Live mode must additionally receive the PROMOTED artifact (audit B-04), and
@@ -116,7 +112,7 @@ def load_active(session: Session, *, service_version: str | None = None) -> Load
     candidate. A parameter that looks like a control and is not is the exact
     shape this system keeps removing.
     """
-    rules_path, lkg_path, phrase_path = _candidate_paths()
+    rules_path, phrase_path = _candidate_paths()
     try:
         return validate_from_disk(rules_path=rules_path, phrase_path=phrase_path,
                                   service_version=service_version)
@@ -124,18 +120,10 @@ def load_active(session: Session, *, service_version: str | None = None) -> Load
         candidate_error = sanitize(exc)
         log.warning("alert_rules_invalid", path=str(rules_path), error=candidate_error)
 
-    try:
-        loaded = validate_from_disk(rules_path=lkg_path, phrase_path=phrase_path,
-                                    service_version=service_version)
-        return LoadedArtifacts(ruleset=loaded.ruleset, phrase_set=loaded.phrase_set,
-                               source="last_known_good", fallback_reason=candidate_error)
-    except (RulesetInvalid, AlertingUnavailable) as exc:
-        log.warning("alert_lkg_invalid", path=str(lkg_path), error=sanitize(exc))
-
     promoted = load_promoted(session, service_version=service_version)
     if promoted is None:
         raise AlertingUnavailable(
-            "no valid ruleset: candidate, last-known-good and registry all unusable"
+            "no valid ruleset: candidate and registry both unusable"
         )
     return LoadedArtifacts(ruleset=promoted.ruleset, phrase_set=promoted.phrase_set,
                            source="registry", fallback_reason=candidate_error)

@@ -42,7 +42,6 @@ class Settings(BaseSettings):
     polygon_api_key: str = ""       # PRIMARY breadth (grouped-daily: 1 call/day, whole US market)
     stooq_enabled: bool = False     # experimental PoW-solver path; see ToS caveat
     twelve_data_indices: bool = False  # true ONLY on Twelve Data Grow ($29/mo)
-    fmp_api_key: str = ""           # optional SEC fundamentals fallback
 
     # Admin / security
     admin_api_key: str = "change-me-to-a-long-random-string"
@@ -171,13 +170,10 @@ class Settings(BaseSettings):
     message_language: Literal["en", "de"] | None = None
     alerts_live_profile: str = "default"
 
-    # Immutable artifacts. The *_lkg_* pair is the last-known-good ruleset used
-    # when a candidate fails validation — a fallback NEVER escalates the mode.
+    # Immutable artifacts. A candidate that fails validation falls back to the
+    # promoted ruleset in the registry — a fallback NEVER escalates the mode.
     alerts_rules_path: str = "/data/alert_rules.yaml"
-    alerts_lkg_path: str = "/data/alert_rules.last_good.yaml"
-    alerts_lkg_hash_path: str = "/data/alert_rules.last_good.sha256"
     alerts_phrase_path: str = "/data/alert_phrases.json"
-    alerts_calibration_dir: str = "/data/alert-calibration"
 
     # Separate scopes. A browser never receives the admin key (or the write
     # key); detailed reads go through a server-side proxy or the redacted
@@ -229,7 +225,6 @@ class Settings(BaseSettings):
     # permanently busy recovery job.
     alerts_eval_retry_max: int = 2
     alerts_eval_budget_ms: int = 1500
-    alerts_unknown_escalate_h: int = 24
     alerts_metadata_retention_days: int = 800
     alerts_message_retention_days: int = 400
     alerts_busy_timeout_ms: int = 5000
@@ -241,9 +236,6 @@ class Settings(BaseSettings):
     alerts_llm_enabled: bool = True
     alerts_llm_timeout_s: int = 6
     alerts_llm_render_cap_24h: int = 12
-    alerts_llm_test_cap_1h: int = 6
-    alerts_llm_retry_max: int = 1
-    alerts_llm_shadow_enabled: bool = False
 
     # Migration-friendly alias for the legacy `sms_enabled`. Until the Stage 4
     # cutover the daily digest keeps running: ALERTS_MODE=live must NOT
