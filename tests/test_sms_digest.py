@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from app.engine.sms_report import _asciify, _clip_to_sms, deterministic_report, generate_sms_body
+from app.engine.sms_report import _asciify, _clip_to_sms, deterministic_report
 from app.models import Snapshot
 
 
@@ -57,26 +57,6 @@ class TestDeterministicReport:
         body = deterministic_report(_snap(), 40)
         assert len(body) <= 40
         assert "41/100" in body
-
-
-class TestGenerateBody:
-    def test_degrades_to_deterministic_without_llm(self, isolated_db):
-        # The gateway is deliberately unconfigured -> deterministic fallback,
-        # always <= limit ASCII.
-        body, llm_used = generate_sms_body(_snap())
-        assert llm_used is False
-        assert len(body) <= 160 and body.isascii()
-        assert "41/100" in body
-
-    def test_llm_path_used_and_capped(self, isolated_db, monkeypatch):
-        import app.engine.judgment as judgment
-
-        long_text = "AI valuation stretched, CAPE ~42 the driver; " * 6  # > 160 chars
-        monkeypatch.setattr(judgment, "run_completion", lambda prompt: long_text)
-        body, llm_used = generate_sms_body(_snap())
-        assert llm_used is True
-        assert len(body) <= 160 and body.isascii()
-        assert "Research, not advice." not in body  # v3.6.0: no tag appended
 
 
 class TestSipgateSender:

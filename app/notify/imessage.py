@@ -243,7 +243,7 @@ def normalise_text(body: str) -> str:
     a guaranteed 400.
 
     THE LEADING HYPHEN IS NOT SAFE TO SIMPLY DELETE. The contract's `^[^-]`
-    rejects it, but the body is LLM-written and `_asciify` in
+    rejects it, but a body may be model-written, and `_asciify` in
     app/engine/sms_report.py folds en- and em-dashes to ASCII "-", so a leading
     hyphen is as likely to be a minus sign as decoration. Deleting it turns
     "-3.1% breadth" into "3.1% breadth" and inverts the reading of a financial

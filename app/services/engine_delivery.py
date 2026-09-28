@@ -4,13 +4,13 @@ Lives with the services, not in the engine package: the engine is a library
 that imports no transport (a pin holds that), and this module is the one
 place in the application that holds both a transport and the gate.
 
-This is the go-live wiring: the daily digest, which the old path sends as
-free text written by the model against SMS_PROMPT and clipped, goes through
-the engine when MESSAGE_ENGINE_ENABLED is on - the model writes the message
-from the snapshot's facts and the references, the basic checks run, and the
-owner's template goes out otherwise (docs/MESSAGE_ENGINE.md, decision 24);
-nothing reaches a transport except through `gate.emit`. With the engine off,
-the old path is untouched (ruling Q42: defaults inert).
+This is the go-live wiring: the daily digest goes through the engine when
+MESSAGE_ENGINE_ENABLED is on - the model writes the message from the
+snapshot's facts and the references, the basic checks run, and the owner's
+template goes out otherwise (docs/MESSAGE_ENGINE.md, decision 24); nothing
+reaches a transport except through `gate.emit`. With the engine off, the
+digest is the deterministic template (app/engine/sms_report.py) and no model
+is called.
 
 Two things are deliberate here. `compose()` is called OUTSIDE any session
 (decision 13): the engine owns its transactions, and a caller holding a

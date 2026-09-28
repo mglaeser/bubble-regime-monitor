@@ -87,19 +87,28 @@ class TestDigestFacts:
 
 
 class TestEngineOff:
-    def test_the_old_path_is_untouched(self, monkeypatch, imessage_env):
+    def test_the_digest_is_the_template_and_no_model_is_called(self, monkeypatch, imessage_env):
+        """With the engine off the digest is the deterministic template; the
+        second model prompt the old path wrote against is gone."""
+        from app.engine import judgment
+        from app.engine.sms_report import deterministic_report
+
         with session_scope() as s:
             s.add(_snapshot())
             s.commit()
         calls: list[str] = []
-        monkeypatch.setattr(digest, "generate_sms_body", lambda snap: ("old digest body", True))
+        prompts: list[str] = []
+        monkeypatch.setattr(judgment, "run_completion",
+                            lambda prompt, *_a, **_kw: prompts.append(prompt) or "a model-written digest")
         monkeypatch.setattr(digest, "send_imessage",
                             lambda body, **_kw: calls.append(body) or type("R", (), {"ok": True, "status_code": 202,
                                                                                       "operation_id": "op", "error": None})())
         monkeypatch.setattr(service, "deliver", lambda **_kw: (_ for _ in ()).throw(AssertionError("engine used")))
         out = digest.send_daily_digest()
-        assert out["status"] == "sent" and out["message"] == "old digest body" and calls == ["old digest body"]
-        assert "engine" not in out
+        template = deterministic_report(_snapshot(), get_settings().sms_max_len)
+        assert out["status"] == "sent" and out["message"] == template and calls == [template]
+        assert out["llm_used"] is False and "engine" not in out
+        assert prompts == []
 
 
 class TestEngineOn:
@@ -121,8 +130,8 @@ class TestEngineOn:
         self._sent(monkeypatch, sends)
         reply = "bubblegauge 51/100, band trim: valuations lead the reading, credit stays calm."
         monkeypatch.setattr(composer, "complete", lambda **_kw: type("C", (), {"text": reply})())
-        monkeypatch.setattr(digest, "generate_sms_body",
-                            lambda snap: (_ for _ in ()).throw(AssertionError("old path used")))
+        monkeypatch.setattr(digest, "deterministic_report",
+                            lambda *_a: (_ for _ in ()).throw(AssertionError("engine-off path used")))
         out = digest.send_daily_digest()
         assert out["status"] == "sent" and out["engine"] is True and out["transport"] == "imessage"
         assert out["source"] == "generated" and out["llm_used"] is True
