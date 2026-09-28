@@ -1203,9 +1203,12 @@ KNOWN_ISSUES: list[dict[str, str]] = [
     {"id": "judgmental-anchors", "severity": "info", "category": "judgmental-parameter",
      "title": "Several anchors/weights are expert-judgmental, not estimated",
      "detail": "S2 concentration lo/hi, D1 breadth lo/hi and weight, and the alpha split have no "
-     "labeled-crash-dataset calibration. No sensitivity report is kept (owner decision "
-     "2026-09-28). A weight change fails the frozen-methodology and golden-fixture tests "
-     "until it is made deliberately, with its numeric delta explained (AGENTS.md rule 6).",
+     "labeled-crash-dataset calibration. No sensitivity report is kept: the script meant to "
+     "produce one failed at import from v3.3.0 on (2026-07-12, when EPSILON left "
+     "app/engine/aggregate.py), so it produced no report or warning after that, and it was "
+     "deleted by owner decision on 2026-09-28 rather than rebuilt. A weight change fails the "
+     "frozen-methodology and golden-fixture tests until it is made deliberately, with its "
+     "numeric delta explained (AGENTS.md rule 6).",
      "ref": "indicators s2,d1"},
     {"id": "alphavantage-unadjusted", "severity": "info", "category": "data-quality",
      "title": "Alpha Vantage tier serves UNADJUSTED prices",
