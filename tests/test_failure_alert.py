@@ -1408,3 +1408,17 @@ class TestRoundThreeOn139:
         monkeypatch.setattr(failure_alert, "build_failure_message", build_failure_message)
         assert notify_recompute_outcome(None)["status"] == "noop"
         assert sent == []
+
+
+class TestRoundFourOn139:
+    """#139 round 4, SOTA-A: an image from before D11 cannot read the new file
+    (its loader requires a failure signature), so a rollback to it drops an
+    open outage's all-clear. That is the scope of this change (no backward
+    compatibility, owner ruling 2026-09-20), stated in the module docstring;
+    this pins the format it states: the record's own fields, nothing else."""
+
+    def test_the_file_holds_the_records_fields_only(self, sent):
+        notify_recompute_outcome(EBP_ERROR)
+        state = json.loads(pathlib.Path(failure_alert._state_path()).read_text())
+        assert set(state) == {"first_seen", "failures", "last_sent", "announced",
+                              "counted_attempt", "recovered_at"}

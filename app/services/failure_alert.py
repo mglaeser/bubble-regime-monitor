@@ -30,6 +30,13 @@ mid-send still owes the all-clear (an all-clear nobody needed is a smaller
 mistake than a FAILING nobody retracts); a transport that answers "not
 delivered" undoes the mark, since then nobody was told.
 
+THE FILE IS THIS RECORD'S OWN FORMAT, in both directions: no backward
+compatibility (owner ruling, 2026-09-20). An image from before D11 cannot read
+it (its loader requires a failure signature and a list of destinations), so a
+rollback to such an image while an announced outage is open drops that
+outage's all-clear. deploy.sh rolls back on its own only when a new image
+fails /healthz, which a failed recompute does not cause.
+
 It never raises: every path returns a status dict, because the caller is the
 scheduler's only worker thread.
 """
