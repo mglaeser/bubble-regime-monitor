@@ -117,7 +117,11 @@ def _aware(value: object) -> datetime:
 def _load_locked() -> None:
     """Restore the record a previous process left. Caller holds `_lock`.
     Anything unreadable is "no outage": a corrupt file must not invent an
-    all-clear, and must never take down the alerter."""
+    all-clear, and must never take down the alerter. A file written before D11
+    is read by the fields it shares with this record; its crash-mid-send marker
+    (`sending`) is not read: no backward compatibility (owner ruling,
+    2026-09-20), and the one deployment held no state file when D11 shipped
+    (checked 2026-09-28)."""
     global _current, _loaded
     _loaded = True
     try:
@@ -287,18 +291,20 @@ def notify_recompute_outcome(error: str | None,
                     _persist_locked()
                     return {"status": "throttled", "failures": outage.failures}
                 kind = "failure"
+            transport, problem = _transport()
+            if problem:
+                # Nowhere to say it is the state this module exists to make
+                # loud. The record stays and nobody was told, so it is not
+                # announced: a later run retries, and no all-clear can follow
+                # an alarm that was never sent (#139 round 1, SOTA-A and SOTA-B).
+                _persist_locked()
+                log.error("failure_alert_undeliverable", kind=kind, reason=problem)
+                return {"status": "skipped", "reason": problem, "transport": transport,
+                        "kind": kind}
             was_announced = outage.announced
             if kind == "failure":
                 outage.announced = True      # BEFORE the send (module docstring)
             _persist_locked()
-
-            transport, problem = _transport()
-            if problem:
-                # Nowhere to say it is the state this module exists to make
-                # loud. The record stays, so a later run retries.
-                log.error("failure_alert_undeliverable", kind=kind, reason=problem)
-                return {"status": "skipped", "reason": problem, "transport": transport,
-                        "kind": kind}
             limit = settings.sms_max_len
             if kind == "recovery":
                 text = build_recovery_message(failures=outage.failures,

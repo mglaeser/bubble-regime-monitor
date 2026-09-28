@@ -1311,3 +1311,45 @@ class TestOneOutageRecord:
         assert "+491510000000" not in state and "base 10" not in state
         assert set(json.loads(state)) == {"first_seen", "failures", "last_sent", "announced",
                                           "counted_attempt", "recovered_at"}
+
+
+class TestRoundOneOn139:
+    """#139 round 1: SOTA-A and SOTA-B, the same two defects. Executed.
+    With no transport the outage was marked announced before the transport was
+    checked, so the first message after one was switched on was an all-clear for
+    an alarm nobody had received. And a file written before D11 is not read for
+    its crash-mid-send marker: the scope of this change, stated in the module."""
+
+    @staticmethod
+    def _transports(monkeypatch, on: bool):
+        from app.config import get_settings
+
+        monkeypatch.setenv("IMESSAGE_ENABLED", "true" if on else "false")
+        get_settings.cache_clear()
+
+    def test_an_outage_nobody_could_be_told_about_is_not_announced(self, monkeypatch, sent):
+        self._transports(monkeypatch, on=False)
+        assert notify_recompute_outcome(EBP_ERROR)["status"] == "skipped"
+        state = json.loads(pathlib.Path(failure_alert._state_path()).read_text())
+        assert state["announced"] is False
+        self._transports(monkeypatch, on=True)
+        assert notify_recompute_outcome(None)["status"] == "noop"
+        assert sent == []
+
+    def test_the_alarm_goes_out_once_there_is_a_transport(self, monkeypatch, sent):
+        self._transports(monkeypatch, on=False)
+        notify_recompute_outcome(EBP_ERROR)
+        self._transports(monkeypatch, on=True)
+        assert notify_recompute_outcome(EBP_ERROR)["status"] == "sent"
+        assert notify_recompute_outcome(None)["kind"] == "recovery"
+        assert len(sent) == 2 and "FAILING" in sent[0] and sent[1].startswith("bubblegauge OK")
+
+    def test_a_pre_d11_crash_marker_is_not_read(self, sent):
+        """No backward compatibility (owner ruling, 2026-09-20): the one
+        deployment held no state file when D11 shipped."""
+        path = pathlib.Path(failure_alert._state_path())
+        path.write_text(json.dumps({"signature": "x", "first_seen": "2026-09-28T10:00:00+00:00",
+                                    "failures": 2, "announced": False, "sending": True}))
+        failure_alert._loaded = False
+        assert notify_recompute_outcome(None)["status"] == "noop"
+        assert sent == []
