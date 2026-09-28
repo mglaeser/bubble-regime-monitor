@@ -5,9 +5,7 @@ Runs against the configured DB (DB_URL / default /data/bubble.db) and prints
 ONE JSON document. Read-only; no scored value is touched.
 
 Usage:
-  python scripts/replay_report.py sufficiency   RM-2 S5 gate tracker
   python scripts/replay_report.py b             RM-4 B0-B5 coverage policies
-  python scripts/replay_report.py s5            RM-4 positional-vs-calendar S5
   python scripts/replay_report.py evidence      RM-1 stamp/outcome summary
   python scripts/replay_report.py assemble      RM-5 per-PIN decision packages
 """
@@ -20,9 +18,7 @@ import sys
 from app.services import replay
 
 STUDIES = {
-    "sufficiency": replay.s5_tier_sufficiency,
     "b": replay.b_policy_report,
-    "s5": replay.s5_dual_report,
     "evidence": replay.evidence_summary,
     "assemble": replay.assemble_decision_packages,
 }

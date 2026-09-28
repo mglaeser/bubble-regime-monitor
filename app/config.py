@@ -248,17 +248,6 @@ class Settings(BaseSettings):
     db_url: str = "sqlite:////data/bubble.db"
     log_level: str = "INFO"
     gsadf_contested: bool = True
-    # S4 v4 CANDIDATE SWITCHES. Both default to the CURRENT production behaviour;
-    # neither moves a scored value until deliberately enabled. PINS_DECISION_MEMO
-    # puts the instrument change (PIN C) on CONDITIONAL HOLD pending "a documented
-    # drift gate", and every PIN becomes a v4 change (version bump +
-    # falsification-clock reset + regenerated golden). These exist to PRODUCE that
-    # drift evidence, in the shape PIN H already set for score-shifting work:
-    # build it, dual-report it, do not activate the headline.
-    #
-    # Shadow only. Runs GSADF a second time on the real (CPI-deflated) native
-    # Nasdaq-100 from FRED and reports the result alongside. Never scored.
-    gsadf_shadow_real_index: bool = False
     # NOTE: there is deliberately NO runtime switch for the asymmetric contested
     # rule. An earlier revision had one, and the panel refuted it: "runtime flag
     # changes frozen S4 scoring without required v4 metadata/golden ceremony".

@@ -70,8 +70,8 @@ extract_cv <- function(obj, level) {
 # from 1986 -- the SCORED family, since there is no deflation on the scored path
 # (exuber 1.1.0, T=487): GSADF 2.5837 > cv95 2.2604 -> rejects, and the sup is
 # attained at a window ending 2000-02, while the BSADF at the 2026-07 endpoint is
-# 1.1315 against an endpoint cv90 of 1.1769. (The CPI-deflated shadow gives
-# 2.6189 and 0.7562 -- same story, and never scored.)
+# 1.1315 against an endpoint cv90 of 1.1769. (The CPI-deflated series gives
+# 2.6189 and 0.7562 -- same story.)
 #
 # BOUND ON THAT NUMBER: gsadf.series_months_max = 360 caps every runtime fit, so
 # T=487 is an offline measurement -- the service never fits it. On the 360-month

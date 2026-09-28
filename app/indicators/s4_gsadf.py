@@ -20,10 +20,10 @@ WHAT/HOW/WHY/references/caveats: see app.references.REGISTRY["s4"]; summary:
     deflation: GSADF 2.5837 > cv95 2.2604 REJECTS, and the sup is attained at a
     window ending 2000-02 — a 26-year-old episode — while the BSADF at the
     2026-07 endpoint is 1.1315 against an endpoint cv90 of 1.1769. (The
-    CPI-deflated shadow gives 2.6189 and 0.7562: same story, never scored.)
+    CPI-deflated series gives 2.6189 and 0.7562: same story.)
 
     READ THAT MEASUREMENT WITH ITS BOUND: gsadf.series_months_max = 360 caps
-    every runtime fit (both run_gsadf call sites), so T=487 is an OFFLINE
+    every runtime fit (the one run_gsadf call site), so T=487 is an OFFLINE
     measurement on the untruncated series — the service never fits it. On the
     360-month tail it does fit, the SAME series gives GSADF 1.4936 against cv95
     2.2099: no rejection, sup dated 2021-08. So the dot-com rejection is not

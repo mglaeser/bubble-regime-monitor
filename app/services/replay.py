@@ -13,12 +13,7 @@ two-thirds band gate is the only live rule.
 
   * RM-1  record_outcome()        append-only falsification evidence
           evidence_summary()      latest stamp + outcome count (acceptance)
-  * RM-2  s5_tier_sufficiency()   qualifying-day counts per S5 source tier
-                                  against the >=60-trading-day activation gate
   * RM-4  b_policy_report()       B0-B5 coverage policies over history
-          s5_dual_report()        positional vs calendar S5, incl. the
-                                  hypothetical headline delta (candidate sub
-                                  swapped into the recorded sub-score set)
   * RM-5  assemble_decision_packages()  per-PIN evidence packages; host-
                                   dependent studies explicitly PENDING
 """
@@ -31,21 +26,11 @@ from typing import Any
 from sqlalchemy import select
 
 from app import methodology as _M
-from app.alerts.calendars import is_trading_day
 from app.db import session_scope
-from app.engine.aggregate import RedFlags, deterministic_score
 from app.logging_conf import get_logger
 from app.models import FalsificationOutcome, Snapshot
 
 log = get_logger(__name__)
-
-# The S5 activation gate's day requirement (operator-set in the milestone:
-# ">= 60 trading days AND adequate observations across all three source
-# tiers"; per-tier adequacy is deliberately NOT pinned here).
-S5_GATE_TRADING_DAYS = 60
-
-_S5_TIERS = ("fed_ebp", "fred_BAA_DGS10", "fred_BAMLH0A0HYM2")
-
 
 _WS = _M.as_dict("aggregation", "block_s_weights")
 _WD = _M.as_dict("aggregation", "block_d_weights")
@@ -96,92 +81,6 @@ def evidence_summary() -> dict[str, Any]:
             "outcomes_append_only": True,   # enforced by DB triggers (0006)
             "current_artifact_sha256": _M.frozen_sha256(),
         }
-
-
-# ------------------------------------------------------------------- RM-2 ---
-
-
-def _s5_payload(snap: Snapshot) -> dict | None:
-    return ((snap.block_s or {}).get("indicators") or {}).get("s5")
-
-
-def s5_tier_sufficiency() -> dict[str, Any]:
-    """Distinct TRADING days (Mon-Fri minus NYSE holidays) of persisted snapshots, overall and per
-    S5 source tier, against the >=60-day activation window. Per-tier adequacy
-    thresholds are an operator decision and deliberately not asserted."""
-    snapshot_weekdays: set = set()      # trading days with any snapshot (holidays excluded)
-    s5_days: set = set()
-    days_by_tier: dict[str, set] = {t: set() for t in _S5_TIERS}
-    comparison_days_by_tier: dict[str, set] = {t: set() for t in _S5_TIERS}
-    dual_days: set = set()
-    valid_days: set = set()
-    with session_scope() as session:
-        for snap in session.execute(select(Snapshot)).scalars():
-            d = snap.computed_at.date()
-            if not is_trading_day(d):
-                continue
-            snapshot_weekdays.add(d)
-            s5 = _s5_payload(snap)
-            if not s5 or s5.get("sub_score") is None:
-                continue
-            s5_days.add(d)
-            src = s5.get("data_source")
-            if src in days_by_tier:
-                days_by_tier[src].add(d)
-            dual = s5.get("s5_dual_report")
-            if isinstance(dual, dict):
-                dual_days.add(d)
-                # A day advances the GATE only if the candidate actually
-                # produced a comparable sub-score (panel round-5 finding:
-                # 60 days of INSUFFICIENT_HISTORY candidate failures must
-                # NOT read as DAY_GATE_MET with zero real comparisons).
-                # The production side is already non-None here (filtered
-                # above); the candidate side is checked explicitly.
-                cand = dual.get("candidate_v4") or {}
-                if cand.get("sub_score") is not None:
-                    valid_days.add(d)
-                    # Tier attribution uses the dual report's OWN source_tier
-                    # (panel round-7): that labels the series the comparison
-                    # actually ran on. Today it always equals production's
-                    # data_source (the shadow is fed the production tier's
-                    # series), but a legacy/foreign payload could diverge —
-                    # and a missing label attributes to NO tier (fail-closed)
-                    # rather than inheriting production's.
-                    cand_tier = cand.get("source_tier")
-                    if cand_tier in comparison_days_by_tier:
-                        comparison_days_by_tier[cand_tier].add(d)
-    # The GATE counts only days on which the dual comparison actually ran
-    # AND produced both sides (panel findings on this PR: counting every
-    # weekday snapshot let 60 S5-less days read as gate progress; counting
-    # dict presence let candidate failures read as progress). Tier adequacy
-    # is NEVER auto-satisfied here — adequacy is the operator's call.
-    return {
-        "gate_trading_days": S5_GATE_TRADING_DAYS,
-        "gate_day_count": len(valid_days),
-        "days_remaining_to_gate": max(0, S5_GATE_TRADING_DAYS - len(valid_days)),
-        "snapshot_weekdays_observed": len(snapshot_weekdays),
-        "s5_observation_days": len(s5_days),
-        "days_with_dual_report": len(dual_days),
-        "days_with_valid_comparison": len(valid_days),
-        # production-observation days per tier vs VALID-comparison days per
-        # tier are reported separately (panel round-6 finding: a tier can be
-        # observed by production for weeks while the candidate never once
-        # resolved on it — that is zero tier evidence for the H decision)
-        "days_by_tier": {t: len(s) for t, s in days_by_tier.items()},
-        "comparison_days_by_tier": {t: len(s) for t, s
-                                    in comparison_days_by_tier.items()},
-        "all_tiers_observed_production": all(days_by_tier[t] for t in _S5_TIERS),
-        "all_tiers_compared": all(comparison_days_by_tier[t] for t in _S5_TIERS),
-        "note": ("gate counts days with a VALID dual comparison (both the "
-                 "production and candidate sub-scores present) on NYSE "
-                 "trading days only "
-                 "(weekends + full-day exchange holidays excluded; one-off "
-                 "special closures are a documented residual); tier EVIDENCE "
-                 "means comparison days (all_tiers_compared), not mere "
-                 "production observation; per-tier "
-                 "adequacy is an operator decision (not pinned) — 60 days of "
-                 "EBP-only success does not validate fallback behavior"),
-    }
 
 
 # ------------------------------------------------------------------- RM-4 ---
@@ -299,106 +198,6 @@ def b_policy_report() -> dict[str, Any]:
     }
 
 
-def _flags_from_detail(detail: dict | None) -> RedFlags:
-    d = detail or {}
-    return RedFlags(
-        gsadf_explosive_noncontested=bool(d.get("gsadf_explosive_noncontested")),
-        semi_runup_ge_150pp=bool(d.get("semi_runup_ge_150pp")),
-        hy_oas_widen_gt_100bps=bool(d.get("hy_oas_widen_gt_100bps")),
-        breadth_lt_50_near_ath=bool(d.get("breadth_lt_50_near_ath")),
-    )
-
-
-def s5_dual_report() -> dict[str, Any]:
-    """Positional (production) vs calendar-candidate S5 over every snapshot
-    carrying the PIN-H shadow dual report, INCLUDING the hypothetical
-    deterministic-headline delta: the candidate sub-score is swapped into the
-    RECORDED sub-score set and the frozen deterministic pipeline re-run on the
-    side. Read-only; the shadow stays included_in_score=false everywhere."""
-    rows: list[dict[str, Any]] = []
-    statuses: dict[str, int] = {}
-    tiers: dict[str, int] = {}
-    mismatches = 0
-    with session_scope() as session:
-        for snap in _snapshot_rows(session):
-            s5 = _s5_payload(snap) or {}
-            dual = s5.get("s5_dual_report")
-            if not isinstance(dual, dict):
-                continue
-            cand = dual.get("candidate_v4") or {}
-            status = cand.get("selection_status") or "UNKNOWN"
-            statuses[status] = statuses.get(status, 0) + 1
-            tier = cand.get("source_tier") or "unknown"
-            tiers[tier] = tiers.get(tier, 0) + 1
-            prod_sub = (dual.get("production") or {}).get("sub_score")
-            cand_sub = cand.get("sub_score")
-            entry: dict[str, Any] = {
-                "computed_at": snap.computed_at.isoformat(),
-                "tier": tier, "status": status,
-                "production_sub": prod_sub, "candidate_sub": cand_sub,
-                "sub_delta": None, "headline_delta": None,
-            }
-            if prod_sub is not None and cand_sub is not None:
-                entry["sub_delta"] = round(cand_sub - prod_sub, 6)
-                # keys restricted to the frozen weight vectors: a stray key in
-                # a legacy/foreign payload must be excluded, not abort the
-                # report (geometric_block's A-05 contract rejects un-weighted
-                # extras; PARTIAL maps are fine — deterministic_score
-                # renormalizes over present keys, production's own drop path)
-                sub_s = {k: v.get("sub_score") for k, v in
-                         ((snap.block_s or {}).get("indicators") or {}).items()
-                         if v.get("sub_score") is not None and k in _WS}
-                sub_d = {k: v.get("sub_score") for k, v in
-                         ((snap.block_d or {}).get("indicators") or {}).items()
-                         if v.get("sub_score") is not None and k in _WD}
-                if "s5" in sub_s and sub_d:
-                    flags = _flags_from_detail(snap.red_flag_detail)
-                    base = deterministic_score(dict(sub_s), dict(sub_d),
-                                               snap.v_multiplier, flags, _WS, _WD).score
-                    # Baseline validation (panel round-5): the re-derived
-                    # baseline must reproduce the RECORDED point score. If it
-                    # doesn't, the reconstructed inclusion set diverged from
-                    # what production actually scored (legacy/foreign payload)
-                    # — flag the row and emit NO delta rather than a wrong one.
-                    if abs(base - snap.point_score) > 1e-6:
-                        entry["baseline_mismatch"] = True
-                        mismatches += 1
-                    else:
-                        swapped = dict(sub_s)
-                        swapped["s5"] = cand_sub
-                        cand_score = deterministic_score(swapped, dict(sub_d),
-                                                         snap.v_multiplier, flags,
-                                                         _WS, _WD).score
-                        entry["headline_delta"] = round(cand_score - base, 4)
-            rows.append(entry)
-
-    deltas = [r["sub_delta"] for r in rows if r["sub_delta"] is not None]
-    hdeltas = [r["headline_delta"] for r in rows if r["headline_delta"] is not None]
-
-    def _agg(xs: list[float]) -> dict[str, float] | None:
-        if not xs:
-            return None
-        return {"n": len(xs), "mean": round(sum(xs) / len(xs), 6),
-                "min": round(min(xs), 6), "max": round(max(xs), 6),
-                "mean_abs": round(sum(abs(x) for x in xs) / len(xs), 6)}
-
-    return {
-        "snapshots_with_dual_report": len(rows),
-        "selection_statuses": statuses,
-        "source_tiers": tiers,
-        "baseline_mismatches": mismatches,
-        "sub_score_delta": _agg(deltas),
-        "headline_delta": _agg(hdeltas),
-        "series": rows,
-        "note": ("hypothetical side-computation over recorded sub-scores; "
-                 "rows whose re-derived baseline does not reproduce the "
-                 "recorded point score are flagged and excluded from the "
-                 "headline delta; the candidate remains "
-                 "included_in_score=false in production and "
-                 "its parameters remain unapproved operator PINs"),
-    }
-
-
 # ------------------------------------------------------------------- RM-5 ---
 
 
@@ -406,7 +205,6 @@ def assemble_decision_packages() -> dict[str, Any]:
     """Collate the per-PIN evidence packages. Studies that need the production
     host's network/data (EDGAR PIT grid, ALFRED vintages, price seeds, Atom
     G1-vs-mp benchmarks) are explicitly PENDING_HOST — never silently omitted."""
-    sufficiency = s5_tier_sufficiency()
     pending = {"status": "PENDING_HOST",
                "run_on": "production host (network + data access required)"}
     return {
@@ -422,22 +220,6 @@ def assemble_decision_packages() -> dict[str, Any]:
         "G_lppls_execution": {**pending,
                               "needs": "Atom runtime benchmark: G1 deterministic "
                                        "reference vs multiprocessing path"},
-        "H_s5_calendar": {
-            # Never a mechanical GATE_MET (panel finding): the day condition is
-            # computable, tier ADEQUACY is an operator judgment by design.
-            "status": ("DAY_GATE_MET_TIER_ADEQUACY_OPERATOR_JUDGMENT"
-                       if sufficiency["gate_day_count"] >= S5_GATE_TRADING_DAYS
-                       else "EVIDENCE_ACCUMULATING"),
-            "sufficiency": sufficiency,
-            "dual_report": s5_dual_report(),
-            "activation_requires": [
-                "operator approval of all six S5 constants (incl. the artifact "
-                "<PIN> S5_EMPIRICAL_CDF_TIE_METHOD)",
-                "vintage policy decision (see ALFRED harness)",
-                "new methodology version + falsification clock + regenerated "
-                "goldens + dual reporting + rollback plan",
-            ],
-        },
         "C_ndx_identity": {**pending,
                            "harness": "docs/harnesses/c_ndx_drift_harness.py"},
     }

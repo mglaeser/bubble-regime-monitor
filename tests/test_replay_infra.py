@@ -1,9 +1,9 @@
 """Historical Replay Infrastructure (RM-1..RM-5, v3.8.0).
 
 Covers: the per-snapshot methodology stamp; DB-level append-only enforcement
-on falsification outcomes; the S5 sufficiency tracker; the B0-B5 policy
-replay; the S5 dual-report backfill incl. the hypothetical headline delta;
-the RM-5 assembler; and the read-only API surfaces. Everything is read-only
+on falsification outcomes; the B0-B5 policy replay; the RM-5 assembler; and
+the read-only API surfaces. (The S5 calendar shadow study went with the
+shadows, owner decision D4, 2026-09-28.) Everything is read-only
 toward scoring: the golden fixture tests elsewhere prove 52.43 is untouched.
 """
 
@@ -15,36 +15,11 @@ from sqlalchemy import select
 from app import methodology as M
 
 
-def _dated_monthly(values, end_year=2026, end_month=6):
-    """Month-end-dated copies of a monthly float series (newest last)."""
-    import calendar as _cal
-
-    out = []
-    y, m = end_year, end_month
-    for v in reversed(values):
-        out.append((f"{y:04d}-{m:02d}-{_cal.monthrange(y, m)[1]:02d}", v))
-        m -= 1
-        if m == 0:
-            y, m = y - 1, 12
-    return list(reversed(out))
-
-
 def _persist_golden(monkeypatch=None):
     from app.services.compute import compute_snapshot, persist_snapshot
     from tests.conftest import make_golden_raw_inputs
 
     raw = make_golden_raw_inputs()
-    # the golden fixture builds RawInputs directly (no gather step), so attach
-    # the DATED series the PIN-H shadow consumes, mirroring live gathering.
-    # The golden S5 rides the daily HY-OAS tier -> daily dates, newest last.
-    if raw.hy_oas_history_bps:
-        from datetime import date, timedelta
-
-        end = date(2026, 6, 30)
-        n = len(raw.hy_oas_history_bps)
-        raw.hy_oas_history_dated = [
-            ((end - timedelta(days=n - 1 - i)).isoformat(), v)
-            for i, v in enumerate(raw.hy_oas_history_bps)]
     data = compute_snapshot(raw, mc_samples=5_000, mc_seed=20260711)
     persist_snapshot(data, raw)
     return data
@@ -131,147 +106,7 @@ class TestRM1Evidence:
         assert ev["outcomes_append_only"] is True
 
 
-class TestRM2Sufficiency:
-    def test_tracker_counts_trading_days_and_tiers(self, isolated_db):
-        from app.services.replay import S5_GATE_TRADING_DAYS, s5_tier_sufficiency
-
-        _persist_golden()
-        out = s5_tier_sufficiency()
-        assert out["gate_trading_days"] == S5_GATE_TRADING_DAYS == 60
-        # the gate counts VALID-comparison days only (panel findings on PR #22)
-        assert out["gate_day_count"] == out["days_with_valid_comparison"]
-        assert out["days_with_valid_comparison"] <= out["days_with_dual_report"]
-        assert out["days_remaining_to_gate"] == 60 - out["gate_day_count"]
-        assert out["s5_observation_days"] <= out["snapshot_weekdays_observed"]
-        # one tier present at most -> both flags honestly False
-        assert out["all_tiers_observed_production"] is False
-        assert out["all_tiers_compared"] is False
-
-    def test_gate_ignores_s5_less_snapshots(self, isolated_db):
-        # 60 weekday snapshots WITHOUT any computed s5 must contribute ZERO
-        # gate progress (the false-GATE_MET path the panel refuted)
-        from datetime import UTC, datetime, timedelta
-
-        from app.db import session_scope
-        from app.models import Snapshot
-        from app.services.replay import s5_tier_sufficiency
-
-        base = datetime(2026, 1, 5, 12, tzinfo=UTC)          # a Monday
-        with session_scope() as session:
-            d = base
-            added = 0
-            while added < 60:
-                if d.weekday() < 5:
-                    session.add(Snapshot(
-                        computed_at=d, service_version="test", median=50.0,
-                        iqr_lo=45.0, iqr_hi=55.0, band5=40.0, band95=60.0,
-                        point_score=50.0, action_band="hold",
-                        block_s={"indicators": {}}, block_d={"indicators": {}},
-                        trend_states={}, fast_alarm={}, data_freshness={}))
-                    added += 1
-                d += timedelta(days=1)
-        out = s5_tier_sufficiency()
-        # the 60-weekday span from Mon 2026-01-05 contains TWO NYSE holidays
-        # (MLK 2026-01-19, Washington's Birthday 2026-02-16) which must NOT
-        # count as trading days (panel round-2 finding)
-        assert out["snapshot_weekdays_observed"] == 58
-        assert out["gate_day_count"] == 0                    # no dual reports -> no progress
-        assert out["days_remaining_to_gate"] == 60
-
-    def test_gate_rejects_candidate_failures(self, isolated_db):
-        # Panel round-5 finding: a dual report whose CANDIDATE failed
-        # (INSUFFICIENT_HISTORY -> sub_score None) must not advance the gate
-        # — 60 candidate failures are zero real comparisons, not DAY_GATE_MET.
-        from datetime import UTC, datetime
-        from datetime import date as _d
-        from datetime import timedelta as _td
-
-        from app.db import session_scope
-        from app.models import Snapshot
-        from app.services.compute import compute_snapshot, persist_snapshot
-        from app.services.replay import s5_tier_sufficiency
-        from tests.conftest import make_golden_raw_inputs
-
-        raw = make_golden_raw_inputs()
-        # production s5 scores from the full undated history, but the shadow
-        # gets only 10 dated observations -> candidate INSUFFICIENT_HISTORY
-        end = _d(2026, 6, 29)
-        raw.hy_oas_history_dated = [
-            ((end - _td(days=9 - i)).isoformat(), v)
-            for i, v in enumerate((raw.hy_oas_history_bps or [])[-10:])]
-        data = compute_snapshot(raw, mc_samples=5_000, mc_seed=20260711)
-        persist_snapshot(data, raw)
-        with session_scope() as session:      # pin to a known NYSE trading day
-            snap = session.execute(select(Snapshot)).scalars().first()
-            snap.computed_at = datetime(2026, 6, 29, 12, tzinfo=UTC)  # Monday
-        out = s5_tier_sufficiency()
-        assert out["days_with_dual_report"] == 1
-        assert out["days_with_valid_comparison"] == 0
-        assert out["gate_day_count"] == 0
-        assert out["days_remaining_to_gate"] == 60
-        # round-6: production observed the HY tier that day, but the candidate
-        # never resolved — observation is NOT comparison evidence for the tier
-        assert out["days_by_tier"]["fred_BAMLH0A0HYM2"] == 1
-        assert out["comparison_days_by_tier"]["fred_BAMLH0A0HYM2"] == 0
-        assert out["all_tiers_compared"] is False
-
-    def test_comparison_tier_follows_dual_report_label(self, isolated_db):
-        # Panel round-7 finding: comparison days must be bucketed by the dual
-        # report's OWN source_tier (the series the comparison ran on), not by
-        # production's data_source; a missing label attributes to NO tier
-        # (fail-closed) while still advancing the overall gate.
-        from datetime import UTC, datetime
-        from datetime import date as _d
-        from datetime import timedelta as _td
-
-        from app.db import session_scope
-        from app.models import Snapshot
-        from app.services.compute import compute_snapshot, persist_snapshot
-        from app.services.replay import s5_tier_sufficiency
-        from tests.conftest import make_golden_raw_inputs
-
-        raw = make_golden_raw_inputs()
-        end = _d(2026, 6, 29)                 # resolving candidate: 10-day
-        n = len(raw.hy_oas_history_bps)       # spacing hits the 730-day target
-        raw.hy_oas_history_dated = [
-            ((end - _td(days=10 * (n - 1 - i))).isoformat(), v)
-            for i, v in enumerate(raw.hy_oas_history_bps)]
-        data = compute_snapshot(raw, mc_samples=5_000, mc_seed=20260711)
-        persist_snapshot(data, raw)
-
-        def _relabel(tier_value, *, drop=False):
-            with session_scope() as session:
-                snap = session.execute(select(Snapshot)).scalars().first()
-                snap.computed_at = datetime(2026, 6, 29, 12, tzinfo=UTC)
-                block = dict(snap.block_s)
-                inds = dict(block["indicators"])
-                s5 = dict(inds["s5"])
-                dual = dict(s5["s5_dual_report"])
-                cand = dict(dual["candidate_v4"])
-                if drop:
-                    cand.pop("source_tier", None)
-                else:
-                    cand["source_tier"] = tier_value
-                dual["candidate_v4"] = cand
-                s5["s5_dual_report"] = dual
-                inds["s5"] = s5
-                block["indicators"] = inds
-                snap.block_s = block
-
-        # a legacy/foreign payload whose comparison ran on a DIFFERENT tier
-        _relabel("fed_ebp")
-        out = s5_tier_sufficiency()
-        assert out["gate_day_count"] == 1
-        assert out["comparison_days_by_tier"]["fed_ebp"] == 1
-        assert out["comparison_days_by_tier"]["fred_BAMLH0A0HYM2"] == 0
-        assert out["days_by_tier"]["fred_BAMLH0A0HYM2"] == 1  # observation stays
-
-        # no label at all: the day still counts, no tier claims the evidence
-        _relabel(None, drop=True)
-        out = s5_tier_sufficiency()
-        assert out["gate_day_count"] == 1
-        assert all(v == 0 for v in out["comparison_days_by_tier"].values())
-
+class TestNyseCalendar:
     def test_nyse_holiday_calendar(self):
         from datetime import date
 
@@ -355,105 +190,6 @@ class TestRM4Policies:
         assert cov["fraction"] < 2.0 / 3.0         # boundary verdict preserved
         assert cov["lost_weight"]["x"] == 1.0 - 0.66666
 
-    def test_dual_report_survives_degraded_and_stray_payloads(self, isolated_db):
-        # Refutation evidence for the round-3 panel claim that partial sub maps
-        # with full frozen weights abort the report: deterministic_score
-        # renormalizes over PRESENT keys (production's own drop path). Also
-        # hardened: a STRAY key in a legacy payload is excluded, not fatal.
-        from app.db import session_scope
-        from app.models import Snapshot
-        from app.services.compute import compute_snapshot, persist_snapshot
-        from app.services.replay import s5_dual_report
-        from tests.conftest import make_golden_raw_inputs
-
-        _persist_golden()                                   # full snapshot
-        raw = make_golden_raw_inputs()                      # degraded snapshot
-        raw.breadth_pct = None                              # d1 drops
-        if raw.hy_oas_history_bps:
-            from datetime import date, timedelta
-
-            end = date(2026, 6, 29)
-            n = len(raw.hy_oas_history_bps)
-            raw.hy_oas_history_dated = [
-                ((end - timedelta(days=n - 1 - i)).isoformat(), v)
-                for i, v in enumerate(raw.hy_oas_history_bps)]
-        data = compute_snapshot(raw, mc_samples=5_000, mc_seed=20260711)
-        persist_snapshot(data, raw)
-        with session_scope() as session:                    # inject a stray key
-            snap = session.execute(select(Snapshot)).scalars().first()
-            block = dict(snap.block_s)
-            block["indicators"] = dict(block["indicators"])
-            block["indicators"]["s9_legacy"] = {"sub_score": 0.5}
-            snap.block_s = block
-        rep = s5_dual_report()                              # must not raise
-        assert rep["snapshots_with_dual_report"] == 2
-        assert rep["baseline_mismatches"] == 0    # inclusion set == production's
-        assert all(r["headline_delta"] is not None or r["candidate_sub"] is None
-                   for r in rep["series"])
-
-    def test_s5_dual_report_headline_delta(self, isolated_db):
-        from app.services.replay import s5_dual_report
-
-        _persist_golden()
-        rep = s5_dual_report()
-        assert rep["snapshots_with_dual_report"] == 1
-        # the re-derived baseline reproduces the recorded point score exactly
-        # (round-5 refutation evidence: the sub_score-not-None inclusion set
-        # IS production's inclusion set — stale indicators are scored,
-        # dropped ones persist sub_score None)
-        assert rep["baseline_mismatches"] == 0
-        row = rep["series"][0]
-        assert row["tier"] == "fred_BAMLH0A0HYM2"
-        if row["sub_delta"] is not None:        # candidate resolved on this data
-            assert rep["sub_score_delta"]["n"] == 1
-            assert row["headline_delta"] is not None
-        assert "included_in_score=false" in rep["note"]
-
-    def test_headline_delta_fail_closed_on_baseline_mismatch(self, isolated_db):
-        # Panel round-5 guard: if the re-derived baseline does NOT reproduce
-        # the recorded point score (legacy/foreign payload whose inclusion set
-        # diverged from production), the row is flagged and NO delta is
-        # emitted — never a delta against a wrong baseline.
-        from datetime import date as _d
-        from datetime import timedelta as _td
-
-        from app.db import session_scope
-        from app.models import Snapshot
-        from app.services.compute import compute_snapshot, persist_snapshot
-        from app.services.replay import s5_dual_report
-        from tests.conftest import make_golden_raw_inputs
-
-        raw = make_golden_raw_inputs()
-        # a 10-day-spaced dated series spans 990 days, past the 24-month
-        # calendar target (730 days back from 2026-06-29), and 730 is a
-        # multiple of 10 — the target is hit EXACTly, so the candidate
-        # RESOLVES (unlike the golden 100-observation daily series, which
-        # is INSUFFICIENT_HISTORY)
-        end = _d(2026, 6, 29)
-        n = len(raw.hy_oas_history_bps)
-        raw.hy_oas_history_dated = [
-            ((end - _td(days=10 * (n - 1 - i))).isoformat(), v)
-            for i, v in enumerate(raw.hy_oas_history_bps)]
-        data = compute_snapshot(raw, mc_samples=5_000, mc_seed=20260711)
-        persist_snapshot(data, raw)
-
-        rep = s5_dual_report()                    # positive path first
-        assert rep["baseline_mismatches"] == 0
-        row = rep["series"][0]
-        assert row["candidate_sub"] is not None
-        assert row["headline_delta"] is not None  # real delta on a real baseline
-
-        with session_scope() as session:
-            snap = session.execute(select(Snapshot)).scalars().first()
-            snap.point_score = snap.point_score + 5.0     # simulate divergence
-        rep = s5_dual_report()
-        assert rep["baseline_mismatches"] == 1
-        row = rep["series"][0]
-        assert row.get("baseline_mismatch") is True
-        assert row["headline_delta"] is None
-        assert rep["headline_delta"] is None              # excluded from agg
-
-
 class TestRM5Assembler:
     def test_packages_mark_host_studies_pending(self, isolated_db):
         from app.services.replay import assemble_decision_packages
@@ -462,11 +198,8 @@ class TestRM5Assembler:
         pkg = assemble_decision_packages()
         for pin in ("DE_d3_ocf_quorum", "F_ath_basis", "G_lppls_execution", "C_ndx_identity"):
             assert pkg[pin]["status"] == "PENDING_HOST"
-        assert pkg["H_s5_calendar"]["status"] == "EVIDENCE_ACCUMULATING"
-        assert "GATE_MET" not in str(pkg["H_s5_calendar"]["status"]).replace(
-            "DAY_GATE_MET_TIER_ADEQUACY_OPERATOR_JUDGMENT", "")
+        assert "H_s5_calendar" not in pkg
         assert pkg["B_coverage_floor"]["report"]["snapshots"] == 1
-        assert any("six S5 constants" in r for r in pkg["H_s5_calendar"]["activation_requires"])
 
 
 class TestApiSurfaces:
@@ -481,9 +214,7 @@ class TestApiSurfaces:
             ev = client.get("/api/v1/replay/evidence")
             assert ev.status_code == 200
             assert ev.json()["data"]["snapshots_stamped"] == 1
-            suf = client.get("/api/v1/replay/sufficiency")
-            assert suf.status_code == 200
-            assert suf.json()["data"]["gate_trading_days"] == 60
+            assert client.get("/api/v1/replay/sufficiency").status_code == 404
             # panel finding: empty criterion is a 422 client error, never a 500
             bad = client.post("/api/v1/admin/falsification", json={},
                               headers={"X-API-Key": TEST_ADMIN_KEY})
@@ -514,7 +245,7 @@ class TestCliAndHarness:
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         capsys.readouterr()          # flush persist-time log lines from the buffer
-        for study in ("sufficiency", "b", "s5", "evidence", "assemble"):
+        for study in ("b", "evidence", "assemble"):
             monkeypatch.setattr(_sys, "argv", ["replay_report.py", study])
             assert mod.main() == 0
             _json.loads(capsys.readouterr().out)      # valid JSON every time
