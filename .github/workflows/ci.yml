@@ -41,8 +41,8 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Install Python deps (the lock, hash-checked)
         # requirements-dev.lock holds the image's packages at the image's
-        # versions (requirements.lock constrains it; only the optional pyarrow
-        # is left out) plus the dev tools; `make lock` writes the locks. Nothing is
+        # versions (requirements.lock constrains it) plus the dev tools;
+        # `make lock` writes both. Nothing is
         # resolved here, so a release upstream cannot change what CI tests
         # (SQLAlchemy 2.1 and Deprecated 3.0 both did). lppls is in the lock,
         # so the LPPLS paths always run here, as they do in the image.
@@ -137,12 +137,11 @@ jobs:
       - name: Security — dependency audit (BLOCKING)
         # Two scopes, both blocking. The environment is what CI actually runs,
         # including pip and setuptools, which the bootstrap line installs
-        # outside the lock. The locks are what gets installed elsewhere:
-        # requirements-image.lock (a superset of requirements.lock) carries
-        # pyarrow, which CI never installs.
+        # outside the lock. The locks are what the image installs
+        # (requirements.lock) and what CI installs (requirements-dev.lock).
         run: |
           pip-audit --progress-spinner off
-          pip-audit --progress-spinner off --disable-pip --require-hashes -r requirements-image.lock -r requirements-dev.lock
+          pip-audit --progress-spinner off --disable-pip --require-hashes -r requirements.lock -r requirements-dev.lock
       - name: Security — secret scan over tracked files (BLOCKING)
         # NB: `detect-secrets scan --baseline` exits 0 even on NEW secrets (it just
         # re-emits an updated baseline) — it does NOT gate. `detect-secrets-hook`

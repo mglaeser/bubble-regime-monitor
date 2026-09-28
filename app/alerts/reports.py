@@ -116,14 +116,7 @@ def snapshot_export_rows(session: Session) -> list[dict[str, Any]]:
 
 
 def write_parquet(rows: list[dict[str, Any]], path: Path) -> None:
-    """Write rows when the explicitly optional Parquet engine is installed."""
-    from app.services.backfill import _parquet_available
-
-    if not _parquet_available():
-        raise RuntimeError(
-            "Parquet support is unavailable on this host; install "
-            "bubblegauge[parquet] on a CPU supported by pyarrow"
-        )
+    """Write rows to a Parquet file (pyarrow)."""
     import pandas as pd
 
     path.parent.mkdir(parents=True, exist_ok=True)

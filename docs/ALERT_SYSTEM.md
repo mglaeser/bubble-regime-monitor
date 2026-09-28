@@ -356,9 +356,8 @@ observations, provider revisions, computation fingerprints, evidence
 occurrences, and recompute inputs separate. The transition report covers
 entries into de-risk by origin, one-snapshot reversals, base/effective
 divergence, rf3/rf4 and Faber transitions, non-fresh evidence, sidecar gaps,
-evaluation conflicts/timeouts, and UNKNOWN deliveries. Parquet export needs
-the optional `bubblegauge[parquet]` dependency; on unsupported hosts it refuses
-rather than silently writing another format.
+evaluation conflicts/timeouts, and UNKNOWN deliveries. Parquet export uses
+pyarrow, a regular dependency since 2026-09-28.
 
 `digest --dry-run` exercises artifact registration and the real digest planner
 inside one explicit transaction, then rolls back **all** registry, event,

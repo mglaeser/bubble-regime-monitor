@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 name = "bubblegauge"
 version = "3.0.0"
 description = "Self-hosted AI bubble regime monitor. Three-leg composite (valuation, credit, breadth, GSADF, LPPLS) with Monte Carlo bands, Faber trend trigger, and API. Research, not advice."
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.111",
     "uvicorn[standard]>=0.30",
@@ -20,14 +20,10 @@ dependencies = [
     "APScheduler>=3.10,<4",
     "structlog>=24.1",
     "slowapi>=0.1.9",
-    # Deprecated 3.0.0 (2026-09-26, pulled in by slowapi -> limits) is written
-    # in Python 3.12 syntax, and mypy, targeting 3.11, stops at it before it
-    # checks the tree. Production runs 1.3.1; 3.x is an upgrade of its own.
-    "Deprecated<3",
-    # <2.3 / <3.0: newer numpy wheels raise the x86-64 CPU baseline and die
-    # with SIGILL (Illegal instruction) on older CPUs and on VMs with generic
-    # CPU models (qemu64/kvm64). Relax only if all deploy targets expose
-    # x86-64-v2+ (or the VM uses host CPU passthrough).
+    # <2.3 / <3.0: numpy 2.3 and pandas 3.0 (copy-on-write, string dtype) are
+    # upgrades of their own against the golden fixture, so a re-lock for an
+    # unrelated change must not pull them in. The old-CPU reason is gone: the
+    # host is an EPYC (owner decision D8, 2026-09-28).
     "numpy>=1.26,<2.3",
     "pandas>=2.2,<3.0",
     "openpyxl>=3.1",
@@ -45,19 +41,15 @@ dependencies = [
     "linkify-it-py==2.2.0",
     "phonenumberslite==9.0.40",
     "lppls==0.6.24",
+    # The Parquet snapshot export (app/services/backfill.py, `bubblegauge
+    # export snapshots --format parquet`).
+    "pyarrow>=16.0",
 ]
 
 [project.scripts]
 bubblegauge = "app.cli:main"
 
 [project.optional-dependencies]
-# pyarrow is optional: pandas imports it eagerly when installed, and its
-# Arrow C++ wheels require SSE4.2 — SIGILL on older CPUs. Without it, the
-# Parquet export disables itself (runtime subprocess probe); everything else
-# works. Install .[parquet] on hosts with a modern CPU.
-parquet = [
-    "pyarrow>=16.0",
-]
 # yfinance is the QUATERNARY price provider (documented-unreliable, ToS-gray),
 # and the one free source of raw index levels. Not installed by default;
 # install .[yfinance] to activate that tier. When absent the price chain
@@ -85,7 +77,7 @@ include = ["app*"]
 
 [tool.ruff]
 line-length = 110
-target-version = "py311"
+target-version = "py312"
 
 [tool.ruff.lint]
 # 'S' (flake8-bandit) added by the audit (A-08/A-13/A-26): the prior config
@@ -106,7 +98,7 @@ ignore = ["E501"]
 "app/db.py" = ["S101"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.12"
 strict = true
 ignore_missing_imports = true
 
