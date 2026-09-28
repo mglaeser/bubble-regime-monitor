@@ -338,3 +338,25 @@ class TestRoundFiveOn140:
         with session_scope() as s:
             stamped = s.get(MessageEngineAttempt, claim).started_at
         assert stamped >= (called + timedelta(seconds=0.4)).replace(tzinfo=None), (called, stamped)
+
+
+class TestRoundSixOn140:
+    """#140 round 6, SOTA-A: the floor read the most recently STARTED call, so
+    with overlapping calls in the history - one started earlier and finished
+    later - it counted from the wrong end and let a call in inside the floor.
+    Calls are read in the order they ended, as the old governor read them
+    (by completion), for the floor and the breaker alike."""
+
+    def test_the_floor_counts_from_the_call_that_ended_last(self):
+        _row(gov.Outcome.OK, minutes_ago=10, finished_minutes_ago=100 / 60)   # started first, ended last
+        _row(gov.Outcome.OK, minutes_ago=500 / 60, finished_minutes_ago=400 / 60)
+        decision, claim = _reserve()
+        assert not decision.may_ask and claim is None and decision.reason == "pacing floor"
+
+    def test_the_breaker_reads_the_calls_in_the_order_they_ended(self):
+        # five failures ended last; a success started later but ended before them
+        for minutes in (30, 29, 28, 27, 26):
+            _row(gov.Outcome.TECHNICAL_ERROR, minutes_ago=minutes + 100, finished_minutes_ago=minutes)
+        _row(gov.Outcome.OK, minutes_ago=90, finished_minutes_ago=89)
+        decision, _claim = _reserve()
+        assert not decision.may_ask and decision.reason == "breaker open: 5 failed calls in a row"

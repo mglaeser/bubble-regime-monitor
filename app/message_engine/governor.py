@@ -112,8 +112,12 @@ def refusal(session: Session, *, settings: Settings, now: datetime) -> str | Non
         return "a call in flight"
     calls = select(MessageEngineAttempt).where(
         MessageEngineAttempt.outcome.in_([o.value for o in _CALLS]))
+    # Calls in the order they ENDED, as the old governor read them: by start,
+    # an overlap in the history (a call started earlier and ended later) put
+    # the floor and the breaker on the wrong call (#140 round 6, SOTA-A).
+    ended = func.coalesce(MessageEngineAttempt.finished_at, MessageEngineAttempt.started_at)
     newest = session.execute(
-        calls.order_by(MessageEngineAttempt.started_at.desc(), MessageEngineAttempt.id.desc())
+        calls.order_by(ended.desc(), MessageEngineAttempt.id.desc())
         .limit(_strikes(settings))
     ).scalars().all()
     # The floor counts from the end of the last call, as the old governor's
