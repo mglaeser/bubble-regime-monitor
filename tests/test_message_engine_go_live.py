@@ -69,16 +69,25 @@ class TestDigestFacts:
         facts = digest.digest_facts(_snapshot())
         assert facts == {
             "median": 51, "score_scale_max": 100, "action_band": "trim", "override_fired": False,
-            "iqr_lo": 40, "iqr_hi": 61, "red_flag_count": 2, "red_flag_total": 4,
-            "spy_trend": "IN", "qqq_trend": "OUT", "s_block_summary": "s1=0.42,s2=NA",
-            "d_block_summary": "d1=0.11", "judgment": "Breadth narrow, credit tight."}
+            "override_suffix": "", "iqr_lo": 40, "iqr_hi": 61, "red_flag_count": 2, "red_flag_total": 4,
+            "spy_trend": "IN", "qqq_trend": "OUT", "s1": 0.42, "s2": None, "s3": None, "s4": None,
+            "s5": None, "d1": 0.11, "d2": None, "d3": None, "d4": None,
+            "judgment": "Breadth narrow, credit tight."}
 
-    def test_every_fact_is_a_scalar_and_declared(self):
-        facts = digest.digest_facts(_snapshot(judgment_call=None))
-        declared = set(composer.library()["prompts"]["daily_digest"]["grounding_fields"])
-        assert set(facts) == declared
-        assert all(isinstance(v, composer._SCALARS) for v in facts.values())
-        assert facts["judgment"] == "n/a"
+    def test_every_fact_is_declared_and_typed(self):
+        """Owner decision D7: every digest fact is a number, a truth value,
+        one of the monitor's own words or the judgment, so each passes the
+        composer's types as it is."""
+        facts = digest.digest_facts(_snapshot(judgment_call=None, override_fired=True))
+        entry = composer.library()["prompts"]["daily_digest"]
+        assert set(facts) == set(entry["grounding_fields"])
+        assert composer.typed_facts(entry, facts) == facts
+        assert facts["judgment"] == "n/a" and facts["override_suffix"] == " OVERRIDE"
+
+    def test_a_sub_score_keeps_the_two_decimals_the_digest_showed(self):
+        facts = digest.digest_facts(_snapshot(block_s={"indicators": {"s1": {"sub_score": 0.4249},
+                                                                      "s3": {"sub_score": 1}}}))
+        assert facts["s1"] == 0.42 and facts["s3"] == 1 and facts["s2"] is None
 
     def test_the_fallback_renders_the_old_deterministic_digest(self):
         entry = composer.library()["prompts"]["daily_digest"]

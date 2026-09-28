@@ -45,7 +45,8 @@ class TestTheLibraryCarriesGerman:
     def test_every_german_fallback_fits_both_channels_with_its_slots_blank(self, channel):
         for name, entry in composer.library()["prompts"].items():
             text = composer.render_fallback(composer.template_for(entry, "de"), {})
-            assert not composer._overflows(text, channel, _settings()), (name, channel, len(text))
+            cap = composer._cap(channel, _settings())
+            assert basic_check(text, channel=channel, max_chars=cap) is None, (name, channel, len(text))
 
     def test_every_german_fallback_renders_without_leaking_a_slot(self):
         for name, entry in composer.library()["prompts"].items():
@@ -118,9 +119,11 @@ class TestComposeInGerman:
         assert out.text == "bubblegauge: Vorsichtsstufe auf trim gewechselt (vorher: hold). Nächster Lauf 14:00 UTC."
 
     def test_a_fixed_trigger_is_deterministic_in_german_too(self):
+        """The time is text, so a dash since owner decision D7; no caller
+        wires this entry."""
         out = composer.compose(trigger="test_message", channel=Channel.IMESSAGE, priority=4,
                                facts={"sent_at_utc": "14:00"}, settings=_settings(message_language="de"))
-        assert out.source == "deterministic" and out.text.startswith("bubblegauge Testnachricht 14:00 UTC")
+        assert out.source == "deterministic" and out.text.startswith("bubblegauge Testnachricht - UTC")
 
     def test_the_setting_reaches_the_daily_digest_service(self, monkeypatch):
         monkeypatch.setenv("IMESSAGE_ENABLED", "true")
