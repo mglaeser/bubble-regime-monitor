@@ -1389,3 +1389,22 @@ class TestRoundTwoOn139:
         current = failure_alert._current
         assert current.first_seen > first_seen and current.failures == 1
         assert current.recovered_at is None and current.announced is True
+
+
+class TestRoundThreeOn139:
+    """#139 round 3, SOTA-A (executed): the outage was marked announced, and
+    persisted, before the alarm's text was built, so a failure while building
+    it recorded an alarm that never left and the next success sent an
+    all-clear for it. The mark now comes after the text, right before the
+    send: a crash mid-send still owes the all-clear (module docstring), and
+    nothing before the send does."""
+
+    def test_an_alarm_that_was_never_built_is_not_announced(self, monkeypatch, sent):
+        def broken(**_kw):
+            raise RuntimeError("the message could not be built")
+
+        monkeypatch.setattr(failure_alert, "build_failure_message", broken)
+        assert notify_recompute_outcome(EBP_ERROR)["status"] == "failed"
+        monkeypatch.setattr(failure_alert, "build_failure_message", build_failure_message)
+        assert notify_recompute_outcome(None)["status"] == "noop"
+        assert sent == []

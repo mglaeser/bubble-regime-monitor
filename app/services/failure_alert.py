@@ -307,10 +307,6 @@ def notify_recompute_outcome(error: str | None,
                 log.error("failure_alert_undeliverable", kind=kind, reason=problem)
                 return {"status": "skipped", "reason": problem, "transport": transport,
                         "kind": kind}
-            was_announced = outage.announced
-            if kind == "failure":
-                outage.announced = True      # BEFORE the send (module docstring)
-            _persist_locked()
             limit = settings.sms_max_len
             if kind == "recovery":
                 text = build_recovery_message(failures=outage.failures,
@@ -321,6 +317,13 @@ def notify_recompute_outcome(error: str | None,
                     failures=outage.failures, first_seen=outage.first_seen,
                     snapshot_age=_last_snapshot_age(),
                     reason=_compress_reason(error or ""), limit=limit)
+            # Marked right BEFORE the send (module docstring) and after the text
+            # is built: nothing before the send can have told anybody (#139
+            # round 3, SOTA-A).
+            was_announced = outage.announced
+            if kind == "failure":
+                outage.announced = True
+            _persist_locked()
             ok, status_code, send_error = _send(transport, text)
             if kind == "recovery" and ok:
                 _current = None              # closes only once the all-clear is out
