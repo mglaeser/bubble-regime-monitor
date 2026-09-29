@@ -284,7 +284,7 @@ class TestRoundThreeOn143:
         a successful deploy: health is tied to the new image now."""
         code, calls = deploy(running="old0000", restart_noop=True)
         assert code != 0
-        assert not deploy.good_file.exists()
+        assert deploy.good_file.read_text().strip() != "sha256:target"   # never recorded as good
 
     def test_the_health_timeout_is_in_seconds(self, deploy):
         """HEALTH_TIMEOUT counted probes, so with each probe bounded a
@@ -300,3 +300,24 @@ class TestRoundThreeOn143:
     def test_a_healthy_deploy_is_remembered_as_the_rollback_target(self, deploy):
         code, _calls = deploy(running="old0000")
         assert code == 0 and deploy.good_file.read_text().strip() == "sha256:target"
+
+
+class TestRoundFourOn143:
+    """#143 round 4, SOTA-A (executed): a healthy switch interrupted before it
+    wrote GOOD_FILE left the older image there, the quiet ticks never corrected
+    it, and the next failed deploy rolled back to that stale image. Every run
+    that finds the service answering records the image it runs as the last
+    good one."""
+
+    def test_the_rollback_goes_to_the_image_last_seen_healthy(self, deploy):
+        deploy.good_file.write_text("sha256:stale\n")
+        code, calls = deploy(running="old0000", healthy=False)
+        assert code != 0
+        assert "podman tag sha256:running localhost/bubblegauge:latest" in calls
+        assert "podman tag sha256:stale localhost/bubblegauge:latest" not in calls
+
+    def test_a_quiet_tick_records_the_healthy_image(self, deploy):
+        deploy.good_file.write_text("sha256:stale\n")
+        code, calls = deploy(running=TARGET)
+        assert code == 0 and not any(c.startswith("podman build") for c in calls)
+        assert deploy.good_file.read_text().strip() == "sha256:running"

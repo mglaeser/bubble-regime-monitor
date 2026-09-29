@@ -68,6 +68,7 @@ healthy() {         # /healthz answers within $1 seconds (default HEALTH_TIMEOUT
   return 1
 }
 running_image() { podman inspect -f '{{.Image}}' "$CONTAINER" 2>/dev/null || true; }
+remember_good() { mkdir -p "$(dirname "$GOOD_FILE")" && echo "$1" > "$GOOD_FILE"; }
 die()    { printf '\nERROR: %s\n' "$*" >&2; exit 1; }
 trap 'die "deploy failed at line $LINENO"' ERR
 
@@ -89,17 +90,25 @@ TARGET="$(git rev-parse --short "origin/$BRANCH")"
 # retag left the service down while every later tick skipped (#143 round 1).
 RUNNING=""
 RUNNING_IMAGE=""
+RUNNING_OK=0
 if systemctl --user is-active --quiet "$SERVICE"; then
-  RUNNING_IMAGE="$(podman inspect -f '{{.Image}}' "$CONTAINER" 2>/dev/null || true)"
+  RUNNING_IMAGE="$(running_image)"
   if [[ -n "$RUNNING_IMAGE" ]]; then
     RUNNING="$(podman image inspect -f "{{index .Labels \"$REVISION_LABEL\"}}" "$RUNNING_IMAGE" 2>/dev/null || true)"
+    if healthy "$QUIET_HEALTH_TIMEOUT"; then
+      RUNNING_OK=1
+      # The image last SEEN healthy is the rollback target: a healthy switch
+      # interrupted before it recorded itself left an older one there, and the
+      # next failed deploy went back to it (#143 round 4, SOTA-A).
+      remember_good "$RUNNING_IMAGE"
+    fi
   fi
 fi
 if [[ "$FORCE" != "1" ]]; then
   # Quiet only when the service runs main's commit AND answers: a switch
   # interrupted on an unhealthy target otherwise stayed there for good (#143
   # round 3, SOTA-A). The common case, every five minutes.
-  if [[ "$TARGET" == "$RUNNING" ]] && healthy "$QUIET_HEALTH_TIMEOUT"; then
+  if [[ "$TARGET" == "$RUNNING" && "$RUNNING_OK" == "1" ]]; then
     exit 0
   fi
   # A commit that failed its health check, and was rolled back to a service
@@ -157,7 +166,7 @@ systemctl --user restart "$SERVICE" || true
 if healthy && [[ "$(running_image)" == "$TARGET_ID" ]]; then
   banner "Deploy OK: $TARGET healthy"
   rm -f "$FAILED_FILE"
-  mkdir -p "$(dirname "$GOOD_FILE")" && echo "$TARGET_ID" > "$GOOD_FILE"
+  remember_good "$TARGET_ID"
   mapfile -t OLD < <(podman images --format '{{.Repository}}:{{.Tag}} {{.ID}}' \
       | awk -v i="$IMAGE" '$1 ~ "^"i":" && $1 !~ /:latest$/ {print $2}' | tail -n +"$((KEEP_IMAGES+1))")
   [[ ${#OLD[@]} -gt 0 ]] && podman rmi -f "${OLD[@]}" >/dev/null 2>&1 || true

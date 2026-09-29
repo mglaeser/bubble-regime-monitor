@@ -15,7 +15,8 @@ deploy compares main with the commit the RUNNING service carries, and stays quie
 only when that service also answers `/healthz`; a service that is down, or that
 runs main's commit without answering, is deployed again at the next tick. A
 deploy succeeds only when `/healthz` answers AND the service runs the new image;
-otherwise it rolls back to the last image that passed that check (`GOOD_FILE`).
+otherwise it rolls back to the last image seen healthy (`GOOD_FILE`, recorded
+whenever a run finds the service answering, and after every healthy deploy).
 A commit that failed is not retried while the rolled-back service runs, until
 main moves on or `FORCE=1` asks for it. A tree with edited tracked files is
 refused. Health waits are deadlines in seconds (`HEALTH_TIMEOUT`,
