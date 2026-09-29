@@ -24,10 +24,10 @@ TARGET = "abc1234"
 # what it did: which image :latest names (latest), which image the service
 # runs (running), whether it is down, and the database's schema revision
 # (rev, 0019 until a migration moves it to 0020). At the start the service
-# runs the old image, sha256:running, labelled $RUNNING_COMMIT, shipping schema
-# 0019; a build of commit C is sha256:img-C, labelled C, shipping $TARGET_HEAD
-# (0020 when the deploy moves the schema). /healthz fails for the images listed
-# in $UNHEALTHY and while the service is down.
+# runs the old image, sha256:running, labelled $RUNNING_COMMIT; a build of
+# commit C is sha256:img-C, labelled C. /healthz fails for the images listed
+# in $UNHEALTHY and while the service is down. As the app does (#134), the old
+# image does not come up on a database a newer image migrated to 0020.
 TARGET_ID = f"sha256:img-{TARGET}"
 
 _SHIMS = {
@@ -43,7 +43,6 @@ esac
 echo "podman $*" >> "$CALLS"
 latest() { cat "$STATE/latest" 2>/dev/null || echo sha256:running; }
 running() { cat "$STATE/running" 2>/dev/null || echo sha256:running; }
-rev() { cat "$STATE/rev" 2>/dev/null || echo 0019; }
 resolve() {
   case "$1" in
     *:latest) latest ;;
@@ -65,11 +64,7 @@ case "$1" in
     fi ;;
   tag) resolve "$2" > "$STATE/latest" ;;
   run)
-    if [[ "$*" == *get_current_head* ]]; then
-      case "$3" in sha256:running) echo 0019 ;; sha256:img-*) echo "$TARGET_HEAD" ;; esac
-    elif [[ "$*" == *"db_migrate --current"* ]]; then
-      rev
-    elif [[ "$*" == *db_migrate* && "$SCHEMA_MOVES" == "1" ]]; then
+    if [[ "$*" == *db_migrate* && "$SCHEMA_MOVES" == "1" ]]; then
       echo 0020 > "$STATE/rev"
     fi ;;
 esac
@@ -83,8 +78,13 @@ fi
 if [[ "$*" == *restart* ]]; then
   if [[ "$RESTART_NOOP" == "1" ]]; then exit 1; fi          # nothing happened; the old one runs on
   if [[ "$RESTART_FAILS" == "1" ]]; then touch "$STATE/down"; exit 1; fi
-  (cat "$STATE/latest" 2>/dev/null || echo sha256:running) > "$STATE/running"
+  latest="$(cat "$STATE/latest" 2>/dev/null || echo sha256:running)"
+  echo "$latest" > "$STATE/running"
   rm -f "$STATE/down"
+  # the old image does not boot a database a newer image migrated (#134)
+  if [[ "$latest" == sha256:running && "$(cat "$STATE/rev" 2>/dev/null)" == 0020 ]]; then
+    touch "$STATE/down"
+  fi
 fi
 exit 0
 """,
@@ -103,7 +103,7 @@ exit 0
 @pytest.fixture()
 def deploy(tmp_path):
     repo = tmp_path / "repo"
-    repo.mkdir()
+    (repo / ".deploy-state").mkdir(parents=True)
     shutil.copy(ROOT / "deploy.sh", repo / "deploy.sh")
     (repo / ".env").write_text("X=1\n")
     shims = tmp_path / "bin"
@@ -126,33 +126,33 @@ def deploy(tmp_path):
             restart_noop: bool = False, head: str | None = None, health_timeout: int = 2,
             slow_s: str = "", schema_moves: bool = False, target: str = TARGET,
             unhealthy: tuple[str, ...] = (), flock_broken: bool = False,
-            target_head: str | None = None) -> tuple[int, list[str]]:
+            env: dict[str, str] | None = None) -> tuple[int, list[str]]:
         calls.write_text("")
         bad = list(unhealthy)
         if not healthy:
             bad.append(f"sha256:img-{target}")
         if not rollback_healthy:
             bad.append("sha256:running")
-        env = {**os.environ, "PATH": f"{shims}:{os.environ['PATH']}", "CALLS": str(calls),
+        environ = {**os.environ, "PATH": f"{shims}:{os.environ['PATH']}", "CALLS": str(calls),
                "STATE": str(state), "TARGET_COMMIT": target, "RUNNING_COMMIT": running,
                "UNHEALTHY": " ".join(bad),
                "HEALTH_TIMEOUT": str(health_timeout), "QUIET_HEALTH_TIMEOUT": "1",
                "ACTIVE": "1" if active else "0", "DIRTY": "1" if dirty else "0",
-               "FORCE": "1" if force else "0", "LOCK_FILE": str(tmp_path / "deploy.lock"),
-               "FAILED_FILE": str(tmp_path / "deploy.failed"), "GOOD_FILE": str(tmp_path / "deploy.good"),
+               "FORCE": "1" if force else "0",
                "RESTART_FAILS": "1" if restart_fails else "0",
                "RESTART_NOOP": "1" if restart_noop else "0",
                "HEAD_COMMIT": head or target, "SLOW_S": slow_s,
                "SCHEMA_MOVES": "1" if schema_moves else "0",
-               "FLOCK_BROKEN": "1" if flock_broken else "0",
-               "TARGET_HEAD": target_head or ("0020" if schema_moves else "0019")}
-        result = subprocess.run(["bash", str(repo / "deploy.sh")], env=env,  # noqa: S603
+               "FLOCK_BROKEN": "1" if flock_broken else "0", **(env or {})}
+        result = subprocess.run(["bash", str(repo / "deploy.sh")], env=environ,  # noqa: S603
                                 capture_output=True, text=True, timeout=120)
+        run.output = result.stdout + result.stderr  # type: ignore[attr-defined]
         return result.returncode, calls.read_text().splitlines()
 
-    run.lock_file = tmp_path / "deploy.lock"  # type: ignore[attr-defined]
-    run.failed_file = tmp_path / "deploy.failed"  # type: ignore[attr-defined]
-    run.good_file = tmp_path / "deploy.good"  # type: ignore[attr-defined]
+    # deploy.sh keeps its lock and records in the checkout (#143 round 11)
+    run.lock_file = repo / ".deploy-state/lock"  # type: ignore[attr-defined]
+    run.failed_file = repo / ".deploy-state/failed"  # type: ignore[attr-defined]
+    run.good_file = repo / ".deploy-state/good"  # type: ignore[attr-defined]
     run.state = state  # type: ignore[attr-defined]
     return run
 
@@ -170,7 +170,7 @@ def test_a_new_commit_is_built_migrated_and_restarted(deploy):
     assert code == 0
     build = next(i for i, c in enumerate(calls) if c.startswith("podman build"))
     migrate = next(i for i, c in enumerate(calls)
-                   if "python -m app.db_migrate" in c and "--current" not in c)
+                   if "python -m app.db_migrate" in c)
     tag = next(i for i, c in enumerate(calls) if c == f"podman tag localhost/bubblegauge:{TARGET} "
                                                     "localhost/bubblegauge:latest")
     restart = next(i for i, c in enumerate(calls) if c == "systemctl --user restart bubblegauge.service")
@@ -277,21 +277,6 @@ class TestRoundTwoOn143:
         assert "podman tag sha256:running localhost/bubblegauge:latest" in calls
         assert "podman tag sha256:previous localhost/bubblegauge:latest" not in calls
 
-    def test_a_failed_rollback_leaves_no_marker(self, deploy):
-        """The marker was written before the rollback was verified, so a
-        rollback that failed as well made every later tick skip recovery."""
-        deploy.good_file.write_text("sha256:running\n")   # seen healthy earlier; not any more
-        code, calls = deploy(running="old0000", healthy=False, rollback_healthy=False)
-        assert "podman tag sha256:running localhost/bubblegauge:latest" in calls   # it was tried
-        assert code != 0 and not deploy.failed_file.exists()
-        code, calls = deploy(running="old0000")
-        assert any(c.startswith("podman build") for c in calls), calls
-
-    def test_a_failed_commit_is_skipped_only_while_the_service_runs(self, deploy):
-        code, _calls = deploy(running="old0000", healthy=False)
-        assert deploy.failed_file.read_text().strip() == TARGET
-        code, calls = deploy(running="old0000", active=False)
-        assert any(c.startswith("podman build") for c in calls), calls
 
 
 class TestRoundThreeOn143:
@@ -355,16 +340,17 @@ class TestRoundFourOn143:
 class TestRoundFiveOn143:
     """#143 round 5, SOTA-A (executed): the deploy migrated the database and
     then rolled back the image alone, so after a release that moved the
-    schema the previous image could not boot it (#134: a schema it does not
-    know fails the boot). The contract is narrowed: a deploy that moved the
-    schema is not rolled back - it fails loudly and is fixed forward - and the
+    schema the previous image could not boot it (#134: a revision it does
+    not ship fails the boot), and the rollback only looked like one. Since
+    round 11 the rollback knows no schema: it is tried, the old image does not
+    come back, and the deploy fails loudly, to be fixed forward - and the
     timer does not rebuild it every tick."""
 
-    def test_a_deploy_that_moved_the_schema_is_not_rolled_back(self, deploy):
+    def test_after_a_migration_the_old_image_does_not_come_back(self, deploy):
         code, calls = deploy(running="old0000", healthy=False, schema_moves=True)
         assert code != 0
-        assert not any(c.startswith("podman tag sha256:running") for c in calls), calls
-        assert deploy.failed_file.read_text().split() == [TARGET, "no-rollback"]
+        assert "did not come back" in deploy.output
+        assert deploy.failed_file.read_text().split() == [TARGET]
 
     def test_the_timer_leaves_it_alone_until_main_moves_on(self, deploy):
         deploy(running="old0000", healthy=False, schema_moves=True)
@@ -376,24 +362,24 @@ class TestRoundFiveOn143:
     def test_a_deploy_that_kept_the_schema_is_still_rolled_back(self, deploy):
         code, calls = deploy(running="old0000", healthy=False)
         assert "podman tag sha256:running localhost/bubblegauge:latest" in calls
+        assert "rolled back" in deploy.output
 
 
 class TestRoundSixOn143:
     """#143 round 6, SOTA-A (executed): the last good image was not tied to
     the schema it ran. After a schema-moving commit T failed (not rolled
     back), a later commit U that moved nothing and failed was rolled back to
-    the pre-migration image, which cannot boot the newer schema. A rollback
-    now goes to an image only when it ships the database's schema - since
-    round 10, the head of the image's own migrations."""
+    the pre-migration image, which cannot boot the newer schema. Since round
+    11 the image decides: it does not come back, and U fails loudly instead
+    of reading as rolled back."""
 
-    def test_after_a_schema_move_an_older_image_is_no_rollback_target(self, deploy):
+    def test_after_a_schema_move_an_older_image_does_not_come_back(self, deploy):
         code, _ = deploy(running="old0000", healthy=False, schema_moves=True)       # T
-        assert code != 0 and deploy.failed_file.read_text().split() == [TARGET, "no-rollback"]
+        assert code != 0 and deploy.failed_file.read_text().split() == [TARGET]
         code, calls = deploy(running="old0000", target="def5678", healthy=False,      # U
-                             unhealthy=(TARGET_ID,), target_head="0020")
-        assert code != 0
-        assert not any(c.startswith("podman tag sha256:running") for c in calls), calls
-        assert deploy.failed_file.read_text().split() == ["def5678", "no-rollback"]
+                             unhealthy=(TARGET_ID,))
+        assert code != 0 and "did not come back" in deploy.output
+        assert deploy.failed_file.read_text().split() == ["def5678"]
 
     def test_a_quiet_tick_records_the_image(self, deploy):
         code, _ = deploy(running=TARGET)
@@ -455,23 +441,96 @@ class TestRoundNineOn143:
         assert code == 0 and not any(c.startswith("podman build") for c in calls)
 
 
-class TestRoundTenOn143:
-    """#143 round 10, SOTA-A (executed): a migration interrupted before the
-    switch left the old image running - and answering - on a schema it does
-    not ship, and the next run recorded that pairing as good; a later failed
-    deploy then restarted the old image on a schema it cannot boot. Whether an
-    image can be rolled back to is now asked of the image: its own migrations'
-    head must be the schema the database is at."""
+class TestRoundElevenOn143:
+    """#143 round 11, SOTA-A (three findings, executed), and the narrowing
+    that answers them. Review rounds had each found the next case our own
+    schema rules missed (rounds 5, 6, 7 and 10), so the rollback reasons about
+    no schema: it restarts the last good image and keeps it only if it
+    answers, and whether an image can run the database is decided by Alembic
+    as the image boots (#134). A failed commit is marked before the rollback
+    and waits for the next commit or FORCE=1, whatever the service does. That
+    reverses two of round 2's rules: a service the rollback did not bring back
+    is systemd's to restart and the owner's to fix, not the timer's to rebuild
+    every five minutes."""
 
-    def test_an_image_that_does_not_ship_the_schema_is_no_rollback_target(self, deploy):
-        (deploy.state / "rev").write_text("0020\n")          # migrated under the running image
-        deploy.good_file.write_text("sha256:running\n")
-        code, calls = deploy(running="old0000", healthy=False, target_head="0020")
-        assert code != 0
-        assert not any(c.startswith("podman tag sha256:running") for c in calls), calls
-        assert deploy.failed_file.read_text().split() == [TARGET, "no-rollback"]
-
-    def test_the_rollback_asks_the_image_for_its_head(self, deploy):
+    def test_the_rollback_reads_nothing_that_could_fail_on_its_own(self, deploy):
+        """A transient Podman error while reading the rollback image's schema
+        read as "cannot boot it": the commit was marked no-rollback and the
+        service left on the failed image. After the switch, nothing is read
+        but health and the image the service runs."""
         code, calls = deploy(running="old0000", healthy=False)
-        assert any("get_current_head" in c and "sha256:running" in c for c in calls), calls
+        switch = calls.index(f"podman tag localhost/bubblegauge:{TARGET} localhost/bubblegauge:latest")
+        assert not any(c.startswith("podman run") for c in calls[switch:]), calls[switch:]
         assert "podman tag sha256:running localhost/bubblegauge:latest" in calls
+
+    def test_an_image_does_not_boot_a_database_newer_than_its_own(self, isolated_db):
+        """What the rollback relies on, pinned against Alembic itself: the app
+        upgrades to its own head as it boots, and a database at a revision its
+        migrations do not contain - one a newer image migrated - fails that
+        upgrade, and so the boot."""
+        import sqlite3
+
+        from alembic.util import CommandError
+        from fastapi.testclient import TestClient
+
+        from app.db_migrate import upgrade_to_head
+        from app.main import app
+
+        upgrade_to_head()
+        db = sqlite3.connect(isolated_db)
+        db.execute("update alembic_version set version_num = '9999'")   # a newer image's migration
+        db.commit()
+        db.close()
+        with pytest.raises(CommandError, match="9999"), TestClient(app):
+            pass
+
+    def test_every_caller_shares_the_lock_whatever_its_environment(self, deploy, tmp_path):
+        """The lock lived under the caller's $XDG_RUNTIME_DIR, so the timer and
+        a run by hand in another environment took different locks and
+        overlapped migrations and restarts."""
+        import fcntl
+
+        other = tmp_path / "other-runtime"
+        other.mkdir()
+        with open(deploy.lock_file, "w") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            code, calls = deploy(running="old0000", env={"XDG_RUNTIME_DIR": str(other)})
+        assert code == 0 and not any(c.startswith("podman build") for c in calls), calls
+
+    def test_a_failed_commit_is_remembered_whatever_the_callers_environment(self, deploy, tmp_path):
+        """The sweep: the failure marker and the last good image lived under
+        the caller's $XDG_STATE_HOME, or $HOME, the same way."""
+        code, _ = deploy(running="old0000", healthy=False, env={"XDG_STATE_HOME": str(tmp_path / "a")})
+        assert code != 0
+        code, calls = deploy(running="old0000", healthy=False,
+                             env={"XDG_STATE_HOME": str(tmp_path / "b"), "HOME": str(tmp_path / "b")})
+        assert code == 0 and not any(c.startswith("podman build") for c in calls), calls
+
+    def test_the_cutover_starts_the_service_before_the_first_deploy(self):
+        """The documented cutover removed the old container before deploy.sh
+        had seen it answer, so a first deploy that failed had nothing to roll
+        back to. The service first takes over the image the old container ran,
+        and the first deploy records it as the last good image."""
+        doc = (ROOT / "docs/AUTO_DEPLOY.md").read_text()
+        cutover = doc[doc.index("## Moving from the webhook"):]
+        steps = [line.split("#")[0].strip() for line in cutover.splitlines()]
+        rm = steps.index("podman rm -f bubblegauge")
+        start = steps.index("systemctl --user start bubblegauge.service")
+        first_deploy = next(i for i, step in enumerate(steps) if step.endswith("./deploy.sh"))
+        assert rm < start < first_deploy
+
+    def test_a_failed_rollback_is_marked_too(self, deploy):
+        deploy.good_file.write_text("sha256:running\n")   # seen healthy earlier; not any more
+        code, calls = deploy(running="old0000", healthy=False, rollback_healthy=False)
+        assert "podman tag sha256:running localhost/bubblegauge:latest" in calls   # it was tried
+        assert code != 0 and "did not come back" in deploy.output
+        assert deploy.failed_file.read_text().split() == [TARGET]
+        code, calls = deploy(running="old0000", healthy=False, rollback_healthy=False)
+        assert code == 0 and not any(c.startswith("podman build") for c in calls), calls
+
+    def test_a_failed_commit_waits_whatever_the_service_does(self, deploy):
+        deploy(running="old0000", healthy=False)
+        code, calls = deploy(running="old0000", active=False)
+        assert code == 0 and not any(c.startswith("podman build") for c in calls), calls
+        code, calls = deploy(running="old0000", active=False, force=True)
+        assert any(c.startswith("podman build") for c in calls), calls

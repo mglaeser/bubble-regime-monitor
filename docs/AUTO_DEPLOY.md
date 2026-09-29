@@ -10,24 +10,28 @@ Merges to `main` reach production by themselves. Three host pieces, all
 | The schedule | `deploy/systemd/bubblegauge-deploy.timer` | Starts the deploy service every five minutes (and two minutes after boot). |
 
 systemd never runs two instances of the oneshot deploy service at once, and a
-run by hand takes the same lock (`LOCK_FILE`), so deploys cannot overlap. The
-deploy compares main with the commit the RUNNING service carries, and stays quiet
-only when that service also answers `/healthz`; a service that is down, or that
-runs main's commit without answering, is deployed again at the next tick. A
-deploy succeeds only when `/healthz` answers AND the service runs the new image;
-otherwise it rolls back to the last image seen healthy (`GOOD_FILE`, recorded
-whenever a run finds the service answering, and after every healthy deploy) -
-but only when that image ships the schema the database is at: the head of its
-own migrations, which Alembic reads from the image's files without touching the
-database. An image cannot boot a schema it does not know, so when a migration
-(this deploy's, an earlier one's, or one interrupted under the running service)
-has moved the schema past it, there is nothing to roll back to: the deploy fails
-loudly and is fixed forward, and the timer leaves that commit alone until main
-moves on or `FORCE=1` asks for it.
-A commit that failed is not retried while the rolled-back service runs, until
-main moves on or `FORCE=1` asks for it. A tree with edited tracked files is
-refused. Health waits are deadlines in seconds (`HEALTH_TIMEOUT`,
-`QUIET_HEALTH_TIMEOUT`), each probe capped at five.
+run by hand takes the same lock, so deploys cannot overlap. The lock and the
+deploy's two records live in the checkout, in `.deploy-state/`, so the timer
+and a person share them whatever their environment. The deploy compares main
+with the commit the RUNNING service carries, and stays quiet only when that
+service also answers `/healthz`; a service that is down, or that runs main's
+commit without answering, is deployed again at the next tick.
+
+A deploy succeeds only when `/healthz` answers AND the service runs the new
+image. Otherwise the commit is marked failed (`.deploy-state/failed`), and
+`:latest` goes back to the last image seen healthy (`.deploy-state/good`,
+recorded whenever a run finds the service answering, and after every healthy
+deploy); the rollback counts only if that image answers too. The rollback knows
+no schema: whether an image can run the database is decided by the image as it
+boots, where Alembic fails the upgrade to its own head - and with it the boot -
+on a revision the image does not ship. After a migration the old image
+therefore does not come back, and the deploy is fixed forward.
+
+A commit that failed waits for the next commit, or for `FORCE=1`, whatever the
+service does: a service the rollback did not bring back is left to systemd's
+restarts, to the dead-man's switch below, and to the owner. A tree with edited
+tracked files is refused. Health waits are deadlines in seconds
+(`HEALTH_TIMEOUT`, `QUIET_HEALTH_TIMEOUT`), each probe capped at five.
 
 ## The dead-man's switch
 
@@ -51,10 +55,25 @@ systemctl --user enable --now bubblegauge-deploy.timer
 loginctl enable-linger "$USER"         # keep the user's units running without a login
 ```
 
-Moving from the earlier webhook watchdog: `systemctl --user disable --now
-bubblegauge-deploy.path`, remove `~/.config/systemd/user/bubblegauge-deploy.path`
-and the old container (`podman rm -f bubblegauge`) before `FORCE=1 ./deploy.sh`,
-and deactivate the repository's GitHub webhook.
+## Moving from the webhook watchdog
+
+The old chain deploys the commit that brings these units, and tags its image
+`:latest`. Copy the three units into place with the `install` lines above; then,
+instead of the rest of that block, the service first takes over the image the
+old container runs. The first deploy then finds it answering and records it as
+the last good image, to roll back to.
+
+```bash
+systemctl --user disable --now bubblegauge-deploy.path
+rm ~/.config/systemd/user/bubblegauge-deploy.path
+systemctl --user daemon-reload
+podman rm -f bubblegauge                         # the old container; its image stays :latest
+systemctl --user start bubblegauge.service       # the same image, now a Quadlet unit
+./deploy.sh                                      # records it as the last good image, then deploys main
+systemctl --user enable --now bubblegauge-deploy.timer
+```
+
+Then deactivate the repository's GitHub webhook.
 
 ## Operate
 
@@ -63,4 +82,5 @@ systemctl --user list-timers bubblegauge-deploy.timer   # next check
 journalctl --user -u bubblegauge-deploy.service -n 50    # last deploys
 systemctl --user status bubblegauge.service              # the container
 FORCE=1 ./deploy.sh                                      # rebuild and restart now
+cat .deploy-state/failed                                 # a failed commit, left alone until main moves on
 ```

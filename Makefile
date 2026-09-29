@@ -35,7 +35,7 @@ build:
 up:
 	podman-compose up -d
 
-# One-command update & deploy: pull -> build -> migrate -> recreate -> health-check.
+# One-command update & deploy: pull -> build -> migrate -> restart -> health-check.
 deploy:
 	./deploy.sh
 

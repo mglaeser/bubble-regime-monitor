@@ -9,53 +9,62 @@
 # runs.
 #
 #   1. Fetch the branch. If the running service already runs that commit and
-#      answers /healthz, or that commit already failed its health check while
-#      the service runs, stop.
+#      answers /healthz, stop. A commit that already failed its health check
+#      waits for the next commit or FORCE=1.
 #   2. Fast-forward the checkout and build the image, labelled with the commit.
 #   3. Migrate the database in a throwaway container; a failure stops here,
 #      while the service keeps running the old image.
 #   4. Point :latest at the new image and restart the Quadlet service.
 #   5. Health-check: the service answers /healthz AND runs the new image. If
-#      not, and the last image seen healthy ships the schema the database is at
-#      now (its migration head), point :latest at it and restart again
-#      (rollback). Otherwise there is nothing to roll back to - an image cannot
-#      boot a schema it does not know - and the deploy fails loudly, to be fixed
-#      forward.
+#      not, mark the commit failed, point :latest back at the image last seen
+#      healthy and restart again: the rollback counts only if that image
+#      answers too.
+#
+# The rollback knows no schema. Whether an image can run the database is
+# decided by the image as it boots: it upgrades the database to its own head,
+# and Alembic fails that upgrade - and with it the boot (#134) - on a revision
+# the image does not ship. After a migration the old image therefore does not
+# come back, the rollback fails its health check, and the deploy is fixed
+# forward. (#143 round 11: review rounds kept finding the next case our own
+# schema rules missed, so the contract is what Alembic decides.)
 #
 # One deploy at a time: systemd serialises the timer's oneshot service, and a
-# run by hand takes the same lock (LOCK_FILE) and leaves the deploy to a run
-# already under way. No child keeps the lock: the container is started by
-# systemd, not by this script.
+# run by hand takes the same lock and leaves the deploy to a run already under
+# way. No child keeps the lock: the container is started by systemd, not by
+# this script. The lock and the deploy's records live in the checkout, so
+# every caller shares them, whatever its environment (#143 round 11, SOTA-A:
+# under $XDG_RUNTIME_DIR the lock followed the caller, and two runs overlapped).
 #
 #   BRANCH           branch to deploy                (default: main)
 #   IMAGE            image repository                (default: localhost/bubblegauge)
 #   SERVICE          the Quadlet service             (default: bubblegauge.service)
+#   CONTAINER        the Quadlet container's name    (default: bubblegauge)
 #   DATA_DIR         host data volume                (default: ./data)
 #   PORT             loopback port for the health check (default: 8000)
 #   HEALTH_TIMEOUT   seconds to wait for /healthz after a restart (default: 120)
 #   QUIET_HEALTH_TIMEOUT  seconds the quiet check waits for /healthz (default: 30)
 #   KEEP_IMAGES      old commit-tagged images kept   (default: 5)
 #   FORCE=1          rebuild and restart even when the commit is current or failed
-#   CONTAINER        the Quadlet container's name     (default: bubblegauge)
-#   LOCK_FILE        the deploy lock                  (default: $XDG_RUNTIME_DIR/bubblegauge-deploy.lock)
-#   FAILED_FILE      the last commit that failed its health check
-#   GOOD_FILE        the image last seen healthy
+#
+#   .deploy-state/lock    the deploy lock
+#   .deploy-state/failed  the last commit that failed its health check
+#   .deploy-state/good    the image last seen healthy: the rollback target
 
 set -Eeuo pipefail
 
 BRANCH="${BRANCH:-main}"
 IMAGE="${IMAGE:-localhost/bubblegauge}"
 SERVICE="${SERVICE:-bubblegauge.service}"
+CONTAINER="${CONTAINER:-bubblegauge}"
 DATA_DIR="${DATA_DIR:-./data}"
 PORT="${PORT:-8000}"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-120}"
 QUIET_HEALTH_TIMEOUT="${QUIET_HEALTH_TIMEOUT:-30}"
 KEEP_IMAGES="${KEEP_IMAGES:-5}"
 FORCE="${FORCE:-0}"
-CONTAINER="${CONTAINER:-bubblegauge}"
-LOCK_FILE="${LOCK_FILE:-${XDG_RUNTIME_DIR:-/tmp}/bubblegauge-deploy.lock}"
-FAILED_FILE="${FAILED_FILE:-${XDG_STATE_HOME:-$HOME/.local/state}/bubblegauge-deploy.failed}"
-GOOD_FILE="${GOOD_FILE:-${XDG_STATE_HOME:-$HOME/.local/state}/bubblegauge-deploy.good}"
+STATE=.deploy-state
+FAILED_FILE="$STATE/failed"
+GOOD_FILE="$STATE/good"
 REVISION_LABEL="org.opencontainers.image.revision"
 
 banner() { printf '\n==> %s\n' "$*"; }
@@ -71,24 +80,16 @@ healthy() {         # /healthz answers within $1 seconds (default HEALTH_TIMEOUT
   return 1
 }
 running_image() { podman inspect -f '{{.Image}}' "$CONTAINER" 2>/dev/null || true; }
-remember_good() { mkdir -p "$(dirname "$GOOD_FILE")" && echo "$1" > "$GOOD_FILE"; }
-# The schema an image SHIPS: its migrations' head, read from its own files by
-# Alembic, with no database. An image can boot only that schema, so this - not
-# the schema the database happened to be at while the image answered - decides
-# whether it can be rolled back to: a migration interrupted under a running
-# image made the observed schema a lie (#143 round 10, SOTA-A).
-image_head() {
-  podman run --rm "$1" python -c "from alembic.config import Config; from alembic.script import ScriptDirectory; print(ScriptDirectory.from_config(Config('alembic.ini')).get_current_head())" 9>&- 2>/dev/null || true
-}
 die()    { printf '\nERROR: %s\n' "$*" >&2; exit 1; }
 trap 'die "deploy failed at line $LINENO"' ERR
 
 cd "$(dirname "$0")"
 [[ -f .env ]] || die ".env not found — copy .env.example to .env and fill it in."
+mkdir -p "$STATE"
 
 # One deploy at a time (#143 round 1, SOTA-A: a run by hand overlapped the
 # timer's migration, retag and restart).
-exec 9>"$LOCK_FILE"
+exec 9>"$STATE/lock"
 # Contention has its own exit code, 75: anything else - flock missing or
 # broken - fails the run. Read as contention, it made every timer run exit 0
 # and deploys stopped, reported as success (#143 round 9, SOTA-A).
@@ -117,30 +118,25 @@ if systemctl --user is-active --quiet "$SERVICE"; then
     fi
   fi
 fi
+# The image last SEEN healthy is the rollback target, recorded by every run
+# that finds the service answering: a healthy switch interrupted before it
+# recorded itself left an older one there (#143 round 4, SOTA-A).
+if [[ "$RUNNING_OK" == "1" ]]; then
+  echo "$RUNNING_IMAGE" > "$GOOD_FILE"
+fi
 if [[ "$FORCE" != "1" ]]; then
   # Quiet only when the service runs main's commit AND answers: a switch
   # interrupted on an unhealthy target otherwise stayed there for good (#143
   # round 3, SOTA-A). The common case, every five minutes.
   if [[ "$TARGET" == "$RUNNING" && "$RUNNING_OK" == "1" ]]; then
-    # The image last SEEN healthy is the rollback target: a healthy switch
-    # interrupted before it recorded itself left an older one there (#143
-    # round 4, SOTA-A).
-    remember_good "$RUNNING_IMAGE"
     exit 0
   fi
-  # A commit that failed its health check, and was rolled back to a service
-  # that runs, waits for the next commit or FORCE=1: retried every tick, it took
-  # the service down every five minutes. With the service down it is tried again
-  # (#143 round 2, SOTA-A).
-  FAILED_TARGET="" FAILED_KIND=""
-  read -r FAILED_TARGET FAILED_KIND < "$FAILED_FILE" 2>/dev/null || true
-  if [[ "$TARGET" == "$FAILED_TARGET" && -n "$RUNNING" && "$TARGET" != "$RUNNING" ]]; then
-    exit 0
-  fi
-  # A commit that failed after moving the schema cannot be rolled back, and
-  # rebuilding and restarting it every tick helps nothing: it waits for a fix
-  # (the next commit) or FORCE=1, whatever the service is doing (#143 round 5).
-  if [[ "$TARGET" == "$FAILED_TARGET" && "$FAILED_KIND" == "no-rollback" ]]; then
+  # A commit that failed its health check waits for the next commit or
+  # FORCE=1, whatever the service does: retried every tick, it took a
+  # rolled-back service down every five minutes (#143 round 2, SOTA-A). A
+  # service that did not come back is systemd's to restart and the owner's to
+  # fix (#143 round 11).
+  if [[ "$TARGET" == "$(cat "$FAILED_FILE" 2>/dev/null || true)" ]]; then
     exit 0
   fi
 fi
@@ -166,27 +162,15 @@ podman build --label "$REVISION_LABEL=$TARGET" -t "$IMAGE:$TARGET" -f Containerf
 # ---- 3. migrate -----------------------------------------------------------
 banner "Migrating the database (alembic upgrade head)"
 mkdir -p "$DATA_DIR"
-revision() {
-  podman run --rm --env-file .env -v "$(realpath "$DATA_DIR")":/data:z \
-    "$IMAGE:$TARGET" python -m app.db_migrate --current 9>&-
-}
-SCHEMA_BEFORE="$(revision)"
-if [[ "$RUNNING_OK" == "1" ]]; then
-  remember_good "$RUNNING_IMAGE"
-fi
 podman run --rm --env-file .env -v "$(realpath "$DATA_DIR")":/data:z \
   "$IMAGE:$TARGET" python -m app.db_migrate 9>&-
-SCHEMA_AFTER="$(revision)"
 
 # ---- 4. switch --------------------------------------------------------------
 TARGET_ID="$(podman image inspect -f '{{.Id}}' "$IMAGE:$TARGET")"
 # The rollback goes back to the image last seen healthy - never to :latest,
-# which an interrupted switch may have left on a failed image, never to the
-# image being deployed (#143 rounds 2 and 3, SOTA-A) - and only when that image
-# ships the schema the database is at: an image cannot boot a schema it does
-# not know (#134), whichever deploy moved it (#143 rounds 5, 6 and 10, SOTA-A).
-PREVIOUS=""
-read -r PREVIOUS _ < "$GOOD_FILE" 2>/dev/null || true
+# which an interrupted switch may have left on a failed image, and never to
+# the image being deployed (#143 rounds 2 and 3, SOTA-A).
+PREVIOUS="$(cat "$GOOD_FILE" 2>/dev/null || true)"
 [[ "$PREVIOUS" != "$TARGET_ID" ]] || PREVIOUS=""
 banner "Restarting $SERVICE on $TARGET"
 podman tag "$IMAGE:$TARGET" "$IMAGE:latest"
@@ -200,7 +184,7 @@ systemctl --user restart "$SERVICE" || true
 if healthy && [[ "$(running_image)" == "$TARGET_ID" ]]; then
   banner "Deploy OK: $TARGET healthy"
   rm -f "$FAILED_FILE"
-  remember_good "$TARGET_ID"
+  echo "$TARGET_ID" > "$GOOD_FILE"
   mapfile -t OLD < <(podman images --format '{{.Repository}}:{{.Tag}} {{.ID}}' \
       | awk -v i="$IMAGE" '$1 ~ "^"i":" && $1 !~ /:latest$/ {print $2}' | tail -n +"$((KEEP_IMAGES+1))")
   [[ ${#OLD[@]} -gt 0 ]] && podman rmi -f "${OLD[@]}" >/dev/null 2>&1 || true
@@ -209,24 +193,16 @@ fi
 trap - ERR
 echo "    $TARGET is NOT healthy. Recent logs:"
 journalctl --user -u "$SERVICE" -n 40 --no-pager 2>&1 | sed 's/^/    | /' || true
-PREVIOUS_HEAD=""
-[[ -z "$PREVIOUS" ]] || PREVIOUS_HEAD="$(image_head "$PREVIOUS")"
-if [[ -z "$PREVIOUS" || -z "$PREVIOUS_HEAD" || "$PREVIOUS_HEAD" != "$SCHEMA_AFTER" ]]; then
-  # Nothing that can boot this schema to go back to: an image rollback here
-  # only looked like one. The timer leaves this commit alone until main moves on.
-  mkdir -p "$(dirname "$FAILED_FILE")" && echo "$TARGET no-rollback" > "$FAILED_FILE"
-  die "deploy of $TARGET failed its health check; the last good image (${PREVIOUS:-none}) ships schema ${PREVIOUS_HEAD:-?}, the database is at ${SCHEMA_AFTER:-?} (this deploy: ${SCHEMA_BEFORE:-?} -> ${SCHEMA_AFTER:-?}), so not rolled back. Fix forward."
-fi
-if [[ -n "$PREVIOUS" ]]; then
-  banner "Rolling back to the last good image"
-  podman tag "$PREVIOUS" "$IMAGE:latest"
+# Marked first: whatever the rollback does, the timer leaves this commit alone
+# until main moves on or FORCE=1.
+echo "$TARGET" > "$FAILED_FILE"
+[[ -n "$PREVIOUS" ]] \
+  || die "deploy of $TARGET failed its health check; no image was seen healthy before it, so there is nothing to roll back to. Fix forward."
+banner "Rolling back to the last good image"
+if podman tag "$PREVIOUS" "$IMAGE:latest"; then
   systemctl --user restart "$SERVICE" || true
   if healthy && [[ "$(running_image)" == "$PREVIOUS" ]]; then
-    # Remembered only once the service runs again: a rollback that failed too
-    # must leave the next tick free to recover (#143 round 2, SOTA-A).
-    mkdir -p "$(dirname "$FAILED_FILE")" && echo "$TARGET" > "$FAILED_FILE"
     die "deploy of $TARGET failed its health check; rolled back."
   fi
-  die "deploy of $TARGET failed its health check, and the rollback did not come up either."
 fi
-die "deploy of $TARGET failed its health check and no image was running to roll back to."
+die "deploy of $TARGET failed its health check, and the last good image did not come back either (after a migration it cannot boot the database, #134). Fix forward."

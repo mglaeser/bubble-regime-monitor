@@ -9,6 +9,8 @@ data/*.db
 data/*.db-*
 data/snapshots/*
 !data/snapshots/.gitkeep
+# deploy.sh's lock and records (the last failed commit, the last good image)
+/.deploy-state/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
