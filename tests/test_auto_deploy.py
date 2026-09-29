@@ -110,6 +110,11 @@ def deploy(tmp_path):
         path = shims / name
         path.write_text(body)
         path.chmod(0o755)
+    # flock: the real one, unless FLOCK_BROKEN says it is missing or broken
+    real_flock = shutil.which("flock")
+    (shims / "flock").write_text(
+        f'#!/usr/bin/env bash\nif [[ "$FLOCK_BROKEN" == "1" ]]; then exit 127; fi\nexec {real_flock} "$@"\n')
+    (shims / "flock").chmod(0o755)
     state = tmp_path / "state"
     state.mkdir()
     calls = tmp_path / "calls.log"
@@ -118,7 +123,8 @@ def deploy(tmp_path):
             force: bool = False, rollback_healthy: bool = True, restart_fails: bool = False,
             restart_noop: bool = False, head: str | None = None, health_timeout: int = 2,
             slow_s: str = "", schema_moves: bool = False, target: str = TARGET,
-            unhealthy: tuple[str, ...] = (), exec_fails: bool = False) -> tuple[int, list[str]]:
+            unhealthy: tuple[str, ...] = (), exec_fails: bool = False,
+            flock_broken: bool = False) -> tuple[int, list[str]]:
         calls.write_text("")
         bad = list(unhealthy)
         if not healthy:
@@ -136,7 +142,8 @@ def deploy(tmp_path):
                "RESTART_NOOP": "1" if restart_noop else "0",
                "HEAD_COMMIT": head or target, "SLOW_S": slow_s,
                "SCHEMA_MOVES": "1" if schema_moves else "0",
-               "EXEC_FAILS": "1" if exec_fails else "0"}
+               "EXEC_FAILS": "1" if exec_fails else "0",
+               "FLOCK_BROKEN": "1" if flock_broken else "0"}
         result = subprocess.run(["bash", str(repo / "deploy.sh")], env=env,  # noqa: S603
                                 capture_output=True, text=True, timeout=120)
         return result.returncode, calls.read_text().splitlines()
@@ -422,3 +429,23 @@ def test_every_mount_of_the_data_volume_shares_its_label():
         mounts = re.findall(r":/data(:[A-Za-z,]+)?", text)
         assert mounts, name
         assert all(m == ":z" for m in mounts), (name, mounts)
+
+
+class TestRoundNineOn143:
+    """#143 round 9, SOTA-A (executed): every flock failure read as "another
+    deploy is running", so a missing or broken flock made each timer run exit
+    0 - deploys stopped, reported as success. Contention has its own exit code
+    (flock -E 75); anything else fails the run."""
+
+    def test_a_broken_lock_fails_the_run(self, deploy):
+        code, calls = deploy(running="old0000", flock_broken=True)
+        assert code != 0
+        assert not any(c.startswith("git fetch") for c in calls), calls
+
+    def test_a_held_lock_is_still_a_quiet_exit(self, deploy):
+        import fcntl
+
+        with open(deploy.lock_file, "w") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            code, calls = deploy(running="old0000")
+        assert code == 0 and not any(c.startswith("podman build") for c in calls)

@@ -90,10 +90,16 @@ cd "$(dirname "$0")"
 # One deploy at a time (#143 round 1, SOTA-A: a run by hand overlapped the
 # timer's migration, retag and restart).
 exec 9>"$LOCK_FILE"
-if ! flock -n 9; then
+# Contention has its own exit code, 75: anything else - flock missing or
+# broken - fails the run. Read as contention, it made every timer run exit 0
+# and deploys stopped, reported as success (#143 round 9, SOTA-A).
+lock_rc=0
+flock -n -E 75 9 || lock_rc=$?
+if [[ "$lock_rc" == "75" ]]; then
   echo "another deploy is running; leaving it to finish"
   exit 0
 fi
+[[ "$lock_rc" == "0" ]] || die "the deploy lock failed (flock exit $lock_rc); nothing was deployed."
 
 # ---- 1. anything to do? ---------------------------------------------------
 git fetch --quiet --prune origin "$BRANCH"
