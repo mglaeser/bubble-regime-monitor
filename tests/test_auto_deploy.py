@@ -102,7 +102,9 @@ exit 0
 
 @pytest.fixture()
 def deploy(tmp_path):
-    repo = tmp_path / "repo"
+    # deploy.sh runs only from the checkout the units name (#143 round 12)
+    home = tmp_path / "home"
+    repo = home / "playground" / "bubble-regime-monitor"
     (repo / ".deploy-state").mkdir(parents=True)
     shutil.copy(ROOT / "deploy.sh", repo / "deploy.sh")
     (repo / ".env").write_text("X=1\n")
@@ -133,7 +135,7 @@ def deploy(tmp_path):
             bad.append(f"sha256:img-{target}")
         if not rollback_healthy:
             bad.append("sha256:running")
-        environ = {**os.environ, "PATH": f"{shims}:{os.environ['PATH']}", "CALLS": str(calls),
+        environ = {**os.environ, "HOME": str(home), "PATH": f"{shims}:{os.environ['PATH']}", "CALLS": str(calls),
                "STATE": str(state), "TARGET_COMMIT": target, "RUNNING_COMMIT": running,
                "UNHEALTHY": " ".join(bad),
                "HEALTH_TIMEOUT": str(health_timeout), "QUIET_HEALTH_TIMEOUT": "1",
@@ -149,6 +151,7 @@ def deploy(tmp_path):
         run.output = result.stdout + result.stderr  # type: ignore[attr-defined]
         return result.returncode, calls.read_text().splitlines()
 
+    run.repo = repo  # type: ignore[attr-defined]
     # deploy.sh keeps its lock and records in the checkout (#143 round 11)
     run.lock_file = repo / ".deploy-state/lock"  # type: ignore[attr-defined]
     run.failed_file = repo / ".deploy-state/failed"  # type: ignore[attr-defined]
@@ -499,11 +502,10 @@ class TestRoundElevenOn143:
 
     def test_a_failed_commit_is_remembered_whatever_the_callers_environment(self, deploy, tmp_path):
         """The sweep: the failure marker and the last good image lived under
-        the caller's $XDG_STATE_HOME, or $HOME, the same way."""
+        the caller's $XDG_STATE_HOME the same way."""
         code, _ = deploy(running="old0000", healthy=False, env={"XDG_STATE_HOME": str(tmp_path / "a")})
         assert code != 0
-        code, calls = deploy(running="old0000", healthy=False,
-                             env={"XDG_STATE_HOME": str(tmp_path / "b"), "HOME": str(tmp_path / "b")})
+        code, calls = deploy(running="old0000", healthy=False, env={"XDG_STATE_HOME": str(tmp_path / "b")})
         assert code == 0 and not any(c.startswith("podman build") for c in calls), calls
 
     def test_the_cutover_starts_the_service_before_the_first_deploy(self):
@@ -534,3 +536,49 @@ class TestRoundElevenOn143:
         assert code == 0 and not any(c.startswith("podman build") for c in calls), calls
         code, calls = deploy(running="old0000", active=False, force=True)
         assert any(c.startswith("podman build") for c in calls), calls
+
+
+class TestRoundTwelveOn143:
+    """#143 round 12, SOTA-A (executed): deploy.sh documented overrides for
+    the image, the container, the service, the data directory and the port,
+    and the Quadlet unit hard-codes all of them - so a DATA_DIR migrated one
+    database while the service ran on another. They are fixed by the units
+    now, and deploy.sh runs only from the checkout the units name (a copy
+    elsewhere would migrate its own database and take a lock the timer does
+    not see)."""
+
+    def test_the_callers_overrides_reach_nothing(self, deploy, tmp_path):
+        other = tmp_path / "other-data"
+        code, calls = deploy(running="old0000", env={
+            "DATA_DIR": str(other), "PORT": "9999", "IMAGE": "localhost/other",
+            "CONTAINER": "other", "SERVICE": "other.service"})
+        assert code == 0
+        migrate = next(c for c in calls if "python -m app.db_migrate" in c)
+        assert f"{deploy.repo}/data:/data:z" in migrate and str(other) not in migrate
+        assert f"podman tag localhost/bubblegauge:{TARGET} localhost/bubblegauge:latest" in calls
+        assert "systemctl --user restart bubblegauge.service" in calls
+        assert "curl -fsS --max-time 5 http://127.0.0.1:8000/healthz" in calls
+
+    def test_it_runs_only_from_the_checkout_the_units_use(self, deploy, tmp_path):
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        code, calls = deploy(running="old0000", env={"HOME": str(elsewhere)})
+        assert code != 0 and "runs from" in deploy.output
+        assert not any(c.startswith("git fetch") for c in calls), calls
+
+    def test_the_script_and_the_units_name_the_same_resources(self):
+        import re
+
+        unit = (ROOT / "deploy/quadlet/bubblegauge.container").read_text()
+        service = (ROOT / "deploy/systemd/bubblegauge-deploy.service").read_text()
+        fixed = dict(re.findall(r"^([A-Z_]+)=(\S+)$", (ROOT / "deploy.sh").read_text(), re.M))
+        assert fixed["CHECKOUT"] == '"$HOME/playground/bubble-regime-monitor"'
+        checkout = "%h/playground/bubble-regime-monitor"
+        assert f"Image={fixed['IMAGE']}:latest" in unit
+        assert f"ContainerName={fixed['CONTAINER']}" in unit
+        assert fixed["SERVICE"] == "bubblegauge.service"   # Quadlet names it after bubblegauge.container
+        assert f"PublishPort=127.0.0.1:{fixed['PORT']}:8000" in unit
+        assert f"EnvironmentFile={checkout}/.env" in unit
+        assert f"Volume={checkout}/data:/data:z" in unit
+        assert f"WorkingDirectory={checkout}" in service
+        assert f"ExecStart={checkout}/deploy.sh" in service

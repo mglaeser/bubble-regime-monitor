@@ -3,6 +3,7 @@ the Healthchecks check; a failure pings <url>/fail with a sanitized reason;
 empty is off; plain http is refused; it never raises."""
 from __future__ import annotations
 
+import httpx
 import pytest
 
 from app.services import healthchecks
@@ -16,6 +17,7 @@ def posts(monkeypatch):
 
     def _post(url, *, content, timeout):
         sent.append((url, content))
+        return httpx.Response(200, text="OK")
 
     monkeypatch.setattr(healthchecks.httpx, "post", _post)
     return sent
@@ -103,3 +105,21 @@ def test_an_empty_failure_is_a_failure(monkeypatch, posts):
     _configure(monkeypatch, URL)
     healthchecks.ping("")
     assert posts and posts[0][0] == URL + "/fail"
+
+
+def test_a_ping_healthchecks_refuses_is_said_without_the_url(monkeypatch):
+    """#143 round 12, SOTA-A: the response was discarded, so a ping
+    Healthchecks refused (an unknown check, a rate limit, its outage) looked
+    delivered. It is logged, with the status only: the URL is the credential."""
+    _configure(monkeypatch, URL)
+    warned: list[tuple[str, dict]] = []
+
+    class _Log:
+        def warning(self, event, **fields):
+            warned.append((event, fields))
+
+    monkeypatch.setattr(healthchecks, "log", _Log())
+    monkeypatch.setattr(healthchecks.httpx, "post",
+                        lambda url, *, content, timeout: httpx.Response(404, text="not found"))
+    healthchecks.ping("gather failed")
+    assert warned == [("healthchecks_ping_rejected", {"status": 404})]

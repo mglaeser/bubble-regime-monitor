@@ -148,7 +148,7 @@ It performs, in order (each step announced with a `==>` banner):
 4. **Restart** — points `:latest` at the new image and restarts the Quadlet unit.
 5. **Health-check + rollback** — the service must answer `/healthz` on the new image. If it does not, the commit is marked failed and `:latest` goes back to the last image seen healthy, which counts only if it answers too; after a migration that image cannot boot the database, and the deploy is fixed forward.
 
-Configuration is via environment variables (all optional, sensible defaults): `BRANCH`, `IMAGE`, `SERVICE`, `CONTAINER`, `DATA_DIR`, `PORT`, `HEALTH_TIMEOUT`, `QUIET_HEALTH_TIMEOUT`, `KEEP_IMAGES`, plus `FORCE=1` to rebuild a commit that is current or failed. Details: **`docs/AUTO_DEPLOY.md`**.
+It runs from `~/playground/bubble-regime-monitor`, the checkout the units name; the image, container, port, `.env` and data volume are the Quadlet unit's. Tunable via environment variables (all optional): `BRANCH`, `HEALTH_TIMEOUT`, `QUIET_HEALTH_TIMEOUT`, `KEEP_IMAGES`, plus `FORCE=1` to rebuild a commit that is current or failed. Details: **`docs/AUTO_DEPLOY.md`**.
 
 The app also **self-migrates at boot** (`app.db_migrate.upgrade_to_head` runs `alembic upgrade head`; a failed migration fails the boot rather than falling back), so a plain `podman-compose up -d --build` stays valid too — `deploy.sh` just makes the pull/build/migrate/health-check flow explicit and safe. To apply migrations locally without a container: `make migrate`.
 

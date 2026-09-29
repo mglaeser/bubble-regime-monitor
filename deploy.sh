@@ -35,12 +35,14 @@
 # every caller shares them, whatever its environment (#143 round 11, SOTA-A:
 # under $XDG_RUNTIME_DIR the lock followed the caller, and two runs overlapped).
 #
+# What it deploys to is fixed by the units, not by the caller: the Quadlet unit
+# names the image, the container, its port, and this checkout's .env and data;
+# the timer's service runs this checkout. It runs only from that checkout
+# (#143 round 12, SOTA-A: overrides of the image, container, data and port
+# reached this script but not the unit, so a DATA_DIR migrated one database
+# while the service ran on another).
+#
 #   BRANCH           branch to deploy                (default: main)
-#   IMAGE            image repository                (default: localhost/bubblegauge)
-#   SERVICE          the Quadlet service             (default: bubblegauge.service)
-#   CONTAINER        the Quadlet container's name    (default: bubblegauge)
-#   DATA_DIR         host data volume                (default: ./data)
-#   PORT             loopback port for the health check (default: 8000)
 #   HEALTH_TIMEOUT   seconds to wait for /healthz after a restart (default: 120)
 #   QUIET_HEALTH_TIMEOUT  seconds the quiet check waits for /healthz (default: 30)
 #   KEEP_IMAGES      old commit-tagged images kept   (default: 5)
@@ -52,12 +54,15 @@
 
 set -Eeuo pipefail
 
+# Fixed by the units (deploy/quadlet/bubblegauge.container,
+# deploy/systemd/bubblegauge-deploy.service); tests/test_auto_deploy.py holds
+# them to it.
+CHECKOUT="$HOME/playground/bubble-regime-monitor"
+IMAGE=localhost/bubblegauge
+SERVICE=bubblegauge.service
+CONTAINER=bubblegauge
+PORT=8000
 BRANCH="${BRANCH:-main}"
-IMAGE="${IMAGE:-localhost/bubblegauge}"
-SERVICE="${SERVICE:-bubblegauge.service}"
-CONTAINER="${CONTAINER:-bubblegauge}"
-DATA_DIR="${DATA_DIR:-./data}"
-PORT="${PORT:-8000}"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-120}"
 QUIET_HEALTH_TIMEOUT="${QUIET_HEALTH_TIMEOUT:-30}"
 KEEP_IMAGES="${KEEP_IMAGES:-5}"
@@ -84,6 +89,8 @@ die()    { printf '\nERROR: %s\n' "$*" >&2; exit 1; }
 trap 'die "deploy failed at line $LINENO"' ERR
 
 cd "$(dirname "$0")"
+[[ "$(pwd -P)" == "$(cd "$CHECKOUT" 2>/dev/null && pwd -P)" ]] \
+  || die "deploy.sh runs from $CHECKOUT, the checkout the units use; this is $(pwd -P)."
 [[ -f .env ]] || die ".env not found — copy .env.example to .env and fill it in."
 mkdir -p "$STATE"
 
@@ -161,8 +168,8 @@ podman build --label "$REVISION_LABEL=$TARGET" -t "$IMAGE:$TARGET" -f Containerf
 
 # ---- 3. migrate -----------------------------------------------------------
 banner "Migrating the database (alembic upgrade head)"
-mkdir -p "$DATA_DIR"
-podman run --rm --env-file .env -v "$(realpath "$DATA_DIR")":/data:z \
+mkdir -p data
+podman run --rm --env-file .env -v "$PWD/data":/data:z \
   "$IMAGE:$TARGET" python -m app.db_migrate 9>&-
 
 # ---- 4. switch --------------------------------------------------------------

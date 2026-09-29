@@ -36,6 +36,14 @@ def ping(failure: str | None) -> None:
     target = url.rstrip("/") + ("/fail" if failed else "")
     body = (sanitize(failure, limit=500) or "failed") if failed else "ok"
     try:
-        httpx.post(target, content=body.encode(), timeout=_TIMEOUT_S)
+        response = httpx.post(target, content=body.encode(), timeout=_TIMEOUT_S)
     except Exception as exc:
         log.warning("healthchecks_ping_failed", error=sanitize(exc, limit=200))
+        return
+    if response.is_error:
+        # A ping Healthchecks refused (an unknown check, a rate limit, its own
+        # outage) is no ping: said, with the status only - the URL is the
+        # credential (#143 round 12, SOTA-A). Not retried: a lost success ping
+        # makes Healthchecks alert, and a failure also reaches the owner through
+        # the failure alarm.
+        log.warning("healthchecks_ping_rejected", status=response.status_code)

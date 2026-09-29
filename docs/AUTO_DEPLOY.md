@@ -12,7 +12,10 @@ Merges to `main` reach production by themselves. Three host pieces, all
 systemd never runs two instances of the oneshot deploy service at once, and a
 run by hand takes the same lock, so deploys cannot overlap. The lock and the
 deploy's two records live in the checkout, in `.deploy-state/`, so the timer
-and a person share them whatever their environment. The deploy compares main
+and a person share them whatever their environment. `deploy.sh` runs only from
+the checkout the units name, `~/playground/bubble-regime-monitor`; the image,
+the container, the port, `.env` and the data volume are the Quadlet unit's,
+not the caller's. The deploy compares main
 with the commit the RUNNING service carries, and stays quiet only when that
 service also answers `/healthz`; a service that is down, or that runs main's
 commit without answering, is deployed again at the next tick.
