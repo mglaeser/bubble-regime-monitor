@@ -103,43 +103,48 @@ def short_circuit(priority: int, settings: Settings) -> Decision | None:
 
 
 def refusal(session: Session, *, settings: Settings, now: datetime) -> str | None:
-    """Why the model may not be asked at `now`, or None."""
+    """Why the model may not be asked at `now`, or None.
+
+    Every rule reads the calls by when they ENDED (a claim in flight has not
+    ended; a reaped one ended at its expiry), as the old governor read them:
+    by start, an overlap in the history put the floor on the wrong call (#140
+    rounds 3 and 6, SOTA-A). And each rule is one aggregate over the calls,
+    not a window of the newest N: a window has an order, and at a tie the
+    order is unknowable (#140 round 7).
+    """
     moment = _naive_utc(now)
+    attempt = MessageEngineAttempt
     # One call at a time: the floor alone let a call running past it - the
     # half-open probe above all - admit another (#140 round 1, SOTA-A, SOTA-C).
-    if session.execute(select(MessageEngineAttempt.id).where(
-            MessageEngineAttempt.outcome == Outcome.IN_FLIGHT.value).limit(1)).first():
+    if session.execute(select(attempt.id).where(
+            attempt.outcome == Outcome.IN_FLIGHT.value).limit(1)).first():
         return "a call in flight"
-    calls = select(MessageEngineAttempt).where(
-        MessageEngineAttempt.outcome.in_([o.value for o in _CALLS]))
-    # Calls in the order they ENDED, as the old governor read them: by start,
-    # an overlap in the history (a call started earlier and ended later) put
-    # the floor and the breaker on the wrong call (#140 round 6, SOTA-A).
-    ended = func.coalesce(MessageEngineAttempt.finished_at, MessageEngineAttempt.started_at)
-    newest = session.execute(
-        calls.order_by(ended.desc(), MessageEngineAttempt.id.desc())
-        .limit(_strikes(settings))
-    ).scalars().all()
-    # The floor counts from the end of the last call, as the old governor's
-    # did: from its start, a call longer than the floor let the next one in a
-    # second after it finished (#140 round 3, SOTA-A).
-    if newest and moment - (newest[0].finished_at or newest[0].started_at) < timedelta(
+    ended = func.coalesce(attempt.finished_at, attempt.started_at)
+    is_call = attempt.outcome.in_([o.value for o in _CALLS])
+    last_end = session.execute(select(func.max(ended)).where(is_call)).scalar()
+    if last_end is not None and moment - last_end < timedelta(
             seconds=settings.message_engine_min_interval_s):
         return "pacing floor"
     day_start = moment.replace(hour=0, minute=0, second=0, microsecond=0)
-    spent = session.execute(
-        select(func.count()).select_from(calls.where(
-            MessageEngineAttempt.started_at >= day_start).subquery())
-    ).scalar_one()
+    spent = session.execute(select(func.count()).where(
+        is_call, attempt.started_at >= day_start)).scalar_one()
     if spent >= settings.message_engine_daily_budget:
         return "daily budget spent"
+    # The run: the failed calls that ended at or after the last success. The
+    # order at a tie is unknowable, so a failure tied with the success counts
+    # and the success does not reset it - the old governor's rule; a window of
+    # the newest N ordered by id let a tied success displace a failure (#140
+    # round 7, SOTA-A).
+    last_ok = session.execute(select(func.max(ended)).where(
+        attempt.outcome == Outcome.OK.value)).scalar()
+    run_query = select(func.count(), func.max(ended)).where(attempt.outcome.in_(_FAILED))
+    if last_ok is not None:
+        run_query = run_query.where(ended >= last_ok)
+    run, last_failure = session.execute(run_query).one()
     strikes = _strikes(settings)
-    if len(newest) == strikes and all(row.outcome in _FAILED for row in newest):
-        last = newest[0]
-        resume = (last.finished_at or last.started_at) + timedelta(
-            seconds=settings.message_engine_breaker_cooldown_s)
-        if moment < resume:
-            return f"breaker open: {strikes} failed calls in a row"
+    if run >= strikes and last_failure is not None and moment < last_failure + timedelta(
+            seconds=settings.message_engine_breaker_cooldown_s):
+        return f"breaker open: {strikes} failed calls in a row"
     return None
 
 

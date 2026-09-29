@@ -360,3 +360,30 @@ class TestRoundSixOn140:
         _row(gov.Outcome.OK, minutes_ago=90, finished_minutes_ago=89)
         decision, _claim = _reserve()
         assert not decision.may_ask and decision.reason == "breaker open: 5 failed calls in a row"
+
+
+class TestRoundSevenOn140:
+    """#140 round 7, SOTA-A (executed): the breaker read the newest N calls,
+    ordered by completion and then by id, so a success that ended at the same
+    instant as a failure but had the higher id took that failure's place in
+    the window, and a call went out during the cooldown. The old governor's
+    rule stands: the order at a tie is unknowable, so the tied failures count
+    and the tied success does not reset them. The run is the number of
+    failures that ended at or after the last success - no window, no order."""
+
+    def test_a_success_tied_with_a_failure_does_not_reset_it(self):
+        _row(gov.Outcome.TECHNICAL_ERROR, minutes_ago=40, finished_minutes_ago=30)  # at X, lower id
+        _row(gov.Outcome.OK, minutes_ago=35, finished_minutes_ago=30)               # at X, higher id
+        for minutes in (29, 28, 27, 26):
+            _row(gov.Outcome.TECHNICAL_ERROR, minutes_ago=minutes, finished_minutes_ago=minutes)
+        decision, claim = _reserve()
+        assert not decision.may_ask and claim is None
+        assert decision.reason == "breaker open: 5 failed calls in a row"
+
+    def test_failures_before_the_last_success_do_not_count(self):
+        for minutes in (60, 59, 58, 57):
+            _row(gov.Outcome.TECHNICAL_ERROR, minutes_ago=minutes, finished_minutes_ago=minutes)
+        _row(gov.Outcome.OK, minutes_ago=50, finished_minutes_ago=49)
+        _row(gov.Outcome.TECHNICAL_ERROR, minutes_ago=30, finished_minutes_ago=29)
+        decision, _claim = _reserve()
+        assert decision.may_ask
