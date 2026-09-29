@@ -16,7 +16,11 @@ only when that service also answers `/healthz`; a service that is down, or that
 runs main's commit without answering, is deployed again at the next tick. A
 deploy succeeds only when `/healthz` answers AND the service runs the new image;
 otherwise it rolls back to the last image seen healthy (`GOOD_FILE`, recorded
-whenever a run finds the service answering, and after every healthy deploy).
+whenever a run finds the service answering, and after every healthy deploy) -
+unless the deploy moved the database schema. The previous image cannot boot a
+schema it does not know, so a deploy that migrated is not rolled back: it fails
+loudly and is fixed forward, and the timer leaves that commit alone until main
+moves on or `FORCE=1` asks for it.
 A commit that failed is not retried while the rolled-back service runs, until
 main moves on or `FORCE=1` asks for it. A tree with edited tracked files is
 refused. Health waits are deadlines in seconds (`HEALTH_TIMEOUT`,

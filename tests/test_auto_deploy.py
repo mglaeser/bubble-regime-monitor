@@ -59,6 +59,12 @@ case "$1" in
       echo "$id"
     fi ;;
   tag) resolve "$2" > "$STATE/latest" ;;
+  run)
+    if [[ "$*" == *"db_migrate --current"* ]]; then
+      cat "$STATE/rev" 2>/dev/null || echo 0019
+    elif [[ "$*" == *db_migrate* && "$SCHEMA_MOVES" == "1" ]]; then
+      echo 0020 > "$STATE/rev"
+    fi ;;
 esac
 exit 0
 """,
@@ -108,7 +114,7 @@ def deploy(tmp_path):
     def run(*, running: str, healthy: bool = True, active: bool = True, dirty: bool = False,
             force: bool = False, rollback_healthy: bool = True, restart_fails: bool = False,
             restart_noop: bool = False, head: str | None = None, health_timeout: int = 2,
-            slow_s: str = "") -> tuple[int, list[str]]:
+            slow_s: str = "", schema_moves: bool = False) -> tuple[int, list[str]]:
         calls.write_text("")
         env = {**os.environ, "PATH": f"{shims}:{os.environ['PATH']}", "CALLS": str(calls),
                "STATE": str(state), "TARGET_COMMIT": TARGET, "RUNNING_COMMIT": running,
@@ -119,7 +125,8 @@ def deploy(tmp_path):
                "FAILED_FILE": str(tmp_path / "deploy.failed"), "GOOD_FILE": str(tmp_path / "deploy.good"),
                "RESTART_FAILS": "1" if restart_fails else "0",
                "RESTART_NOOP": "1" if restart_noop else "0",
-               "HEAD_COMMIT": head or TARGET, "SLOW_S": slow_s}
+               "HEAD_COMMIT": head or TARGET, "SLOW_S": slow_s,
+               "SCHEMA_MOVES": "1" if schema_moves else "0"}
         result = subprocess.run(["bash", str(repo / "deploy.sh")], env=env,  # noqa: S603
                                 capture_output=True, text=True, timeout=120)
         return result.returncode, calls.read_text().splitlines()
@@ -321,3 +328,29 @@ class TestRoundFourOn143:
         code, calls = deploy(running=TARGET)
         assert code == 0 and not any(c.startswith("podman build") for c in calls)
         assert deploy.good_file.read_text().strip() == "sha256:running"
+
+
+class TestRoundFiveOn143:
+    """#143 round 5, SOTA-A (executed): the deploy migrated the database and
+    then rolled back the image alone, so after a release that moved the
+    schema the previous image could not boot it (#134: a schema it does not
+    know fails the boot). The contract is narrowed: a deploy that moved the
+    schema is not rolled back - it fails loudly and is fixed forward - and the
+    timer does not rebuild it every tick."""
+
+    def test_a_deploy_that_moved_the_schema_is_not_rolled_back(self, deploy):
+        code, calls = deploy(running="old0000", healthy=False, schema_moves=True)
+        assert code != 0
+        assert not any(c.startswith("podman tag sha256:running") for c in calls), calls
+        assert deploy.failed_file.read_text().split() == [TARGET, "no-rollback"]
+
+    def test_the_timer_leaves_it_alone_until_main_moves_on(self, deploy):
+        deploy(running="old0000", healthy=False, schema_moves=True)
+        code, calls = deploy(running="old0000", healthy=False)
+        assert code == 0 and not any(c.startswith("podman build") for c in calls), calls
+        code, calls = deploy(running="old0000", healthy=False, force=True)
+        assert any(c.startswith("podman build") for c in calls), calls
+
+    def test_a_deploy_that_kept_the_schema_is_still_rolled_back(self, deploy):
+        code, calls = deploy(running="old0000", healthy=False)
+        assert "podman tag sha256:running localhost/bubblegauge:latest" in calls

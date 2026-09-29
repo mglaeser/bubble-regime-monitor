@@ -16,8 +16,10 @@
 #      while the service keeps running the old image.
 #   4. Point :latest at the new image and restart the Quadlet service.
 #   5. Health-check: the service answers /healthz AND runs the new image. If
-#      not, point :latest at the last image that passed this check and restart
-#      again (rollback).
+#      not, and the deploy left the schema as it was, point :latest at the last
+#      image seen healthy and restart again (rollback). A deploy that moved the
+#      schema is not rolled back: the previous image cannot boot it. It fails
+#      loudly, to be fixed forward.
 #
 # One deploy at a time: systemd serialises the timer's oneshot service, and a
 # run by hand takes the same lock (LOCK_FILE) and leaves the deploy to a run
@@ -115,8 +117,15 @@ if [[ "$FORCE" != "1" ]]; then
   # that runs, waits for the next commit or FORCE=1: retried every tick, it took
   # the service down every five minutes. With the service down it is tried again
   # (#143 round 2, SOTA-A).
-  if [[ -n "$RUNNING" && "$TARGET" != "$RUNNING" \
-        && "$TARGET" == "$(cat "$FAILED_FILE" 2>/dev/null || true)" ]]; then
+  FAILED_TARGET="" FAILED_KIND=""
+  read -r FAILED_TARGET FAILED_KIND < "$FAILED_FILE" 2>/dev/null || true
+  if [[ "$TARGET" == "$FAILED_TARGET" && -n "$RUNNING" && "$TARGET" != "$RUNNING" ]]; then
+    exit 0
+  fi
+  # A commit that failed after moving the schema cannot be rolled back, and
+  # rebuilding and restarting it every tick helps nothing: it waits for a fix
+  # (the next commit) or FORCE=1, whatever the service is doing (#143 round 5).
+  if [[ "$TARGET" == "$FAILED_TARGET" && "$FAILED_KIND" == "no-rollback" ]]; then
     exit 0
   fi
 fi
@@ -142,8 +151,14 @@ podman build --label "$REVISION_LABEL=$TARGET" -t "$IMAGE:$TARGET" -f Containerf
 # ---- 3. migrate -----------------------------------------------------------
 banner "Migrating the database (alembic upgrade head)"
 mkdir -p "$DATA_DIR"
+revision() {
+  podman run --rm --env-file .env -v "$(realpath "$DATA_DIR")":/data:Z \
+    "$IMAGE:$TARGET" python -m app.db_migrate --current 9>&-
+}
+SCHEMA_BEFORE="$(revision)"
 podman run --rm --env-file .env -v "$(realpath "$DATA_DIR")":/data:Z \
   "$IMAGE:$TARGET" python -m app.db_migrate 9>&-
+SCHEMA_AFTER="$(revision)"
 
 # ---- 4. switch --------------------------------------------------------------
 TARGET_ID="$(podman image inspect -f '{{.Id}}' "$IMAGE:$TARGET")"
@@ -175,6 +190,12 @@ fi
 trap - ERR
 echo "    $TARGET is NOT healthy. Recent logs:"
 journalctl --user -u "$SERVICE" -n 40 --no-pager 2>&1 | sed 's/^/    | /' || true
+if [[ "$SCHEMA_BEFORE" != "$SCHEMA_AFTER" ]]; then
+  # The previous image cannot boot a schema it does not know (#134), so an
+  # image rollback here only looked like one (#143 round 5, SOTA-A).
+  mkdir -p "$(dirname "$FAILED_FILE")" && echo "$TARGET no-rollback" > "$FAILED_FILE"
+  die "deploy of $TARGET failed its health check after moving the schema ($SCHEMA_BEFORE -> $SCHEMA_AFTER); not rolled back - the previous image cannot run it. Fix forward."
+fi
 if [[ -n "$PREVIOUS" ]]; then
   banner "Rolling back to the last good image"
   podman tag "$PREVIOUS" "$IMAGE:latest"

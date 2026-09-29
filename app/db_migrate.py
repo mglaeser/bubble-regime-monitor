@@ -21,8 +21,10 @@ replaced ran create_all, which only adds tables that are missing and never
 alters one that exists: after a migration that failed part-way on an
 existing database, the service came up on a schema between two revisions.
 deploy.sh runs the upgrade before it replaces the container and aborts on
-failure; a boot that fails anyway fails the health check, and the deploy
-rolls back.
+failure. It reads the revision (`python -m app.db_migrate --current`) before
+and after: a deploy that moved the schema is not rolled back, because the
+previous image cannot boot a schema it does not know (#143 round 5); one that
+kept it is.
 """
 
 from __future__ import annotations
@@ -79,9 +81,20 @@ def upgrade_to_head() -> str:
     return "upgraded"
 
 
+def current_revision() -> str:
+    """The database's Alembic revision, or "" for none. Reads only."""
+    from alembic.runtime.migration import MigrationContext
+
+    with get_engine().connect() as conn:
+        return MigrationContext.configure(conn).get_current_revision() or ""
+
+
 if __name__ == "__main__":  # `python -m app.db_migrate` — used by deploy.sh
     import sys
 
+    if sys.argv[1:] == ["--current"]:
+        print(current_revision())
+        sys.exit(0)
     try:
         status = upgrade_to_head()
         print(f"migration: {status} (head)")
