@@ -1457,3 +1457,33 @@ class TestRoundFiveOn139:
                             lambda transport, text: (sent.append(text) is None, 202, None))
         result = notify_recompute_outcome("a new failure inside the quiet period")
         assert result["status"] == "sent" and "FAILING" in sent[-1]
+
+
+class TestTheClockIsReadUnderTheLock:
+    """The clone of #140 round 5 (SOTA-A, executed there on the governor):
+    the alarm read the clock before it held its lock, and the lock is held
+    across a send, so a report that waited for another one was stamped with
+    the moment it began to wait - an early first_seen and last_sent, and a
+    repeat that came due early by the wait. The clock is read under the lock."""
+
+    def test_a_report_that_waited_for_the_lock_is_stamped_after_the_wait(self, sent):
+        import threading
+
+        release = threading.Event()
+        holding = threading.Event()
+
+        def hold_the_lock():
+            with failure_alert._lock:
+                holding.set()
+                release.wait(5)
+
+        holder = threading.Thread(target=hold_the_lock)
+        holder.start()
+        holding.wait(5)
+        called = datetime.now(UTC)
+        threading.Timer(0.5, release.set).start()
+        assert notify_recompute_outcome(EBP_ERROR)["status"] == "sent"
+        holder.join()
+        outage = failure_alert._current
+        assert outage.first_seen >= called + timedelta(seconds=0.4)
+        assert outage.last_sent >= called + timedelta(seconds=0.4)
