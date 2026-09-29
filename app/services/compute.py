@@ -37,7 +37,7 @@ import math
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
-from typing import Any, Literal
+from typing import Any
 
 from sqlalchemy import select
 
@@ -75,7 +75,6 @@ from app.indicators import (
     s2_concentration,
     s3_semis_gsy,
     s4_gsadf,
-    s5_calendar,
     s5_credit,
     v_vix,
 )
@@ -118,16 +117,10 @@ ATH_PROVENANCE: dict[str, Any] = {
 _NEAR_ATH_FRAC: float = _M.get_path("red_flags", "index_near_ath_frac")
 
 
-def _s5_extra_with_shadow(observations_dated: list[tuple[str, float]] | None,
-                          cadence: Literal["monthly", "daily"], source_tier: str,
-                          production_sub: float | None,
-                          *, raw_value: float | None = None,
-                          raw_unit: str | None = None) -> dict[str, Any]:
-    """S5 payload extra: the v3.7.7 provisional-lag contract keys PLUS the PIN-H
-    shadow dual report (calendar-anchored candidate; operator authorization
-    2026-07-23: inactive, included_in_score=false, zero influence on any scored
-    value). A shadow failure must never break scoring (guardrail 5): it degrades
-    to an error note inside the extra instead."""
+def _s5_extra(source_tier: str, production_sub: float | None,
+              *, raw_value: float | None = None,
+              raw_unit: str | None = None) -> dict[str, Any]:
+    """S5 payload extra: the v3.7.7 provisional-lag contract keys."""
     extra: dict[str, Any] = dict(S5_PROVISIONAL_LAG)
     # TYPED, because `value` alone is unreadable: the preferred tier persists an
     # Excess Bond Premium in percentage points and the two fallbacks persist a
@@ -139,15 +132,6 @@ def _s5_extra_with_shadow(observations_dated: list[tuple[str, float]] | None,
     extra["s5_input_tier"] = source_tier
     extra["s5_sub_score"] = production_sub
     extra["s5_percentile_available"] = False
-    try:
-        if observations_dated:
-            extra["s5_dual_report"] = s5_calendar.build_dual_report(
-                observations=observations_dated, cadence=cadence,
-                source_tier=source_tier,
-                production_method="provisional_positional",
-                production_sub_score=production_sub)
-    except Exception as exc:
-        extra["s5_dual_report_error"] = str(exc)[:200]
     return extra
 
 
@@ -286,14 +270,6 @@ class RawInputs:
     bsadf_n: int | None = None
     bsadf_n_finite: int | None = None  # < bsadf_n means the history has holes
     bsadf_cv_route: str | None = None  # "bsadf_cv" | "augment_join" | "unavailable"
-    # S4 v4 SHADOW (GSADF_SHADOW_REAL_INDEX). Reported, never scored.
-    gsadf_shadow_stat: float | None = None
-    gsadf_shadow_cv90: float | None = None
-    gsadf_shadow_cv95: float | None = None
-    gsadf_shadow_bsadf: float | None = None
-    gsadf_shadow_bsadf_cv90: float | None = None
-    gsadf_shadow_bsadf_cv95: float | None = None
-    gsadf_shadow_note: str | None = None
 
     hy_oas_bps: float | None = None
     hy_oas_history_bps: list[float] | None = None
@@ -309,14 +285,6 @@ class RawInputs:
     # sentiment construct LSSZ (2017) actually build on; PREFERRED S5 input (v3.3.1).
     ebp_history: list[float] | None = None
     ebp_as_of: str | None = None
-
-    # DATED copies of the three S5 tier histories, feeding ONLY the shadow
-    # calendar-anchoring dual report (s5_calendar; operator PIN-H, 2026-07-23:
-    # inactive candidate). Monthly tiers are month-END dated (C-04 convention).
-    # Never consumed by any scored path.
-    ebp_history_dated: list[tuple[str, float]] | None = None
-    baa_spread_history_dated: list[tuple[str, float]] | None = None
-    hy_oas_history_dated: list[tuple[str, float]] | None = None
 
     breadth_pct: float | None = None
     breadth_n: int | None = None   # constituents resolved on the common date
@@ -578,7 +546,7 @@ def gather_inputs() -> RawInputs:
     # used to say "no free raw index source"; that is false -- FRED serves
     # NASDAQ100 free on the key this service already holds, from 1986 against the
     # proxy's 1999. Switching to it is a source substitution (PIN C, CONDITIONAL
-    # HOLD) and is staged as the shadow candidate, not swapped in here.
+    # HOLD), not made here.
     # R subprocess degrades to the contested/stale 0.25 floor.
     ndx = _track(raw, "price_NDX", lambda: _closes("NDX"))
     if ndx:
@@ -613,8 +581,6 @@ def gather_inputs() -> RawInputs:
     else:
         raw.gsadf_note = "no Nasdaq-100/QQQ series this run"
 
-    populate_gsadf_shadow(raw)
-
     # HY OAS: FRED latest + own persisted history (FRED 3-yr truncation).
     # The date parse lives INSIDE the tracked callable, like `_ebp` below:
     # `date.fromisoformat` on a vendor string can raise, and out in the gather
@@ -641,8 +607,6 @@ def gather_inputs() -> RawInputs:
         ).scalars().all()
         if rows:
             raw.hy_oas_history_bps = [row.oas_bps for row in rows]
-            raw.hy_oas_history_dated = [(row.date.isoformat(), row.oas_bps)
-                                        for row in rows]   # shadow-only (PIN-H)
             raw.hy_oas_bps = rows[-1].oas_bps
             raw.hy_oas_as_of = rows[-1].date.isoformat()
             raw.hy_oas_note = "own history table; FRED 3yr truncation"
@@ -661,8 +625,6 @@ def gather_inputs() -> RawInputs:
         # Age from the reference month's END, not its 1st (v3.7.6/C-04): a monthly
         # series must not read stale on the day its freshest month is published.
         raw.baa_spread_as_of = _month_end_iso(pairs[-1][0])
-        raw.baa_spread_history_dated = [(_month_end_iso(m), v)
-                                        for m, v in pairs]   # shadow-only (PIN-H)
         return [v for _, v in pairs]
 
     sp = _track(raw, "fred_baa_dgs10", _baa_spread)
@@ -680,19 +642,15 @@ def gather_inputs() -> RawInputs:
     # day, for twelve days. A source's post-fetch transform shares that source's
     # failure domain and belongs inside its error boundary, exactly as
     # `_baa_spread` above already does it.
-    def _ebp() -> tuple[list[float], list[tuple[str, float]], str]:
+    def _ebp() -> tuple[list[float], str]:
         pairs = fed_ebp_src.fetch_ebp()
         # C-04: EBP is monthly (dated at month start); age s5 from the month END
         # so the freshest published month is not spuriously stale under the SLA.
-        return (
-            [v for _, v in pairs],
-            [(_month_end_iso(d[:7]), v) for d, v in pairs],   # shadow-only (PIN-H)
-            _month_end_iso(pairs[-1][0][:7]),
-        )
+        return [v for _, v in pairs], _month_end_iso(pairs[-1][0][:7])
 
     ebp = _track(raw, "fed_ebp", _ebp)
     if ebp:
-        raw.ebp_history, raw.ebp_history_dated, raw.ebp_as_of = ebp
+        raw.ebp_history, raw.ebp_as_of = ebp
 
     r = _track(raw, "breadth", breadth_src.pct_above_200dma)
     if r:
@@ -806,45 +764,6 @@ def scored_s4_statistic(raw: RawInputs) -> tuple[float | None, float | None, flo
         return raw.bsadf_stat, raw.bsadf_cv90, raw.bsadf_cv95
     return raw.gsadf_stat, raw.gsadf_cv90, raw.gsadf_cv95
 
-
-def populate_gsadf_shadow(raw: RawInputs) -> None:
-    """S4 v4 SHADOW: the same test on the input the cited papers use.
-
-    REPORTED, NEVER SCORED. PIN C (docs/PINS_DECISION_MEMO.md) holds the
-    instrument change pending "a documented drift gate"; this produces it.
-
-    A FUNCTION, not an inline block, because inline it was untestable: it lives
-    on the GATHER path while compute_snapshot is the pure scoring pipeline, so no
-    test could reach it. A mutation that disabled the guard
-    (`if False and get_settings()...`) survived the whole suite -- which is the
-    original "the shadow produces nothing" defect, undetected a second time.
-
-    Failure is silent by construction: a shadow that can break a recompute would
-    be a scoring dependency wearing a different name.
-    """
-    if not get_settings().gsadf_shadow_real_index:
-        return
-    try:
-        from app.sources import fred_real_index as _fri
-
-        shadow_as_of, shadow_series = _fri.real_monthly_log_index()
-        shadow_out = run_gsadf(
-            shadow_series[-_M.get_path("gsadf", "series_months_max"):],
-            timeout_s=get_settings().gsadf_timeout_s)
-        if shadow_out:
-            raw.gsadf_shadow_stat = shadow_out.gsadf
-            raw.gsadf_shadow_cv90 = shadow_out.cv90
-            raw.gsadf_shadow_cv95 = shadow_out.cv95
-            raw.gsadf_shadow_bsadf = shadow_out.bsadf
-            raw.gsadf_shadow_bsadf_cv90 = shadow_out.bsadf_cv90
-            raw.gsadf_shadow_bsadf_cv95 = shadow_out.bsadf_cv95
-            raw.gsadf_shadow_note = (
-                f"SHADOW (not scored): real CPI-deflated native NASDAQ100 from FRED, "
-                f"monthly month-end, T={len(shadow_series)}, as_of {shadow_as_of}")
-        else:
-            raw.gsadf_shadow_note = "SHADOW (not scored): R/exuber unavailable or the fit failed"
-    except Exception as exc:  # noqa: BLE001 -- a shadow must never break a recompute
-        raw.gsadf_shadow_note = f"SHADOW (not scored): unavailable — {str(exc)[:120]}"
 
 def _closed_months(daily: list[tuple[str, float]]) -> frozenset[str]:
     """Months whose LAST BAR is that month's last trading day.
@@ -1085,13 +1004,6 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
             if _st is not None and _cv is not None:
                 s4_note += f"; {_lab} {_st:.4f} (cv90 {_cv:.4f}) reported, not scored"
         s4_extra = None
-    # DUAL REPORT (PIN C's "documented drift gate"). The shadow was previously
-    # written to RawInputs and never read by anything -- computed at the cost of a
-    # FRED round-trip and a second R run, then discarded with the object. It now
-    # rides on IndicatorOutput.extra, the same channel s5 already uses for its
-    # dual report (extra["s5_dual_report"], read back in app/services/replay.py).
-    # included_in_score is false and there is no parameter by which it could
-    # become true: sub_score never sees it.
     # WHICH STATISTIC, and what the other one said. The unscored statistic is
     # reported so the endpoint-vs-sup divergence is auditable from the payload
     # alone — that divergence is the entire reason for the v4.0 switch.
@@ -1115,18 +1027,6 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
             # data, and one that floors s4 and disables red flag #1.
             "cv_route": raw.bsadf_cv_route,
             "contested_rule": s4_gsadf.CONTESTED_RULE,
-        }
-    if raw.gsadf_shadow_note:
-        s4_extra = dict(s4_extra or {})
-        s4_extra["s4_shadow"] = {
-            "included_in_score": False,
-            "note": raw.gsadf_shadow_note,
-            "gsadf": raw.gsadf_shadow_stat,
-            "cv90": raw.gsadf_shadow_cv90,
-            "cv95": raw.gsadf_shadow_cv95,
-            "bsadf": raw.gsadf_shadow_bsadf,
-            "bsadf_cv90": raw.gsadf_shadow_bsadf_cv90,
-            "bsadf_cv95": raw.gsadf_shadow_bsadf_cv95,
         }
     # as_of = the QQQ monthly series GSADF actually ran on (v3.7.1 — was the
     # unrelated semis-series date, a provenance mislabel).
@@ -1154,8 +1054,7 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         indicators["s5"] = IndicatorOutput("s5", ebp_t2_persisted, sub, False,
                                            "fed_ebp", False, note=s5_note,
                                            as_of=raw.ebp_as_of, quality=1.0,
-                                           extra=_s5_extra_with_shadow(
-                                               raw.ebp_history_dated, "monthly",
+                                           extra=_s5_extra(
                                                "fed_ebp", sub,
                                                raw_value=ebp_t2_persisted, raw_unit="pp"))
     elif raw.baa_spread_history_bps and len(raw.baa_spread_history_bps) >= 24:
@@ -1178,9 +1077,8 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         indicators["s5"] = IndicatorOutput("s5", spread_t2, sub, False,
                                            "fred_BAA_DGS10", True, note=s5_note,
                                            as_of=raw.baa_spread_as_of, quality=0.5,
-                                           extra=_s5_extra_with_shadow(
-                                               raw.baa_spread_history_dated,
-                                               "monthly", "fred_BAA_DGS10", sub,
+                                           extra=_s5_extra(
+                                               "fred_BAA_DGS10", sub,
                                                raw_value=spread_t2, raw_unit="bps"))
     elif raw.hy_oas_bps is not None and raw.hy_oas_history_bps:
         # FALLBACK: HY-OAS t-2 over the (regime-limited) accrued 3yr history.
@@ -1199,8 +1097,7 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         indicators["s5"] = IndicatorOutput("s5", oas_t2, sub, False,
                                            "fred_BAMLH0A0HYM2", False, note=s5_note,
                                            as_of=raw.hy_oas_as_of, quality=0.3,
-                                           extra=_s5_extra_with_shadow(
-                                               raw.hy_oas_history_dated, "daily",
+                                           extra=_s5_extra(
                                                "fred_BAMLH0A0HYM2", sub,
                                                raw_value=oas_t2, raw_unit="bps"))
     else:
