@@ -150,7 +150,7 @@ def run_recompute_guarded() -> None:
             # The dead-man's switch (owner decision D6), under the same lock:
             # Healthchecks reads the LAST ping, so an older run's success sent
             # after a newer run's /fail read the check up again (#143 round 1,
-            # SOTA-A). One bounded call; it never raises.
+            # SOTA-A). One call under a total deadline (round 14); it never raises.
             from app.services.healthchecks import ping
 
             ping(failure)

@@ -45,7 +45,6 @@
 #   BRANCH           branch to deploy                (default: main)
 #   HEALTH_TIMEOUT   seconds to wait for /healthz after a restart (default: 120)
 #   QUIET_HEALTH_TIMEOUT  seconds the quiet check waits for /healthz (default: 30)
-#   KEEP_IMAGES      old commit-tagged images kept   (default: 5)
 #   FORCE=1          rebuild and restart even when the commit is current or failed
 #
 #   .deploy-state/lock    the deploy lock
@@ -65,7 +64,6 @@ PORT=8000
 BRANCH="${BRANCH:-main}"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-120}"
 QUIET_HEALTH_TIMEOUT="${QUIET_HEALTH_TIMEOUT:-30}"
-KEEP_IMAGES="${KEEP_IMAGES:-5}"
 FORCE="${FORCE:-0}"
 STATE=.deploy-state
 FAILED_FILE="$STATE/failed"
@@ -192,9 +190,14 @@ if healthy && [[ "$(running_image)" == "$TARGET_ID" ]]; then
   banner "Deploy OK: $TARGET healthy"
   rm -f "$FAILED_FILE"
   echo "$TARGET_ID" > "$GOOD_FILE"
-  mapfile -t OLD < <(podman images --format '{{.Repository}}:{{.Tag}} {{.ID}}' \
-      | awk -v i="$IMAGE" '$1 ~ "^"i":" && $1 !~ /:latest$/ {print $2}' | tail -n +"$((KEEP_IMAGES+1))")
-  [[ ${#OLD[@]} -gt 0 ]] && podman rmi -f "${OLD[@]}" >/dev/null 2>&1 || true
+  # The five newest commit tags stay. Older ones are removed by NAME and
+  # without -f, so podman keeps any image a container uses: the running
+  # service's image is never deleted, whatever the list holds (#143 round 14,
+  # SOTA-A: KEEP_IMAGES=0 listed the running image's own tag, and `rmi -f`
+  # deleted the image with its container).
+  mapfile -t OLD < <(podman images --format '{{.Repository}}:{{.Tag}}' \
+      | grep "^$IMAGE:" | grep -v ':latest$' | tail -n +6)
+  [[ ${#OLD[@]} -eq 0 ]] || podman rmi "${OLD[@]}" >/dev/null 2>&1 || true
   exit 0
 fi
 trap - ERR

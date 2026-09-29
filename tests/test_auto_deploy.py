@@ -63,6 +63,11 @@ case "$1" in
       echo "$id"
     fi ;;
   tag) resolve "$2" > "$STATE/latest" ;;
+  images)                                   # newest first, as podman lists them
+    for tag in latest "$TARGET_COMMIT" old7 old6 old5 old4 old3 old2 old1; do
+      id="sha256:img-$tag"; [[ "$tag" == latest ]] && id="$(latest)"
+      if [[ "$*" == *.ID* ]]; then echo "localhost/bubblegauge:$tag $id"; else echo "localhost/bubblegauge:$tag"; fi
+    done ;;
   run)
     if [[ "$*" == *db_migrate* && "$SCHEMA_MOVES" == "1" ]]; then
       echo 0020 > "$STATE/rev"
@@ -606,3 +611,18 @@ class TestRoundThirteenOn143:
         unit = (ROOT / "deploy/quadlet/bubblegauge.container").read_text()
         assert resolvers
         assert [line.split("=", 1)[1] for line in unit.splitlines() if line.startswith("DNS=")] == resolvers
+
+
+class TestRoundFourteenOn143:
+    """#143 round 14, SOTA-A (executed): the prune after a healthy deploy took
+    KEEP_IMAGES from the caller, and KEEP_IMAGES=0 listed the running image's
+    own commit tag, which `podman rmi -f` deleted with its container. The five
+    newest commit tags stay; older ones are removed by name and without -f,
+    so podman keeps any image a container uses."""
+
+    @pytest.mark.parametrize("env", [{}, {"KEEP_IMAGES": "0"}])
+    def test_the_prune_never_forces_and_never_names_the_running_image(self, deploy, env):
+        code, calls = deploy(running="old0000", env=env)
+        assert code == 0
+        assert [c for c in calls if c.startswith("podman rmi")] == [
+            "podman rmi localhost/bubblegauge:old3 localhost/bubblegauge:old2 localhost/bubblegauge:old1"]

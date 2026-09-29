@@ -10,6 +10,8 @@ its own channels: the one outage the service cannot report itself. Empty
 
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 
 from app.config import get_settings
@@ -19,6 +21,16 @@ from app.redaction import sanitize
 log = get_logger(__name__)
 
 _TIMEOUT_S = 10.0
+# The whole call, not each read: httpx's timeouts bound one I/O each, so a peer
+# dripping bytes kept the ping - and the recompute lock it runs under -
+# waiting for good (#143 round 14, SOTA-A). httpx leaves a total deadline to
+# the event loop; cancelling the request closes its connection.
+_DEADLINE_S = 15.0
+
+
+async def _post(target: str, body: bytes) -> httpx.Response:
+    async with httpx.AsyncClient(timeout=_TIMEOUT_S) as client:
+        return await asyncio.wait_for(client.post(target, content=body), _DEADLINE_S)
 
 
 def ping(failure: str | None) -> None:
@@ -36,9 +48,12 @@ def ping(failure: str | None) -> None:
     target = url.rstrip("/") + ("/fail" if failed else "")
     body = (sanitize(failure, limit=500) or "failed") if failed else "ok"
     try:
-        response = httpx.post(target, content=body.encode(), timeout=_TIMEOUT_S)
+        # Its callers, the scheduler's job and the refresh route's thread, run
+        # no event loop of their own.
+        response = asyncio.run(_post(target, body.encode()))
     except Exception as exc:
-        log.warning("healthchecks_ping_failed", error=sanitize(exc, limit=200))
+        log.warning("healthchecks_ping_failed",
+                    error=sanitize(exc, limit=200) or type(exc).__name__)
         return
     if response.is_error:
         # A ping Healthchecks refused (an unknown check, a rate limit, its own

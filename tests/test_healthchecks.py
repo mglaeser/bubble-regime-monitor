@@ -15,11 +15,11 @@ URL = "https://hc-ping.com/00000000-0000-4000-8000-000000000000"
 def posts(monkeypatch):
     sent: list[tuple[str, bytes]] = []
 
-    def _post(url, *, content, timeout):
+    async def _post(self, url, *, content):
         sent.append((url, content))
         return httpx.Response(200, text="OK")
 
-    monkeypatch.setattr(healthchecks.httpx, "post", _post)
+    monkeypatch.setattr(healthchecks.httpx.AsyncClient, "post", _post)
     return sent
 
 
@@ -59,10 +59,10 @@ def test_plain_http_is_refused(monkeypatch, posts):
 def test_it_never_raises(monkeypatch):
     _configure(monkeypatch, URL)
 
-    def _boom(*_a, **_kw):
+    async def _boom(*_a, **_kw):
         raise RuntimeError("network down")
 
-    monkeypatch.setattr(healthchecks.httpx, "post", _boom)
+    monkeypatch.setattr(healthchecks.httpx.AsyncClient, "post", _boom)
     healthchecks.ping(None)
 
 
@@ -118,8 +118,41 @@ def test_a_ping_healthchecks_refuses_is_said_without_the_url(monkeypatch):
         def warning(self, event, **fields):
             warned.append((event, fields))
 
+    async def _refused(self, url, *, content):
+        return httpx.Response(404, text="not found")
+
     monkeypatch.setattr(healthchecks, "log", _Log())
-    monkeypatch.setattr(healthchecks.httpx, "post",
-                        lambda url, *, content, timeout: httpx.Response(404, text="not found"))
+    monkeypatch.setattr(healthchecks.httpx.AsyncClient, "post", _refused)
     healthchecks.ping("gather failed")
     assert warned == [("healthchecks_ping_rejected", {"status": 404})]
+
+
+def test_a_ping_that_never_finishes_holds_nothing(monkeypatch):
+    """#143 round 14, SOTA-A: httpx's timeouts bound each read, not the call,
+    and the ping runs under the recompute lock - so a peer dripping bytes held
+    every later recompute. The whole call has a deadline now."""
+    import asyncio
+    import threading
+    import time
+
+    _configure(monkeypatch, URL)
+    monkeypatch.setattr(healthchecks, "_DEADLINE_S", 0.5, raising=False)
+    warned: list[tuple[str, dict]] = []
+
+    class _Log:
+        def warning(self, event, **fields):
+            warned.append((event, fields))
+
+    def _hang(*_a, **_kw):                   # a synchronous call that never ends
+        time.sleep(30)
+
+    async def _drip(self, *_a, **_kw):       # a response that never completes
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(healthchecks, "log", _Log())
+    monkeypatch.setattr(healthchecks.httpx, "post", _hang)
+    monkeypatch.setattr(healthchecks.httpx.AsyncClient, "post", _drip)
+    done = threading.Event()
+    threading.Thread(target=lambda: (healthchecks.ping(None), done.set()), daemon=True).start()
+    assert done.wait(5), "the ping held its caller - and the recompute lock - past its deadline"
+    assert warned == [("healthchecks_ping_failed", {"error": "TimeoutError"})]
