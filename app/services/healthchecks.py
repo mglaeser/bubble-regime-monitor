@@ -33,6 +33,24 @@ async def _post(target: str, body: bytes) -> httpx.Response:
         return await asyncio.wait_for(client.post(target, content=body), _DEADLINE_S)
 
 
+def _post_by_deadline(target: str, body: bytes) -> httpx.Response:
+    """_post on a loop of its own, left without waiting for its executor.
+
+    Name resolution runs on the loop's default executor, where a blocked
+    getaddrinfo cannot be cancelled; asyncio.run waits for that executor on
+    its way out, so a resolver that did not answer held the ping - and the
+    recompute lock - past the deadline (#143 round 17, SOTA-A). close() shuts
+    the executor down without waiting: the resolver finishes on its own
+    thread. The callers, the scheduler's job and the refresh route's thread,
+    run no event loop of their own.
+    """
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(_post(target, body))
+    finally:
+        loop.close()
+
+
 def ping(failure: str | None) -> None:
     """Report one recompute outcome: None is success."""
     url = get_settings().healthchecks_ping_url.strip()
@@ -48,9 +66,7 @@ def ping(failure: str | None) -> None:
     target = url.rstrip("/") + ("/fail" if failed else "")
     body = (sanitize(failure, limit=500) or "failed") if failed else "ok"
     try:
-        # Its callers, the scheduler's job and the refresh route's thread, run
-        # no event loop of their own.
-        response = asyncio.run(_post(target, body.encode()))
+        response = _post_by_deadline(target, body.encode())
     except Exception as exc:
         log.warning("healthchecks_ping_failed",
                     error=sanitize(exc, limit=200) or type(exc).__name__)

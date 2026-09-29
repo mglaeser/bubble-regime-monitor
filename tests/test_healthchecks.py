@@ -156,3 +156,27 @@ def test_a_ping_that_never_finishes_holds_nothing(monkeypatch):
     threading.Thread(target=lambda: (healthchecks.ping(None), done.set()), daemon=True).start()
     assert done.wait(5), "the ping held its caller - and the recompute lock - past its deadline"
     assert warned == [("healthchecks_ping_failed", {"error": "TimeoutError"})]
+
+
+def test_a_resolver_that_hangs_holds_nothing(monkeypatch):
+    """#143 round 17, SOTA-A: the deadline cancelled the request, but name
+    resolution runs on the loop's executor, which asyncio.run then waited for
+    on its way out - a blocked getaddrinfo held the ping, and the recompute
+    lock, past the deadline. The loop is closed without waiting for it."""
+    import socket
+    import threading
+    import time
+
+    _configure(monkeypatch, URL)
+    monkeypatch.setattr(healthchecks, "_DEADLINE_S", 0.5, raising=False)
+    real = socket.getaddrinfo
+
+    def _hang(host, *args, **kwargs):
+        if host in ("hc-ping.com", b"hc-ping.com"):   # asyncio passes it as bytes
+            time.sleep(8)                    # a resolver that does not answer
+        return real(host, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", _hang)
+    done = threading.Event()
+    threading.Thread(target=lambda: (healthchecks.ping(None), done.set()), daemon=True).start()
+    assert done.wait(4), "a hanging resolver held the ping - and the recompute lock - past its deadline"
