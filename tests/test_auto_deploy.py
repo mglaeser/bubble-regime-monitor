@@ -119,20 +119,15 @@ def deploy(tmp_path):
         path = shims / name
         path.write_text(body)
         path.chmod(0o755)
-    # flock: the real one, unless FLOCK_BROKEN says it is missing or broken
-    real_flock = shutil.which("flock")
-    (shims / "flock").write_text(
-        f'#!/usr/bin/env bash\nif [[ "$FLOCK_BROKEN" == "1" ]]; then exit 127; fi\nexec {real_flock} "$@"\n')
-    (shims / "flock").chmod(0o755)
     state = tmp_path / "state"
     state.mkdir()
     calls = tmp_path / "calls.log"
 
     def run(*, running: str, healthy: bool = True, active: bool = True, dirty: bool = False,
-            force: bool = False, rollback_healthy: bool = True, restart_fails: bool = False,
+            rollback_healthy: bool = True, restart_fails: bool = False,
             restart_noop: bool = False, head: str | None = None, health_timeout: int = 2,
             slow_s: str = "", schema_moves: bool = False, target: str = TARGET,
-            unhealthy: tuple[str, ...] = (), flock_broken: bool = False,
+            unhealthy: tuple[str, ...] = (),
             env: dict[str, str] | None = None) -> tuple[int, list[str]]:
         calls.write_text("")
         bad = list(unhealthy)
@@ -145,20 +140,18 @@ def deploy(tmp_path):
                "UNHEALTHY": " ".join(bad),
                "HEALTH_TIMEOUT": str(health_timeout), "QUIET_HEALTH_TIMEOUT": "1",
                "ACTIVE": "1" if active else "0", "DIRTY": "1" if dirty else "0",
-               "FORCE": "1" if force else "0",
                "RESTART_FAILS": "1" if restart_fails else "0",
                "RESTART_NOOP": "1" if restart_noop else "0",
                "HEAD_COMMIT": head or target, "SLOW_S": slow_s,
                "SCHEMA_MOVES": "1" if schema_moves else "0",
-               "FLOCK_BROKEN": "1" if flock_broken else "0", **(env or {})}
+               "BUBBLEGAUGE_DEPLOY_UNIT": "1", **(env or {})}
         result = subprocess.run(["bash", str(repo / "deploy.sh")], env=environ,  # noqa: S603
                                 capture_output=True, text=True, timeout=120)
         run.output = result.stdout + result.stderr  # type: ignore[attr-defined]
         return result.returncode, calls.read_text().splitlines()
 
     run.repo = repo  # type: ignore[attr-defined]
-    # deploy.sh keeps its lock and records in the checkout (#143 round 11)
-    run.lock_file = repo / ".deploy-state/lock"  # type: ignore[attr-defined]
+    # deploy.sh keeps its records in the checkout (#143 round 11)
     run.failed_file = repo / ".deploy-state/failed"  # type: ignore[attr-defined]
     run.good_file = repo / ".deploy-state/good"  # type: ignore[attr-defined]
     run.state = state  # type: ignore[attr-defined]
@@ -237,26 +230,24 @@ class TestRoundOneOn143:
         assert not any(c.startswith("podman build") for c in calls), calls
 
     def test_a_run_by_hand_does_not_overlap_the_timers(self, deploy):
-        """systemd serialises the timer's oneshot service, not a run by hand:
-        both take the same lock, and the second one leaves it to the first."""
-        import fcntl
-
-        with open(deploy.lock_file, "w") as held:
-            fcntl.flock(held, fcntl.LOCK_EX)
-            code, calls = deploy(running="old0000", force=True)
-        assert code == 0
-        assert not any(c.startswith(("podman build", "systemctl --user restart")) for c in calls), calls
+        """A run by hand overlapped the timer's migration, retag and restart.
+        Since round 15 every run is the unit's, which systemd starts once at a
+        time; a run from a shell is refused."""
+        code, calls = deploy(running="old0000", env={"BUBBLEGAUGE_DEPLOY_UNIT": ""})
+        assert code != 0
+        assert not any(c.startswith(("git fetch", "podman build")) for c in calls), calls
 
     def test_a_commit_that_failed_is_not_retried_every_tick(self, deploy):
         """The sweep: after a rollback the running image is behind main again,
         so every five minutes the same broken commit was built, restarted,
         found unhealthy and rolled back. A commit that failed its health check
-        waits for the next commit, or for FORCE=1."""
+        waits for the next commit, or for its marker to be removed."""
         code, _calls = deploy(running="old0000", healthy=False)
         assert code != 0
         code, calls = deploy(running="old0000")
         assert code == 0 and not any(c.startswith("podman build") for c in calls), calls
-        code, calls = deploy(running="old0000", force=True)
+        deploy.failed_file.unlink()
+        code, calls = deploy(running="old0000")
         assert code == 0 and any(c.startswith("podman build") for c in calls), calls
 
 
@@ -364,7 +355,8 @@ class TestRoundFiveOn143:
         deploy(running="old0000", healthy=False, schema_moves=True)
         code, calls = deploy(running="old0000", healthy=False)
         assert code == 0 and not any(c.startswith("podman build") for c in calls), calls
-        code, calls = deploy(running="old0000", healthy=False, force=True)
+        deploy.failed_file.unlink()
+        code, calls = deploy(running="old0000", healthy=False)
         assert any(c.startswith("podman build") for c in calls), calls
 
     def test_a_deploy_that_kept_the_schema_is_still_rolled_back(self, deploy):
@@ -432,21 +424,12 @@ def test_every_mount_of_the_data_volume_shares_its_label():
 class TestRoundNineOn143:
     """#143 round 9, SOTA-A (executed): every flock failure read as "another
     deploy is running", so a missing or broken flock made each timer run exit
-    0 - deploys stopped, reported as success. Contention has its own exit code
-    (flock -E 75); anything else fails the run."""
+    0 - deploys stopped, reported as success. Since round 15 there is no flock
+    to fail: the unit is the lock."""
 
-    def test_a_broken_lock_fails_the_run(self, deploy):
-        code, calls = deploy(running="old0000", flock_broken=True)
-        assert code != 0
-        assert not any(c.startswith("git fetch") for c in calls), calls
-
-    def test_a_held_lock_is_still_a_quiet_exit(self, deploy):
-        import fcntl
-
-        with open(deploy.lock_file, "w") as held:
-            fcntl.flock(held, fcntl.LOCK_EX)
-            code, calls = deploy(running="old0000")
-        assert code == 0 and not any(c.startswith("podman build") for c in calls)
+    def test_deploy_sh_takes_no_lock_of_its_own(self):
+        script = (ROOT / "deploy.sh").read_text()
+        assert "flock" not in script and "9>" not in script
 
 
 class TestRoundElevenOn143:
@@ -456,7 +439,8 @@ class TestRoundElevenOn143:
     no schema: it restarts the last good image and keeps it only if it
     answers, and whether an image can run the database is decided by Alembic
     as the image boots (#134). A failed commit is marked before the rollback
-    and waits for the next commit or FORCE=1, whatever the service does. That
+    and waits for the next commit, or for its marker to be removed, whatever
+    the service does. That
     reverses two of round 2's rules: a service the rollback did not bring back
     is systemd's to restart and the owner's to fix, not the timer's to rebuild
     every five minutes."""
@@ -492,19 +476,6 @@ class TestRoundElevenOn143:
         with pytest.raises(CommandError, match="9999"), TestClient(app):
             pass
 
-    def test_every_caller_shares_the_lock_whatever_its_environment(self, deploy, tmp_path):
-        """The lock lived under the caller's $XDG_RUNTIME_DIR, so the timer and
-        a run by hand in another environment took different locks and
-        overlapped migrations and restarts."""
-        import fcntl
-
-        other = tmp_path / "other-runtime"
-        other.mkdir()
-        with open(deploy.lock_file, "w") as held:
-            fcntl.flock(held, fcntl.LOCK_EX)
-            code, calls = deploy(running="old0000", env={"XDG_RUNTIME_DIR": str(other)})
-        assert code == 0 and not any(c.startswith("podman build") for c in calls), calls
-
     def test_a_failed_commit_is_remembered_whatever_the_callers_environment(self, deploy, tmp_path):
         """The sweep: the failure marker and the last good image lived under
         the caller's $XDG_STATE_HOME the same way."""
@@ -523,7 +494,7 @@ class TestRoundElevenOn143:
         steps = [line.split("#")[0].strip() for line in cutover.splitlines()]
         rm = steps.index("podman rm -f bubblegauge")
         start = steps.index("systemctl --user start bubblegauge.service")
-        first_deploy = next(i for i, step in enumerate(steps) if step.endswith("./deploy.sh"))
+        first_deploy = steps.index("systemctl --user start bubblegauge-deploy.service")
         assert rm < start < first_deploy
 
     def test_a_failed_rollback_is_marked_too(self, deploy):
@@ -539,7 +510,8 @@ class TestRoundElevenOn143:
         deploy(running="old0000", healthy=False)
         code, calls = deploy(running="old0000", active=False)
         assert code == 0 and not any(c.startswith("podman build") for c in calls), calls
-        code, calls = deploy(running="old0000", active=False, force=True)
+        deploy.failed_file.unlink()
+        code, calls = deploy(running="old0000", active=False)
         assert any(c.startswith("podman build") for c in calls), calls
 
 
@@ -626,3 +598,44 @@ class TestRoundFourteenOn143:
         assert code == 0
         assert [c for c in calls if c.startswith("podman rmi")] == [
             "podman rmi localhost/bubblegauge:old3 localhost/bubblegauge:old2 localhost/bubblegauge:old1"]
+
+
+class TestRoundFifteenOn143:
+    """#143 round 15, SOTA-A (executed): the build and the migration closed
+    the lock's descriptor, so killing a run by hand released the lock while
+    they built and migrated on, beside the next run. Rounds 1, 9, 11 and 15
+    each found the next case a lock of our own missed; the contract is what
+    systemd decides now. deploy.sh runs only as bubblegauge-deploy.service,
+    which systemd starts once at a time and stops whole - the build and the
+    migration with it. By hand: `systemctl --user start
+    bubblegauge-deploy.service`; to retry a failed commit, remove its marker."""
+
+    def test_a_run_outside_its_unit_is_refused(self, deploy):
+        code, calls = deploy(running="old0000", env={"BUBBLEGAUGE_DEPLOY_UNIT": ""})
+        assert code != 0 and "systemctl --user start bubblegauge-deploy.service" in deploy.output
+        assert not any(c.startswith(("git fetch", "podman")) for c in calls), calls
+
+    def test_the_unit_is_the_lock(self):
+        service = (ROOT / "deploy/systemd/bubblegauge-deploy.service").read_text()
+        settings = [line.strip() for line in service.splitlines() if line.strip() and not line.startswith("#")]
+        assert "Type=oneshot" in settings
+        assert "Environment=BUBBLEGAUGE_DEPLOY_UNIT=1" in settings
+        # the default, control-group: stopping the unit stops everything it started
+        assert not any(line.startswith("KillMode=") for line in settings)
+
+    def test_the_migration_ends_with_its_unit(self, deploy):
+        """Executed on the host: a oneshot unit's bash killed while `podman
+        run` migrated left the container running in its own scope (python as
+        PID 1 ignores SIGTERM) until --init put catatonit in front of it."""
+        code, calls = deploy(running="old0000")
+        migrate = next(c for c in calls if "python -m app.db_migrate" in c)
+        assert code == 0 and migrate.startswith("podman run --rm --init "), migrate
+
+    def test_a_failed_commit_is_tried_again_once_its_marker_is_removed(self, deploy):
+        deploy(running="old0000", healthy=False)
+        assert deploy.failed_file.read_text().split() == [TARGET]
+        code, calls = deploy(running="old0000", env={"FORCE": "1"})   # no knob any more
+        assert code == 0 and not any(c.startswith("podman build") for c in calls), calls
+        deploy.failed_file.unlink()
+        code, calls = deploy(running="old0000")
+        assert code == 0 and any(c.startswith("podman build") for c in calls), calls

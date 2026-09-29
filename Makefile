@@ -37,7 +37,7 @@ up:
 
 # One-command update & deploy: pull -> build -> migrate -> restart -> health-check.
 deploy:
-	./deploy.sh
+	systemctl --user start bubblegauge-deploy.service
 
 # Apply DB migrations to head against the local DB_URL (no container).
 migrate:

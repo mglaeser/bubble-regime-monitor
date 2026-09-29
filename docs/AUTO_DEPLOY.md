@@ -9,10 +9,12 @@ Merges to `main` reach production by themselves. Three host pieces, all
 | The deploy | `deploy.sh` via `deploy/systemd/bubblegauge-deploy.service` | Fetch `main`; if the running image carries that commit, stop. Otherwise fast-forward, build (image labelled with the commit), migrate in a throwaway container, point `:latest` at the new image, restart the service, health-check, and on failure point `:latest` back and restart again. |
 | The schedule | `deploy/systemd/bubblegauge-deploy.timer` | Starts the deploy service five minutes after the last run ended (and two minutes after boot). |
 
-systemd never runs two instances of the oneshot deploy service at once, and a
-run by hand takes the same lock, so deploys cannot overlap. The lock and the
-deploy's two records live in the checkout, in `.deploy-state/`, so the timer
-and a person share them whatever their environment. `deploy.sh` runs only from
+`deploy.sh` runs only as the deploy service, started by the timer or by hand
+(`systemctl --user start bubblegauge-deploy.service`). systemd runs one
+instance of the oneshot service at a time, and stopping it - or its main
+process dying - stops everything it started, the build and the migration
+included: deploys neither overlap nor outlive their run. The deploy's two
+records live in the checkout, in `.deploy-state/`. `deploy.sh` runs only from
 the checkout the units name, `~/playground/bubble-regime-monitor`; the image,
 the container, the port, `.env` and the data volume are the Quadlet unit's,
 not the caller's. The deploy compares main
@@ -30,8 +32,8 @@ boots, where Alembic fails the upgrade to its own head - and with it the boot -
 on a revision the image does not ship. After a migration the old image
 therefore does not come back, and the deploy is fixed forward.
 
-A commit that failed waits for the next commit, or for `FORCE=1`, whatever the
-service does: a service the rollback did not bring back is left to systemd's
+A commit that failed waits for the next commit, or for its marker to be
+removed (`rm .deploy-state/failed`), whatever the service does: a service the rollback did not bring back is left to systemd's
 restarts, to the dead-man's switch below, and to the owner. A tree with edited
 tracked files is refused. Health waits are deadlines in seconds
 (`HEALTH_TIMEOUT`, `QUIET_HEALTH_TIMEOUT`), each probe capped at five.
@@ -53,7 +55,7 @@ install -D -m 644 deploy/quadlet/bubblegauge.container ~/.config/containers/syst
 install -D -m 644 deploy/systemd/bubblegauge-deploy.service ~/.config/systemd/user/bubblegauge-deploy.service
 install -D -m 644 deploy/systemd/bubblegauge-deploy.timer ~/.config/systemd/user/bubblegauge-deploy.timer
 systemctl --user daemon-reload
-FORCE=1 ./deploy.sh                    # builds, migrates and starts bubblegauge.service
+systemctl --user start bubblegauge-deploy.service   # builds, migrates and starts bubblegauge.service
 systemctl --user enable --now bubblegauge-deploy.timer
 loginctl enable-linger "$USER"         # keep the user's units running without a login
 ```
@@ -72,7 +74,7 @@ rm ~/.config/systemd/user/bubblegauge-deploy.path
 systemctl --user daemon-reload
 podman rm -f bubblegauge                         # the old container; its image stays :latest
 systemctl --user start bubblegauge.service       # the same image, now a Quadlet unit
-./deploy.sh                                      # records it as the last good image, then deploys main
+systemctl --user start bubblegauge-deploy.service   # records it as the last good image, then deploys main
 systemctl --user enable --now bubblegauge-deploy.timer
 ```
 
@@ -84,6 +86,7 @@ Then deactivate the repository's GitHub webhook.
 systemctl --user list-timers bubblegauge-deploy.timer   # next check
 journalctl --user -u bubblegauge-deploy.service -n 50    # last deploys
 systemctl --user status bubblegauge.service              # the container
-FORCE=1 ./deploy.sh                                      # rebuild and restart now
+systemctl --user start bubblegauge-deploy.service        # deploy now (it waits for a run under way)
 cat .deploy-state/failed                                 # a failed commit, left alone until main moves on
+rm .deploy-state/failed                                  # ... unless removed: the next run tries it again
 ```

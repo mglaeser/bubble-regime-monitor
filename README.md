@@ -137,7 +137,7 @@ Base path `/api/v1`; every response is `{"data": ..., "meta": ...}` with the fiv
 Updating a running server is a single command:
 
 ```bash
-./deploy.sh        # or: make deploy
+systemctl --user start bubblegauge-deploy.service   # or: make deploy
 ```
 
 It performs, in order (each step announced with a `==>` banner):
@@ -148,13 +148,13 @@ It performs, in order (each step announced with a `==>` banner):
 4. **Restart** — points `:latest` at the new image and restarts the Quadlet unit.
 5. **Health-check + rollback** — the service must answer `/healthz` on the new image. If it does not, the commit is marked failed and `:latest` goes back to the last image seen healthy, which counts only if it answers too; after a migration that image cannot boot the database, and the deploy is fixed forward.
 
-It runs from `~/playground/bubble-regime-monitor`, the checkout the units name; the image, container, port, `.env` and data volume are the Quadlet unit's. Tunable via environment variables (all optional): `BRANCH`, `HEALTH_TIMEOUT`, `QUIET_HEALTH_TIMEOUT`, plus `FORCE=1` to rebuild a commit that is current or failed. Details: **`docs/AUTO_DEPLOY.md`**.
+It runs as the deploy service only (the timer's, or started by hand as above), from `~/playground/bubble-regime-monitor`, the checkout the units name; the image, container, port, `.env` and data volume are the Quadlet unit's. A commit that failed its health check is tried again once `.deploy-state/failed` is removed. Details: **`docs/AUTO_DEPLOY.md`**.
 
 The app also **self-migrates at boot** (`app.db_migrate.upgrade_to_head` runs `alembic upgrade head`; a failed migration fails the boot rather than falling back), so a plain `podman-compose up -d --build` stays valid too — `deploy.sh` just makes the pull/build/migrate/health-check flow explicit and safe. To apply migrations locally without a container: `make migrate`.
 
 ### Auto-deploy (systemd timer + Podman Quadlet, since 2026-09-28)
 
-The container is a **Podman Quadlet** unit (`deploy/quadlet/bubblegauge.container`): systemd starts it at boot and restarts it when it dies. A **systemd timer** (`deploy/systemd/bubblegauge-deploy.timer`) runs `./deploy.sh` five minutes after each run ends; it fetches `main` and returns at once unless the running image is behind it. When `main` moved, it builds, migrates, points `:latest` at the new image, restarts the unit and health-checks it, rolling back to the last image seen healthy if it does not become healthy. There is no webhook and no trigger file: systemd never runs two instances of the oneshot deploy service at once, and a run by hand takes the same lock. A **Healthchecks** dead-man's switch (`HEALTHCHECKS_PING_URL`) is pinged after every recompute, so an outage the service cannot report itself (host, container or scheduler gone) still reaches you. Setup: **`docs/AUTO_DEPLOY.md`**.
+The container is a **Podman Quadlet** unit (`deploy/quadlet/bubblegauge.container`): systemd starts it at boot and restarts it when it dies. A **systemd timer** (`deploy/systemd/bubblegauge-deploy.timer`) runs `./deploy.sh` five minutes after each run ends; it fetches `main` and returns at once unless the running image is behind it. When `main` moved, it builds, migrates, points `:latest` at the new image, restarts the unit and health-checks it, rolling back to the last image seen healthy if it does not become healthy. There is no webhook, no trigger file and no lock of its own: every deploy is the systemd service, which systemd runs once at a time and stops whole, the build and the migration included. A **Healthchecks** dead-man's switch (`HEALTHCHECKS_PING_URL`) is pinged after every recompute, so an outage the service cannot report itself (host, container or scheduler gone) still reaches you. Setup: **`docs/AUTO_DEPLOY.md`**.
 
 ## Status & spec UI
 

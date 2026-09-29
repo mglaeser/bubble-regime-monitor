@@ -2,15 +2,16 @@
 #
 # deploy.sh — update and deploy bubblegauge (owner decision D6, 2026-09-28).
 #
-# Run by the systemd timer, five minutes after its last run ended
-# (deploy/systemd/bubblegauge-deploy.timer), or by hand. The container is a
-# Podman Quadlet unit (deploy/quadlet/bubblegauge.container): systemd starts it
-# at boot and restarts it when it dies; this script only changes the image it
-# runs.
+# Runs only as bubblegauge-deploy.service: started by its timer five minutes
+# after its last run ended (deploy/systemd/bubblegauge-deploy.timer), or by
+# hand with `systemctl --user start bubblegauge-deploy.service`. The container
+# is a Podman Quadlet unit (deploy/quadlet/bubblegauge.container): systemd
+# starts it at boot and restarts it when it dies; this script only changes the
+# image it runs.
 #
-#   1. Fetch the branch. If the running service already runs that commit and
+#   1. Fetch main. If the running service already runs that commit and
 #      answers /healthz, stop. A commit that already failed its health check
-#      waits for the next commit or FORCE=1.
+#      waits for the next commit, or for its marker to be removed by hand.
 #   2. Fast-forward the checkout and build the image, labelled with the commit.
 #   3. Migrate the database in a throwaway container; a failure stops here,
 #      while the service keeps running the old image.
@@ -28,12 +29,14 @@
 # forward. (#143 round 11: review rounds kept finding the next case our own
 # schema rules missed, so the contract is what Alembic decides.)
 #
-# One deploy at a time: systemd serialises the timer's oneshot service, and a
-# run by hand takes the same lock and leaves the deploy to a run already under
-# way. No child keeps the lock: the container is started by systemd, not by
-# this script. The lock and the deploy's records live in the checkout, so
-# every caller shares them, whatever its environment (#143 round 11, SOTA-A:
-# under $XDG_RUNTIME_DIR the lock followed the caller, and two runs overlapped).
+# One deploy at a time, and none outlives its run: systemd starts one
+# instance of the oneshot unit at a time, and stopping it - or its main
+# process dying - stops every process the unit started, the build and the
+# migration included. That is the lock. Review rounds 1, 9, 11 and 15 each
+# found the next case a lock of our own missed, the last one a run by hand
+# killed mid-build while its children, which had closed the lock, built and
+# migrated on beside the next run (#143 round 15, SOTA-A). The deploy's records
+# live in the checkout, so every run shares them.
 #
 # What it deploys to is fixed by the units, not by the caller: the Quadlet unit
 # names the image, the container, its port, and this checkout's .env and data;
@@ -42,13 +45,11 @@
 # reached this script but not the unit, so a DATA_DIR migrated one database
 # while the service ran on another).
 #
-#   BRANCH           branch to deploy                (default: main)
 #   HEALTH_TIMEOUT   seconds to wait for /healthz after a restart (default: 120)
 #   QUIET_HEALTH_TIMEOUT  seconds the quiet check waits for /healthz (default: 30)
-#   FORCE=1          rebuild and restart even when the commit is current or failed
 #
-#   .deploy-state/lock    the deploy lock
-#   .deploy-state/failed  the last commit that failed its health check
+#   .deploy-state/failed  the last commit that failed its health check; remove
+#                         it to have that commit tried again
 #   .deploy-state/good    the image last seen healthy: the rollback target
 
 set -Eeuo pipefail
@@ -61,10 +62,9 @@ IMAGE=localhost/bubblegauge
 SERVICE=bubblegauge.service
 CONTAINER=bubblegauge
 PORT=8000
-BRANCH="${BRANCH:-main}"
+BRANCH=main
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-120}"
 QUIET_HEALTH_TIMEOUT="${QUIET_HEALTH_TIMEOUT:-30}"
-FORCE="${FORCE:-0}"
 STATE=.deploy-state
 FAILED_FILE="$STATE/failed"
 GOOD_FILE="$STATE/good"
@@ -86,25 +86,15 @@ running_image() { podman inspect -f '{{.Image}}' "$CONTAINER" 2>/dev/null || tru
 die()    { printf '\nERROR: %s\n' "$*" >&2; exit 1; }
 trap 'die "deploy failed at line $LINENO"' ERR
 
+# The unit sets this; a run from a shell would be neither serialised with the
+# timer's nor stopped with its children.
+[[ "${BUBBLEGAUGE_DEPLOY_UNIT:-}" == "1" ]] \
+  || die "deploy.sh runs as its unit: systemctl --user start bubblegauge-deploy.service"
 cd "$(dirname "$0")"
 [[ "$(pwd -P)" == "$(cd "$CHECKOUT" 2>/dev/null && pwd -P)" ]] \
   || die "deploy.sh runs from $CHECKOUT, the checkout the units use; this is $(pwd -P)."
 [[ -f .env ]] || die ".env not found — copy .env.example to .env and fill it in."
 mkdir -p "$STATE"
-
-# One deploy at a time (#143 round 1, SOTA-A: a run by hand overlapped the
-# timer's migration, retag and restart).
-exec 9>"$STATE/lock"
-# Contention has its own exit code, 75: anything else - flock missing or
-# broken - fails the run. Read as contention, it made every timer run exit 0
-# and deploys stopped, reported as success (#143 round 9, SOTA-A).
-lock_rc=0
-flock -n -E 75 9 || lock_rc=$?
-if [[ "$lock_rc" == "75" ]]; then
-  echo "another deploy is running; leaving it to finish"
-  exit 0
-fi
-[[ "$lock_rc" == "0" ]] || die "the deploy lock failed (flock exit $lock_rc); nothing was deployed."
 
 # ---- 1. anything to do? ---------------------------------------------------
 git fetch --quiet --prune origin "$BRANCH"
@@ -129,21 +119,19 @@ fi
 if [[ "$RUNNING_OK" == "1" ]]; then
   echo "$RUNNING_IMAGE" > "$GOOD_FILE"
 fi
-if [[ "$FORCE" != "1" ]]; then
-  # Quiet only when the service runs main's commit AND answers: a switch
-  # interrupted on an unhealthy target otherwise stayed there for good (#143
-  # round 3, SOTA-A). The common case, every five minutes.
-  if [[ "$TARGET" == "$RUNNING" && "$RUNNING_OK" == "1" ]]; then
-    exit 0
-  fi
-  # A commit that failed its health check waits for the next commit or
-  # FORCE=1, whatever the service does: retried every tick, it took a
-  # rolled-back service down every five minutes (#143 round 2, SOTA-A). A
-  # service that did not come back is systemd's to restart and the owner's to
-  # fix (#143 round 11).
-  if [[ "$TARGET" == "$(cat "$FAILED_FILE" 2>/dev/null || true)" ]]; then
-    exit 0
-  fi
+# Quiet only when the service runs main's commit AND answers: a switch
+# interrupted on an unhealthy target otherwise stayed there for good (#143
+# round 3, SOTA-A). The common case, every five minutes.
+if [[ "$TARGET" == "$RUNNING" && "$RUNNING_OK" == "1" ]]; then
+  exit 0
+fi
+# A commit that failed its health check waits for the next commit, or for its
+# marker to be removed, whatever the service does: retried every tick, it took
+# a rolled-back service down every five minutes (#143 round 2, SOTA-A). A
+# service that did not come back is systemd's to restart and the owner's to
+# fix (#143 round 11).
+if [[ "$TARGET" == "$(cat "$FAILED_FILE" 2>/dev/null || true)" ]]; then
+  exit 0
 fi
 banner "Deploying $TARGET (running: ${RUNNING:-none})"
 # Fast-forward only, from a clean tree: a diverged tree, or a tracked file
@@ -162,13 +150,19 @@ git merge --ff-only -q "origin/$BRANCH"
 
 # ---- 2. build -------------------------------------------------------------
 banner "Building $IMAGE:$TARGET"
-podman build --label "$REVISION_LABEL=$TARGET" -t "$IMAGE:$TARGET" -f Containerfile . 9>&-
+podman build --label "$REVISION_LABEL=$TARGET" -t "$IMAGE:$TARGET" -f Containerfile .
 
 # ---- 3. migrate -----------------------------------------------------------
 banner "Migrating the database (alembic upgrade head)"
 mkdir -p data
-podman run --rm --env-file .env -v "$PWD/data":/data:z \
-  "$IMAGE:$TARGET" python -m app.db_migrate 9>&-
+# --init: as PID 1, python ignores a SIGTERM it has no handler for, so the
+# SIGTERM a stopping unit sends through podman left the migration running in
+# its container's own scope; under catatonit it ends with the unit (executed
+# on the host, #143 round 15: a unit's bash killed mid-migration - without
+# --init the container outlived the unit, with it the container was gone; a
+# build's RUN step ended with its unit either way).
+podman run --rm --init --env-file .env -v "$PWD/data":/data:z \
+  "$IMAGE:$TARGET" python -m app.db_migrate
 
 # ---- 4. switch --------------------------------------------------------------
 TARGET_ID="$(podman image inspect -f '{{.Id}}' "$IMAGE:$TARGET")"
@@ -204,7 +198,7 @@ trap - ERR
 echo "    $TARGET is NOT healthy. Recent logs:"
 journalctl --user -u "$SERVICE" -n 40 --no-pager 2>&1 | sed 's/^/    | /' || true
 # Marked first: whatever the rollback does, the timer leaves this commit alone
-# until main moves on or FORCE=1.
+# until main moves on, or its marker is removed.
 echo "$TARGET" > "$FAILED_FILE"
 [[ -n "$PREVIOUS" ]] \
   || die "deploy of $TARGET failed its health check; no image was seen healthy before it, so there is nothing to roll back to. Fix forward."

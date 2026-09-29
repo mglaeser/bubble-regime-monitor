@@ -1,5 +1,9 @@
-# Started by bubblegauge-deploy.timer. A oneshot service never runs twice at
-# once, so deploys cannot overlap.
+# Started by bubblegauge-deploy.timer, or by hand with
+# `systemctl --user start bubblegauge-deploy.service`. systemd runs one
+# instance of a oneshot service at a time, and stopping it - or its main
+# process dying - stops every process it started (the default
+# KillMode=control-group): deploys neither overlap nor outlive their run.
+# deploy.sh refuses to run without BUBBLEGAUGE_DEPLOY_UNIT (#143 round 15).
 
 [Unit]
 Description=bubblegauge deploy (fetch main; when it moved: build, migrate, restart, health-check, roll back on failure)
@@ -10,5 +14,6 @@ After=network-online.target
 Type=oneshot
 WorkingDirectory=%h/playground/bubble-regime-monitor
 ExecStart=%h/playground/bubble-regime-monitor/deploy.sh
+Environment=BUBBLEGAUGE_DEPLOY_UNIT=1
 TimeoutStartSec=3600
 NoNewPrivileges=true
