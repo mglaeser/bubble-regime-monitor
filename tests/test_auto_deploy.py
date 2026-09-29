@@ -52,7 +52,7 @@ resolve() {
 }
 case "$1" in
   inspect) running ;;
-  exec) rev ;;
+  exec) if [[ "$EXEC_FAILS" == "1" ]]; then exit 1; fi; rev ;;
   image)
     id="$(resolve "${@: -1}")"
     if [[ "$*" == *Labels* ]]; then
@@ -118,7 +118,7 @@ def deploy(tmp_path):
             force: bool = False, rollback_healthy: bool = True, restart_fails: bool = False,
             restart_noop: bool = False, head: str | None = None, health_timeout: int = 2,
             slow_s: str = "", schema_moves: bool = False, target: str = TARGET,
-            unhealthy: tuple[str, ...] = ()) -> tuple[int, list[str]]:
+            unhealthy: tuple[str, ...] = (), exec_fails: bool = False) -> tuple[int, list[str]]:
         calls.write_text("")
         bad = list(unhealthy)
         if not healthy:
@@ -135,7 +135,8 @@ def deploy(tmp_path):
                "RESTART_FAILS": "1" if restart_fails else "0",
                "RESTART_NOOP": "1" if restart_noop else "0",
                "HEAD_COMMIT": head or target, "SLOW_S": slow_s,
-               "SCHEMA_MOVES": "1" if schema_moves else "0"}
+               "SCHEMA_MOVES": "1" if schema_moves else "0",
+               "EXEC_FAILS": "1" if exec_fails else "0"}
         result = subprocess.run(["bash", str(repo / "deploy.sh")], env=env,  # noqa: S603
                                 capture_output=True, text=True, timeout=120)
         return result.returncode, calls.read_text().splitlines()
@@ -388,3 +389,18 @@ class TestRoundSixOn143:
     def test_the_record_carries_the_schema_it_ran(self, deploy):
         code, _ = deploy(running=TARGET)
         assert code == 0 and deploy.good_file.read_text().split() == ["sha256:running", "0019"]
+
+
+class TestRoundSevenOn143:
+    """#143 round 7, SOTA-A (executed): the running service's schema was read
+    by importing current_revision INSIDE it, and an image older than that
+    function answered nothing, so the record held no schema and a release that
+    kept the schema and failed was left deployed instead of rolled back. A
+    deploy reads the schema through the NEW image before it migrates - the
+    same database, whatever the running image knows."""
+
+    def test_a_predecessor_without_the_import_is_still_rolled_back_to(self, deploy):
+        code, calls = deploy(running="old0000", healthy=False, exec_fails=True)
+        assert code != 0
+        assert "podman tag sha256:running localhost/bubblegauge:latest" in calls
+        assert deploy.failed_file.read_text().split() == [TARGET]

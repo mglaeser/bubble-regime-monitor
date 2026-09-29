@@ -73,9 +73,10 @@ running_image() { podman inspect -f '{{.Image}}' "$CONTAINER" 2>/dev/null || tru
 remember_good() {   # <image id> <schema revision>
   mkdir -p "$(dirname "$GOOD_FILE")" && echo "$1 $2" > "$GOOD_FILE"
 }
-# The schema the running service sees, "" when unknown. An import, not
+# The schema the running service sees, "" when unknown: used only on the
+# quiet path, where the service runs main's own commit. An import, not
 # `python -m app.db_migrate --current`: an image older than that flag would
-# run its upgrade instead.
+# run its upgrade instead. A deploy reads the schema through the NEW image.
 service_schema() {
   podman exec "$CONTAINER" python -c \
     "from app.db_migrate import current_revision; print(current_revision())" 2>/dev/null || true
@@ -108,11 +109,6 @@ if systemctl --user is-active --quiet "$SERVICE"; then
     RUNNING="$(podman image inspect -f "{{index .Labels \"$REVISION_LABEL\"}}" "$RUNNING_IMAGE" 2>/dev/null || true)"
     if healthy "$QUIET_HEALTH_TIMEOUT"; then
       RUNNING_OK=1
-      # The image last SEEN healthy is the rollback target: a healthy switch
-      # interrupted before it recorded itself left an older one there, and the
-      # next failed deploy went back to it (#143 round 4, SOTA-A). With the
-      # schema it ran (round 6).
-      remember_good "$RUNNING_IMAGE" "$(service_schema)"
     fi
   fi
 fi
@@ -121,6 +117,10 @@ if [[ "$FORCE" != "1" ]]; then
   # interrupted on an unhealthy target otherwise stayed there for good (#143
   # round 3, SOTA-A). The common case, every five minutes.
   if [[ "$TARGET" == "$RUNNING" && "$RUNNING_OK" == "1" ]]; then
+    # The image last SEEN healthy is the rollback target, with the schema it
+    # runs: a healthy switch interrupted before it recorded itself left an
+    # older one there (#143 rounds 4 and 6, SOTA-A).
+    remember_good "$RUNNING_IMAGE" "$(service_schema)"
     exit 0
   fi
   # A commit that failed its health check, and was rolled back to a service
@@ -166,6 +166,13 @@ revision() {
     "$IMAGE:$TARGET" python -m app.db_migrate --current 9>&-
 }
 SCHEMA_BEFORE="$(revision)"
+# The healthy service runs on the schema as it is now. Read through the NEW
+# image, it is known whatever the running image knows: read inside the running
+# image, a predecessor without the reader answered nothing, and a release that
+# kept the schema and failed was left deployed (#143 round 7, SOTA-A).
+if [[ "$RUNNING_OK" == "1" ]]; then
+  remember_good "$RUNNING_IMAGE" "$SCHEMA_BEFORE"
+fi
 podman run --rm --env-file .env -v "$(realpath "$DATA_DIR")":/data:Z \
   "$IMAGE:$TARGET" python -m app.db_migrate 9>&-
 SCHEMA_AFTER="$(revision)"
