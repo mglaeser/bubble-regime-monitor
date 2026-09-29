@@ -197,16 +197,20 @@ fi
 trap - ERR
 echo "    $TARGET is NOT healthy. Recent logs:"
 journalctl --user -u "$SERVICE" -n 40 --no-pager 2>&1 | sed 's/^/    | /' || true
-# Marked first: whatever the rollback does, the timer leaves this commit alone
-# until main moves on, or its marker is removed.
-echo "$TARGET" > "$FAILED_FILE"
+# The commit is marked once the rollback has run its course, whichever way it
+# went; from then on the timer leaves it alone until main moves on, or its
+# marker is removed. A run stopped before that leaves no mark, so the next run
+# tries the commit again and, when it fails again, rolls back again (#143
+# round 16, SOTA-A: marked first, a unit stopped mid-rollback left every later
+# run quiet and the last good image never restored).
+failed() { echo "$TARGET" > "$FAILED_FILE"; die "$@"; }
 [[ -n "$PREVIOUS" ]] \
-  || die "deploy of $TARGET failed its health check; no image was seen healthy before it, so there is nothing to roll back to. Fix forward."
+  || failed "deploy of $TARGET failed its health check; no image was seen healthy before it, so there is nothing to roll back to. Fix forward."
 banner "Rolling back to the last good image"
 if podman tag "$PREVIOUS" "$IMAGE:latest"; then
   systemctl --user restart "$SERVICE" || true
   if healthy && [[ "$(running_image)" == "$PREVIOUS" ]]; then
-    die "deploy of $TARGET failed its health check; rolled back."
+    failed "deploy of $TARGET failed its health check; rolled back."
   fi
 fi
-die "deploy of $TARGET failed its health check, and the last good image did not come back either (after a migration it cannot boot the database, #134). Fix forward."
+failed "deploy of $TARGET failed its health check, and the last good image did not come back either (after a migration it cannot boot the database, #134). Fix forward."

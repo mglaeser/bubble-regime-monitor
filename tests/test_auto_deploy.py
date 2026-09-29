@@ -20,7 +20,9 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 TARGET = "abc1234"
 
-# The shims keep a little state in $STATE, so that what deploy.sh reads follows
+# The shims keep a little state in $SHIM_STATE (not $STATE: deploy.sh assigns
+# its own STATE, and bash keeps a variable that came from the environment
+# exported), so that what deploy.sh reads follows
 # what it did: which image :latest names (latest), which image the service
 # runs (running), whether it is down, and the database's schema revision
 # (rev, 0019 until a migration moves it to 0020). At the start the service
@@ -41,8 +43,8 @@ esac
 """,
     "podman": r"""#!/usr/bin/env bash
 echo "podman $*" >> "$CALLS"
-latest() { cat "$STATE/latest" 2>/dev/null || echo sha256:running; }
-running() { cat "$STATE/running" 2>/dev/null || echo sha256:running; }
+latest() { cat "$SHIM_STATE/latest" 2>/dev/null || echo sha256:running; }
+running() { cat "$SHIM_STATE/running" 2>/dev/null || echo sha256:running; }
 resolve() {
   case "$1" in
     *:latest) latest ;;
@@ -62,7 +64,10 @@ case "$1" in
     else
       echo "$id"
     fi ;;
-  tag) resolve "$2" > "$STATE/latest" ;;
+  tag)
+    # the unit stopped mid-rollback: SIGKILL deploy.sh as it retags this image
+    if [[ -n "$KILL_ON_TAG" && "$2" == "$KILL_ON_TAG" ]]; then kill -9 "$PPID"; exit 137; fi
+    resolve "$2" > "$SHIM_STATE/latest" ;;
   images)                                   # newest first, as podman lists them
     for tag in latest "$TARGET_COMMIT" old7 old6 old5 old4 old3 old2 old1; do
       id="sha256:img-$tag"; [[ "$tag" == latest ]] && id="$(latest)"
@@ -70,7 +75,7 @@ case "$1" in
     done ;;
   run)
     if [[ "$*" == *db_migrate* && "$SCHEMA_MOVES" == "1" ]]; then
-      echo 0020 > "$STATE/rev"
+      echo 0020 > "$SHIM_STATE/rev"
     fi ;;
 esac
 exit 0
@@ -78,17 +83,17 @@ exit 0
     "systemctl": r"""#!/usr/bin/env bash
 echo "systemctl $*" >> "$CALLS"
 if [[ "$*" == *is-active* ]]; then
-  if [[ "$ACTIVE" == "1" && ! -f "$STATE/down" ]]; then exit 0; else exit 3; fi
+  if [[ "$ACTIVE" == "1" && ! -f "$SHIM_STATE/down" ]]; then exit 0; else exit 3; fi
 fi
 if [[ "$*" == *restart* ]]; then
   if [[ "$RESTART_NOOP" == "1" ]]; then exit 1; fi          # nothing happened; the old one runs on
-  if [[ "$RESTART_FAILS" == "1" ]]; then touch "$STATE/down"; exit 1; fi
-  latest="$(cat "$STATE/latest" 2>/dev/null || echo sha256:running)"
-  echo "$latest" > "$STATE/running"
-  rm -f "$STATE/down"
+  if [[ "$RESTART_FAILS" == "1" ]]; then touch "$SHIM_STATE/down"; exit 1; fi
+  latest="$(cat "$SHIM_STATE/latest" 2>/dev/null || echo sha256:running)"
+  echo "$latest" > "$SHIM_STATE/running"
+  rm -f "$SHIM_STATE/down"
   # the old image does not boot a database a newer image migrated (#134)
-  if [[ "$latest" == sha256:running && "$(cat "$STATE/rev" 2>/dev/null)" == 0020 ]]; then
-    touch "$STATE/down"
+  if [[ "$latest" == sha256:running && "$(cat "$SHIM_STATE/rev" 2>/dev/null)" == 0020 ]]; then
+    touch "$SHIM_STATE/down"
   fi
 fi
 exit 0
@@ -96,8 +101,8 @@ exit 0
     "curl": r"""#!/usr/bin/env bash
 echo "curl $*" >> "$CALLS"
 [[ -n "$SLOW_S" ]] && sleep "$SLOW_S"
-[[ -f "$STATE/down" ]] && exit 7
-run="$(cat "$STATE/running" 2>/dev/null || echo sha256:running)"
+[[ -f "$SHIM_STATE/down" ]] && exit 7
+run="$(cat "$SHIM_STATE/running" 2>/dev/null || echo sha256:running)"
 for bad in $UNHEALTHY; do [[ "$run" == "$bad" ]] && exit 22; done
 exit 0
 """,
@@ -136,7 +141,7 @@ def deploy(tmp_path):
         if not rollback_healthy:
             bad.append("sha256:running")
         environ = {**os.environ, "HOME": str(home), "PATH": f"{shims}:{os.environ['PATH']}", "CALLS": str(calls),
-               "STATE": str(state), "TARGET_COMMIT": target, "RUNNING_COMMIT": running,
+               "SHIM_STATE": str(state), "TARGET_COMMIT": target, "RUNNING_COMMIT": running,
                "UNHEALTHY": " ".join(bad),
                "HEALTH_TIMEOUT": str(health_timeout), "QUIET_HEALTH_TIMEOUT": "1",
                "ACTIVE": "1" if active else "0", "DIRTY": "1" if dirty else "0",
@@ -639,3 +644,22 @@ class TestRoundFifteenOn143:
         deploy.failed_file.unlink()
         code, calls = deploy(running="old0000")
         assert code == 0 and any(c.startswith("podman build") for c in calls), calls
+
+
+class TestRoundSixteenOn143:
+    """#143 round 16, SOTA-A (executed): the failed commit was marked before
+    the rollback, so a unit stopped mid-rollback left every later run quiet
+    while the last good image was never restored. The mark is written once
+    the rollback has run its course; a run stopped before that leaves none,
+    and the next run tries the commit again and rolls back again."""
+
+    def test_a_rollback_stopped_midway_is_finished_by_the_next_run(self, deploy):
+        code, calls = deploy(running="old0000", healthy=False, env={"KILL_ON_TAG": "sha256:running"})
+        assert code == -9 or code == 137, code
+        assert not deploy.failed_file.exists()                      # no mark: not finished
+        assert (deploy.state / "running").read_text().strip() == TARGET_ID   # left on the failed image
+        code, calls = deploy(running="old0000", healthy=False)
+        assert code != 0 and "rolled back" in deploy.output
+        assert "podman tag sha256:running localhost/bubblegauge:latest" in calls
+        assert (deploy.state / "running").read_text().strip() == "sha256:running"
+        assert deploy.failed_file.read_text().split() == [TARGET]
