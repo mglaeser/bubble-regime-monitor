@@ -663,3 +663,24 @@ class TestRoundSixteenOn143:
         assert "podman tag sha256:running localhost/bubblegauge:latest" in calls
         assert (deploy.state / "running").read_text().strip() == "sha256:running"
         assert deploy.failed_file.read_text().split() == [TARGET]
+
+
+class TestRoundEighteenOn143:
+    """#143 round 18, SOTA-A: the cutover let the old chain deploy the very
+    commit that removes deploy-watch.sh, so a failed build, migration or health
+    check rolled back to the webhook app with nothing left to run it. The old
+    chain is retired before that commit is merged; after the merge the
+    checkout is fast-forwarded by hand and the new units take over."""
+
+    def test_the_old_chain_is_retired_before_the_merge(self):
+        doc = (ROOT / "docs/AUTO_DEPLOY.md").read_text()
+        cutover = doc[doc.index("## Moving from the webhook"):doc.index("## Operate")]
+        before, after = cutover.split("After merging", 1)
+        assert "Before merging" in before
+        assert "systemctl --user disable --now bubblegauge-deploy.path" in before
+        assert "deactivate the repository's GitHub webhook" in before
+        steps = [line.split("#")[0].strip() for line in after.splitlines()]
+        pull = steps.index("git pull --ff-only")
+        install = next(i for i, step in enumerate(steps) if step.startswith("install -D"))
+        deploy = steps.index("systemctl --user start bubblegauge-deploy.service")
+        assert pull < install < deploy

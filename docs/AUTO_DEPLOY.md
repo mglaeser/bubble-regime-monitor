@@ -62,23 +62,38 @@ loginctl enable-linger "$USER"         # keep the user's units running without a
 
 ## Moving from the webhook watchdog
 
-The old chain deploys the commit that brings these units, and tags its image
-`:latest`. Copy the three units into place with the `install` lines above; then,
-instead of the rest of that block, the service first takes over the image the
-old container runs. The first deploy then finds it answering and records it as
-the last good image, to roll back to.
+Retire the old chain BEFORE the commit that brings these units is merged, so
+that it never runs a release it cannot finish: that commit removes
+`deploy-watch.sh`, and a deploy of it through the old chain that failed and
+rolled back would leave the webhook app with nothing to run it (#143 round 18).
+
+Before merging - the old watchdog stops listening, and GitHub stops calling:
 
 ```bash
 systemctl --user disable --now bubblegauge-deploy.path
 rm ~/.config/systemd/user/bubblegauge-deploy.path
+```
+
+and deactivate the repository's GitHub webhook. The service keeps running the
+image it runs.
+
+After merging - fast-forward the checkout, install the units, move the running
+image under Quadlet, and let the deploy service deploy main. It finds that
+image answering and records it as the last good one, to roll back to; the old
+container's image is `:latest`, which the old chain tagged.
+
+```bash
+cd ~/playground/bubble-regime-monitor
+git pull --ff-only
+install -D -m 644 deploy/quadlet/bubblegauge.container ~/.config/containers/systemd/bubblegauge.container
+install -D -m 644 deploy/systemd/bubblegauge-deploy.service ~/.config/systemd/user/bubblegauge-deploy.service
+install -D -m 644 deploy/systemd/bubblegauge-deploy.timer ~/.config/systemd/user/bubblegauge-deploy.timer
 systemctl --user daemon-reload
 podman rm -f bubblegauge                         # the old container; its image stays :latest
 systemctl --user start bubblegauge.service       # the same image, now a Quadlet unit
 systemctl --user start bubblegauge-deploy.service   # records it as the last good image, then deploys main
 systemctl --user enable --now bubblegauge-deploy.timer
 ```
-
-Then deactivate the repository's GitHub webhook.
 
 ## Operate
 
