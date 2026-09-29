@@ -77,3 +77,19 @@ def test_every_recompute_reports_its_outcome(monkeypatch, isolated_db):
                         lambda: (_ for _ in ()).throw(RuntimeError("gather failed")))
     admin.run_recompute_guarded()
     assert seen == [None, "gather failed"]
+
+
+
+def test_the_outcome_is_pinged_before_the_recompute_lock_is_released(monkeypatch):
+    """#143 round 1, SOTA-A: the ping went out after the lock was released, so
+    an older run's success could land after a newer run's /fail and read the
+    check up again. The lock orders the outcomes; the pings follow the order."""
+    from app.routers import admin
+    from app.services import compute
+
+    held: list[bool] = []
+    monkeypatch.setattr(compute, "run_recompute", lambda: 1)
+    monkeypatch.setattr("app.services.failure_alert.notify_recompute_outcome", lambda *a, **k: {})
+    monkeypatch.setattr(healthchecks, "ping", lambda failure: held.append(admin.recompute_lock.locked()))
+    admin.run_recompute_guarded()
+    assert held == [True]

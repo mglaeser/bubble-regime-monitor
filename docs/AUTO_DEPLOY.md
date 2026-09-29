@@ -9,8 +9,12 @@ Merges to `main` reach production by themselves. Three host pieces, all
 | The deploy | `deploy.sh` via `deploy/systemd/bubblegauge-deploy.service` | Fetch `main`; if the running image carries that commit, stop. Otherwise fast-forward, build (image labelled with the commit), migrate in a throwaway container, point `:latest` at the new image, restart the service, health-check, and on failure point `:latest` back and restart again. |
 | The schedule | `deploy/systemd/bubblegauge-deploy.timer` | Starts the deploy service every five minutes (and two minutes after boot). |
 
-systemd never runs two instances of the oneshot deploy service at once, so
-deploys cannot overlap; there is no webhook, no trigger file and no lock.
+systemd never runs two instances of the oneshot deploy service at once, and a
+run by hand takes the same lock (`LOCK_FILE`), so deploys cannot overlap. The
+deploy compares main with the commit the RUNNING service carries, so a service
+that is down is deployed again at the next tick; a commit that failed its health
+check is not retried until main moves on or `FORCE=1` asks for it. A tree with
+edited tracked files is refused.
 
 ## The dead-man's switch
 
