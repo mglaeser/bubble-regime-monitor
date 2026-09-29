@@ -93,3 +93,13 @@ def test_the_outcome_is_pinged_before_the_recompute_lock_is_released(monkeypatch
     monkeypatch.setattr(healthchecks, "ping", lambda failure: held.append(admin.recompute_lock.locked()))
     admin.run_recompute_guarded()
     assert held == [True]
+
+
+
+def test_an_empty_failure_is_a_failure(monkeypatch, posts):
+    """#143 round 2, SOTA-A: the ping read a failure by truthiness, so a
+    recompute whose exception had an empty message pinged success. None is
+    success; any string, the empty one too, is a failure."""
+    _configure(monkeypatch, URL)
+    healthchecks.ping("")
+    assert posts and posts[0][0] == URL + "/fail"

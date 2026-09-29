@@ -30,8 +30,11 @@ def ping(failure: str | None) -> None:
         # The URL is the credential; it does not travel in cleartext.
         log.warning("healthchecks_ping_refused", reason="HEALTHCHECKS_PING_URL must be https")
         return
-    target = url.rstrip("/") + ("/fail" if failure else "")
-    body = sanitize(failure, limit=500) if failure else "ok"
+    # None is success; any string is a failure, the empty one too: a recompute
+    # whose exception had no message pinged success (#143 round 2, SOTA-A).
+    failed = failure is not None
+    target = url.rstrip("/") + ("/fail" if failed else "")
+    body = (sanitize(failure, limit=500) or "failed") if failed else "ok"
     try:
         httpx.post(target, content=body.encode(), timeout=_TIMEOUT_S)
     except Exception as exc:

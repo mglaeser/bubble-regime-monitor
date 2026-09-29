@@ -50,6 +50,15 @@ FAILED_FILE="${FAILED_FILE:-${XDG_STATE_HOME:-$HOME/.local/state}/bubblegauge-de
 REVISION_LABEL="org.opencontainers.image.revision"
 
 banner() { printf '\n==> %s\n' "$*"; }
+healthy() {                                  # /healthz answers within HEALTH_TIMEOUT
+  for _ in $(seq 1 "$HEALTH_TIMEOUT"); do
+    # each probe bounded: a container that accepts and never answers must not
+    # hold the deploy (and its lock) until systemd's start timeout
+    if curl -fsS --max-time 5 "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1; then return 0; fi
+    sleep 1
+  done
+  return 1
+}
 die()    { printf '\nERROR: %s\n' "$*" >&2; exit 1; }
 trap 'die "deploy failed at line $LINENO"' ERR
 
@@ -70,6 +79,7 @@ TARGET="$(git rev-parse --short "origin/$BRANCH")"
 # What the SERVICE runs, not what :latest says: a restart that failed after the
 # retag left the service down while every later tick skipped (#143 round 1).
 RUNNING=""
+RUNNING_IMAGE=""
 if systemctl --user is-active --quiet "$SERVICE"; then
   RUNNING_IMAGE="$(podman inspect -f '{{.Image}}' "$CONTAINER" 2>/dev/null || true)"
   if [[ -n "$RUNNING_IMAGE" ]]; then
@@ -80,9 +90,11 @@ if [[ "$FORCE" != "1" ]]; then
   if [[ "$TARGET" == "$RUNNING" ]]; then
     exit 0                                 # the common case, every five minutes: quiet
   fi
-  # A commit that failed its health check waits for the next commit, or FORCE=1:
-  # retried every tick, it took the service down every five minutes.
-  if [[ "$TARGET" == "$(cat "$FAILED_FILE" 2>/dev/null || true)" ]]; then
+  # A commit that failed its health check, and was rolled back to a service
+  # that runs, waits for the next commit or FORCE=1: retried every tick, it took
+  # the service down every five minutes. With the service down it is tried again
+  # (#143 round 2, SOTA-A).
+  if [[ -n "$RUNNING" && "$TARGET" == "$(cat "$FAILED_FILE" 2>/dev/null || true)" ]]; then
     exit 0
   fi
 fi
@@ -92,10 +104,14 @@ banner "Deploying $TARGET (running: ${RUNNING:-none})"
 # origin's label (#143 round 1, SOTA-A).
 git diff --quiet HEAD -- \
   || die "tracked files are modified; commit or restore them, then deploy."
-git merge-base --is-ancestor HEAD "origin/$BRANCH" \
-  || die "local HEAD is not behind origin/$BRANCH (diverged or ahead); reconcile by hand."
 git checkout -q "$BRANCH"
+git merge-base --is-ancestor HEAD "origin/$BRANCH" \
+  || die "local $BRANCH is not behind origin/$BRANCH (diverged or ahead); reconcile by hand."
 git merge --ff-only -q "origin/$BRANCH"
+# What is built is exactly origin's commit: checked before the checkout, a
+# local branch ahead of origin shipped under origin's label (#143 round 2).
+[[ "$(git rev-parse HEAD)" == "$(git rev-parse "origin/$BRANCH")" ]] \
+  || die "local $BRANCH is not origin/$BRANCH after the fast-forward; reconcile by hand."
 
 # ---- 2. build -------------------------------------------------------------
 banner "Building $IMAGE:$TARGET"
@@ -108,18 +124,17 @@ podman run --rm --env-file .env -v "$(realpath "$DATA_DIR")":/data:Z \
   "$IMAGE:$TARGET" python -m app.db_migrate 9>&-
 
 # ---- 4. switch --------------------------------------------------------------
-PREVIOUS="$(podman image inspect -f '{{.Id}}' "$IMAGE:latest" 2>/dev/null || true)"
+# The rollback goes back to what the service RAN, not to :latest, which an
+# interrupted switch may have left on a failed image (#143 round 2, SOTA-A).
+PREVIOUS="$RUNNING_IMAGE"
 banner "Restarting $SERVICE on $TARGET"
 podman tag "$IMAGE:$TARGET" "$IMAGE:latest"
-systemctl --user restart "$SERVICE"
+# Not fatal: a start that fails is an unhealthy deploy and is rolled back
+# below; under `set -e` it stopped the old service and skipped the rollback.
+systemctl --user restart "$SERVICE" || true
 
 # ---- 5. health, or roll back -------------------------------------------------
-healthy=0
-for _ in $(seq 1 "$HEALTH_TIMEOUT"); do
-  if curl -fsS "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1; then healthy=1; break; fi
-  sleep 1
-done
-if [[ "$healthy" == "1" ]]; then
+if healthy; then
   banner "Deploy OK: $TARGET healthy"
   rm -f "$FAILED_FILE"
   mapfile -t OLD < <(podman images --format '{{.Repository}}:{{.Tag}} {{.ID}}' \
@@ -128,13 +143,18 @@ if [[ "$healthy" == "1" ]]; then
   exit 0
 fi
 trap - ERR
-mkdir -p "$(dirname "$FAILED_FILE")" && echo "$TARGET" > "$FAILED_FILE"
 echo "    $TARGET is NOT healthy. Recent logs:"
 journalctl --user -u "$SERVICE" -n 40 --no-pager 2>&1 | sed 's/^/    | /' || true
 if [[ -n "$PREVIOUS" ]]; then
-  banner "Rolling back to the previous image"
+  banner "Rolling back to the image the service ran"
   podman tag "$PREVIOUS" "$IMAGE:latest"
-  systemctl --user restart "$SERVICE"
-  die "deploy of $TARGET failed its health check; rolled back."
+  systemctl --user restart "$SERVICE" || true
+  if healthy; then
+    # Remembered only once the service runs again: a rollback that failed too
+    # must leave the next tick free to recover (#143 round 2, SOTA-A).
+    mkdir -p "$(dirname "$FAILED_FILE")" && echo "$TARGET" > "$FAILED_FILE"
+    die "deploy of $TARGET failed its health check; rolled back."
+  fi
+  die "deploy of $TARGET failed its health check, and the rollback did not come up either."
 fi
-die "deploy of $TARGET failed its health check and there was no previous image."
+die "deploy of $TARGET failed its health check and no image was running to roll back to."
