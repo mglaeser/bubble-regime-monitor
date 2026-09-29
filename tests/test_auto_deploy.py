@@ -24,8 +24,9 @@ TARGET = "abc1234"
 # what it did: which image :latest names (latest), which image the service
 # runs (running), whether it is down, and the database's schema revision
 # (rev, 0019 until a migration moves it to 0020). At the start the service
-# runs the old image, sha256:running, labelled $RUNNING_COMMIT; a build of
-# commit C is sha256:img-C, labelled C. /healthz fails for the images listed
+# runs the old image, sha256:running, labelled $RUNNING_COMMIT, shipping schema
+# 0019; a build of commit C is sha256:img-C, labelled C, shipping $TARGET_HEAD
+# (0020 when the deploy moves the schema). /healthz fails for the images listed
 # in $UNHEALTHY and while the service is down.
 TARGET_ID = f"sha256:img-{TARGET}"
 
@@ -52,7 +53,6 @@ resolve() {
 }
 case "$1" in
   inspect) running ;;
-  exec) if [[ "$EXEC_FAILS" == "1" ]]; then exit 1; fi; rev ;;
   image)
     id="$(resolve "${@: -1}")"
     if [[ "$*" == *Labels* ]]; then
@@ -65,7 +65,9 @@ case "$1" in
     fi ;;
   tag) resolve "$2" > "$STATE/latest" ;;
   run)
-    if [[ "$*" == *"db_migrate --current"* ]]; then
+    if [[ "$*" == *get_current_head* ]]; then
+      case "$3" in sha256:running) echo 0019 ;; sha256:img-*) echo "$TARGET_HEAD" ;; esac
+    elif [[ "$*" == *"db_migrate --current"* ]]; then
       rev
     elif [[ "$*" == *db_migrate* && "$SCHEMA_MOVES" == "1" ]]; then
       echo 0020 > "$STATE/rev"
@@ -123,8 +125,8 @@ def deploy(tmp_path):
             force: bool = False, rollback_healthy: bool = True, restart_fails: bool = False,
             restart_noop: bool = False, head: str | None = None, health_timeout: int = 2,
             slow_s: str = "", schema_moves: bool = False, target: str = TARGET,
-            unhealthy: tuple[str, ...] = (), exec_fails: bool = False,
-            flock_broken: bool = False) -> tuple[int, list[str]]:
+            unhealthy: tuple[str, ...] = (), flock_broken: bool = False,
+            target_head: str | None = None) -> tuple[int, list[str]]:
         calls.write_text("")
         bad = list(unhealthy)
         if not healthy:
@@ -142,8 +144,8 @@ def deploy(tmp_path):
                "RESTART_NOOP": "1" if restart_noop else "0",
                "HEAD_COMMIT": head or target, "SLOW_S": slow_s,
                "SCHEMA_MOVES": "1" if schema_moves else "0",
-               "EXEC_FAILS": "1" if exec_fails else "0",
-               "FLOCK_BROKEN": "1" if flock_broken else "0"}
+               "FLOCK_BROKEN": "1" if flock_broken else "0",
+               "TARGET_HEAD": target_head or ("0020" if schema_moves else "0019")}
         result = subprocess.run(["bash", str(repo / "deploy.sh")], env=env,  # noqa: S603
                                 capture_output=True, text=True, timeout=120)
         return result.returncode, calls.read_text().splitlines()
@@ -278,7 +280,7 @@ class TestRoundTwoOn143:
     def test_a_failed_rollback_leaves_no_marker(self, deploy):
         """The marker was written before the rollback was verified, so a
         rollback that failed as well made every later tick skip recovery."""
-        deploy.good_file.write_text("sha256:running 0019\n")   # seen healthy earlier; not any more
+        deploy.good_file.write_text("sha256:running\n")   # seen healthy earlier; not any more
         code, calls = deploy(running="old0000", healthy=False, rollback_healthy=False)
         assert "podman tag sha256:running localhost/bubblegauge:latest" in calls   # it was tried
         assert code != 0 and not deploy.failed_file.exists()
@@ -301,7 +303,7 @@ class TestRoundThreeOn143:
         /healthz too, and the rollback goes to the last image that passed."""
         (deploy.state / "running").write_text(TARGET_ID + "\n")
         (deploy.state / "latest").write_text(TARGET_ID + "\n")
-        deploy.good_file.write_text("sha256:running 0019\n")
+        deploy.good_file.write_text("sha256:running\n")
         code, calls = deploy(running="old0000", healthy=False)
         assert code != 0
         assert "podman tag sha256:running localhost/bubblegauge:latest" in calls
@@ -326,7 +328,7 @@ class TestRoundThreeOn143:
 
     def test_a_healthy_deploy_is_remembered_as_the_rollback_target(self, deploy):
         code, _calls = deploy(running="old0000")
-        assert code == 0 and deploy.good_file.read_text().split() == [TARGET_ID, "0019"]
+        assert code == 0 and deploy.good_file.read_text().split() == [TARGET_ID]
 
 
 class TestRoundFourOn143:
@@ -337,17 +339,17 @@ class TestRoundFourOn143:
     good one."""
 
     def test_the_rollback_goes_to_the_image_last_seen_healthy(self, deploy):
-        deploy.good_file.write_text("sha256:stale 0019\n")
+        deploy.good_file.write_text("sha256:stale\n")
         code, calls = deploy(running="old0000", healthy=False)
         assert code != 0
         assert "podman tag sha256:running localhost/bubblegauge:latest" in calls
         assert "podman tag sha256:stale localhost/bubblegauge:latest" not in calls
 
     def test_a_quiet_tick_records_the_healthy_image(self, deploy):
-        deploy.good_file.write_text("sha256:stale 0019\n")
+        deploy.good_file.write_text("sha256:stale\n")
         code, calls = deploy(running=TARGET)
         assert code == 0 and not any(c.startswith("podman build") for c in calls)
-        assert deploy.good_file.read_text().split() == ["sha256:running", "0019"]
+        assert deploy.good_file.read_text().split() == ["sha256:running"]
 
 
 class TestRoundFiveOn143:
@@ -380,37 +382,39 @@ class TestRoundSixOn143:
     """#143 round 6, SOTA-A (executed): the last good image was not tied to
     the schema it ran. After a schema-moving commit T failed (not rolled
     back), a later commit U that moved nothing and failed was rolled back to
-    the pre-migration image, which cannot boot the newer schema. The record
-    now carries the schema revision it was seen healthy on, and a rollback
-    goes to it only while the database is still at that revision."""
+    the pre-migration image, which cannot boot the newer schema. A rollback
+    now goes to an image only when it ships the database's schema - since
+    round 10, the head of the image's own migrations."""
 
     def test_after_a_schema_move_an_older_image_is_no_rollback_target(self, deploy):
         code, _ = deploy(running="old0000", healthy=False, schema_moves=True)       # T
         assert code != 0 and deploy.failed_file.read_text().split() == [TARGET, "no-rollback"]
         code, calls = deploy(running="old0000", target="def5678", healthy=False,      # U
-                             unhealthy=(TARGET_ID,))
+                             unhealthy=(TARGET_ID,), target_head="0020")
         assert code != 0
         assert not any(c.startswith("podman tag sha256:running") for c in calls), calls
         assert deploy.failed_file.read_text().split() == ["def5678", "no-rollback"]
 
-    def test_the_record_carries_the_schema_it_ran(self, deploy):
+    def test_a_quiet_tick_records_the_image(self, deploy):
         code, _ = deploy(running=TARGET)
-        assert code == 0 and deploy.good_file.read_text().split() == ["sha256:running", "0019"]
+        assert code == 0 and deploy.good_file.read_text().split() == ["sha256:running"]
 
 
 class TestRoundSevenOn143:
     """#143 round 7, SOTA-A (executed): the running service's schema was read
     by importing current_revision INSIDE it, and an image older than that
-    function answered nothing, so the record held no schema and a release that
-    kept the schema and failed was left deployed instead of rolled back. A
-    deploy reads the schema through the NEW image before it migrates - the
-    same database, whatever the running image knows."""
+    function answered nothing, so a release that kept the schema and failed
+    was left deployed instead of rolled back. Nothing the rollback decides on
+    is read inside the running service now: the database's schema through the
+    new image, the rollback image's head from its own files (round 10)."""
 
-    def test_a_predecessor_without_the_import_is_still_rolled_back_to(self, deploy):
-        code, calls = deploy(running="old0000", healthy=False, exec_fails=True)
+    def test_nothing_is_read_inside_the_running_service(self, deploy):
+        _, quiet = deploy(running=TARGET)
+        code, calls = deploy(running=TARGET, target="def5678", healthy=False)
+        assert not any(c.startswith("podman exec") for c in quiet + calls), quiet + calls
         assert code != 0
         assert "podman tag sha256:running localhost/bubblegauge:latest" in calls
-        assert deploy.failed_file.read_text().split() == [TARGET]
+        assert deploy.failed_file.read_text().split() == ["def5678"]
 
 
 def test_every_mount_of_the_data_volume_shares_its_label():
@@ -449,3 +453,25 @@ class TestRoundNineOn143:
             fcntl.flock(held, fcntl.LOCK_EX)
             code, calls = deploy(running="old0000")
         assert code == 0 and not any(c.startswith("podman build") for c in calls)
+
+
+class TestRoundTenOn143:
+    """#143 round 10, SOTA-A (executed): a migration interrupted before the
+    switch left the old image running - and answering - on a schema it does
+    not ship, and the next run recorded that pairing as good; a later failed
+    deploy then restarted the old image on a schema it cannot boot. Whether an
+    image can be rolled back to is now asked of the image: its own migrations'
+    head must be the schema the database is at."""
+
+    def test_an_image_that_does_not_ship_the_schema_is_no_rollback_target(self, deploy):
+        (deploy.state / "rev").write_text("0020\n")          # migrated under the running image
+        deploy.good_file.write_text("sha256:running\n")
+        code, calls = deploy(running="old0000", healthy=False, target_head="0020")
+        assert code != 0
+        assert not any(c.startswith("podman tag sha256:running") for c in calls), calls
+        assert deploy.failed_file.read_text().split() == [TARGET, "no-rollback"]
+
+    def test_the_rollback_asks_the_image_for_its_head(self, deploy):
+        code, calls = deploy(running="old0000", healthy=False)
+        assert any("get_current_head" in c and "sha256:running" in c for c in calls), calls
+        assert "podman tag sha256:running localhost/bubblegauge:latest" in calls

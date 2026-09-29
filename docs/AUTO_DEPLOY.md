@@ -15,14 +15,15 @@ deploy compares main with the commit the RUNNING service carries, and stays quie
 only when that service also answers `/healthz`; a service that is down, or that
 runs main's commit without answering, is deployed again at the next tick. A
 deploy succeeds only when `/healthz` answers AND the service runs the new image;
-otherwise it rolls back to the last image seen healthy (`GOOD_FILE`: the image
-and the schema revision it ran, recorded whenever a run finds the service
-answering, and after every healthy deploy) - but only while the database is
-still at that schema. An image cannot boot a schema it does not know, so when a
-migration (this deploy's or an earlier one's) has moved the schema past it,
-there is nothing to roll back to: the deploy fails loudly and is fixed forward,
-and the timer leaves that commit alone until main moves on or `FORCE=1` asks for
-it.
+otherwise it rolls back to the last image seen healthy (`GOOD_FILE`, recorded
+whenever a run finds the service answering, and after every healthy deploy) -
+but only when that image ships the schema the database is at: the head of its
+own migrations, which Alembic reads from the image's files without touching the
+database. An image cannot boot a schema it does not know, so when a migration
+(this deploy's, an earlier one's, or one interrupted under the running service)
+has moved the schema past it, there is nothing to roll back to: the deploy fails
+loudly and is fixed forward, and the timer leaves that commit alone until main
+moves on or `FORCE=1` asks for it.
 A commit that failed is not retried while the rolled-back service runs, until
 main moves on or `FORCE=1` asks for it. A tree with edited tracked files is
 refused. Health waits are deadlines in seconds (`HEALTH_TIMEOUT`,
