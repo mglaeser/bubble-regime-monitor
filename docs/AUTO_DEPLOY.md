@@ -7,7 +7,7 @@ Merges to `main` reach production by themselves. Three host pieces, all
 |---|---|---|
 | The service | `deploy/quadlet/bubblegauge.container` | A Podman Quadlet unit: systemd starts the container at boot (with linger) and restarts it when it dies. It runs `localhost/bubblegauge:latest`. |
 | The deploy | `deploy.sh` via `deploy/systemd/bubblegauge-deploy.service` | Fetch `main`; if the running image carries that commit, stop. Otherwise fast-forward, build (image labelled with the commit), migrate in a throwaway container, point `:latest` at the new image, restart the service, health-check, and on failure point `:latest` back and restart again. |
-| The schedule | `deploy/systemd/bubblegauge-deploy.timer` | Starts the deploy service every five minutes (and two minutes after boot). |
+| The schedule | `deploy/systemd/bubblegauge-deploy.timer` | Starts the deploy service five minutes after the last run ended (and two minutes after boot). |
 
 systemd never runs two instances of the oneshot deploy service at once, and a
 run by hand takes the same lock, so deploys cannot overlap. The lock and the

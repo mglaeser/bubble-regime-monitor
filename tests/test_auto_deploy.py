@@ -1,5 +1,5 @@
 """Auto-deploy (owner decision D6, 2026-09-28): a systemd timer runs deploy.sh
-every five minutes; the container is a Podman Quadlet unit.
+five minutes after each run ends; the container is a Podman Quadlet unit.
 
 deploy.sh is executed for real here, against shims for git, podman, systemctl,
 curl and journalctl that log every call, so the tests pin what it DOES: stay
@@ -188,10 +188,10 @@ def test_an_unhealthy_deploy_is_rolled_back(deploy):
     assert calls.count("systemctl --user restart bubblegauge.service") == 2
 
 
-def test_the_timer_runs_the_oneshot_deploy_every_five_minutes():
+def test_the_timer_runs_the_oneshot_deploy_five_minutes_after_each_run():
     timer = (ROOT / "deploy/systemd/bubblegauge-deploy.timer").read_text()
     service = (ROOT / "deploy/systemd/bubblegauge-deploy.service").read_text()
-    assert "OnUnitActiveSec=5min" in timer
+    assert "OnUnitInactiveSec=5min" in timer
     assert "Type=oneshot" in service and "deploy.sh" in service
 
 
@@ -582,3 +582,27 @@ class TestRoundTwelveOn143:
         assert f"Volume={checkout}/data:/data:z" in unit
         assert f"WorkingDirectory={checkout}" in service
         assert f"ExecStart={checkout}/deploy.sh" in service
+
+
+class TestRoundThirteenOn143:
+    """#143 round 13, SOTA-A (executed). The timer counted from the START of
+    the last run (OnUnitActiveSec), feared to stop recurring once a run
+    outlasts it. On the host's systemd 255 it did not (8 s oneshot runs
+    against a 5 s interval, succeeding and failing, kept recurring back to
+    back), but it counts from the END of a run now: a long deploy is followed
+    by a pause, not an immediate rerun. And the Quadlet unit left out the
+    resolvers compose.yml pins since the July 2026 outage."""
+
+    def test_the_timer_counts_from_the_end_of_the_last_run(self):
+        timer = (ROOT / "deploy/systemd/bubblegauge-deploy.timer").read_text()
+        settings = timer.split("[Timer]", 1)[1]
+        assert "OnUnitInactiveSec=5min" in settings and "OnUnitActiveSec" not in settings
+
+    def test_the_container_pins_the_resolvers_compose_pins(self):
+        import yaml
+
+        compose = yaml.safe_load((ROOT / "compose.yml").read_text())
+        resolvers = compose["services"]["bubblegauge"]["dns"]
+        unit = (ROOT / "deploy/quadlet/bubblegauge.container").read_text()
+        assert resolvers
+        assert [line.split("=", 1)[1] for line in unit.splitlines() if line.startswith("DNS=")] == resolvers

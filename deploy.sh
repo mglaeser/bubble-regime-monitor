@@ -2,7 +2,7 @@
 #
 # deploy.sh — update and deploy bubblegauge (owner decision D6, 2026-09-28).
 #
-# Run every five minutes by the systemd timer
+# Run by the systemd timer, five minutes after its last run ended
 # (deploy/systemd/bubblegauge-deploy.timer), or by hand. The container is a
 # Podman Quadlet unit (deploy/quadlet/bubblegauge.container): systemd starts it
 # at boot and restarts it when it dies; this script only changes the image it

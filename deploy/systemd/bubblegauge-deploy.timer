@@ -1,13 +1,21 @@
 # Deploy bubblegauge when main moves (owner decision D6, 2026-09-28).
-# Every five minutes deploy.sh fetches main and returns at once unless the
-# running image is behind it.
+# Five minutes after each check ends, deploy.sh fetches main and returns at
+# once unless the running image is behind it.
+#
+# Counted from the END of the last run (OnUnitInactiveSec), so a deploy longer
+# than five minutes is followed by a pause, not an immediate rerun, and a
+# failed run counts as ended too. (#143 round 13, SOTA-A, feared OnUnitActiveSec
+# stops recurring when a run outlasts it; executed on the host's systemd 255
+# with 8 s oneshot runs against a 5 s interval, succeeding and failing, both
+# kinds kept recurring - OnUnitActiveSec back to back, this one 5 s after each
+# run.)
 
 [Unit]
-Description=bubblegauge deploy check (every 5 minutes)
+Description=bubblegauge deploy check (five minutes after the last one)
 
 [Timer]
 OnBootSec=2min
-OnUnitActiveSec=5min
+OnUnitInactiveSec=5min
 
 [Install]
 WantedBy=timers.target
