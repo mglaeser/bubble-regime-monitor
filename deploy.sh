@@ -162,7 +162,7 @@ podman build --label "$REVISION_LABEL=$TARGET" -t "$IMAGE:$TARGET" -f Containerf
 banner "Migrating the database (alembic upgrade head)"
 mkdir -p "$DATA_DIR"
 revision() {
-  podman run --rm --env-file .env -v "$(realpath "$DATA_DIR")":/data:Z \
+  podman run --rm --env-file .env -v "$(realpath "$DATA_DIR")":/data:z \
     "$IMAGE:$TARGET" python -m app.db_migrate --current 9>&-
 }
 SCHEMA_BEFORE="$(revision)"
@@ -173,7 +173,7 @@ SCHEMA_BEFORE="$(revision)"
 if [[ "$RUNNING_OK" == "1" ]]; then
   remember_good "$RUNNING_IMAGE" "$SCHEMA_BEFORE"
 fi
-podman run --rm --env-file .env -v "$(realpath "$DATA_DIR")":/data:Z \
+podman run --rm --env-file .env -v "$(realpath "$DATA_DIR")":/data:z \
   "$IMAGE:$TARGET" python -m app.db_migrate 9>&-
 SCHEMA_AFTER="$(revision)"
 

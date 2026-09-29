@@ -14,7 +14,10 @@ After=network-online.target
 ContainerName=bubblegauge
 Image=localhost/bubblegauge:latest
 EnvironmentFile=%h/playground/bubble-regime-monitor/.env
-Volume=%h/playground/bubble-regime-monitor/data:/data:Z
+# :z, the SELinux label every container that mounts /data shares: deploy.sh's
+# revision and migration containers mount it too, and a private :Z relabelled it
+# away from this one (#143 round 8, SOTA-A).
+Volume=%h/playground/bubble-regime-monitor/data:/data:z
 # Loopback only: the reverse proxy (nginx-proxy-manager, host network) is the
 # one way in. Rootless Podman's port handler rewrites every forwarded
 # connection's source to 10.0.2.100 inside the container, so uvicorn trusts

@@ -11,7 +11,7 @@ services:
     environment:
       FORWARDED_ALLOW_IPS: "10.0.2.100"
     volumes:
-      - ./data:/data:Z          # :Z applies the SELinux label for rootless Podman
+      - ./data:/data:z          # :z: the SELinux label shared by every container that mounts it
     # Pin working nameservers. Root cause of the July 2026 outage was broken
     # in-container DNS: every outbound hostname failed with "Temporary failure
     # in name resolution", so NO price provider was ever contacted (the chain

@@ -404,3 +404,21 @@ class TestRoundSevenOn143:
         assert code != 0
         assert "podman tag sha256:running localhost/bubblegauge:latest" in calls
         assert deploy.failed_file.read_text().split() == [TARGET]
+
+
+def test_every_mount_of_the_data_volume_shares_its_label():
+    """#143 round 8, SOTA-A: the service and deploy.sh's throwaway containers
+    each mounted /data with a PRIVATE label (:Z), so on an enforcing SELinux
+    host each one relabelled it for itself and a deploy that stopped before
+    the restart left the running service locked out of its own database. A
+    volume several containers use takes the shared label (:z). (leaf runs
+    AppArmor, where either is a no-op.)"""
+    import re
+
+    sources = {"deploy/quadlet/bubblegauge.container": (ROOT / "deploy/quadlet/bubblegauge.container").read_text(),
+               "deploy.sh": (ROOT / "deploy.sh").read_text(),
+               "compose.yml": (ROOT / "compose.yml").read_text()}
+    for name, text in sources.items():
+        mounts = re.findall(r":/data(:[A-Za-z,]+)?", text)
+        assert mounts, name
+        assert all(m == ":z" for m in mounts), (name, mounts)
