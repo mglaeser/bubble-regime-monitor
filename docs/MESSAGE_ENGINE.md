@@ -226,20 +226,18 @@ out. An escaping exception would reach the engine's caller, which classifies
 exceptions as `TECHNICAL_ERROR` and retries — silently converting "this
 deployment is not authorised to send" into "try again in two minutes", forever.
 
-## The six governor constants (ruling Q42 — settings, these defaults)
+## The governor settings (ruling Q42 — settings, these defaults)
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `MESSAGE_ENGINE_MIN_INTERVAL_S` | 300 | floor between two LLM requests |
-| `MESSAGE_ENGINE_FORMAT_RETRY_S` | 30 | pause for a format-only retry |
-| `MESSAGE_ENGINE_MAX_CONTENT_ITERATIONS` | 3 | content attempts before fallback |
-| `MESSAGE_ENGINE_TECHNICAL_BACKOFF_S` | 120 | pause after a 4xx/5xx/timeout |
-| `MESSAGE_ENGINE_BREAKER_STRIKES` | 5 | consecutive technical errors before all-fallback |
-| `MESSAGE_ENGINE_BREAKER_COOLDOWN_S` | 86400 | all-fallback dwell before retrying |
+| `MESSAGE_ENGINE_MIN_INTERVAL_S` | 300 | floor between two model calls |
+| `MESSAGE_ENGINE_BREAKER_STRIKES` | 5 | failed calls in a row before the cooldown; read within [1, 1000], so a zero never switches the breaker off |
+| `MESSAGE_ENGINE_BREAKER_COOLDOWN_S` | 86400 | no model call for this long after them |
+| `MESSAGE_ENGINE_DAILY_BUDGET` | 100 | model calls per UTC day (ruling Q40) |
 
-Plus `MESSAGE_ENGINE_ENABLED` (default false — inert until switched on, Q42)
-and `MESSAGE_ENGINE_DAILY_BUDGET` (default 100, ruling Q40; at cap the
-evergreen fallback is used and the exhaustion is reported in the next digest).
+Plus `MESSAGE_ENGINE_ENABLED` (default false — inert until switched on, Q42).
+The format-retry, content-iteration and technical-backoff settings went with
+decision 27.
 
 ## Channel contract (rulings Q27, Q29, Q30)
 
@@ -248,7 +246,43 @@ SMS: at most 150 septets, GSM-7 (3GPP 23.038) - the German letters ä ö ü Ä �
 points (`MESSAGE_ENGINE_IMESSAGE_MAX_CHARS`). The model is told the channel's
 length and alphabet; the basic checks hold it to them (decision 24).
 
+## Decision 27 — any failed call is a strike (owner decision D1, 2026-09-28)
+
+The owner amended ruling Q38: **any failed model call counts as a strike.**
+That made the per-compose bookkeeping of decisions 6 and later rounds (content
+iterations, exhaustion markers, strike instants, scan windows) unnecessary, and
+app/message_engine/governor.py went from 1,219 lines to one small rule set,
+still derived from the attempt rows alone:
+
+* a P1 never waits, and the engine switched off asks nothing;
+* at most one call in flight, so the probe after a cooldown is the only call
+  (#140 round 1);
+* at least `MESSAGE_ENGINE_MIN_INTERVAL_S` from the end of one model call to the
+  start of the next;
+* at most `MESSAGE_ENGINE_DAILY_BUDGET` model calls per UTC day;
+* after `MESSAGE_ENGINE_BREAKER_STRIKES` failed calls in a row (a reply that
+  fails the basic checks, or a gateway failure), no call for
+  `MESSAGE_ENGINE_BREAKER_COOLDOWN_S` after the last of them; the next call is
+  the probe.
+
+| the engine… | outcome | a call? | a strike? |
+|---|---|---|---|
+| called and the reply passed the checks | `OK` | yes | no |
+| called and the reply failed the checks | `FORMAT_REJECTED` | yes | yes |
+| called and the gateway failed | `TECHNICAL_ERROR` | yes | yes |
+| sent the template after a call | `FALLBACK_USED` | no (audit) | no |
+| was not permitted to call | `NOT_ASKED` | no (audit) | no |
+
+Only calls pace, spend and strike, so decision 6's rule survives by
+construction: a refusal the engine issued to itself is never evidence about
+the provider. A claim left in flight past `CLAIM_TTL_S` (a worker that died
+mid-call) is closed as a technical error before any decision, dated to its
+expiry rather than to the moment it was noticed (#140 round 1).
+
 ## Decision 6 — "did not ask" is not "tried and failed" (round 32)
+
+*Superseded in its mechanics by decision 27; kept as the history of why only
+calls may move the breaker.*
 
 The breaker exists to notice a broken PROVIDER. That only works if the rows it
 reads distinguish two things that both end in the same evergreen sentence:
