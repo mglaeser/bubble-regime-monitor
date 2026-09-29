@@ -20,36 +20,72 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 TARGET = "abc1234"
 
+# The shims keep a little state in $STATE, so that what deploy.sh reads follows
+# what it did: which image :latest names (latest), which image the service
+# runs (running), and whether it is down. At the start the service runs the old
+# image, sha256:running, labelled $RUNNING_COMMIT; the new build is
+# sha256:target, labelled $TARGET_COMMIT. /healthz answers for the new image
+# when HEALTHY=1, for any other when OLD_HEALTHY=1.
 _SHIMS = {
-    "git": r'''#!/usr/bin/env bash
+    "git": r"""#!/usr/bin/env bash
 echo "git $*" >> "$CALLS"
 case "$1" in
   rev-parse) if [[ "$*" == "rev-parse HEAD" ]]; then echo "${HEAD_COMMIT:-$TARGET_COMMIT}"; else echo "$TARGET_COMMIT"; fi ;;
   diff) [[ "$DIRTY" != "1" ]] ;;
   *) : ;;
 esac
-''',
-    "podman": r'''#!/usr/bin/env bash
+""",
+    "podman": r"""#!/usr/bin/env bash
 echo "podman $*" >> "$CALLS"
-if [[ "$1 $2" == "image inspect" ]]; then
-  if [[ "$*" == *Labels* ]]; then echo "$RUNNING_COMMIT"; else echo "sha256:previous"; fi
-elif [[ "$1" == "inspect" ]]; then
-  echo "sha256:running"
-fi
-''',
-    "systemctl": r'''#!/usr/bin/env bash
-echo "systemctl $*" >> "$CALLS"
-if [[ "$*" == *is-active* ]]; then if [[ "$ACTIVE" == "1" ]]; then exit 0; else exit 3; fi; fi
-if [[ "$*" == *restart* && "$RESTART_FAILS" == "1" ]]; then exit 1; fi
+latest() { cat "$STATE/latest" 2>/dev/null || echo sha256:running; }
+running() { cat "$STATE/running" 2>/dev/null || echo sha256:running; }
+resolve() {
+  case "$1" in
+    *:latest) latest ;;
+    localhost/bubblegauge:*) echo sha256:target ;;
+    *) echo "$1" ;;
+  esac
+}
+case "$1" in
+  inspect) running ;;
+  image)
+    id="$(resolve "${@: -1}")"
+    if [[ "$*" == *Labels* ]]; then
+      case "$id" in
+        sha256:target) echo "$TARGET_COMMIT" ;;
+        sha256:running) echo "$RUNNING_COMMIT" ;;
+      esac
+    else
+      echo "$id"
+    fi ;;
+  tag) resolve "$2" > "$STATE/latest" ;;
+esac
 exit 0
-''',
-    "curl": r'''#!/usr/bin/env bash
+""",
+    "systemctl": r"""#!/usr/bin/env bash
+echo "systemctl $*" >> "$CALLS"
+if [[ "$*" == *is-active* ]]; then
+  if [[ "$ACTIVE" == "1" && ! -f "$STATE/down" ]]; then exit 0; else exit 3; fi
+fi
+if [[ "$*" == *restart* ]]; then
+  if [[ "$RESTART_NOOP" == "1" ]]; then exit 1; fi          # nothing happened; the old one runs on
+  if [[ "$RESTART_FAILS" == "1" ]]; then touch "$STATE/down"; exit 1; fi
+  (cat "$STATE/latest" 2>/dev/null || echo sha256:running) > "$STATE/running"
+  rm -f "$STATE/down"
+fi
+exit 0
+""",
+    "curl": r"""#!/usr/bin/env bash
 echo "curl $*" >> "$CALLS"
-# healthy throughout, or - with ROLLBACK_HEALTHY - once the rollback has retagged
-[[ "$HEALTHY" == "1" ]] || { [[ "$ROLLBACK_HEALTHY" == "1" ]] && grep -q "^podman tag sha256:running" "$CALLS"; }
-''',
+[[ -n "$SLOW_S" ]] && sleep "$SLOW_S"
+[[ -f "$STATE/down" ]] && exit 7
+if [[ "$(cat "$STATE/running" 2>/dev/null || echo sha256:running)" == "sha256:target" ]]; then
+  [[ "$HEALTHY" == "1" ]]
+else
+  [[ "$OLD_HEALTHY" == "1" ]]
+fi
+""",
     "journalctl": "#!/usr/bin/env bash\nexit 0\n",
-    "sleep": "#!/usr/bin/env bash\nexit 0\n",
 }
 
 
@@ -65,26 +101,33 @@ def deploy(tmp_path):
         path = shims / name
         path.write_text(body)
         path.chmod(0o755)
+    state = tmp_path / "state"
+    state.mkdir()
     calls = tmp_path / "calls.log"
 
     def run(*, running: str, healthy: bool = True, active: bool = True, dirty: bool = False,
             force: bool = False, rollback_healthy: bool = True, restart_fails: bool = False,
-            head: str | None = None) -> tuple[int, list[str]]:
+            restart_noop: bool = False, head: str | None = None, health_timeout: int = 2,
+            slow_s: str = "") -> tuple[int, list[str]]:
         calls.write_text("")
         env = {**os.environ, "PATH": f"{shims}:{os.environ['PATH']}", "CALLS": str(calls),
-               "TARGET_COMMIT": TARGET, "RUNNING_COMMIT": running,
-               "HEALTHY": "1" if healthy else "0", "HEALTH_TIMEOUT": "2",
+               "STATE": str(state), "TARGET_COMMIT": TARGET, "RUNNING_COMMIT": running,
+               "HEALTHY": "1" if healthy else "0", "OLD_HEALTHY": "1" if rollback_healthy else "0",
+               "HEALTH_TIMEOUT": str(health_timeout), "QUIET_HEALTH_TIMEOUT": "1",
                "ACTIVE": "1" if active else "0", "DIRTY": "1" if dirty else "0",
                "FORCE": "1" if force else "0", "LOCK_FILE": str(tmp_path / "deploy.lock"),
-               "FAILED_FILE": str(tmp_path / "deploy.failed"),
-               "ROLLBACK_HEALTHY": "1" if rollback_healthy else "0",
-               "RESTART_FAILS": "1" if restart_fails else "0", "HEAD_COMMIT": head or TARGET}
+               "FAILED_FILE": str(tmp_path / "deploy.failed"), "GOOD_FILE": str(tmp_path / "deploy.good"),
+               "RESTART_FAILS": "1" if restart_fails else "0",
+               "RESTART_NOOP": "1" if restart_noop else "0",
+               "HEAD_COMMIT": head or TARGET, "SLOW_S": slow_s}
         result = subprocess.run(["bash", str(repo / "deploy.sh")], env=env,  # noqa: S603
-                                capture_output=True, text=True, timeout=60)
+                                capture_output=True, text=True, timeout=120)
         return result.returncode, calls.read_text().splitlines()
 
     run.lock_file = tmp_path / "deploy.lock"  # type: ignore[attr-defined]
     run.failed_file = tmp_path / "deploy.failed"  # type: ignore[attr-defined]
+    run.good_file = tmp_path / "deploy.good"  # type: ignore[attr-defined]
+    run.state = state  # type: ignore[attr-defined]
     return run
 
 
@@ -220,3 +263,40 @@ class TestRoundTwoOn143:
         assert deploy.failed_file.read_text().strip() == TARGET
         code, calls = deploy(running="old0000", active=False)
         assert any(c.startswith("podman build") for c in calls), calls
+
+
+class TestRoundThreeOn143:
+    """#143 round 3, SOTA-A (three findings, executed)."""
+
+    def test_a_running_target_that_does_not_answer_is_rolled_back(self, deploy):
+        """The quiet check trusted the label, so a switch interrupted on an
+        unhealthy target exited quietly at every later tick. It asks
+        /healthz too, and the rollback goes to the last image that passed."""
+        (deploy.state / "running").write_text("sha256:target\n")
+        (deploy.state / "latest").write_text("sha256:target\n")
+        deploy.good_file.write_text("sha256:running\n")
+        code, calls = deploy(running="old0000", healthy=False)
+        assert code != 0
+        assert "podman tag sha256:running localhost/bubblegauge:latest" in calls
+
+    def test_a_restart_that_left_the_old_service_running_is_no_success(self, deploy):
+        """A restart that failed while the old container kept answering read as
+        a successful deploy: health is tied to the new image now."""
+        code, calls = deploy(running="old0000", restart_noop=True)
+        assert code != 0
+        assert not deploy.good_file.exists()
+
+    def test_the_health_timeout_is_in_seconds(self, deploy):
+        """HEALTH_TIMEOUT counted probes, so with each probe bounded a
+        container that never answers stretched it several times over."""
+        import time
+
+        started = time.monotonic()
+        code, _calls = deploy(running="old0000", active=False, healthy=False,
+                              health_timeout=3, slow_s="2")
+        assert code != 0
+        assert time.monotonic() - started < 7, "HEALTH_TIMEOUT=3 took far longer than 3 s"
+
+    def test_a_healthy_deploy_is_remembered_as_the_rollback_target(self, deploy):
+        code, _calls = deploy(running="old0000")
+        assert code == 0 and deploy.good_file.read_text().strip() == "sha256:target"

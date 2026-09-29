@@ -8,14 +8,16 @@
 # at boot and restarts it when it dies; this script only changes the image it
 # runs.
 #
-#   1. Fetch the branch. If the running service already runs that commit, or
-#      that commit already failed its health check, stop.
+#   1. Fetch the branch. If the running service already runs that commit and
+#      answers /healthz, or that commit already failed its health check while
+#      the service runs, stop.
 #   2. Fast-forward the checkout and build the image, labelled with the commit.
 #   3. Migrate the database in a throwaway container; a failure stops here,
 #      while the service keeps running the old image.
 #   4. Point :latest at the new image and restart the Quadlet service.
-#   5. Health-check; if it does not become healthy, point :latest back and
-#      restart again (rollback).
+#   5. Health-check: the service answers /healthz AND runs the new image. If
+#      not, point :latest at the last image that passed this check and restart
+#      again (rollback).
 #
 # One deploy at a time: systemd serialises the timer's oneshot service, and a
 # run by hand takes the same lock (LOCK_FILE) and leaves the deploy to a run
@@ -27,12 +29,14 @@
 #   SERVICE          the Quadlet service             (default: bubblegauge.service)
 #   DATA_DIR         host data volume                (default: ./data)
 #   PORT             loopback port for the health check (default: 8000)
-#   HEALTH_TIMEOUT   seconds to wait for /healthz    (default: 120)
+#   HEALTH_TIMEOUT   seconds to wait for /healthz after a restart (default: 120)
+#   QUIET_HEALTH_TIMEOUT  seconds the quiet check waits for /healthz (default: 30)
 #   KEEP_IMAGES      old commit-tagged images kept   (default: 5)
 #   FORCE=1          rebuild and restart even when the commit is current or failed
 #   CONTAINER        the Quadlet container's name     (default: bubblegauge)
 #   LOCK_FILE        the deploy lock                  (default: $XDG_RUNTIME_DIR/bubblegauge-deploy.lock)
 #   FAILED_FILE      the last commit that failed its health check
+#   GOOD_FILE        the image id of the last deploy that passed it
 
 set -Eeuo pipefail
 
@@ -42,23 +46,28 @@ SERVICE="${SERVICE:-bubblegauge.service}"
 DATA_DIR="${DATA_DIR:-./data}"
 PORT="${PORT:-8000}"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-120}"
+QUIET_HEALTH_TIMEOUT="${QUIET_HEALTH_TIMEOUT:-30}"
 KEEP_IMAGES="${KEEP_IMAGES:-5}"
 FORCE="${FORCE:-0}"
 CONTAINER="${CONTAINER:-bubblegauge}"
 LOCK_FILE="${LOCK_FILE:-${XDG_RUNTIME_DIR:-/tmp}/bubblegauge-deploy.lock}"
 FAILED_FILE="${FAILED_FILE:-${XDG_STATE_HOME:-$HOME/.local/state}/bubblegauge-deploy.failed}"
+GOOD_FILE="${GOOD_FILE:-${XDG_STATE_HOME:-$HOME/.local/state}/bubblegauge-deploy.good}"
 REVISION_LABEL="org.opencontainers.image.revision"
 
 banner() { printf '\n==> %s\n' "$*"; }
-healthy() {                                  # /healthz answers within HEALTH_TIMEOUT
-  for _ in $(seq 1 "$HEALTH_TIMEOUT"); do
-    # each probe bounded: a container that accepts and never answers must not
-    # hold the deploy (and its lock) until systemd's start timeout
+healthy() {         # /healthz answers within $1 seconds (default HEALTH_TIMEOUT)
+  # A deadline in seconds, each probe bounded: a count of probes let a
+  # container that accepts and never answers stretch 120 s to about 720 s
+  # (#143 round 3, SOTA-A).
+  local deadline=$((SECONDS + ${1:-$HEALTH_TIMEOUT}))
+  while (( SECONDS < deadline )); do
     if curl -fsS --max-time 5 "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1; then return 0; fi
     sleep 1
   done
   return 1
 }
+running_image() { podman inspect -f '{{.Image}}' "$CONTAINER" 2>/dev/null || true; }
 die()    { printf '\nERROR: %s\n' "$*" >&2; exit 1; }
 trap 'die "deploy failed at line $LINENO"' ERR
 
@@ -87,14 +96,18 @@ if systemctl --user is-active --quiet "$SERVICE"; then
   fi
 fi
 if [[ "$FORCE" != "1" ]]; then
-  if [[ "$TARGET" == "$RUNNING" ]]; then
-    exit 0                                 # the common case, every five minutes: quiet
+  # Quiet only when the service runs main's commit AND answers: a switch
+  # interrupted on an unhealthy target otherwise stayed there for good (#143
+  # round 3, SOTA-A). The common case, every five minutes.
+  if [[ "$TARGET" == "$RUNNING" ]] && healthy "$QUIET_HEALTH_TIMEOUT"; then
+    exit 0
   fi
   # A commit that failed its health check, and was rolled back to a service
   # that runs, waits for the next commit or FORCE=1: retried every tick, it took
   # the service down every five minutes. With the service down it is tried again
   # (#143 round 2, SOTA-A).
-  if [[ -n "$RUNNING" && "$TARGET" == "$(cat "$FAILED_FILE" 2>/dev/null || true)" ]]; then
+  if [[ -n "$RUNNING" && "$TARGET" != "$RUNNING" \
+        && "$TARGET" == "$(cat "$FAILED_FILE" 2>/dev/null || true)" ]]; then
     exit 0
   fi
 fi
@@ -124,9 +137,14 @@ podman run --rm --env-file .env -v "$(realpath "$DATA_DIR")":/data:Z \
   "$IMAGE:$TARGET" python -m app.db_migrate 9>&-
 
 # ---- 4. switch --------------------------------------------------------------
-# The rollback goes back to what the service RAN, not to :latest, which an
-# interrupted switch may have left on a failed image (#143 round 2, SOTA-A).
-PREVIOUS="$RUNNING_IMAGE"
+TARGET_ID="$(podman image inspect -f '{{.Id}}' "$IMAGE:$TARGET")"
+# The rollback goes back to the last image that passed this check, or else to
+# what the service ran - never to :latest, which an interrupted switch may have
+# left on a failed image, and never to the image being deployed (#143 rounds
+# 2 and 3, SOTA-A).
+PREVIOUS="$(cat "$GOOD_FILE" 2>/dev/null || true)"
+[[ -n "$PREVIOUS" ]] || PREVIOUS="$RUNNING_IMAGE"
+[[ "$PREVIOUS" != "$TARGET_ID" ]] || PREVIOUS=""
 banner "Restarting $SERVICE on $TARGET"
 podman tag "$IMAGE:$TARGET" "$IMAGE:latest"
 # Not fatal: a start that fails is an unhealthy deploy and is rolled back
@@ -134,9 +152,12 @@ podman tag "$IMAGE:$TARGET" "$IMAGE:latest"
 systemctl --user restart "$SERVICE" || true
 
 # ---- 5. health, or roll back -------------------------------------------------
-if healthy; then
+# Healthy AND running the new image: a restart that failed while the old
+# container kept answering was a false success (#143 round 3, SOTA-A).
+if healthy && [[ "$(running_image)" == "$TARGET_ID" ]]; then
   banner "Deploy OK: $TARGET healthy"
   rm -f "$FAILED_FILE"
+  mkdir -p "$(dirname "$GOOD_FILE")" && echo "$TARGET_ID" > "$GOOD_FILE"
   mapfile -t OLD < <(podman images --format '{{.Repository}}:{{.Tag}} {{.ID}}' \
       | awk -v i="$IMAGE" '$1 ~ "^"i":" && $1 !~ /:latest$/ {print $2}' | tail -n +"$((KEEP_IMAGES+1))")
   [[ ${#OLD[@]} -gt 0 ]] && podman rmi -f "${OLD[@]}" >/dev/null 2>&1 || true
@@ -146,10 +167,10 @@ trap - ERR
 echo "    $TARGET is NOT healthy. Recent logs:"
 journalctl --user -u "$SERVICE" -n 40 --no-pager 2>&1 | sed 's/^/    | /' || true
 if [[ -n "$PREVIOUS" ]]; then
-  banner "Rolling back to the image the service ran"
+  banner "Rolling back to the last good image"
   podman tag "$PREVIOUS" "$IMAGE:latest"
   systemctl --user restart "$SERVICE" || true
-  if healthy; then
+  if healthy && [[ "$(running_image)" == "$PREVIOUS" ]]; then
     # Remembered only once the service runs again: a rollback that failed too
     # must leave the next tick free to recover (#143 round 2, SOTA-A).
     mkdir -p "$(dirname "$FAILED_FILE")" && echo "$TARGET" > "$FAILED_FILE"

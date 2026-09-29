@@ -11,10 +11,15 @@ Merges to `main` reach production by themselves. Three host pieces, all
 
 systemd never runs two instances of the oneshot deploy service at once, and a
 run by hand takes the same lock (`LOCK_FILE`), so deploys cannot overlap. The
-deploy compares main with the commit the RUNNING service carries, so a service
-that is down is deployed again at the next tick; a commit that failed its health
-check is not retried until main moves on or `FORCE=1` asks for it. A tree with
-edited tracked files is refused.
+deploy compares main with the commit the RUNNING service carries, and stays quiet
+only when that service also answers `/healthz`; a service that is down, or that
+runs main's commit without answering, is deployed again at the next tick. A
+deploy succeeds only when `/healthz` answers AND the service runs the new image;
+otherwise it rolls back to the last image that passed that check (`GOOD_FILE`).
+A commit that failed is not retried while the rolled-back service runs, until
+main moves on or `FORCE=1` asks for it. A tree with edited tracked files is
+refused. Health waits are deadlines in seconds (`HEALTH_TIMEOUT`,
+`QUIET_HEALTH_TIMEOUT`), each probe capped at five.
 
 ## The dead-man's switch
 
