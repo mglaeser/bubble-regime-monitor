@@ -81,8 +81,13 @@ healthy() {         # /healthz answers within $1 seconds (default HEALTH_TIMEOUT
   # container that accepts and never answers stretch 120 s to about 720 s
   # (#143 round 3, SOTA-A).
   local deadline=$((SECONDS + ${1:-$HEALTH_TIMEOUT}))
+  # Straight to the loopback: no proxy from the environment (--noproxy) and
+  # no ~/.curlrc (-q, first), so nothing ambient answers for the service. A
+  # proxy that answers 2xx for anything made a closed port "healthy": no
+  # rollback, and the bad image recorded as good (#143 round 32, SOTA-A;
+  # executed on the host).
   while (( SECONDS < deadline )); do
-    if curl -fsS --max-time 5 "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1; then return 0; fi
+    if curl -q -fsS --noproxy '*' --max-time 5 "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1; then return 0; fi
     sleep 1
   done
   return 1

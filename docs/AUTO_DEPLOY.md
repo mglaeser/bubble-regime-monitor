@@ -43,7 +43,9 @@ unit turns the default start limit off: five starts in ten seconds would
 have left a fast-crashing service in `failed` for good, down after the
 fault cleared), to the dead-man's switch below, and to the owner. A tree with edited
 tracked files is refused. Health waits are deadlines in seconds
-(`HEALTH_TIMEOUT`, `QUIET_HEALTH_TIMEOUT`), each probe capped at five.
+(`HEALTH_TIMEOUT`, `QUIET_HEALTH_TIMEOUT`), each probe capped at five, and
+a probe reaches the loopback and nothing else: no proxy from the
+environment, no `~/.curlrc`, so nothing ambient can answer for the service.
 
 ## Install (once, on the deploy host)
 

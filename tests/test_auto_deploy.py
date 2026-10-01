@@ -558,7 +558,7 @@ class TestRoundTwelveOn143:
         assert f"{deploy.repo}/data:/data:z" in migrate and str(other) not in migrate
         assert f"podman tag localhost/bubblegauge:{TARGET} localhost/bubblegauge:latest" in calls
         assert "systemctl --user restart bubblegauge.service" in calls
-        assert "curl -fsS --max-time 5 http://127.0.0.1:8000/healthz" in calls
+        assert "curl -q -fsS --noproxy * --max-time 5 http://127.0.0.1:8000/healthz" in calls
 
     def test_it_runs_only_from_the_checkout_the_units_use(self, deploy, tmp_path):
         elsewhere = tmp_path / "elsewhere"
@@ -873,3 +873,19 @@ class TestRoundThirtyOneOn143:
         code, calls = deploy(running="old0000", schema_moves=True)                 # the next tick
         assert code == 0 and deploy.good_file.read_text() == f"sha256:img-{TARGET}\n"
         assert "systemctl --user restart bubblegauge.service" in calls
+
+
+class TestRoundThirtyTwoOn143:
+    """#143 round 32, SOTA-A: the loopback health probe honoured http_proxy
+    and ALL_PROXY from the environment, so a proxy answering 2xx for
+    anything forged the verdict - executed on the host: through such a proxy
+    curl reported 200 for a closed port; with --noproxy '*' it reported 000.
+    The sibling source, ~/.curlrc (it can set proxy= too), is what the
+    repository's notify-outage.sh already disables with -q first. The probe
+    reaches the loopback and nothing else."""
+
+    def test_the_health_probe_goes_straight_to_the_loopback(self, deploy):
+        _, calls = deploy(running="old0000")
+        probes = [c for c in calls if c.startswith("curl")]
+        assert probes
+        assert all(c.startswith("curl -q -fsS --noproxy * ") for c in probes), probes
