@@ -41,8 +41,9 @@ tracked files is refused. Health waits are deadlines in seconds
 ## The dead-man's switch
 
 Set `HEALTHCHECKS_PING_URL` in `.env` to a Healthchecks check's ping URL
-(`https://hc-ping.com/<uuid>`). The service pings it after every recompute,
-and `<url>/fail` with the reason after a failed one. Configure the check with
+(`https://hc-ping.com/<uuid>`). The service pings it after every successful
+recompute, and nothing after a failed one, which the failure alarm reports at
+once. Configure the check with
 a **4 h period** (the recompute cadence) and a **1 h grace**; Healthchecks then
 alerts on its own channels when the pings stop, which covers the one outage
 the service cannot report itself.

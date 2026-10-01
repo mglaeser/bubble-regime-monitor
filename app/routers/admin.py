@@ -147,10 +147,10 @@ def run_recompute_guarded() -> None:
             # The attempt this run IS, so a wedged run already reported by the
             # watchdog is not counted a second time when it finally gives up.
             notify_recompute_outcome(failure, attempt=str(_last.get("started_at") or ""))
-            # The dead-man's switch (owner decision D6), under the same lock:
-            # Healthchecks reads the LAST ping, so an older run's success sent
-            # after a newer run's /fail read the check up again (#143 round 1,
-            # SOTA-A). One call under a total deadline (round 14); it never raises.
+            # The dead-man's switch (owner decision D6): one report per run,
+            # under the same lock as the alarm. Only a success pings, so the
+            # order of pings cannot matter (#143 round 23); the call returns
+            # within a deadline (round 14) and never raises.
             from app.services.healthchecks import ping
 
             ping(failure)

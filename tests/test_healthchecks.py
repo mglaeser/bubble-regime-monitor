@@ -1,5 +1,5 @@
 """The dead-man's switch (owner decision D6, 2026-09-28): every recompute pings
-the Healthchecks check; a failure pings <url>/fail with a sanitized reason;
+the Healthchecks check; a failure pings nothing (the failure alarm reports it);
 empty is off; plain http is refused; it never raises."""
 from __future__ import annotations
 
@@ -42,12 +42,14 @@ def test_a_success_pings_the_check(monkeypatch, posts):
     assert posts == [(URL, b"ok")]
 
 
-def test_a_failure_pings_fail_with_a_sanitized_reason(monkeypatch, posts):
+def test_a_failure_pings_nothing(monkeypatch, posts):
+    """#143 round 23, SOTA-A: a success ping abandoned at its deadline could
+    land after a newer run's /fail and read the check back to "up". Only
+    successes ping, so every ping says the same thing; a failed recompute is
+    the failure alarm's to report, at once."""
     _configure(monkeypatch, URL)
     healthchecks.ping("fred: HTTP 500 for https://api.stlouisfed.org/x?api_key=abcdef0123456789abcdef")  # pragma: allowlist secret
-    (url, body), = posts
-    assert url == URL + "/fail"
-    assert b"abcdef0123456789abcdef" not in body and b"HTTP 500" in body
+    assert posts == []
 
 
 def test_plain_http_is_refused(monkeypatch, posts):
@@ -104,7 +106,7 @@ def test_an_empty_failure_is_a_failure(monkeypatch, posts):
     success; any string, the empty one too, is a failure."""
     _configure(monkeypatch, URL)
     healthchecks.ping("")
-    assert posts and posts[0][0] == URL + "/fail"
+    assert posts == []
 
 
 def test_a_ping_healthchecks_refuses_is_said_without_the_url(monkeypatch):
@@ -123,7 +125,7 @@ def test_a_ping_healthchecks_refuses_is_said_without_the_url(monkeypatch):
 
     monkeypatch.setattr(healthchecks, "log", _Log())
     monkeypatch.setattr(healthchecks.httpx, "post", _refused)
-    healthchecks.ping("gather failed")
+    healthchecks.ping(None)
     assert warned == [("healthchecks_ping_rejected", {"status": 404})]
 
 

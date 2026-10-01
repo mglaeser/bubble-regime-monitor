@@ -2,10 +2,15 @@
 
 Owner decision D6 (2026-09-28). HEALTHCHECKS_PING_URL is the check's ping URL
 (https://hc-ping.com/<uuid>). A successful recompute pings it; a failed one
-pings <url>/fail with the sanitized reason. When the pings stop — the host,
-the container or the scheduler is gone — Healthchecks alerts the operator on
-its own channels: the one outage the service cannot report itself. Empty
-(the default) switches it off. It never raises.
+pings nothing. When the pings stop — the host, the container or the scheduler
+is gone, or no recompute succeeds any more — Healthchecks alerts the operator
+on its own channels: the one outage the service cannot report itself. A
+failed recompute it can report, and does, at once, through the failure alarm.
+Only successes ping, so every ping says the same thing and their order cannot
+matter: a ping abandoned at its deadline that lands after a newer one changes
+nothing (#143 round 23, SOTA-A; the /fail ping it replaced could be read back
+to "up" by an older success landing late). Empty (the default) switches it
+off. It never raises.
 """
 
 from __future__ import annotations
@@ -41,14 +46,18 @@ def _send(target: str, body: bytes) -> None:
     if response.is_error:
         # A ping Healthchecks refused (an unknown check, a rate limit, its own
         # outage) is no ping: said, with the status only - the URL is the
-        # credential (#143 round 12, SOTA-A). Not retried: a lost success ping
-        # makes Healthchecks alert, and a failure also reaches the owner through
-        # the failure alarm.
+        # credential (#143 round 12, SOTA-A). Not retried: a lost ping makes
+        # Healthchecks alert, which is the safe side.
         log.warning("healthchecks_ping_rejected", status=response.status_code)
 
 
 def ping(failure: str | None) -> None:
-    """Report one recompute outcome: None is success. Never raises."""
+    """Report one recompute outcome: None is success, and only a success
+    pings. Never raises."""
+    # None is success; any string is a failure, the empty one too: a recompute
+    # whose exception had no message pinged success (#143 round 2, SOTA-A).
+    if failure is not None:
+        return
     url = get_settings().healthchecks_ping_url.strip()
     if not url:
         return
@@ -56,12 +65,7 @@ def ping(failure: str | None) -> None:
         # The URL is the credential; it does not travel in cleartext.
         log.warning("healthchecks_ping_refused", reason="HEALTHCHECKS_PING_URL must be https")
         return
-    # None is success; any string is a failure, the empty one too: a recompute
-    # whose exception had no message pinged success (#143 round 2, SOTA-A).
-    failed = failure is not None
-    target = url.rstrip("/") + ("/fail" if failed else "")
-    body = (sanitize(failure, limit=500) or "failed") if failed else "ok"
-    worker = threading.Thread(target=_send, args=(target, body.encode()),
+    worker = threading.Thread(target=_send, args=(url.rstrip("/"), b"ok"),
                               name="healthchecks-ping", daemon=True)
     worker.start()
     worker.join(_DEADLINE_S)
