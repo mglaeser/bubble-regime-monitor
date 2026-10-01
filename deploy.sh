@@ -163,6 +163,14 @@ fi
 # recorded itself left an older one there (#143 round 4, SOTA-A).
 if [[ "$RUNNING_OK" == "1" ]]; then
   record "$GOOD_FILE" "$RUNNING_IMAGE"
+  # ...and :latest names it. A deploy stopped after its restart but before
+  # its verdict left the new image running with :latest back on the previous
+  # one (the restore of round 37), and the next tick recorded the new image
+  # good while a later restart of the service booted the previous one - old
+  # code, or after a migration none (#143 round 38, SOTA-A). The image last
+  # seen healthy is what :latest names, when it does not already.
+  [[ "$(podman image inspect -f '{{.Id}}' "$IMAGE:latest" 2>/dev/null || true)" == "$RUNNING_IMAGE" ]] \
+    || podman tag "$RUNNING_IMAGE" "$IMAGE:latest"
 fi
 # Quiet only when the service runs main's commit AND answers: a switch
 # interrupted on an unhealthy target otherwise stayed there for good (#143

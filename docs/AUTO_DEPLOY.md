@@ -33,8 +33,11 @@ and before the health verdict (the image's inspection, the tag) marks
 nothing, since the schema has moved and this commit's image is the one fit
 for it: the next tick tries the commit again - and
 `:latest` goes back to the last image seen healthy (`.deploy-state/good`,
-recorded whenever a run finds the service answering, and after every healthy
-deploy); the rollback counts only if that image answers too. `:latest` goes
+recorded - and named `:latest` - whenever a run finds the service answering,
+and after every healthy deploy; a deploy stopped after its restart but
+before its verdict leaves the new image running with `:latest` back on the
+previous one, and the next tick, finding it answering, lines them up again);
+the rollback counts only if that image answers too. `:latest` goes
 back to that image on every other exit before a successful verdict as well -
 a rejected switch, a unit stop - so that a later restart of the service never
 boots an image the gate did not pass; a kill mid-switch is left to the next

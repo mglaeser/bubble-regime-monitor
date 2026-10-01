@@ -103,6 +103,8 @@ fi
 if [[ "$*" == *restart* ]]; then
   if [[ "$RESTART_NOOP" == "1" ]]; then exit 1; fi          # nothing happened; the old one runs on
   if [[ "$RESTART_FAILS" == "1" ]]; then touch "$SHIM_STATE/down"; exit 1; fi
+  # the unit stopped right after the restart: SIGTERM to deploy.sh (#143 round 38)
+  if [[ "$TERM_ON_RESTART" == "1" ]]; then kill -TERM "$PPID"; fi
   latest="$(cat "$SHIM_STATE/latest" 2>/dev/null || echo sha256:running)"
   echo "$latest" > "$SHIM_STATE/running"
   rm -f "$SHIM_STATE/down"
@@ -1000,3 +1002,25 @@ class TestRoundThirtySevenOn143:
     def test_a_unit_stop_takes_the_same_way_out(self):
         script = (ROOT / "deploy.sh").read_text()
         assert "trap cleanup EXIT" in script and "trap 'exit 143' TERM" in script
+
+
+class TestRoundThirtyEightOn143:
+    """#143 round 38, SOTA-A: a deploy stopped after its restart but before
+    its verdict leaves the new image running while round 37's restore puts
+    :latest back on the previous one; the next tick finds the service
+    answering on main's commit, records that image good and exits quietly -
+    and a later restart of the service boots the previous image: old code,
+    or after a migration none. The image last seen healthy is what :latest
+    names: the quiet tick tags it too. Executed: the restart shim sends
+    TERM to deploy.sh, as a unit stop would."""
+
+    def test_the_next_tick_lines_latest_up_with_the_image_it_finds_healthy(self, deploy):
+        code, calls = deploy(running="old0000", env={"TERM_ON_RESTART": "1"})
+        assert code == 143 and calls.count("systemctl --user restart bubblegauge.service") == 1
+        assert (deploy.state / "latest").read_text().strip() == "sha256:running"     # restored on the way out
+        assert (deploy.state / "running").read_text().strip() == f"sha256:img-{TARGET}"   # ...but the new image runs
+        assert not deploy.failed_file.exists()
+        code, calls = deploy(running=TARGET)                                        # the next tick
+        assert code == 0 and not any(c.startswith("podman build") for c in calls)
+        assert deploy.good_file.read_text().strip() == f"sha256:img-{TARGET}"
+        assert (deploy.state / "latest").read_text().strip() == f"sha256:img-{TARGET}"
