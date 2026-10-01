@@ -101,11 +101,16 @@ cd "$(dirname "$0")"
 mkdir -p "$STATE"
 
 # ---- 1. anything to do? ---------------------------------------------------
-git fetch --quiet --prune origin "$BRANCH"
+# The remote branch by its full name, fetched by an explicit refspec with no
+# tags: `origin/main` is shorthand that a tag named origin/main would win
+# (git tries refs/tags/ before refs/remotes/), pinning every deploy to that
+# tag's commit (#143 round 26, SOTA-A).
+REMOTE_REF="refs/remotes/origin/$BRANCH"
+git fetch --quiet --prune --no-tags origin "+refs/heads/$BRANCH:$REMOTE_REF"
 # The full id for everything git resolves, the short one for labels and tags:
 # a tag named like the short id would win the lookup, and its tree would ship
 # under this commit's label (#143 round 25, SOTA-A).
-TARGET_SHA="$(git rev-parse "origin/$BRANCH")"
+TARGET_SHA="$(git rev-parse "$REMOTE_REF")"
 TARGET="$(git rev-parse --short "$TARGET_SHA")"
 # What the SERVICE runs, not what :latest says: a restart that failed after the
 # retag left the service down while every later tick skipped (#143 round 1).
@@ -148,12 +153,12 @@ banner "Deploying $TARGET (running: ${RUNNING:-none})"
 git diff --quiet HEAD -- \
   || die "tracked files are modified; commit or restore them, then deploy."
 git checkout -q "$BRANCH"
-git merge-base --is-ancestor HEAD "origin/$BRANCH" \
+git merge-base --is-ancestor HEAD "$REMOTE_REF" \
   || die "local $BRANCH is not behind origin/$BRANCH (diverged or ahead); reconcile by hand."
-git merge --ff-only -q "origin/$BRANCH"
+git merge --ff-only -q "$REMOTE_REF"
 # What is built is exactly origin's commit: checked before the checkout, a
 # local branch ahead of origin shipped under origin's label (#143 round 2).
-[[ "$(git rev-parse HEAD)" == "$(git rev-parse "origin/$BRANCH")" ]] \
+[[ "$(git rev-parse HEAD)" == "$(git rev-parse "$REMOTE_REF")" ]] \
   || die "local $BRANCH is not origin/$BRANCH after the fast-forward; reconcile by hand."
 
 # From here on a failure is the commit's: it is marked, and the timer leaves

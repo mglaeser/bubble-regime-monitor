@@ -773,3 +773,18 @@ class TestRoundTwentyFiveOn143:
         assert len(exported) == 40 and exported.startswith(TARGET), exported
         build = next(c for c in calls if c.startswith("podman build"))
         assert f"org.opencontainers.image.revision={TARGET}" in build
+
+
+class TestRoundTwentySixOn143:
+    """#143 round 26, SOTA-A: `origin/main` is shorthand that git resolves
+    through refs/tags/ before refs/remotes/, so a fetched tag of that name
+    would have pinned every deploy to its commit. The branch is fetched by an
+    explicit refspec with no tags, and resolved by its full remote name."""
+
+    def test_the_remote_branch_is_fetched_and_resolved_by_its_full_name(self, deploy):
+        code, calls = deploy(running="old0000")
+        assert code == 0
+        assert "git fetch --quiet --prune --no-tags origin +refs/heads/main:refs/remotes/origin/main" in calls
+        assert "git rev-parse refs/remotes/origin/main" in calls
+        assert "git merge --ff-only -q refs/remotes/origin/main" in calls
+        assert not any(" origin/main" in c for c in calls if c.startswith("git ")), calls
