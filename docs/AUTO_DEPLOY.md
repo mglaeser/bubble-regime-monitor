@@ -23,7 +23,11 @@ service also answers `/healthz`; a service that is down, or that runs main's
 commit without answering, is deployed again at the next tick.
 
 A deploy succeeds only when `/healthz` answers AND the service runs the new
-image. Otherwise the commit is marked failed (`.deploy-state/failed`), and
+image. Otherwise the commit is marked failed (`.deploy-state/failed`) - as
+it is when its build or its migration fails; an error after the migration
+and before the health verdict (the image's inspection, the tag) marks
+nothing, since the schema has moved and this commit's image is the one fit
+for it: the next tick tries the commit again - and
 `:latest` goes back to the last image seen healthy (`.deploy-state/good`,
 recorded whenever a run finds the service answering, and after every healthy
 deploy); the rollback counts only if that image answers too. The rollback knows

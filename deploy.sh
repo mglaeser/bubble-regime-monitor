@@ -170,10 +170,11 @@ git merge --ff-only -q "$REMOTE_REF"
 [[ "$(git rev-parse HEAD)" == "$(git rev-parse "$REMOTE_REF")" ]] \
   || die "local $BRANCH is not origin/$BRANCH after the fast-forward; reconcile by hand."
 
-# From here on a failure is the commit's: it is marked, and the timer leaves
-# it alone until main moves on or the marker is removed. Unmarked, a build or
-# migration that failed was run again every five minutes, the migration
-# against the production database (#143 retrospective, 2026-09-29).
+# From here to the end of the migration a failure is the commit's: it is
+# marked, and the timer leaves it alone until main moves on or the marker is
+# removed. Unmarked, a build or migration that failed was run again every
+# five minutes, the migration against the production database (#143
+# retrospective, 2026-09-29).
 failed() { record "$FAILED_FILE" "$TARGET"; die "$@"; }
 trap 'failed "deploy of $TARGET failed at line $LINENO"' ERR
 
@@ -200,6 +201,13 @@ mkdir -p data
 # build's RUN step ended with its unit either way).
 podman run --rm --init --env-file .env -v "$PWD/data":/data:z \
   "$IMAGE:$TARGET" python -m app.db_migrate
+# The schema has moved: from here on this commit's image is the one fit for
+# the database, so an error before the health verdict - the image's
+# inspection, the tag - marks nothing, and the next tick tries the commit
+# again. Marked, the old image ran on on the new schema, unable to boot
+# again, while every tick skipped the one commit that fits (#143 round 31,
+# SOTA-A). The health verdict below marks on its own.
+trap 'die "deploy of $TARGET failed at line $LINENO, after the migration; tried again next tick"' ERR
 
 # ---- 4. switch --------------------------------------------------------------
 TARGET_ID="$(podman image inspect -f '{{.Id}}' "$IMAGE:$TARGET")"

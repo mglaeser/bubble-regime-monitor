@@ -73,6 +73,8 @@ case "$1" in
   tag)
     # the unit stopped mid-rollback: SIGKILL deploy.sh as it retags this image
     if [[ -n "$KILL_ON_TAG" && "$2" == "$KILL_ON_TAG" ]]; then kill -9 "$PPID"; exit 137; fi
+    # a host error on the first tag of the test, after the migration (#143 round 31)
+    if [[ "$TAG_FAILS_ONCE" == "1" && ! -f "$SHIM_STATE/tag-failed" ]]; then touch "$SHIM_STATE/tag-failed"; exit 1; fi
     resolve "$2" > "$SHIM_STATE/latest" ;;
   images)                                   # newest first, as podman lists them
     [[ "$IMAGES_FAILS" != "1" ]] || exit 1
@@ -851,3 +853,23 @@ class TestRoundThirtyOn143:
                 sections.setdefault(name, []).append(line)
         assert "StartLimitIntervalSec=0" in sections["[Unit]"]
         assert {"Restart=always", "RestartSec=10s"} <= set(sections["[Service]"])
+
+
+class TestRoundThirtyOneOn143:
+    """#143 round 31, SOTA-A: an error after the migration - the image's
+    inspection, the tag - hit the ERR trap and marked the commit. The schema
+    had moved, so the old image ran on on it, unable to boot again, while
+    every later tick skipped the one commit whose image fits. After the
+    migration the trap marks nothing: the run dies, and the next tick tries
+    the commit again. A build or migration failure, and the health verdict,
+    mark as before."""
+
+    def test_an_error_after_the_migration_marks_nothing_and_the_next_tick_deploys(self, deploy):
+        code, calls = deploy(running="old0000", schema_moves=True, env={"TAG_FAILS_ONCE": "1"})
+        assert code != 0 and any("db_migrate" in c for c in calls)
+        assert not any(c.startswith("systemctl --user restart") for c in calls)   # it died at the tag
+        assert not deploy.failed_file.exists()
+        assert "after the migration" in deploy.output
+        code, calls = deploy(running="old0000", schema_moves=True)                 # the next tick
+        assert code == 0 and deploy.good_file.read_text() == f"sha256:img-{TARGET}\n"
+        assert "systemctl --user restart bubblegauge.service" in calls
