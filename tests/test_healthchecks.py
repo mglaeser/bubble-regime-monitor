@@ -44,7 +44,7 @@ def test_a_success_pings_the_check(monkeypatch, posts):
 
 def test_a_failure_pings_fail_with_a_sanitized_reason(monkeypatch, posts):
     _configure(monkeypatch, URL)
-    healthchecks.ping("fred: HTTP 500 for https://api.stlouisfed.org/x?api_key=abcdef0123456789abcdef")
+    healthchecks.ping("fred: HTTP 500 for https://api.stlouisfed.org/x?api_key=abcdef0123456789abcdef")  # pragma: allowlist secret
     (url, body), = posts
     assert url == URL + "/fail"
     assert b"abcdef0123456789abcdef" not in body and b"HTTP 500" in body
