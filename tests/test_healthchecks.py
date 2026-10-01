@@ -66,7 +66,7 @@ def test_a_success_pings_the_check_with_the_url_on_stdin(monkeypatch, curl):
     _configure(monkeypatch, URL)
     healthchecks.ping(None)
     (args, config, timeout), = curl.calls
-    assert args == ["curl", "-K", "-"]                     # the URL is not on the command line
+    assert args == ["curl", "-q", "-K", "-"]               # no ~/.curlrc; the URL is not on the command line
     assert f'url = "{URL}"' in config.decode() and 'data = "ok"' in config.decode()
     assert f"max-time = {healthchecks._DEADLINE_S}" in config.decode()
     assert timeout > healthchecks._DEADLINE_S
@@ -103,6 +103,17 @@ def test_a_refused_ping_is_said_with_the_status_only(monkeypatch, warned):
     monkeypatch.setattr(healthchecks.subprocess, "run", _Curl(status="404"))
     healthchecks.ping(None)
     assert warned == [("healthchecks_ping_rejected", {"status": "404"})]
+
+
+def test_output_that_is_not_a_status_code_reaches_no_log(monkeypatch, warned):
+    """#144 round 2, SOTA-A: a ~/.curlrc trace option would have written the
+    request, URL included, to stdout, and the rejection branch logged it as
+    the status. -q keeps curl from reading it, and only three digits are ever
+    logged."""
+    _configure(monkeypatch, URL)
+    monkeypatch.setattr(healthchecks.subprocess, "run", _Curl(status=f"== Info: POST {URL}\n200"))
+    healthchecks.ping(None)
+    assert warned == [("healthchecks_ping_rejected", {"status": "?"})]
 
 
 def test_a_curl_error_is_said_by_its_exit_code_only(monkeypatch, warned):

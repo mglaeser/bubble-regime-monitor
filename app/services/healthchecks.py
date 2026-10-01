@@ -61,7 +61,10 @@ def ping(failure: str | None) -> None:
         log.warning("healthchecks_ping_refused", reason="HEALTHCHECKS_PING_URL must be a plain https URL")
         return
     try:
-        done = subprocess.run(["curl", "-K", "-"], input=_config(url.rstrip("/")),  # noqa: S603, S607
+        # -q first: curl reads ~/.curlrc otherwise, and a trace option there
+        # would write the request, URL included, to stdout (#144 round 2,
+        # SOTA-A). The config on stdin is the only one it sees.
+        done = subprocess.run(["curl", "-q", "-K", "-"], input=_config(url.rstrip("/")),  # noqa: S603, S607
                               capture_output=True, timeout=_KILL_S, check=False)
     except subprocess.TimeoutExpired:
         log.warning("healthchecks_ping_slow", deadline_s=_DEADLINE_S)
@@ -74,7 +77,10 @@ def ping(failure: str | None) -> None:
         log.warning("healthchecks_ping_failed", error=f"curl exit {done.returncode}")
         return
     status = done.stdout.decode(errors="replace").strip()
-    if not status.startswith("2"):
+    if len(status) != 3 or not status.isdigit():
+        # Not the status code asked for: nothing of it reaches a log.
+        log.warning("healthchecks_ping_rejected", status="?")
+    elif not status.startswith("2"):
         # A ping Healthchecks refused (an unknown check, a rate limit, its own
         # outage) is no ping: said, with the status only (#143 round 12,
         # SOTA-A). Not retried: a lost ping makes Healthchecks alert, which is
