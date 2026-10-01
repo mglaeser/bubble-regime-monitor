@@ -906,3 +906,28 @@ class TestRoundThirtyThreeOn143:
         drain = steps.index("while systemctl --user is-active --quiet bubblegauge-deploy.service; do sleep 10; done")
         pull = steps.index("git pull --ff-only")
         assert disable < drain < pull
+
+
+class TestRoundThirtyFiveOn143:
+    """#143 round 35, SOTA-A: a restart that never took - the old container
+    running on - failed the target's verdict and then satisfied the
+    rollback's (healthy, and running the previous image, which had never
+    left), so after a migration the commit was marked and the old image ran
+    on on a database it cannot boot again while every tick skipped the one
+    commit that fits. The verdict is the commit's only when its image ran:
+    the previous image still running marks nothing, and the next tick tries
+    again. An image that was running already and is deployed again cannot be
+    told apart this way and stays the commit's failure."""
+
+    def test_a_restart_that_never_took_marks_nothing_after_a_migration(self, deploy):
+        code, calls = deploy(running="old0000", schema_moves=True, restart_noop=True)
+        assert code != 0 and "did not take" in deploy.output
+        assert not deploy.failed_file.exists()
+        assert "podman tag sha256:running localhost/bubblegauge:latest" not in calls   # no rollback either
+        code, calls = deploy(running="old0000", schema_moves=True)                   # the next tick
+        assert code == 0 and deploy.good_file.read_text() == f"sha256:img-{TARGET}\n"
+
+    def test_an_image_that_ran_already_and_fails_again_stays_the_commits(self, deploy):
+        (deploy.state / "running").write_text(f"sha256:img-{TARGET}\n")
+        code, _ = deploy(running=TARGET, restart_noop=True, unhealthy=(f"sha256:img-{TARGET}",))
+        assert code != 0 and deploy.failed_file.read_text() == f"{TARGET}\n"

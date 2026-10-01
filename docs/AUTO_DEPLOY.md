@@ -23,7 +23,9 @@ service also answers `/healthz`; a service that is down, or that runs main's
 commit without answering, is deployed again at the next tick.
 
 A deploy succeeds only when `/healthz` answers AND the service runs the new
-image. Otherwise the commit is marked failed (`.deploy-state/failed`) - as
+image. Otherwise - once the new image has run: a restart that never took,
+the service active and still on the previous image, marks nothing and is
+tried again at the next tick - the commit is marked failed (`.deploy-state/failed`) - as
 it is when its build or its migration fails (the upgrade is one transaction,
 so a failed migration leaves the database as it found it and the running
 image runs on); an error after the migration

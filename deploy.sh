@@ -253,6 +253,20 @@ if healthy && [[ "$(running_image)" == "$TARGET_ID" ]]; then
   exit 0
 fi
 trap - ERR
+# The verdict is the commit's only when its image ran. A restart that never
+# took - the service refusing it, the old container running on - fails the
+# check above and then satisfied the rollback's, the previous image "back"
+# without ever having left: after a migration the commit was marked, the old
+# image ran on on a database it cannot boot again, and every tick skipped the
+# one commit that fits (#143 round 35, SOTA-A). The previous image still
+# RUNNING - the unit active on it; a stopped container still answers to
+# inspect - is the host's failure: not marked, tried again next tick. (An
+# image that was running already and is deployed again cannot be told apart
+# this way and stays the commit's: rolled back and marked, as below.)
+if [[ -n "$RUNNING_IMAGE" && "$RUNNING_IMAGE" != "$TARGET_ID" && "$(running_image)" == "$RUNNING_IMAGE" ]] \
+   && systemctl --user is-active --quiet "$SERVICE"; then
+  die "the restart of $SERVICE did not take: it still runs the previous image; not marked, tried again next tick"
+fi
 echo "    $TARGET is NOT healthy. Recent logs:"
 journalctl --user -u "$SERVICE" -n 40 --no-pager 2>&1 | sed 's/^/    | /' || true
 # The commit is marked once the rollback has run its course, whichever way it
