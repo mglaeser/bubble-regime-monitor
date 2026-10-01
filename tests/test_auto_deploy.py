@@ -89,6 +89,12 @@ exit 0
 """,
     "systemctl": r"""#!/usr/bin/env bash
 echo "systemctl $*" >> "$CALLS"
+if [[ "$*" == *"show -p MainPID"* ]]; then
+  # systemd's answer: the deploy unit's main process is deploy.sh - our
+  # grandparent, behind the command substitution's subshell - unless the test
+  # says the run is not the unit's
+  if [[ "$NOT_THE_UNIT" == "1" ]]; then echo 0; else ps -o ppid= -p "$PPID" | tr -d ' '; fi; exit 0
+fi
 if [[ "$*" == *is-active* ]]; then
   if [[ "$ACTIVE" == "1" && ! -f "$SHIM_STATE/down" ]]; then exit 0; else exit 3; fi
 fi
@@ -156,7 +162,7 @@ def deploy(tmp_path):
                "RESTART_NOOP": "1" if restart_noop else "0",
                "HEAD_COMMIT": head or target, "SLOW_S": slow_s,
                "SCHEMA_MOVES": "1" if schema_moves else "0",
-               "BUBBLEGAUGE_DEPLOY_UNIT": "1", **(env or {})}
+               **(env or {})}
         result = subprocess.run(["bash", str(repo / "deploy.sh")], env=environ,  # noqa: S603
                                 capture_output=True, text=True, timeout=120)
         run.output = result.stdout + result.stderr  # type: ignore[attr-defined]
@@ -245,7 +251,7 @@ class TestRoundOneOn143:
         """A run by hand overlapped the timer's migration, retag and restart.
         Since round 15 every run is the unit's, which systemd starts once at a
         time; a run from a shell is refused."""
-        code, calls = deploy(running="old0000", env={"BUBBLEGAUGE_DEPLOY_UNIT": ""})
+        code, calls = deploy(running="old0000", env={"NOT_THE_UNIT": "1"})
         assert code != 0
         assert not any(c.startswith(("git fetch", "podman build")) for c in calls), calls
 
@@ -627,7 +633,7 @@ class TestRoundFifteenOn143:
     bubblegauge-deploy.service`; to retry a failed commit, remove its marker."""
 
     def test_a_run_outside_its_unit_is_refused(self, deploy):
-        code, calls = deploy(running="old0000", env={"BUBBLEGAUGE_DEPLOY_UNIT": ""})
+        code, calls = deploy(running="old0000", env={"NOT_THE_UNIT": "1"})
         assert code != 0 and "systemctl --user start bubblegauge-deploy.service" in deploy.output
         assert not any(c.startswith(("git fetch", "podman")) for c in calls), calls
 
@@ -635,7 +641,7 @@ class TestRoundFifteenOn143:
         service = (ROOT / "deploy/systemd/bubblegauge-deploy.service").read_text()
         settings = [line.strip() for line in service.splitlines() if line.strip() and not line.startswith("#")]
         assert "Type=oneshot" in settings
-        assert "Environment=BUBBLEGAUGE_DEPLOY_UNIT=1" in settings
+        assert not any("BUBBLEGAUGE_DEPLOY_UNIT" in line for line in settings)   # no flag to forge
         # the default, control-group: stopping the unit stops everything it started
         assert not any(line.startswith("KillMode=") for line in settings)
         # rootless podman needs the setuid newuidmap/newgidmap to set up its user
@@ -788,3 +794,16 @@ class TestRoundTwentySixOn143:
         assert "git rev-parse refs/remotes/origin/main" in calls
         assert "git merge --ff-only -q refs/remotes/origin/main" in calls
         assert not any(" origin/main" in c for c in calls if c.startswith("git ")), calls
+
+
+class TestRoundTwentySevenOn143:
+    """#143 round 27, SOTA-A: the unit gate was an environment flag the unit
+    set, so a run from a shell with the flag set ran beside the timer's. The
+    gate is systemd's own answer now: this process must be the deploy unit's
+    main process, which no environment can claim."""
+
+    def test_a_forged_flag_does_not_make_a_run_the_units(self, deploy):
+        code, calls = deploy(running="old0000", env={"NOT_THE_UNIT": "1", "BUBBLEGAUGE_DEPLOY_UNIT": "1"})
+        assert code != 0 and "systemctl --user start bubblegauge-deploy.service" in deploy.output
+        assert "systemctl --user show -p MainPID --value bubblegauge-deploy.service" in calls
+        assert not any(c.startswith(("git fetch", "podman")) for c in calls), calls

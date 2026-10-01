@@ -3,7 +3,8 @@
 # instance of a oneshot service at a time, and stopping it - or its main
 # process dying - stops every process it started (the default
 # KillMode=control-group): deploys neither overlap nor outlive their run.
-# deploy.sh refuses to run without BUBBLEGAUGE_DEPLOY_UNIT (#143 round 15).
+# deploy.sh refuses to run unless it is this unit's main process, by
+# systemd's own answer (#143 rounds 15 and 27).
 
 [Unit]
 Description=bubblegauge deploy (fetch main; when it moved: build, migrate, restart, health-check, roll back on failure)
@@ -14,7 +15,6 @@ After=network-online.target
 Type=oneshot
 WorkingDirectory=%h/playground/bubble-regime-monitor
 ExecStart=%h/playground/bubble-regime-monitor/deploy.sh
-Environment=BUBBLEGAUGE_DEPLOY_UNIT=1
 TimeoutStartSec=3600
 # No NoNewPrivileges here: rootless Podman sets up its user namespace with the
 # setuid helpers newuidmap/newgidmap, which that setting blocks. Executed on

@@ -64,6 +64,7 @@ set -Eeuo pipefail
 CHECKOUT="$HOME/playground/bubble-regime-monitor"
 IMAGE=localhost/bubblegauge
 SERVICE=bubblegauge.service
+DEPLOY_SERVICE=bubblegauge-deploy.service
 CONTAINER=bubblegauge
 PORT=8000
 BRANCH=main
@@ -90,10 +91,13 @@ running_image() { podman inspect -f '{{.Image}}' "$CONTAINER" 2>/dev/null || tru
 die()    { printf '\nERROR: %s\n' "$*" >&2; exit 1; }
 trap 'die "deploy failed at line $LINENO"' ERR
 
-# The unit sets this; a run from a shell would be neither serialised with the
-# timer's nor stopped with its children.
-[[ "${BUBBLEGAUGE_DEPLOY_UNIT:-}" == "1" ]] \
-  || die "deploy.sh runs as its unit: systemctl --user start bubblegauge-deploy.service"
+# This process must be the deploy unit's main process, by systemd's own
+# answer: a run from a shell would be neither serialised with the timer's nor
+# stopped with its children. An environment flag stood here and could be set
+# by hand, beside the timer's run (#143 round 27, SOTA-A); systemd cannot be
+# told what its unit's main process is.
+[[ "$(systemctl --user show -p MainPID --value "$DEPLOY_SERVICE" 2>/dev/null)" == "$$" ]] \
+  || die "deploy.sh runs as its unit: systemctl --user start $DEPLOY_SERVICE"
 cd "$(dirname "$0")"
 [[ "$(pwd -P)" == "$(cd "$CHECKOUT" 2>/dev/null && pwd -P)" ]] \
   || die "deploy.sh runs from $CHECKOUT, the checkout the units use; this is $(pwd -P)."
