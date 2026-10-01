@@ -102,7 +102,11 @@ mkdir -p "$STATE"
 
 # ---- 1. anything to do? ---------------------------------------------------
 git fetch --quiet --prune origin "$BRANCH"
-TARGET="$(git rev-parse --short "origin/$BRANCH")"
+# The full id for everything git resolves, the short one for labels and tags:
+# a tag named like the short id would win the lookup, and its tree would ship
+# under this commit's label (#143 round 25, SOTA-A).
+TARGET_SHA="$(git rev-parse "origin/$BRANCH")"
+TARGET="$(git rev-parse --short "$TARGET_SHA")"
 # What the SERVICE runs, not what :latest says: a restart that failed after the
 # retag left the service down while every later tick skipped (#143 round 1).
 RUNNING=""
@@ -168,7 +172,7 @@ banner "Building $IMAGE:$TARGET"
 # round 20, SOTA-A); git decides what the commit contains.
 CONTEXT="$(mktemp -d)"
 trap 'rm -rf "$CONTEXT"' EXIT
-git archive "$TARGET" | tar -x -C "$CONTEXT"
+git archive "$TARGET_SHA" | tar -x -C "$CONTEXT"
 podman build --label "$REVISION_LABEL=$TARGET" -t "$IMAGE:$TARGET" -f "$CONTEXT/Containerfile" "$CONTEXT"
 
 # ---- 3. migrate -----------------------------------------------------------

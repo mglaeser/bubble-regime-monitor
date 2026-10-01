@@ -36,7 +36,11 @@ _SHIMS = {
     "git": r"""#!/usr/bin/env bash
 echo "git $*" >> "$CALLS"
 case "$1" in
-  rev-parse) if [[ "$*" == "rev-parse HEAD" ]]; then echo "${HEAD_COMMIT:-$TARGET_COMMIT}"; else echo "$TARGET_COMMIT"; fi ;;
+  rev-parse)
+    full() { printf '%s%040d\n' "$1" 0 | cut -c1-40; }     # a commit's full id: the short one, zero-padded
+    if [[ "$*" == *--short* ]]; then echo "$TARGET_COMMIT"
+    elif [[ "$*" == "rev-parse HEAD" ]]; then full "${HEAD_COMMIT:-$TARGET_COMMIT}"
+    else full "$TARGET_COMMIT"; fi ;;
   diff) [[ "$DIRTY" != "1" ]] ;;
   archive) tar -cf - --files-from /dev/null ;;      # an empty export of the commit
   *) : ;;
@@ -725,7 +729,7 @@ class TestRoundTwentyOn143Build:
     def test_the_image_is_built_from_an_export_of_the_commit(self, deploy):
         code, calls = deploy(running="old0000")
         assert code == 0
-        assert f"git archive {TARGET}" in calls
+        assert any(c.startswith("git archive ") for c in calls), calls
         build = next(c for c in calls if c.startswith("podman build"))
         context = build.split()[-1]
         assert context != "." and not context.startswith(str(deploy.repo)), build
@@ -755,3 +759,17 @@ class TestRoundTwentyFourOn143:
         line = next(row for row in operate.splitlines()
                     if row.startswith("systemctl --user restart bubblegauge.service"))
         assert ".env" in line
+
+
+class TestRoundTwentyFiveOn143:
+    """#143 round 25, SOTA-A: the short id named the tree to export, and a tag
+    of the same name would have won the lookup, shipping its tree under this
+    commit's label. Git resolves the full id; the short one labels."""
+
+    def test_the_export_names_the_full_commit_id(self, deploy):
+        code, calls = deploy(running="old0000")
+        assert code == 0
+        exported = next(c for c in calls if c.startswith("git archive ")).split()[-1]
+        assert len(exported) == 40 and exported.startswith(TARGET), exported
+        build = next(c for c in calls if c.startswith("podman build"))
+        assert f"org.opencontainers.image.revision={TARGET}" in build

@@ -122,10 +122,6 @@ class Settings(BaseSettings):
     # is reported as a wedged run. Slots are 4h apart and a full gather runs
     # well under an hour, so a run still in flight at the next slot is stuck.
     failure_alert_stuck_after_h: int = 4
-    # The dead-man's switch (owner decision D6): a Healthchecks check's ping
-    # URL, pinged after every recompute (<url>/fail on a failure). When the
-    # pings stop, Healthchecks alerts on its own channels. Empty: off.
-    healthchecks_ping_url: str = ""
 
     # --- ALERT SYSTEM (docs/ALERT_SYSTEM.md) --------------------------------
     # Two INDEPENDENT switches. Evidence capture may run with alerting fully
