@@ -33,8 +33,11 @@ on a revision the image does not ship. After a migration the old image
 therefore does not come back, and the deploy is fixed forward.
 
 A commit that failed waits for the next commit, or for its marker to be
-removed (`rm .deploy-state/failed`), whatever the service does: a service the rollback did not bring back is left to systemd's
-restarts, to the dead-man's switch below, and to the owner. A tree with edited
+removed (`rm .deploy-state/failed`), whatever the service does: a service the rollback did not bring back is left to systemd,
+which restarts it every ten seconds without limit until it answers (the
+unit turns the default start limit off: five starts in ten seconds would
+have left a fast-crashing service in `failed` for good, down after the
+fault cleared), to the dead-man's switch below, and to the owner. A tree with edited
 tracked files is refused. Health waits are deadlines in seconds
 (`HEALTH_TIMEOUT`, `QUIET_HEALTH_TIMEOUT`), each probe capped at five.
 

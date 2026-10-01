@@ -9,6 +9,11 @@
 Description=bubblegauge API and scheduler
 Wants=network-online.target
 After=network-online.target
+# No start limit: this unit is the service's only keeper once a rollback has
+# failed, and systemd's default (five starts in ten seconds) left a
+# fast-crashing service in `failed` for good, down after the fault cleared
+# (#143 round 30, SOTA-A; reproduced on leaf: NRestarts=5, then nothing).
+StartLimitIntervalSec=0
 
 [Container]
 ContainerName=bubblegauge
@@ -44,6 +49,8 @@ NoNewPrivileges=true
 
 [Service]
 Restart=always
+# ... every ten seconds, so a crash loop is a restart every ten seconds, not a spin.
+RestartSec=10s
 TimeoutStartSec=300
 
 [Install]

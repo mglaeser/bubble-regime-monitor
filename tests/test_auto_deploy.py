@@ -826,3 +826,28 @@ class TestRoundTwentyNineOn143:
         assert deploy.good_file.read_text() == "sha256:running\n"
         assert deploy.failed_file.read_text() == f"{TARGET}\n"
         assert not list((deploy.repo / ".deploy-state").glob("*.tmp"))
+
+
+class TestRoundThirtyOn143:
+    """#143 round 30, SOTA-A: Restart=always under systemd's default start
+    limit - five starts in ten seconds - leaves a fast-crashing service in
+    `failed` for good, down after the fault clears, and the failed marker
+    then keeps the deploy from touching it. Reproduced on leaf (systemd 255,
+    user manager defaults 5/10s): a transient Restart=always unit that exits
+    at once shows NRestarts=5, then ActiveState=failed and no further start.
+    The old chain's container ran under podman's --restart=unless-stopped,
+    which has no such limit. The unit turns the limit off and paces the
+    restarts at ten seconds: a crash loop is a restart every ten seconds, not
+    a spin, and the service is back ten seconds after the fault clears."""
+
+    def test_the_service_is_restarted_without_limit_every_ten_seconds(self):
+        unit = (ROOT / "deploy/quadlet/bubblegauge.container").read_text()
+        sections: dict[str, list[str]] = {}
+        name = ""
+        for line in (line.strip() for line in unit.splitlines()):
+            if line.startswith("["):
+                name = line
+            elif line and not line.startswith("#"):
+                sections.setdefault(name, []).append(line)
+        assert "StartLimitIntervalSec=0" in sections["[Unit]"]
+        assert {"Restart=always", "RestartSec=10s"} <= set(sections["[Service]"])
