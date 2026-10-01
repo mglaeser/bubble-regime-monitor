@@ -55,7 +55,7 @@ class TestTheMaterial:
         assert ref.sources == ("FINRA margin-statistics XLSX",)
 
     def test_no_trigger_without_indicators_has_material(self):
-        assert context.references_for("failure_alert_failing") == ()
+        assert context.references_for("BAND_TO_HOLD") == ()
         assert context.references_for("not_a_trigger") == ()
         assert context.render(()) == ""
 
