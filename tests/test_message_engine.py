@@ -558,11 +558,10 @@ class TestRoundNineOn126:
         text = composer.render_fallback(composer.template_for(entry, None), composer.typed_facts(entry, facts))
         assert text.startswith(f"bubblegauge 59/100 {band}. range 57-61.")
 
-    @pytest.mark.parametrize("band", ["suppressed", "fallback"])
-    def test_a_band_the_digest_never_holds_is_no_word_of_it(self, band):
-        """Owner decision D7: the digest's band is compute.py's display band;
-        the bare state and "fallback" have no producer there."""
-        assert composer.typed("action_band", band) is None
+    def test_the_bare_state_is_no_band_of_the_digest(self):
+        """Owner decision D7: the digest's band is compute.py's display band,
+        which never shows the bare "suppressed" state."""
+        assert composer.typed("action_band", "suppressed") is None
 
     @pytest.mark.parametrize("text", ["Window 2026-08-15T14:00:00+00:00 to 2026-08-22T14:00Z.",
                                       "Stand 2026-09-25T06:01:43.119497Z, next 2026-09-26T14:00+02:00."])
@@ -1133,3 +1132,44 @@ class TestRoundTwoOn145:
         assert not self.GONE & set(lib["prompts"]) and len(lib["prompts"]) == 23
         assert lib["version"] == "1.2.0" and lib["status"].startswith("SIGNED 2026-10-01")
         assert not any("llm" in entry for entry in lib["prompts"].values())
+
+
+class TestRoundThreeOn145:
+    """#145 round 3, SOTA-A, two readings of the word domains: a "fallback"
+    band (a negative example in a test, read as a value the digest holds -
+    compute.py's display band is action_band_with_override's three bands
+    and the two degraded displays, nothing else) and F_TRIGGER_VALUE /
+    F_CURRENT_VALUE (the alert phrase set's MATERIAL_CHANGE slots, which the
+    alert renderer fills; no library entry declares them). Each word domain
+    is pinned at its producer, and every other fact an alert entry declares
+    is a number by its builder."""
+
+    def test_the_digests_band_domain_is_its_producers_whole_range(self):
+        from app.engine.aggregate import action_band_with_override
+        from app.services import compute
+
+        produced = {action_band_with_override(score, types.SimpleNamespace(override_fired=fired))
+                    for score in range(0, 101) for fired in (False, True)}
+        degraded = {"suppressed (block degraded)", "de-risk (data degraded)"}
+        source = Path(compute.__file__).read_text(encoding="utf-8")
+        assert all(f'"{band}"' in source for band in degraded)
+        assert produced | degraded == composer.WORDS["action_band"]
+
+    def test_every_declared_alert_fact_is_a_word_or_a_number_by_its_builder(self):
+        from app.alerts import render_context, sources
+
+        numbers = {"F_HEADLINE_MEDIAN", "F_RF_COUNT", "F_RF_REQUIRED", "F_RF3_DISTANCE"}   # float | int | None
+        evidence = {"F_BREADTH": "indicator.d1.breadth", "F_D2": "indicator.d2.finra_release",
+                    "F_S3": "indicator.s3.semi_runup", "F_MISSED_SLOTS": "ops.recompute_slot"}
+        builders = Path(render_context.__file__).read_text(encoding="utf-8")
+        specs = [spec for value in vars(sources).values() if isinstance(value, tuple)
+                 for spec in value if isinstance(spec, sources.SourceSpec)]
+        for fact, domain in evidence.items():
+            assert f'"{fact}": _evidence_value("{domain}")' in builders
+            kinds = {str(getattr(spec.kind, "value", spec.kind)) for spec in specs if spec.domain == domain}
+            assert kinds and kinds <= {"number", "count"}, (domain, kinds)
+        declared = {fact for entry in composer.library()["prompts"].values()
+                    for fact in entry.get("grounding_fields") or [] if fact.startswith("F_")}
+        assert declared <= set(composer.WORDS) | numbers | set(evidence), declared - set(composer.WORDS) - numbers - set(evidence)
+        assert declared <= set(render_context.MEMBER_FACT_BUILDERS)
+        assert not declared & {"F_TRIGGER_VALUE", "F_CURRENT_VALUE"}

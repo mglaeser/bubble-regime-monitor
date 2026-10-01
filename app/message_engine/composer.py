@@ -186,13 +186,22 @@ _CONTROL_RE = re.compile(
 #: prompt leaves it out.
 _TRENDS = frozenset({"IN", "OUT", "unknown", "?"})
 WORDS: dict[str, frozenset[str]] = {
-    # the digest: the snapshot's band, which folds the coverage gate in
-    # (app/services/compute.py), and legs.faber_state's trend
+    # the digest: the snapshot's band - the whole of its producer's range,
+    # action_band_with_override's three bands and the two degraded displays
+    # compute.py folds the coverage gate into; neither the bare "suppressed"
+    # state nor any other word is a band of it - and legs.faber_state's trend
     "action_band": frozenset(ACTION_BANDS) | {"suppressed (block degraded)", "de-risk (data degraded)"},
     "override_suffix": frozenset({"", " OVERRIDE"}),
     "spy_trend": _TRENDS,
     "qqq_trend": _TRENDS,
-    # the alert contract's facts (app/alerts/render_context.py)
+    # the alert contract's facts the entries declare as words
+    # (app/alerts/render_context.py): the band states, the asset, the next
+    # check. The other facts an entry declares there are numbers by their
+    # builders - F_HEADLINE_MEDIAN, F_RF_COUNT, F_RF_REQUIRED, F_RF3_DISTANCE,
+    # and the evidence values F_BREADTH, F_D2, F_S3 and F_MISSED_SLOTS, whose
+    # sources are "number" and "count" specs (app/alerts/sources.py). The
+    # phrase set's MATERIAL_CHANGE slots, F_TRIGGER_VALUE and F_CURRENT_VALUE,
+    # are the alert renderer's; no entry declares them (#145 round 3).
     "F_BAND_EFFECTIVE": frozenset(ACTION_STATES),
     "F_BAND_PREVIOUS": frozenset(ACTION_STATES),
     "F_BAND_BASE": frozenset(ACTION_BANDS),

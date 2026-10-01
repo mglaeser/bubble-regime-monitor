@@ -42,6 +42,13 @@ converge, and 57 review rounds on #121 and 20 on #124 showed it.
   "suppressed (block degraded)" too; the trend states; the override
   suffix; the alert contract's band states, assets and recompute slot
   times), or the prior judgment, redacted and capped at 180 characters.
+  Each word domain is the whole of its producer's range, pinned there
+  (`tests/test_message_engine.py::TestRoundThreeOn145`): the digest's band
+  is `action_band_with_override`'s three bands and compute.py's two
+  degraded displays, nothing else; the other facts an alert entry declares
+  are numbers by their builders in `render_context.py` (the evidence
+  values from "number" and "count" source specs); the phrase set's
+  MATERIAL_CHANGE slots are the alert renderer's and no entry declares them.
   Anything else - text of any shape, a non-finite number, a structure -
   renders as a dash and stays out of the prompt (AGENTS.md ground rule 1).
   That type allowlist replaced the rules #126 rounds 2-4, 11 and 23 grew for
