@@ -67,11 +67,16 @@ that it never runs a release it cannot finish: that commit removes
 `deploy-watch.sh`, and a deploy of it through the old chain that failed and
 rolled back would leave the webhook app with nothing to run it (#143 round 18).
 
-Before merging - the old watchdog stops listening, and GitHub stops calling:
+Before merging - the old watchdog stops listening, GitHub stops calling, and
+a release the old chain has in flight finishes before anything else is
+touched (its service carries the same name the new deploy takes over at the
+install below, and the steps after the merge are run by hand against the
+checkout and the container it is working on; #143 round 33):
 
 ```bash
 systemctl --user disable --now bubblegauge-deploy.path
 rm ~/.config/systemd/user/bubblegauge-deploy.path
+while systemctl --user is-active --quiet bubblegauge-deploy.service; do sleep 10; done   # a release in flight finishes first
 ```
 
 and deactivate the repository's GitHub webhook. The service keeps running the

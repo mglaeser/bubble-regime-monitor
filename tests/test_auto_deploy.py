@@ -889,3 +889,20 @@ class TestRoundThirtyTwoOn143:
         probes = [c for c in calls if c.startswith("curl")]
         assert probes
         assert all(c.startswith("curl -q -fsS --noproxy * ") for c in probes), probes
+
+
+class TestRoundThirtyThreeOn143:
+    """#143 round 33, SOTA-A: the cutover disabled the old chain's path unit
+    and never drained its service - an old release in flight (the same unit
+    name, bubblegauge-deploy.service, which the install hands to the new
+    deploy) could race the hand-run fast-forward, the container swap and the
+    first deploy's migration. The old chain is drained before the merge."""
+
+    def test_the_cutover_drains_the_old_chain_before_the_merge(self):
+        doc = (ROOT / "docs/AUTO_DEPLOY.md").read_text()
+        cutover = doc[doc.index("## Moving from the webhook"):]
+        steps = [line.split("#")[0].strip() for line in cutover.splitlines()]
+        disable = steps.index("systemctl --user disable --now bubblegauge-deploy.path")
+        drain = steps.index("while systemctl --user is-active --quiet bubblegauge-deploy.service; do sleep 10; done")
+        pull = steps.index("git pull --ff-only")
+        assert disable < drain < pull
