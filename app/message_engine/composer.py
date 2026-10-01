@@ -233,9 +233,14 @@ def render_fallback(template: str, facts: dict[str, object]) -> str:
     "{F_BREADTH}": the fallback exists precisely for the moments when
     something is already wrong, and it must degrade into something a person
     can read.
+
+    A slot renders a TYPED fact and nothing else, whatever dict this is
+    given: the callers pass typed_facts, and the function holds the same
+    line on its own (#145 round 1, SOTA-C).
     """
     def _sub(match: re.Match[str]) -> str:
-        value = facts.get(match.group(1))
+        name = match.group(1)
+        value = typed(name, facts.get(name))
         return "-" if value is None else str(value)
 
     return _SLOT_RE.sub(_sub, template).strip()

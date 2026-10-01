@@ -49,6 +49,13 @@ converge, and 57 review rounds on #121 and 20 on #124 showed it.
   proof): the digest's block summaries are one number per indicator now,
   and the text facts of the entries no caller wires - times, durations, a
   reason, the reminder's summary - are a dash until they become numbers.
+  That no caller wires them is pinned, not asserted: the engine's one entry
+  point is `engine_delivery.deliver`, the app calls it once, from the daily
+  digest; the alert dispatcher renders the phrase set and the failure alarm
+  writes its own text, and outside the engine's package only the digest and
+  the entry point import it (`tests/test_message_engine.py::TestRoundOneOn145`).
+  The template renderer holds the same line by itself: a slot renders a
+  typed fact, whatever dict `render_fallback` is given.
   The library's other sections (its hard rules, output format and SMS
   notes, written for the replaced two-variant design) are never sent. Its
   tasks ask for one message and every data section is headed DATA: the

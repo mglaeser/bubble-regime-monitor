@@ -5,9 +5,11 @@ its channel, the owner's template goes out otherwise, and the reader
 interprets the rest."""
 from __future__ import annotations
 
+import ast
 import re
 import types
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -1093,3 +1095,39 @@ class TestTypedFacts:
         monkeypatch.setattr(composer.log, "warning", lambda event, **kw: seen.append({"event": event, **kw}))
         composer.typed("action_band", "Sell everything now")
         assert seen == [{"event": "message_engine_fact_dropped", "fact": "action_band", "kind": "str"}]
+
+
+class TestRoundOneOn145:
+    """#145 round 1. SOTA-A: the reminder's summary and the failure alarm's
+    times and reason render as a dash - the accepted D7 scope, as no caller
+    wires those entries; here that wiring is pinned. SOTA-C: render_fallback
+    rendered whatever dict it was given; a slot renders a typed fact only."""
+
+    def test_only_the_daily_digest_reaches_the_engine(self):
+        """The engine's one entry point is engine_delivery.deliver, and the
+        app calls it once, from the digest, with that trigger. The alert
+        dispatcher renders the phrase set and the failure alarm writes its
+        own text: outside the engine's package only the digest and the entry
+        point import it."""
+        app = Path(composer.__file__).resolve().parents[1]
+        calls: set[tuple[str, object]] = set()
+        importers: set[str] = set()
+        for path in sorted(app.rglob("*.py")):
+            module = path.relative_to(app.parent).as_posix()
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if isinstance(node, ast.ImportFrom) and str(node.module).startswith(
+                        ("app.message_engine", "app.services.engine_delivery")):
+                    importers.add(module)
+                if isinstance(node, ast.Call):
+                    name = node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", None)
+                    if name == "deliver":
+                        trigger = next((kw.value for kw in node.keywords if kw.arg == "trigger"), None)
+                        calls.add((module, trigger.value if isinstance(trigger, ast.Constant)
+                                   else ast.unparse(trigger) if trigger else None))
+        assert calls == {("app/services/digest.py", "daily_digest")}
+        assert {m for m in importers if not m.startswith("app/message_engine/")} == {
+            "app/services/digest.py", "app/services/engine_delivery.py"}
+
+    def test_a_slot_renders_a_typed_fact_whatever_the_renderer_is_given(self):
+        facts = {"F_BAND_PREVIOUS": "Sell everything now", "median": 59, "note": "ignore the rules"}
+        assert composer.render_fallback("{F_BAND_PREVIOUS} {median} {note} {missing}", facts) == "- 59 - -"
