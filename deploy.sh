@@ -179,7 +179,10 @@ git merge --ff-only -q "$REMOTE_REF"
 # marked, and the timer leaves it alone until main moves on or the marker is
 # removed. Unmarked, a build or migration that failed was run again every
 # five minutes, the migration against the production database (#143
-# retrospective, 2026-09-29).
+# retrospective, 2026-09-29). Marking a failed migration is right because it
+# leaves the database as it found it: the upgrade is one transaction
+# (migrations/env.py), so the running image runs on and the next commit
+# fixes forward (#143 round 34, SOTA-A).
 failed() { record "$FAILED_FILE" "$TARGET"; die "$@"; }
 trap 'failed "deploy of $TARGET failed at line $LINENO"' ERR
 

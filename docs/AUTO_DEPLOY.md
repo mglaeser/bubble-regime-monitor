@@ -24,7 +24,9 @@ commit without answering, is deployed again at the next tick.
 
 A deploy succeeds only when `/healthz` answers AND the service runs the new
 image. Otherwise the commit is marked failed (`.deploy-state/failed`) - as
-it is when its build or its migration fails; an error after the migration
+it is when its build or its migration fails (the upgrade is one transaction,
+so a failed migration leaves the database as it found it and the running
+image runs on); an error after the migration
 and before the health verdict (the image's inspection, the tag) marks
 nothing, since the schema has moved and this commit's image is the one fit
 for it: the next tick tries the commit again - and
