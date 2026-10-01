@@ -134,7 +134,7 @@ Base path `/api/v1`; every response is `{"data": ..., "meta": ...}` with the fiv
 
 ## Deployment & updates
 
-Updating a running server is a single command:
+Updating a running server to `main` is a single command (a changed `.env`, such as a rotated key, is applied by `systemctl --user restart bubblegauge.service`: the deploy moves code only):
 
 ```bash
 systemctl --user start bubblegauge-deploy.service   # or: make deploy

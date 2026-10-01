@@ -106,6 +106,7 @@ systemctl --user list-timers bubblegauge-deploy.timer   # next check
 journalctl --user -u bubblegauge-deploy.service -n 50    # last deploys
 systemctl --user status bubblegauge.service              # the container
 systemctl --user start bubblegauge-deploy.service        # deploy now (it waits for a run under way)
+systemctl --user restart bubblegauge.service             # apply a changed .env, e.g. a rotated key: the deploy moves code only
 cat .deploy-state/failed                                 # a failed commit, left alone until main moves on
 rm .deploy-state/failed                                  # ... unless removed: the next run tries it again
 ```

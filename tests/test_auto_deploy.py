@@ -71,6 +71,7 @@ case "$1" in
     if [[ -n "$KILL_ON_TAG" && "$2" == "$KILL_ON_TAG" ]]; then kill -9 "$PPID"; exit 137; fi
     resolve "$2" > "$SHIM_STATE/latest" ;;
   images)                                   # newest first, as podman lists them
+    [[ "$IMAGES_FAILS" != "1" ]] || exit 1
     for tag in latest "$TARGET_COMMIT" old7 old6 old5 old4 old3 old2 old1; do
       id="sha256:img-$tag"; [[ "$tag" == latest ]] && id="$(latest)"
       if [[ "$*" == *.ID* ]]; then echo "localhost/bubblegauge:$tag $id"; else echo "localhost/bubblegauge:$tag"; fi
@@ -730,3 +731,27 @@ class TestRoundTwentyOn143Build:
         assert context != "." and not context.startswith(str(deploy.repo)), build
         assert f"-f {context}/Containerfile" in build
         assert not Path(context).exists()          # the export is removed after the run
+
+
+class TestRoundTwentyFourOn143:
+    """#143 round 24, SOTA-A (two findings). The success path's prune ran its
+    `podman images` in a process substitution that inherited the error trap
+    (set -E): a passing failure there marked a healthy deploy as failed while
+    the run exited 0, and a later outage on the same commit was left alone.
+    Once the deploy is done, nothing marks the commit. And the quiet path is
+    blind to a changed .env by design: the deploy moves code, and a changed
+    .env (a rotated key) is applied by restarting the Quadlet unit, which the
+    runbook says."""
+
+    def test_a_failing_prune_marks_nothing(self, deploy):
+        code, calls = deploy(running="old0000", env={"IMAGES_FAILS": "1"})
+        assert code == 0 and not deploy.failed_file.exists()
+        assert deploy.good_file.read_text().split() == [TARGET_ID]
+        assert not any(c.startswith("podman rmi") for c in calls), calls
+
+    def test_the_runbook_applies_a_changed_env_by_restarting_the_unit(self):
+        doc = (ROOT / "docs/AUTO_DEPLOY.md").read_text()
+        operate = doc[doc.index("## Operate"):]
+        line = next(row for row in operate.splitlines()
+                    if row.startswith("systemctl --user restart bubblegauge.service"))
+        assert ".env" in line

@@ -36,6 +36,7 @@ up:
 	podman-compose up -d
 
 # One-command update & deploy: pull -> build -> migrate -> restart -> health-check.
+# Code only: a changed .env is applied by `systemctl --user restart bubblegauge.service`.
 deploy:
 	systemctl --user start bubblegauge-deploy.service
 

@@ -10,7 +10,9 @@
 # image it runs.
 #
 #   1. Fetch main. If the running service already runs that commit and
-#      answers /healthz, stop. A commit that already failed - its build, its
+#      answers /healthz, stop: the deploy moves code, and a changed .env is
+#      applied by `systemctl --user restart bubblegauge.service` (the unit
+#      reads it at every start; #143 round 24, SOTA-A). A commit that already failed - its build, its
 #      migration or its health check - waits for the next commit, or for its
 #      marker to be removed by hand.
 #   2. Fast-forward the checkout and build the image from an export of the
@@ -199,6 +201,11 @@ systemctl --user restart "$SERVICE" || true
 # container kept answering was a false success (#143 round 3, SOTA-A).
 if healthy && [[ "$(running_image)" == "$TARGET_ID" ]]; then
   banner "Deploy OK: $TARGET healthy"
+  # Done: from here on nothing may mark the commit. The prune's process
+  # substitution inherited the trap (set -E), and a passing `podman images`
+  # failure marked a healthy deploy as failed, so a later outage on the same
+  # commit was left alone (#143 round 24, SOTA-A).
+  trap - ERR
   rm -f "$FAILED_FILE"
   echo "$TARGET_ID" > "$GOOD_FILE"
   # The five newest commit tags stay. Older ones are removed by NAME and
