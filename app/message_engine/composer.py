@@ -305,15 +305,13 @@ def _well_formed(entry: dict[str, Any]) -> None:
     prompt = entry.get("prompt", "")
     if not isinstance(prompt, str):
         raise TypeError("'prompt' is not text")
-    if not isinstance(entry.get("llm", True), bool):
-        raise TypeError("'llm' is not true or false")
     # A field that is there is a list of names; a falsy "" or {} was read as
     # "none" (#126 round 20, SOTA-A, executed).
     names = entry.get("grounding_fields", [])
     if not isinstance(names, list) or not all(isinstance(name, str) and name.strip() for name in names):
         raise TypeError("'grounding_fields' is not a list of names")
     # ...and a task is written, not a heading alone (#126 round 20)
-    if entry.get("llm", True) and not dict(_SECTION_RE.findall(prompt)).get("TASK", "").strip():
+    if not dict(_SECTION_RE.findall(prompt)).get("TASK", "").strip():
         raise ValueError("an entry the model writes has no task")
 
 
@@ -416,11 +414,6 @@ def compose(*, trigger: str, channel: Channel,
         return _bare_event(trigger, channel, f"the template fails a basic check: {problem}",
                            known=True)
 
-    if entry.get("llm") is False:
-        # A FIXED trigger is never written by the model: test_message tests
-        # the pipe, host_outage reports the host itself.
-        return _issue(text=fallback, source="deterministic", trigger=trigger,
-                      channel=channel.value, reason="fixed trigger: never LLM-generated")
     short = gov.short_circuit(priority, settings)
     if short is not None:
         # The engine switched off, or a P1 that must arrive: no model, no

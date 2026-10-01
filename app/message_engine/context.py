@@ -31,8 +31,6 @@ TRIGGER_INDICATORS: dict[str, tuple[str, ...]] = {
     "RF4_PERSISTENT": ("d1",),
     "RF4_ALL_CLEAR": ("d1",),
     "RF3_CREDIT_STRESS": ("s5",),
-    "weekly_digest": (),
-    "reminder": (),
     "BAND_TO_DERISK": (),
     "BAND_TO_TRIM": (),
     "BAND_TO_HOLD": (),
@@ -48,13 +46,6 @@ TRIGGER_INDICATORS: dict[str, tuple[str, ...]] = {
     "RF_INPUT_UNAVAILABLE": (),
     "FLAG_CONTRACT_MISMATCH": (),
     "RECOMPUTE_OUTAGE": (),
-    "failure_alert_failing": (),
-    "failure_alert_recovery": (),
-    "failure_alert_stuck": (),
-    "breaker_notify": (),
-    "breaker_all_clear": (),
-    "test_message": (),
-    "host_outage": (),
 }
 
 #: The data sources each indicator is computed from, by source-registry key.

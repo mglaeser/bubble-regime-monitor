@@ -47,15 +47,19 @@ converge, and 57 review rounds on #121 and 20 on #124 showed it.
   That type allowlist replaced the rules #126 rounds 2-4, 11 and 23 grew for
   text (values written as text, block summaries, the reminder's registry
   proof): the digest's block summaries are one number per indicator now,
-  and the text facts of the entries no caller wires - times, durations, a
-  reason, the reminder's summary - are a dash until they become numbers.
-  That no caller wires them is pinned, not asserted: the engine's one entry
-  point is `engine_delivery.deliver`, the app calls it once, from the daily
-  digest; the alert dispatcher renders the phrase set and the failure alarm
-  writes its own text, and outside the engine's package only the digest and
-  the entry point import it (`tests/test_message_engine.py::TestRoundOneOn145`).
-  The template renderer holds the same line by itself: a slot renders a
-  typed fact, whatever dict `render_fallback` is given.
+  and the nine entries no caller wires - the weekly digest, the reminder,
+  the three failure alarms, the two breaker notices, the test message and
+  the host outage, whose times, durations, reason and summary were text -
+  left the library on the owner's ruling of 2026-10-01 (#145 round 2): their
+  senders write their own text, and they return with numeric facts when the
+  owner wires them through the engine. So the library declares only facts
+  a producer types, which is pinned (`tests/test_message_engine.py::TestRoundTwoOn145`),
+  as is the engine's wiring: `engine_delivery.deliver` is called once in
+  the app, from the daily digest, and outside the engine's package only the
+  digest and the entry point import it (`TestRoundOneOn145`). The template
+  renderer holds the type line by itself: a slot renders a typed fact,
+  whatever dict `render_fallback` is given. With the two fixed entries gone
+  no entry is `llm: false`, and the composer has no fixed-trigger path.
   The library's other sections (its hard rules, output format and SMS
   notes, written for the replaced two-variant design) are never sent. Its
   tasks ask for one message and every data section is headed DATA: the
@@ -114,14 +118,14 @@ converge, and 57 review rounds on #121 and 20 on #124 showed it.
   repository's own data model, and what a prompt shows of them carries no
   link (pinned), so there is nothing to harmonise for the libraries.
 - **Otherwise the template**: a reply that fails a basic check, a gateway
-  failure, a paced or budgeted-out call, a fixed trigger, a disabled engine
+  failure, a paced or budgeted-out call, a disabled engine
   or a P1 - each sends the owner's template with the current numbers.
 - **What stays**: the governor's pacing, budget and breaker (the cost of
   calling the model), the attempt rows, the library sign-off, provenance,
   and the admission gate. They are not gates on the content. Nor is the
   entry check: a library entry whose fields are not of their type - a
   template or prompt that is not text, fact names that are not a list of
-  names (a falsy "" or {} included), an "llm" that is not true or false,
+  names (a falsy "" or {} included),
   an entry the model writes without a written TASK - sends the bare event
   and is never coerced into a text (#126 rounds 17 and 20).
 

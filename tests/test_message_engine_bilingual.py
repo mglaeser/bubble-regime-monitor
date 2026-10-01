@@ -118,13 +118,6 @@ class TestComposeInGerman:
         assert out.source == "fallback"
         assert out.text == "bubblegauge: Vorsichtsstufe auf trim gewechselt (vorher: hold). Nächster Lauf 14:00 UTC."
 
-    def test_a_fixed_trigger_is_deterministic_in_german_too(self):
-        """The time is text, so a dash since owner decision D7; no caller
-        wires this entry."""
-        out = composer.compose(trigger="test_message", channel=Channel.IMESSAGE, priority=4,
-                               facts={"sent_at_utc": "14:00"}, settings=_settings(message_language="de"))
-        assert out.source == "deterministic" and out.text.startswith("bubblegauge Testnachricht - UTC")
-
     def test_the_setting_reaches_the_daily_digest_service(self, monkeypatch):
         monkeypatch.setenv("IMESSAGE_ENABLED", "true")
         monkeypatch.setenv("IMESSAGE_API_BASE_URL", "https://messages.example.com")
