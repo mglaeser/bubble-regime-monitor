@@ -362,17 +362,18 @@ class TestRoundFiveOn143:
     schema the previous image could not boot it (#134: a revision it does
     not ship fails the boot), and the rollback only looked like one. Since
     round 11 the rollback knows no schema: it is tried, the old image does not
-    come back, and the deploy fails loudly, to be fixed forward - and the
-    timer does not rebuild it every tick."""
+    come back, and the deploy fails loudly, to be fixed forward. Since round
+    36 the next tick tries it again: a service that is down is retried, the
+    build cached and the migration a no-op at head."""
 
     def test_after_a_migration_the_old_image_does_not_come_back(self, deploy):
         code, calls = deploy(running="old0000", healthy=False, schema_moves=True)
         assert code != 0
         assert "did not come back" in deploy.output
-        assert deploy.failed_file.read_text().split() == [TARGET]
+        assert not deploy.failed_file.exists()   # down anyway: not marked since round 36, tried again
 
-    def test_the_timer_leaves_it_alone_until_main_moves_on(self, deploy):
-        deploy(running="old0000", healthy=False, schema_moves=True)
+    def test_the_timer_leaves_a_rolled_back_commit_alone_until_main_moves_on(self, deploy):
+        deploy(running="old0000", healthy=False)   # rolled back: the one case that marks (round 36)
         code, calls = deploy(running="old0000", healthy=False)
         assert code == 0 and not any(c.startswith("podman build") for c in calls), calls
         deploy.failed_file.unlink()
@@ -395,11 +396,11 @@ class TestRoundSixOn143:
 
     def test_after_a_schema_move_an_older_image_does_not_come_back(self, deploy):
         code, _ = deploy(running="old0000", healthy=False, schema_moves=True)       # T
-        assert code != 0 and deploy.failed_file.read_text().split() == [TARGET]
+        assert code != 0 and not deploy.failed_file.exists()   # down: not marked since round 36
         code, calls = deploy(running="old0000", target="def5678", healthy=False,      # U
                              unhealthy=(TARGET_ID,))
         assert code != 0 and "did not come back" in deploy.output
-        assert deploy.failed_file.read_text().split() == ["def5678"]
+        assert not deploy.failed_file.exists()
 
     def test_a_quiet_tick_records_the_image(self, deploy):
         code, _ = deploy(running=TARGET)
@@ -521,14 +522,14 @@ class TestRoundElevenOn143:
         # still exists (#143 round 19: :latest can be a release that rolled back)
         assert seed < tag < rm < start < first_deploy
 
-    def test_a_failed_rollback_is_marked_too(self, deploy):
+    def test_a_failed_rollback_is_not_marked_since_round_36(self, deploy):
         deploy.good_file.write_text("sha256:running\n")   # seen healthy earlier; not any more
         code, calls = deploy(running="old0000", healthy=False, rollback_healthy=False)
         assert "podman tag sha256:running localhost/bubblegauge:latest" in calls   # it was tried
         assert code != 0 and "did not come back" in deploy.output
-        assert deploy.failed_file.read_text().split() == [TARGET]
+        assert not deploy.failed_file.exists()   # the service is down: a marker could only suppress the retry
         code, calls = deploy(running="old0000", healthy=False, rollback_healthy=False)
-        assert code == 0 and not any(c.startswith("podman build") for c in calls), calls
+        assert code != 0 and any(c.startswith("podman build") for c in calls), calls   # tried again
 
     def test_a_failed_commit_waits_whatever_the_service_does(self, deploy):
         deploy(running="old0000", healthy=False)
@@ -917,7 +918,8 @@ class TestRoundThirtyFiveOn143:
     commit that fits. The verdict is the commit's only when its image ran:
     the previous image still running marks nothing, and the next tick tries
     again. An image that was running already and is deployed again cannot be
-    told apart this way and stays the commit's failure."""
+    told apart this way; with nothing to roll back to it is down anyway, and
+    since round 36 retried rather than marked."""
 
     def test_a_restart_that_never_took_marks_nothing_after_a_migration(self, deploy):
         code, calls = deploy(running="old0000", schema_moves=True, restart_noop=True)
@@ -927,7 +929,39 @@ class TestRoundThirtyFiveOn143:
         code, calls = deploy(running="old0000", schema_moves=True)                   # the next tick
         assert code == 0 and deploy.good_file.read_text() == f"sha256:img-{TARGET}\n"
 
-    def test_an_image_that_ran_already_and_fails_again_stays_the_commits(self, deploy):
+    def test_an_image_that_ran_already_and_fails_again_is_not_read_as_a_restart_that_did_not_take(self, deploy):
         (deploy.state / "running").write_text(f"sha256:img-{TARGET}\n")
         code, _ = deploy(running=TARGET, restart_noop=True, unhealthy=(f"sha256:img-{TARGET}",))
+        assert code != 0 and "did not take" not in deploy.output and "nothing to roll back to" in deploy.output
+        assert not deploy.failed_file.exists()   # down anyway: retried, not marked (round 36)
+
+
+class TestRoundThirtySixOn143:
+    """#143 round 36, SOTA-A: a start failure that outlasted the health
+    window - the image never launched - rolled back, and after a migration
+    the previous image cannot boot: the service down, and the commit marked,
+    so every tick skipped the one image that could bring it up. Quadlet runs
+    the container with --rm and removes it on stop, so whether the image
+    launched cannot be read back afterwards; the contract is the simpler
+    one: the marker is written only when the rollback brought the previous
+    image back (it says: the service is up on the previous image, leave this
+    commit alone), and a service that is down anyway is marked nothing and
+    tried again at the next tick. This amends rounds 5, 6 and 11 for the
+    down case; a rolled-back commit is marked as before (round 2)."""
+
+    def test_a_service_the_rollback_did_not_bring_back_is_not_marked(self, deploy):
+        code, calls = deploy(running="old0000", schema_moves=True, restart_fails=True)
+        assert code != 0 and "did not come back" in deploy.output and "Not marked" in deploy.output
+        assert "podman tag sha256:running localhost/bubblegauge:latest" in calls   # the rollback was tried
+        assert not deploy.failed_file.exists()
+        code, _ = deploy(running="old0000", schema_moves=True)                     # the next tick, start failure gone
+        assert code == 0 and deploy.good_file.read_text() == f"sha256:img-{TARGET}\n"
+
+    def test_nothing_to_roll_back_to_is_not_marked_either(self, deploy):
+        code, _ = deploy(running="old0000", healthy=False, unhealthy=("sha256:running",))
+        assert code != 0 and "nothing to roll back to" in deploy.output
+        assert not deploy.failed_file.exists()
+
+    def test_a_rolled_back_commit_is_still_marked(self, deploy):
+        code, _ = deploy(running="old0000", healthy=False)
         assert code != 0 and deploy.failed_file.read_text() == f"{TARGET}\n"

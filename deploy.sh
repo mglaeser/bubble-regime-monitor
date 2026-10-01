@@ -152,11 +152,14 @@ fi
 if [[ "$TARGET" == "$RUNNING" && "$RUNNING_OK" == "1" ]]; then
   exit 0
 fi
-# A commit that failed its health check waits for the next commit, or for its
-# marker to be removed, whatever the service does: retried every tick, it took
-# a rolled-back service down every five minutes (#143 round 2, SOTA-A). A
-# service that did not come back is systemd's to restart and the owner's to
-# fix (#143 round 11).
+# A commit that failed its health check and was rolled back waits for the next
+# commit, or for its marker to be removed: retried every tick, it took a
+# rolled-back service down every five minutes (#143 round 2, SOTA-A). The
+# marker says just that - the service is up on the previous image, leave this
+# commit alone. A service the rollback did not bring back is marked nothing:
+# it is systemd's to restart, the owner's to fix, and the next tick's to try
+# again, since a marker could only suppress the one thing that may help
+# (#143 rounds 11 and 36).
 if [[ "$TARGET" == "$(cat "$FAILED_FILE" 2>/dev/null || true)" ]]; then
   exit 0
 fi
@@ -275,8 +278,14 @@ journalctl --user -u "$SERVICE" -n 40 --no-pager 2>&1 | sed 's/^/    | /' || tru
 # tries the commit again and, when it fails again, rolls back again (#143
 # round 16, SOTA-A: marked first, a unit stopped mid-rollback left every later
 # run quiet and the last good image never restored).
+# Marked only when the rollback brought the previous image back: a marker on
+# a service that is down anyway suppressed the one thing that may help - the
+# next tick trying the commit again, after a start failure that outlasted the
+# health window, or after a migration the previous image cannot boot (#143
+# round 36, SOTA-A). Down, the service is systemd's, the owner's, and the
+# next tick's.
 [[ -n "$PREVIOUS" ]] \
-  || failed "deploy of $TARGET failed its health check; no image was seen healthy before it, so there is nothing to roll back to. Fix forward."
+  || die "deploy of $TARGET failed its health check; no image was seen healthy before it, so there is nothing to roll back to. Not marked: tried again next tick. Fix forward."
 banner "Rolling back to the last good image"
 if podman tag "$PREVIOUS" "$IMAGE:latest"; then
   systemctl --user restart "$SERVICE" || true
@@ -284,4 +293,4 @@ if podman tag "$PREVIOUS" "$IMAGE:latest"; then
     failed "deploy of $TARGET failed its health check; rolled back."
   fi
 fi
-failed "deploy of $TARGET failed its health check, and the last good image did not come back either (after a migration it cannot boot the database, #134). Fix forward."
+die "deploy of $TARGET failed its health check, and the last good image did not come back either (after a migration it cannot boot the database, #134). Not marked: tried again next tick. Fix forward."
