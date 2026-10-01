@@ -531,13 +531,14 @@ class TestRoundElevenOn143:
         code, calls = deploy(running="old0000", healthy=False, rollback_healthy=False)
         assert code != 0 and any(c.startswith("podman build") for c in calls), calls   # tried again
 
-    def test_a_failed_commit_waits_whatever_the_service_does(self, deploy):
-        deploy(running="old0000", healthy=False)
+    def test_a_marked_commit_is_tried_again_once_the_service_is_down(self, deploy):
+        """Round 37 amended "whatever the service does": the marker holds while
+        the service answers. Down, the commit is tried again - and here it
+        comes up, so the marker goes."""
+        deploy(running="old0000", healthy=False)                     # rolled back, marked
         code, calls = deploy(running="old0000", active=False)
-        assert code == 0 and not any(c.startswith("podman build") for c in calls), calls
-        deploy.failed_file.unlink()
-        code, calls = deploy(running="old0000", active=False)
-        assert any(c.startswith("podman build") for c in calls), calls
+        assert code == 0 and any(c.startswith("podman build") for c in calls), calls
+        assert not deploy.failed_file.exists()
 
 
 class TestRoundTwelveOn143:
@@ -925,7 +926,8 @@ class TestRoundThirtyFiveOn143:
         code, calls = deploy(running="old0000", schema_moves=True, restart_noop=True)
         assert code != 0 and "did not take" in deploy.output
         assert not deploy.failed_file.exists()
-        assert "podman tag sha256:running localhost/bubblegauge:latest" not in calls   # no rollback either
+        assert calls.count("systemctl --user restart bubblegauge.service") == 1     # no rollback restart either
+        assert "podman tag sha256:running localhost/bubblegauge:latest" in calls      # :latest restored (round 37)
         code, calls = deploy(running="old0000", schema_moves=True)                   # the next tick
         assert code == 0 and deploy.good_file.read_text() == f"sha256:img-{TARGET}\n"
 
@@ -965,3 +967,36 @@ class TestRoundThirtySixOn143:
     def test_a_rolled_back_commit_is_still_marked(self, deploy):
         code, _ = deploy(running="old0000", healthy=False)
         assert code != 0 and deploy.failed_file.read_text() == f"{TARGET}\n"
+
+
+class TestRoundThirtySevenOn143:
+    """#143 round 37, SOTA-A, two findings. The marker's quiet exit ignored
+    the service's health, so a rolled-back service that stopped answering
+    without exiting - wedged, nothing for Restart= to see - stayed that way
+    for good: the marker holds while the service answers, and a marked
+    commit is tried again once it does not. And :latest, moved to the
+    candidate before the verdict, survived a rejected or stopped switch, so a
+    later restart of the service booted a never-validated image outside the
+    gate: :latest goes back to the previous image on every exit before a
+    successful verdict, a unit stop included."""
+
+    def test_a_marked_commit_is_tried_again_once_the_service_stops_answering(self, deploy):
+        deploy(running="old0000", healthy=False)                                   # rolled back, marked
+        code, calls = deploy(running="old0000", healthy=False)
+        assert code == 0 and not any(c.startswith("podman build") for c in calls)   # answering: left alone
+        code, calls = deploy(running="old0000", healthy=False, unhealthy=("sha256:running",))
+        assert code != 0 and any(c.startswith("podman build") for c in calls)       # wedged: tried again
+
+    def test_latest_goes_back_to_the_previous_image_on_a_rejected_switch(self, deploy):
+        code, calls = deploy(running="old0000", restart_noop=True)
+        assert code != 0 and "did not take" in deploy.output
+        assert [c for c in calls if c.startswith("podman tag")][-1] == "podman tag sha256:running localhost/bubblegauge:latest"
+        assert (deploy.state / "latest").read_text().strip() == "sha256:running"
+
+    def test_latest_stays_on_the_new_image_after_a_successful_verdict(self, deploy):
+        code, _ = deploy(running="old0000")
+        assert code == 0 and (deploy.state / "latest").read_text().strip() == f"sha256:img-{TARGET}"
+
+    def test_a_unit_stop_takes_the_same_way_out(self):
+        script = (ROOT / "deploy.sh").read_text()
+        assert "trap cleanup EXIT" in script and "trap 'exit 143' TERM" in script

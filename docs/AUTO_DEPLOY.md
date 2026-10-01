@@ -34,7 +34,11 @@ nothing, since the schema has moved and this commit's image is the one fit
 for it: the next tick tries the commit again - and
 `:latest` goes back to the last image seen healthy (`.deploy-state/good`,
 recorded whenever a run finds the service answering, and after every healthy
-deploy); the rollback counts only if that image answers too. The rollback knows
+deploy); the rollback counts only if that image answers too. `:latest` goes
+back to that image on every other exit before a successful verdict as well -
+a rejected switch, a unit stop - so that a later restart of the service never
+boots an image the gate did not pass; a kill mid-switch is left to the next
+tick. The rollback knows
 no schema: whether an image can run the database is decided by the image as it
 boots, where Alembic fails the upgrade to its own head - and with it the boot -
 on a revision the image does not ship. After a migration the old image
@@ -43,7 +47,9 @@ tries the commit again, and the next commit fixes it.
 
 A commit that failed and was rolled back waits for the next commit, or for
 its marker to be removed (`rm .deploy-state/failed`): the marker says the
-service is up on the previous image and this commit is left alone. A service
+service is up on the previous image and this commit is left alone - while
+it answers; once it stops answering, the commit is tried again (a wedged
+process exits nothing, so systemd restarts nothing; #143 round 37). A service
 the rollback did not bring back is marked nothing - a marker could only
 suppress the next tick trying the commit again, the one thing that may help
 after a start failure that outlasted the health window (#143 round 36) - and

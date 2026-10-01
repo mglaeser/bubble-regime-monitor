@@ -99,6 +99,24 @@ running_image() { podman inspect -f '{{.Image}}' "$CONTAINER" 2>/dev/null || tru
 # migrated and restarted the commit just rolled back (#143 round 29, SOTA-A).
 record() { printf '%s\n' "$2" > "$1.tmp" && sync "$1.tmp" && mv -f "$1.tmp" "$1"; }
 die()    { printf '\nERROR: %s\n' "$*" >&2; exit 1; }
+# What a deploy that ends before its verdict leaves behind: the build context
+# gone, and :latest back on the previous image. :latest moves to the candidate
+# before the verdict (the Quadlet unit's Image= is fixed), and a switch that
+# was rejected or stopped left it there, so a later restart of the service -
+# a crash, a reboot - booted a never-validated image on the production data,
+# outside this gate (#143 round 37, SOTA-A). The restore runs on every exit
+# the script controls, a unit stop included (TERM); a kill is left to the next
+# tick, which starts from whatever :latest is. A successful verdict sets DONE,
+# and :latest stays on the new image.
+CONTEXT=""; PREVIOUS=""; SWITCHED=0; DONE=0
+cleanup() {
+  [[ -z "$CONTEXT" ]] || rm -rf "$CONTEXT"
+  if (( SWITCHED && ! DONE )) && [[ -n "$PREVIOUS" ]]; then
+    podman tag "$PREVIOUS" "$IMAGE:latest" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT
+trap 'exit 143' TERM
 trap 'die "deploy failed at line $LINENO"' ERR
 
 # This process must be the deploy unit's main process, by systemd's own
@@ -159,8 +177,12 @@ fi
 # commit alone. A service the rollback did not bring back is marked nothing:
 # it is systemd's to restart, the owner's to fix, and the next tick's to try
 # again, since a marker could only suppress the one thing that may help
-# (#143 rounds 11 and 36).
-if [[ "$TARGET" == "$(cat "$FAILED_FILE" 2>/dev/null || true)" ]]; then
+# (#143 rounds 11 and 36). The marker holds while the service answers: a
+# rolled-back service that stopped answering without exiting - wedged, so
+# Restart= sees nothing - was left there for good by this quiet exit (#143
+# round 37, SOTA-A); not answering, the commit is tried again, and a try
+# that fails restarts the previous image on its way back.
+if [[ "$TARGET" == "$(cat "$FAILED_FILE" 2>/dev/null || true)" && "$RUNNING_OK" == "1" ]]; then
   exit 0
 fi
 banner "Deploying $TARGET (running: ${RUNNING:-none})"
@@ -197,7 +219,6 @@ banner "Building $IMAGE:$TARGET"
 # build context and ran against the production data under that label (#143
 # round 20, SOTA-A); git decides what the commit contains.
 CONTEXT="$(mktemp -d)"
-trap 'rm -rf "$CONTEXT"' EXIT
 git archive "$TARGET_SHA" | tar -x -C "$CONTEXT"
 podman build --label "$REVISION_LABEL=$TARGET" -t "$IMAGE:$TARGET" -f "$CONTEXT/Containerfile" "$CONTEXT"
 
@@ -229,6 +250,7 @@ PREVIOUS="$(cat "$GOOD_FILE" 2>/dev/null || true)"
 [[ "$PREVIOUS" != "$TARGET_ID" ]] || PREVIOUS=""
 banner "Restarting $SERVICE on $TARGET"
 podman tag "$IMAGE:$TARGET" "$IMAGE:latest"
+SWITCHED=1
 # Not fatal: a start that fails is an unhealthy deploy and is rolled back
 # below; under `set -e` it stopped the old service and skipped the rollback.
 systemctl --user restart "$SERVICE" || true
@@ -243,6 +265,7 @@ if healthy && [[ "$(running_image)" == "$TARGET_ID" ]]; then
   # failure marked a healthy deploy as failed, so a later outage on the same
   # commit was left alone (#143 round 24, SOTA-A).
   trap - ERR
+  DONE=1
   rm -f "$FAILED_FILE"
   record "$GOOD_FILE" "$TARGET_ID"
   # The five newest commit tags stay. Older ones are removed by NAME and
