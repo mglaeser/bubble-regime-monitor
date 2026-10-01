@@ -633,6 +633,10 @@ class TestRoundFifteenOn143:
         assert "Environment=BUBBLEGAUGE_DEPLOY_UNIT=1" in settings
         # the default, control-group: stopping the unit stops everything it started
         assert not any(line.startswith("KillMode=") for line in settings)
+        # rootless podman needs the setuid newuidmap/newgidmap to set up its user
+        # namespace; NoNewPrivileges blocked them on a fresh one (#143 round 22,
+        # executed on the host: "cannot set up namespace")
+        assert not any(line.startswith("NoNewPrivileges=") for line in settings)
 
     def test_the_migration_ends_with_its_unit(self, deploy):
         """Executed on the host: a oneshot unit's bash killed while `podman

@@ -16,4 +16,8 @@ WorkingDirectory=%h/playground/bubble-regime-monitor
 ExecStart=%h/playground/bubble-regime-monitor/deploy.sh
 Environment=BUBBLEGAUGE_DEPLOY_UNIT=1
 TimeoutStartSec=3600
-NoNewPrivileges=true
+# No NoNewPrivileges here: rootless Podman sets up its user namespace with the
+# setuid helpers newuidmap/newgidmap, which that setting blocks. Executed on
+# the host with a fresh namespace: "newuidmap: write to uid_map failed:
+# Operation not permitted; cannot set up namespace" under it, fine without
+# (#143 round 22, SOTA-A). The container unit keeps its own NoNewPrivileges.

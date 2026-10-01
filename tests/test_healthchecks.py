@@ -15,11 +15,11 @@ URL = "https://hc-ping.com/00000000-0000-4000-8000-000000000000"
 def posts(monkeypatch):
     sent: list[tuple[str, bytes]] = []
 
-    async def _post(self, url, *, content):
+    def _post(url, *, content, timeout):
         sent.append((url, content))
         return httpx.Response(200, text="OK")
 
-    monkeypatch.setattr(healthchecks.httpx.AsyncClient, "post", _post)
+    monkeypatch.setattr(healthchecks.httpx, "post", _post)
     return sent
 
 
@@ -59,10 +59,10 @@ def test_plain_http_is_refused(monkeypatch, posts):
 def test_it_never_raises(monkeypatch):
     _configure(monkeypatch, URL)
 
-    async def _boom(*_a, **_kw):
+    def _boom(*_a, **_kw):
         raise RuntimeError("network down")
 
-    monkeypatch.setattr(healthchecks.httpx.AsyncClient, "post", _boom)
+    monkeypatch.setattr(healthchecks.httpx, "post", _boom)
     healthchecks.ping(None)
 
 
@@ -118,11 +118,11 @@ def test_a_ping_healthchecks_refuses_is_said_without_the_url(monkeypatch):
         def warning(self, event, **fields):
             warned.append((event, fields))
 
-    async def _refused(self, url, *, content):
+    def _refused(url, *, content, timeout):
         return httpx.Response(404, text="not found")
 
     monkeypatch.setattr(healthchecks, "log", _Log())
-    monkeypatch.setattr(healthchecks.httpx.AsyncClient, "post", _refused)
+    monkeypatch.setattr(healthchecks.httpx, "post", _refused)
     healthchecks.ping("gather failed")
     assert warned == [("healthchecks_ping_rejected", {"status": 404})]
 
@@ -131,7 +131,6 @@ def test_a_ping_that_never_finishes_holds_nothing(monkeypatch):
     """#143 round 14, SOTA-A: httpx's timeouts bound each read, not the call,
     and the ping runs under the recompute lock - so a peer dripping bytes held
     every later recompute. The whole call has a deadline now."""
-    import asyncio
     import threading
     import time
 
@@ -143,26 +142,27 @@ def test_a_ping_that_never_finishes_holds_nothing(monkeypatch):
         def warning(self, event, **fields):
             warned.append((event, fields))
 
-    def _hang(*_a, **_kw):                   # a synchronous call that never ends
-        time.sleep(30)
-
-    async def _drip(self, *_a, **_kw):       # a response that never completes
-        await asyncio.sleep(30)
+    def _hang(*_a, **_kw):                   # a call that never ends
+        time.sleep(8)
 
     monkeypatch.setattr(healthchecks, "log", _Log())
     monkeypatch.setattr(healthchecks.httpx, "post", _hang)
-    monkeypatch.setattr(healthchecks.httpx.AsyncClient, "post", _drip)
     done = threading.Event()
     threading.Thread(target=lambda: (healthchecks.ping(None), done.set()), daemon=True).start()
     assert done.wait(5), "the ping held its caller - and the recompute lock - past its deadline"
-    assert warned == [("healthchecks_ping_failed", {"error": "TimeoutError"})]
+    assert warned == [("healthchecks_ping_slow", {"deadline_s": 0.5})]
+    # nothing waits for the abandoned call, the interpreter at shutdown included
+    # (#143 round 22, SOTA-A: a stuck resolver worker hung a graceful shutdown)
+    stuck = [t for t in threading.enumerate() if t.name == "healthchecks-ping"]
+    assert stuck and all(t.daemon for t in stuck)
 
 
 def test_a_resolver_that_hangs_holds_nothing(monkeypatch):
     """#143 round 17, SOTA-A: the deadline cancelled the request, but name
-    resolution runs on the loop's executor, which asyncio.run then waited for
+    resolution ran on the loop's executor, which asyncio.run then waited for
     on its way out - a blocked getaddrinfo held the ping, and the recompute
-    lock, past the deadline. The loop is closed without waiting for it."""
+    lock, past the deadline. Since round 22 the call runs on a daemon thread
+    that nothing waits for past the deadline."""
     import socket
     import threading
     import time
@@ -172,7 +172,7 @@ def test_a_resolver_that_hangs_holds_nothing(monkeypatch):
     real = socket.getaddrinfo
 
     def _hang(host, *args, **kwargs):
-        if host in ("hc-ping.com", b"hc-ping.com"):   # asyncio passes it as bytes
+        if host in ("hc-ping.com", b"hc-ping.com"):   # str or bytes, by resolver path
             time.sleep(8)                    # a resolver that does not answer
         return real(host, *args, **kwargs)
 

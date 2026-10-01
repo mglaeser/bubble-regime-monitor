@@ -10,7 +10,7 @@ its own channels: the one outage the service cannot report itself. Empty
 
 from __future__ import annotations
 
-import asyncio
+import threading
 
 import httpx
 
@@ -23,36 +23,32 @@ log = get_logger(__name__)
 _TIMEOUT_S = 10.0
 # The whole call, not each read: httpx's timeouts bound one I/O each, so a peer
 # dripping bytes kept the ping - and the recompute lock it runs under -
-# waiting for good (#143 round 14, SOTA-A). httpx leaves a total deadline to
-# the event loop; cancelling the request closes its connection.
+# waiting for good (#143 round 14, SOTA-A). The call runs on a daemon thread
+# joined for the deadline. Nothing it does can be cancelled from outside, name
+# resolution least of all; so nothing waits for it: not the caller past the
+# deadline, and not the interpreter at shutdown (#143 rounds 17 and 22,
+# SOTA-A). A late ping lands within the resolver's own timeouts, hours before
+# the next one.
 _DEADLINE_S = 15.0
 
 
-async def _post(target: str, body: bytes) -> httpx.Response:
-    async with httpx.AsyncClient(timeout=_TIMEOUT_S) as client:
-        return await asyncio.wait_for(client.post(target, content=body), _DEADLINE_S)
-
-
-def _post_by_deadline(target: str, body: bytes) -> httpx.Response:
-    """_post on a loop of its own, left without waiting for its executor.
-
-    Name resolution runs on the loop's default executor, where a blocked
-    getaddrinfo cannot be cancelled; asyncio.run waits for that executor on
-    its way out, so a resolver that did not answer held the ping - and the
-    recompute lock - past the deadline (#143 round 17, SOTA-A). close() shuts
-    the executor down without waiting: the resolver finishes on its own
-    thread. The callers, the scheduler's job and the refresh route's thread,
-    run no event loop of their own.
-    """
-    loop = asyncio.new_event_loop()
+def _send(target: str, body: bytes) -> None:
     try:
-        return loop.run_until_complete(_post(target, body))
-    finally:
-        loop.close()
+        response = httpx.post(target, content=body, timeout=_TIMEOUT_S)
+    except Exception as exc:
+        log.warning("healthchecks_ping_failed", error=sanitize(exc, limit=200) or type(exc).__name__)
+        return
+    if response.is_error:
+        # A ping Healthchecks refused (an unknown check, a rate limit, its own
+        # outage) is no ping: said, with the status only - the URL is the
+        # credential (#143 round 12, SOTA-A). Not retried: a lost success ping
+        # makes Healthchecks alert, and a failure also reaches the owner through
+        # the failure alarm.
+        log.warning("healthchecks_ping_rejected", status=response.status_code)
 
 
 def ping(failure: str | None) -> None:
-    """Report one recompute outcome: None is success."""
+    """Report one recompute outcome: None is success. Never raises."""
     url = get_settings().healthchecks_ping_url.strip()
     if not url:
         return
@@ -65,16 +61,9 @@ def ping(failure: str | None) -> None:
     failed = failure is not None
     target = url.rstrip("/") + ("/fail" if failed else "")
     body = (sanitize(failure, limit=500) or "failed") if failed else "ok"
-    try:
-        response = _post_by_deadline(target, body.encode())
-    except Exception as exc:
-        log.warning("healthchecks_ping_failed",
-                    error=sanitize(exc, limit=200) or type(exc).__name__)
-        return
-    if response.is_error:
-        # A ping Healthchecks refused (an unknown check, a rate limit, its own
-        # outage) is no ping: said, with the status only - the URL is the
-        # credential (#143 round 12, SOTA-A). Not retried: a lost success ping
-        # makes Healthchecks alert, and a failure also reaches the owner through
-        # the failure alarm.
-        log.warning("healthchecks_ping_rejected", status=response.status_code)
+    worker = threading.Thread(target=_send, args=(target, body.encode()),
+                              name="healthchecks-ping", daemon=True)
+    worker.start()
+    worker.join(_DEADLINE_S)
+    if worker.is_alive():
+        log.warning("healthchecks_ping_slow", deadline_s=_DEADLINE_S)
