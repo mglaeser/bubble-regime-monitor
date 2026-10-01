@@ -13,7 +13,8 @@
 #      answers /healthz, stop. A commit that already failed - its build, its
 #      migration or its health check - waits for the next commit, or for its
 #      marker to be removed by hand.
-#   2. Fast-forward the checkout and build the image, labelled with the commit.
+#   2. Fast-forward the checkout and build the image from an export of the
+#      commit (git archive), labelled with the commit.
 #   3. Migrate the database in a throwaway container; a failure stops here,
 #      while the service keeps running the old image.
 #   4. Point :latest at the new image and restart the Quadlet service.
@@ -158,7 +159,15 @@ trap 'failed "deploy of $TARGET failed at line $LINENO"' ERR
 
 # ---- 2. build -------------------------------------------------------------
 banner "Building $IMAGE:$TARGET"
-podman build --label "$REVISION_LABEL=$TARGET" -t "$IMAGE:$TARGET" -f Containerfile .
+# From an export of the commit, not from the working tree: what ships under
+# origin's label is exactly what origin has. Built from the tree, an untracked
+# file in the checkout - a stray migration, a source file - went into the
+# build context and ran against the production data under that label (#143
+# round 20, SOTA-A); git decides what the commit contains.
+CONTEXT="$(mktemp -d)"
+trap 'rm -rf "$CONTEXT"' EXIT
+git archive "$TARGET" | tar -x -C "$CONTEXT"
+podman build --label "$REVISION_LABEL=$TARGET" -t "$IMAGE:$TARGET" -f "$CONTEXT/Containerfile" "$CONTEXT"
 
 # ---- 3. migrate -----------------------------------------------------------
 banner "Migrating the database (alembic upgrade head)"

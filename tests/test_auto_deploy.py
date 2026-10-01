@@ -38,6 +38,7 @@ echo "git $*" >> "$CALLS"
 case "$1" in
   rev-parse) if [[ "$*" == "rev-parse HEAD" ]]; then echo "${HEAD_COMMIT:-$TARGET_COMMIT}"; else echo "$TARGET_COMMIT"; fi ;;
   diff) [[ "$DIRTY" != "1" ]] ;;
+  archive) tar -cf - --files-from /dev/null ;;      # an empty export of the commit
   *) : ;;
 esac
 """,
@@ -707,3 +708,21 @@ class TestRoundTwentyOn143:
         deploy.failed_file.unlink()
         code, calls = deploy(running="old0000")
         assert code == 0 and any(c.startswith("podman build") for c in calls), calls
+
+
+class TestRoundTwentyOn143Build:
+    """#143 round 20, SOTA-A: the clean-tree check saw modified tracked files
+    only, while the image was built from the working tree, so an untracked
+    file in the checkout - a stray migration, a source file - shipped under
+    origin's label. The image is built from `git archive` of the commit: what
+    ships is exactly what origin has, and git decides that."""
+
+    def test_the_image_is_built_from_an_export_of_the_commit(self, deploy):
+        code, calls = deploy(running="old0000")
+        assert code == 0
+        assert f"git archive {TARGET}" in calls
+        build = next(c for c in calls if c.startswith("podman build"))
+        context = build.split()[-1]
+        assert context != "." and not context.startswith(str(deploy.repo)), build
+        assert f"-f {context}/Containerfile" in build
+        assert not Path(context).exists()          # the export is removed after the run
