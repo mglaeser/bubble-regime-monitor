@@ -25,9 +25,9 @@ converge, and 57 review rounds on #121 and 20 on #124 showed it.
   bubblegauge is, that the owner interprets, research not advice, numbers
   as given); the entry's ROLE, TASK and DATA sections from the library with
   the numbers filled in; every fact the entry declares (`grounding_fields`:
-  for the digest, every number it reports and the judgment), by name - one
-  value per declared field under its declared name, which fills the
-  template too (`visible_facts`, #126 round 14);
+  for the digest, every number it reports, its indicators' sub-scores and
+  the judgment), by name - one value per declared field under its declared
+  name, which fills the template too (`typed_facts`, #126 round 14);
   the references for the trigger - the methodology and sources of its
   indicators (`app/message_engine/context.py`, repo-authored text only);
   and how to write: one message, in `MESSAGE_LANGUAGE`, for its channel
@@ -35,24 +35,44 @@ converge, and 57 review rounds on #121 and 20 on #124 showed it.
   check counts them (septets and GSM-7 on SMS, where `[ \ ] ^ { | } ~ €`
   count as two; code points on iMessage, in printable ASCII and Latin-1,
   the marks and the library's five emoji; #126 rounds 5-7). A fact the entry does not declare
-  never reaches the model (#126 round 1), and a string fact is one of the
-  monitor's own values - an action or trend state (the digest's band as the
-  snapshot displays it, "suppressed (block degraded)" too; #126 round 9),
-  a value written as text
-  (digits, and for words only units, time zones, months, weekdays and the
-  two trend assets: "14:00 UTC", "3h", "25 Sep 14:00Z" - or one such word
-  alone, "SPY"; never punctuation alone, #126 round 23), a block
-  summary keyed by the indicators' own ids, the alert renderer's text in a
-  field the entry declares `authorized_prose` (the reminder's condition
-  summary) when it proves to be a join of the phrase registry's fragments
-  (`registry_authored`, as on main since #112/#119) - or the bounded prior
-  judgment; anything else renders as a dash and stays out of the prompt
-  (AGENTS.md ground rule 1; #126 rounds 2-4 and 11). The library's other
-  sections (its hard rules, output format and SMS notes, written for the
-  replaced two-variant design) are never sent, and its tasks' instruction
-  to write an SMS and an iMessage variant in one reply is left out (#126
-  round 4); ten alert entries call their data "INJECTED DATA", which is
-  sent as their DATA (#126 round 22).
+  never reaches the model (#126 round 1), and a declared fact is TYPED
+  (owner decision D7, 2026-09-28; `composer.typed`): a finite number, a
+  truth value, one of the monitor's own words for that fact
+  (`composer.WORDS`: the digest's band as the snapshot displays it,
+  "suppressed (block degraded)" too; the trend states; the override
+  suffix; the alert contract's band states, assets and recompute slot
+  times), or the prior judgment, redacted and capped at 180 characters.
+  Each word domain is the whole of its producer's range, pinned there
+  (`tests/test_message_engine.py::TestRoundThreeOn145`): the digest's band
+  is `action_band_with_override`'s three bands and compute.py's two
+  degraded displays, nothing else; the other facts an alert entry declares
+  are numbers by their builders in `render_context.py` (the evidence
+  values from "number" and "count" source specs); the phrase set's
+  MATERIAL_CHANGE slots are the alert renderer's and no entry declares them.
+  Anything else - text of any shape, a non-finite number, a structure -
+  renders as a dash and stays out of the prompt (AGENTS.md ground rule 1).
+  That type allowlist replaced the rules #126 rounds 2-4, 11 and 23 grew for
+  text (values written as text, block summaries, the reminder's registry
+  proof): the digest's block summaries are one number per indicator now,
+  and the nine entries no caller wires - the weekly digest, the reminder,
+  the three failure alarms, the two breaker notices, the test message and
+  the host outage, whose times, durations, reason and summary were text -
+  left the library on the owner's ruling of 2026-10-01 (#145 round 2): their
+  senders write their own text, and they return with numeric facts when the
+  owner wires them through the engine. So the library declares only facts
+  a producer types, which is pinned (`tests/test_message_engine.py::TestRoundTwoOn145`),
+  as is the engine's wiring: `engine_delivery.deliver` is called once in
+  the app, from the daily digest, and outside the engine's package only the
+  digest and the entry point import it (`TestRoundOneOn145`). The template
+  renderer holds the type line by itself: a slot renders a typed fact,
+  whatever dict `render_fallback` is given. With the two fixed entries gone
+  no entry is `llm: false`, and the composer has no fixed-trigger path.
+  The library's other sections (its hard rules, output format and SMS
+  notes, written for the replaced two-variant design) are never sent. Its
+  tasks ask for one message and every data section is headed DATA: the
+  data fixes of D7, which retired the composer's rewrites of both (#126
+  rounds 4 and 22) and started sending the eight DATA sections a
+  "DATA (...)" heading had kept from the model.
 - **The basic checks** (`app/message_engine/checks.py`): something visible,
   no control character, only the channel's alphabet, no link, within the
   channel's length. The alphabet is an allowlist: GSM-7
@@ -82,8 +102,9 @@ converge, and 57 review rounds on #121 and 20 on #124 showed it.
   message for its channel and no prompt asks for variants (#126 round 4);
   the filter that also refused channel names is gone (round 13; the
   owner's rulings of 2026-09-25/26). The length is counted in
-  septets on SMS and in code points on iMessage. The template meets the checks too: a
-  template a fact broke sends the bare event. Nothing about what the text
+  septets on SMS and in code points on iMessage. The template meets the checks too, its
+  length among them: a template that fails one sends the bare event
+  (decision 7). Nothing about what the text
   says: a number the facts do not carry, or a word the old lexicon banned,
   goes out as written, and that is pinned.
 - **Libraries over rules of our own** (the owner, 2026-09-26: robustness
@@ -104,14 +125,14 @@ converge, and 57 review rounds on #121 and 20 on #124 showed it.
   repository's own data model, and what a prompt shows of them carries no
   link (pinned), so there is nothing to harmonise for the libraries.
 - **Otherwise the template**: a reply that fails a basic check, a gateway
-  failure, a paced or budgeted-out call, a fixed trigger, a disabled engine
+  failure, a paced or budgeted-out call, a disabled engine
   or a P1 - each sends the owner's template with the current numbers.
 - **What stays**: the governor's pacing, budget and breaker (the cost of
   calling the model), the attempt rows, the library sign-off, provenance,
   and the admission gate. They are not gates on the content. Nor is the
   entry check: a library entry whose fields are not of their type - a
   template or prompt that is not text, fact names that are not a list of
-  names (a falsy "" or {} included), an "llm" that is not true or false,
+  names (a falsy "" or {} included),
   an entry the model writes without a written TASK - sends the bare event
   and is never coerced into a text (#126 rounds 17 and 20).
 
@@ -327,7 +348,17 @@ had silently assumed every row was an attempt:
   answered None and the 30-second retry never fired. NOT_ASKED is excluded
   there too: the question is how the last ATTEMPT ended.
 
-## Decision 7 — the fallback is a CONTRACT, not a consolation
+## Decision 7 — the fallback is a CONTRACT, not a consolation (AMENDED by D7)
+
+**Since owner decision D7 (2026-09-28)** a template is sent as rendered or not
+at all. Its facts are typed (decision 16), so their width is bounded by what
+they are: a number, one of a closed set of words, the judgment at its cap. CI
+renders every template, in every language and on both channels, with each
+fact at its widest and holds it to the basic checks
+(`tests/test_message_engine.py::TestTypedFacts`); at run time a template that
+still fails one - a number far wider than the monitor writes - sends the bare
+event. The clipping and the fact-shortening below (and decision 18) are gone.
+What follows is the history the amendment replaced.
 
 The generated path is validated and rejected on overrun. The fallback path had
 no check at all — and it is the path taken when something is already wrong, so
@@ -433,13 +464,16 @@ before the channel, the signature and admission, and its refusal logs
 nothing of the object (round 14) — until a `Composed` is proved the
 composer's, every field of it is the caller's string.
 
-## Decision 16 — a fact is a scalar, redacted
+## Decision 16 — a fact is typed (AMENDED by D7)
 
-A fact is a scalar - a dict or list renders as a dash - and every string
-passes the repository's redaction chokepoint (`app.redaction.sanitize`), the
-one the failure alert uses, before it reaches the prompt or a template slot
-(#112 rounds 4 and 6); a string must also be one of the monitor's own values
-(decision 24). The override suffix is derived, never supplied.
+A fact is a finite number, a truth value, one of the monitor's own words for
+that fact, or the judgment - a dict, a list, any other text or a non-finite
+number renders as a dash (decision 24; owner decision D7, 2026-09-28). The
+judgment passes the repository's redaction chokepoint
+(`app.redaction.sanitize`), the one the failure alert uses (#112 rounds 4 and
+6), loses its control characters and is capped. The override suffix is a
+fact the digest supplies (" OVERRIDE" or nothing), one of its own two words;
+the composer derives none.
 
 ## Decision 17 — the transport is the channel the Composed was made for
 
@@ -447,7 +481,10 @@ A `Composed` is fitted and validated for ONE channel. A sender names its
 channel; the gate refuses a sender that does not match the `Composed`'s, or
 names none (#112 round 13). The `Composed`'s channel is bound by its token.
 
-## Decision 18 — when a render overflows, the facts give way first
+## Decision 18 — when a render overflows, the facts give way first (SUPERSEDED by D7)
+
+Superseded by the amendment to decision 7: a typed fact has a bounded width,
+so no fact is shortened and no template is clipped. The history:
 
 The fit clipped the rendered text from the end, so an over-long fact in the
 middle of the breaker notice cost it "Scores and alerts unaffected." — the
@@ -473,8 +510,11 @@ Two entries declared the contract's source attribute (`base_action_band`,
 `missed_recompute_slots`) while the alert contract supplies the fact id
 (`F_BAND_BASE`, `F_MISSED_SLOTS`), so the live value rendered as a dash and
 was invisible to the model (#112 round 9). Every rule-driven entry declares
-contract ids, and the contract's own `FACT_SOURCES` table is the slot alias
-table.
+contract ids. **Since owner decision D7** every slot, in every template and
+prompt section, names the fact its entry declares (`F_BAND_EFFECTIVE`, not
+`band_effective`; `F_NEXT_CHECK`, a bare HH:MM before the template's " UTC"),
+so the composer keeps no alias table and resolves no other spelling; a test
+holds every slot of the library to its entry's declared facts.
 
 ## Decision 23 — one language switch for both paths
 

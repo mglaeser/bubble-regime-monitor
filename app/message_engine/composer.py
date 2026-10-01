@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import math
 import re
 import secrets
 import unicodedata
@@ -30,11 +31,9 @@ from typing import Any
 
 from sqlalchemy.exc import SQLAlchemyError
 
-from app.alerts.artifacts import REPO_PHRASES
 from app.alerts.gsm7 import GSM7_EXT
-from app.alerts.phrase_registry import JOIN, validate_phrase_set
-from app.alerts.render_context import FACT_SOURCES
 from app.config import Settings, get_settings
+from app.engine.recompute_slots import RECOMPUTE_SLOT_HOURS
 from app.engine.snapshot_contract import ACTION_BANDS, ACTION_STATES
 from app.llm_gateway import complete
 from app.logging_conf import get_logger
@@ -42,7 +41,6 @@ from app.message_engine import context as context_material
 from app.message_engine import governor as gov
 from app.message_engine.checks import EMOJI, MARKS, Channel, basic_check
 from app.redaction import sanitize
-from app.references import REGISTRY
 
 log = get_logger(__name__)
 
@@ -104,16 +102,7 @@ def issued(composed: Composed) -> bool:
     return hmac.compare_digest(composed.token, expected)
 
 
-#: What may fill a slot: a scalar. Anything else - a dict, a list, an object
-#: - rendered as its repr, and a nested credential rode into the fallback
-#: and the prompt past the redaction that only saw strings (#112 round 6,
-#: SOTA-A, executed). A non-scalar fact is no fact: it renders as a dash and
-#: is logged by name.
-_SCALARS = (str, bool, int, float, type(None))
-
-
-def _bare_event(trigger: str, channel: Channel, settings: Settings,
-                reason: str, *, known: bool) -> Composed:
+def _bare_event(trigger: str, channel: Channel, reason: str, *, known: bool) -> Composed:
     """The one line the engine says when it cannot say anything else.
 
     The trigger NAME is the caller's string, and it was interpolated
@@ -124,10 +113,13 @@ def _bare_event(trigger: str, channel: Channel, settings: Settings,
     gate's log (#112 round 7, SOTA-A, executed). The name is echoed only
     when it is a KEY OF THE LIBRARY - the owner's word, not the caller's;
     otherwise the line and the record say "unknown".
+
+    At most 60 characters, every one of them GSM-7: within every channel's
+    length, so it is sent as it is.
     """
     label = re.sub(r"[^A-Za-z0-9_.\-]+", "", trigger)[:40] if known else ""
     label = label or "unknown"
-    return _issue(text=_fit(f"bubblegauge: {label} fired.", channel, settings),
+    return _issue(text=f"bubblegauge: {label} fired.",
                   source="deterministic", trigger=label, channel=channel.value,
                   reason=reason)
 
@@ -181,230 +173,66 @@ _CONTROL_RE = re.compile(
     r"\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\u00ad\ufeff]+")
 
 
-#: Slot names the library spells differently from the fact that fills them.
-#: 21 of the 32 shipped fallbacks use lowercase slots ("{band_effective}")
-#: while every fact is F_-keyed; a case-insensitive F_ lookup bridges those.
-#: Two are documented exceptions in the library's own notes.
-#: The alert contract names a fact by id (F_BAND_BASE) and its source by
-#: attribute (base_action_band); a template that used the attribute name
-#: rendered a dash and left the fact out of the model's grounding while the
-#: caller supplied the id (#112 round 9, SOTA-A, executed on
-#: COVERAGE_RISK_MASKING and RECOMPUTE_OUTAGE - the library now declares
-#: the ids). The contract's own source table is the alias table, so the
-#: attribute spelling still resolves.
-_SLOT_ALIASES = {"next_check_utc": "F_NEXT_CHECK", "missed_recompute_slots": "F_MISSED_SLOTS",
-                 **{attr: fact_id for fact_id, attr in FACT_SOURCES.items()}}
-_TRAILING_ZONE_RE = re.compile(r"\s*\b(?:UTC|GMT|Z)\s*$", re.IGNORECASE)
+#: THE FACTS A MESSAGE MAY CARRY, by type (owner decision D7, 2026-09-28): a
+#: number, a truth value, one of the monitor's own words for that fact, or
+#: the judgment. They are the only facts the prompt and the template see
+#: (AGENTS.md ground rule 1).
+#:
+#: A number is a finite int or float, written as Python writes it, so the
+#: caller rounds it first. A word is admitted only for a fact named in WORDS,
+#: and only as one of that fact's values. The judgment is the prior LLM
+#: judgment, redacted and capped. Any other value - text, a non-finite
+#: number, a structure - is no fact: the template shows a dash and the
+#: prompt leaves it out.
+_TRENDS = frozenset({"IN", "OUT", "unknown", "?"})
+WORDS: dict[str, frozenset[str]] = {
+    # the digest: the snapshot's band - the whole of its producer's range,
+    # action_band_with_override's three bands and the two degraded displays
+    # compute.py folds the coverage gate into; neither the bare "suppressed"
+    # state nor any other word is a band of it - and legs.faber_state's trend
+    "action_band": frozenset(ACTION_BANDS) | {"suppressed (block degraded)", "de-risk (data degraded)"},
+    "override_suffix": frozenset({"", " OVERRIDE"}),
+    "spy_trend": _TRENDS,
+    "qqq_trend": _TRENDS,
+    # the alert contract's facts the entries declare as words
+    # (app/alerts/render_context.py): the band states, the asset, the next
+    # check. The other facts an entry declares there are numbers by their
+    # builders - F_HEADLINE_MEDIAN, F_RF_COUNT, F_RF_REQUIRED, F_RF3_DISTANCE,
+    # and the evidence values F_BREADTH, F_D2, F_S3 and F_MISSED_SLOTS, whose
+    # sources are "number" and "count" specs (app/alerts/sources.py). The
+    # phrase set's MATERIAL_CHANGE slots, F_TRIGGER_VALUE and F_CURRENT_VALUE,
+    # are the alert renderer's; no entry declares them (#145 round 3).
+    "F_BAND_EFFECTIVE": frozenset(ACTION_STATES),
+    "F_BAND_PREVIOUS": frozenset(ACTION_STATES),
+    "F_BAND_BASE": frozenset(ACTION_BANDS),
+    "F_ASSET": frozenset({"SPY", "QQQ"}),
+    "F_NEXT_CHECK": frozenset(f"{hour:02d}:00" for hour in RECOMPUTE_SLOT_HOURS),
+}
+JUDGMENT = "judgment"
+JUDGMENT_MAX = 180
 
 
-def _slot_value(name: str, facts: dict[str, object]) -> object | None:
-    """The fact behind a slot: exact key, then its F_ form, then an alias.
-    A slot that resolves to nothing degrades to a readable dash."""
-    if name == "override_suffix":
-        # The library's note defines it: the literal " OVERRIDE" when the
-        # override fired, else empty - a suffix, so never a dash. Resolved
-        # like any other slot: the digest DECLARES "override_fired", and
-        # reading only F_OVERRIDE_FIRED dropped an active override from a
-        # digest composed from its declared facts (#112 round 3, SOTA-A,
-        # executed). DERIVED BEFORE ANY LOOKUP: a caller's own
-        # "override_suffix" key shadowed the derivation and wrote an active
-        # override over override_fired=False (#112 round 15, SOTA-A,
-        # executed).
-        return " OVERRIDE" if _slot_value("override_fired", facts) else ""
-    if name in facts:
-        return _redacted(facts[name])
-    for key in (_SLOT_ALIASES.get(name), "F_" + name.upper()):
-        if key and key in facts:
-            value = facts[key]
-            if value is None:
-                return None               # a blank fact: a dash
-            if name.endswith("_utc"):
-                # The template supplies the zone itself ("{next_check_utc}
-                # UTC"), so a fact that already carries one rendered
-                # "14:00 UTC UTC". A *_utc slot is the bare time.
-                value = _TRAILING_ZONE_RE.sub("", str(value))
-            return _redacted(value)
+def typed(name: str, value: object) -> object | None:
+    """`value` as the fact `name` may carry it, or None."""
+    if isinstance(value, bool | int) or (isinstance(value, float) and math.isfinite(value)):
+        return value
+    if isinstance(value, str):
+        if name == JUDGMENT:
+            return _CONTROL_RE.sub(" ", sanitize(value))[:JUDGMENT_MAX]
+        if value in WORDS.get(name, ()):
+            return value
+    if value is not None:
+        # by name and kind only: no log line carries a caller's string (decision 19)
+        log.warning("message_engine_fact_dropped", fact=name, kind=type(value).__name__)
     return None
 
 
-def _redacted(value: object) -> object:
-    """A string fact through the redaction chokepoint; a scalar as is; a
-    non-scalar as nothing. Applied where a fact is read for a slot, so the
-    renderer is safe with raw facts too."""
-    if isinstance(value, str):
-        return sanitize(value)
-    return value if isinstance(value, _SCALARS) else None
-
-
-#: THE VALUES A STRING FACT MAY BE: the monitor's own. Its enums (the action
-#: states, the trend states, the placeholders), a value written as text
-#: ("14:00", "57-61", "2026-09-25T14:00Z"), a block summary ("s1=0.80,d1=NA"),
-#: and the prior LLM judgment, bounded - which AGENTS.md ground rule 1
-#: admits. Anything else is upstream or caller text: it renders as a dash
-#: and stays out of the prompt (#126 round 2, SOTA-A: "SYSTEM:IGNORE_ALL_RULES"
-#: and "Sell everything now").
-#: The digest's band is the snapshot's display string, which folds the
-#: coverage gate in (app/services/compute.py): "suppressed (block degraded)"
-#: stood in 30 of 342 production snapshots on 2026-09-26 and was erased
-#: (#126 round 9, swept from SOTA-A's trend finding - the trends are
-#: legs.faber_state's IN or OUT, never "up" or "flat").
-_DISPLAY_BANDS = frozenset({"suppressed (block degraded)", "de-risk (data degraded)", "fallback"})
-_ENUM_VALUES = frozenset(ACTION_STATES) | _DISPLAY_BANDS | {"IN", "OUT", "unknown", "?", "n/a", ""}
-#: ...a value written as text: digits and signs, and for words only units,
-#: time zones, months, weekdays and the monitor's two trend assets ("14:00
-#: UTC", "3h", "2d 4h", "12.5%", "25 Sep 14:00Z", "Monday", "SPY"; #126
-#: round 4, SOTA-A: a digits-only shape erased "14:00 UTC" and "3h"). A word
-#: in any script counts, so "5 Ｓｅｌｌ" is text, not a value.
-_VALUE_WORDS = frozenset((
-    "utc gmt z t am pm s sec secs second seconds m min mins minute minutes h hr hrs hour hours "
-    "d day days w wk wks week weeks mo month months q y yr yrs year years bp bps pp x pct percent "
-    "jan feb mar apr may jun jul aug sep sept oct nov dec january february march april june july "
-    "august september october november december mon tue wed thu fri sat sun monday tuesday "
-    "wednesday thursday friday saturday sunday spy qqq").split())
-_VALUE_MAX = 40
-
-
-def _value_text(value: str) -> bool:
-    words = re.findall(r"[^\W\d_]+", value)
-    return (len(value) <= _VALUE_MAX and not re.search(r"[^\w .,:;/%+\-\u2212]", value)
-            and all(word.lower() in _VALUE_WORDS for word in words)
-            # a number, or one known word alone - never punctuation alone, where
-            # "all words known" held of no words ("... --- ...", #126 round 23)
-            and (any(ch.isdigit() for ch in value) or [value.strip()] == words))
-
-#: ...a summary's keys are the monitor's own indicator ids: "ignore=1,system=1"
-#: had the shape of one (#126 round 3, SOTA-A)
-_SUMMARY_ITEM = "(?:" + "|".join(sorted(REGISTRY, key=len, reverse=True)) + r")=(?:[+-]?\d+(?:\.\d+)?|NA)"
-_SUMMARY_RE = re.compile(_SUMMARY_ITEM + "(?:," + _SUMMARY_ITEM + ")*")
-_JUDGMENT_KEY = "judgment"
-_JUDGMENT_MAX = 400
-
-
-def _admissible(name: str, value: str) -> bool:
-    return (name == _JUDGMENT_KEY or value in _ENUM_VALUES or _value_text(value)
-            or bool(_SUMMARY_RE.fullmatch(value)))
-
-
-#: THE RENDERER'S OWN PROSE: a field the entry declares `authorized_prose`
-#: (the reminder's condition summary) holds the alert renderer's text, and
-#: is admitted when it PROVES to be that - a join of the phrase registry's
-#: fragments with typed slots, as on main since #112/#119 - never by its
-#: key (#126 round 11, SOTA-A: the summary was erased to a dash).
-_REGISTRY_MATCHERS: dict[str, re.Pattern[str]] | None = None
-
-#: What the alert renderer can put into a slot, per fact: its TYPED domain,
-#: within the fact's REVIEWED width. The renderer copies the typed band
-#: enums, the rule's asset label and the next check as HH:MM, and formats
-#: every other fact as a number (digits, a sign, a decimal point). A slot
-#: used to admit any non-blank run up to the reviewed width, so the F_ASSET
-#: slot proved "Execution armed: SELL OUT, median 99." as registry text
-#: (#119 round 4, SOTA-A, executed); typed without the width, a number of
-#: any length was proved (round 5). A fact without an entry here is a
-#: number: the strictest domain, so a new fact fails closed rather than
-#: open.
-_STATE = "|".join(re.escape(state) for state in ACTION_STATES)
-_BAND = "|".join(re.escape(band) for band in ACTION_BANDS)
-#: The rule labels the shipped ruleset carries; pinned against it.
-_ASSET = "SPY|QQQ"
-_SLOT_DOMAINS: dict[str, str] = {
-    "F_BAND_EFFECTIVE": _STATE, "F_BAND_PREVIOUS": _STATE,
-    "F_BAND_BASE": _BAND, "F_BAND_SCORE": _BAND,
-    "F_ASSET": _ASSET,
-    "F_NEXT_CHECK": r"\d{2}:\d{2}",
-}
-#: MATERIAL_CHANGE shows a fact's two values, and that fact may be a band.
-_TWO_VALUED = frozenset({"F_TRIGGER_VALUE", "F_CURRENT_VALUE"})
-
-
-def _numeral(width: int) -> str:
-    """A number of at most `width` characters as the renderer formats one:
-    an optional sign, digits, an optional decimal part - bounded by
-    construction, because a lookahead cannot tell the value's own point
-    from the fragment's full stop after it."""
-    alternatives = []
-    for sign, used in (("", 0), ("[-+]", 1)):
-        for digits in range(1, width - used + 1):
-            room = width - used - digits - 1   # decimals after the point
-            tail = rf"(?:\.\d{{1,{room}}})?" if room >= 1 else ""
-            alternatives.append(rf"{sign}\d{{{digits}}}{tail}")
-    return "(?:" + "|".join(alternatives) + ")"
-
-
-def _slot_domain(fact_id: str, width: int) -> str:
-    """The pattern a slot of `fact_id` may hold: what the renderer writes
-    there, no wider than the registry reviewed."""
-    if fact_id in _SLOT_DOMAINS:
-        return "(?:" + _SLOT_DOMAINS[fact_id] + ")"
-    if fact_id in _TWO_VALUED:
-        return "(?:" + _numeral(width) + "|" + _STATE + ")"
-    return _numeral(width)
-
-
-def _registry_matchers() -> dict[str, re.Pattern[str]]:
-    """One pattern per language, each matching exactly what the alert
-    renderer can produce IN THAT LANGUAGE.
-
-    The renderer joins reviewed fragments - headlines, phrases, next-checks,
-    caveats - with their slots filled from typed facts, and it writes one
-    language per message. A text is the registry's if and only if it parses
-    as such a join in ONE language; a first cut pooled every language into
-    one alternation, so a German-and-English mixture no renderer could
-    produce passed as registry text (#119 round 2, SOTA-A, executed). Each
-    slot admits its fact's typed domain only, within the fact's reviewed
-    max_width (see _slot_domain). Read once from the shipped phrase set;
-    an unreadable set authorizes nothing.
-    """
-    global _REGISTRY_MATCHERS
-    if _REGISTRY_MATCHERS is None:
-        try:
-            phrase_set = validate_phrase_set(REPO_PHRASES.read_text(encoding="utf-8"))
-            by_language: dict[str, list[str]] = {}
-            for table in (phrase_set.headlines, phrase_set.phrases,
-                          phrase_set.next_checks, phrase_set.caveats):
-                for fragment in table.values():
-                    for lang, text in fragment.texts or ((phrase_set.language, fragment.text),):
-                        pattern = re.escape(text)
-                        for slot in fragment.slots:
-                            domain = _slot_domain(slot, phrase_set.facts[slot].max_width)
-                            pattern = pattern.replace(re.escape("{" + slot + "}"), domain)
-                        by_language.setdefault(lang, []).append(pattern)
-            _REGISTRY_MATCHERS = {}
-            for lang, fragments in by_language.items():
-                one = "(?:" + "|".join(fragments) + ")"
-                _REGISTRY_MATCHERS[lang] = re.compile(rf"^{one}(?:{re.escape(JOIN)}{one})*$")
-        except Exception as exc:  # noqa: BLE001 - nothing is authorized, and that is logged
-            log.warning("message_engine_registry_unreadable", error=type(exc).__name__)
-            _REGISTRY_MATCHERS = {}
-    return _REGISTRY_MATCHERS
-
-
-def registry_authored(text: str) -> bool:
-    """Is this text something the alert renderer could have produced, in one
-    of the registry's languages?"""
-    return any(matcher.fullmatch(text) is not None for matcher in _registry_matchers().values())
-
-
-def _sanitized(facts: dict[str, object], authorized: frozenset[str] = frozenset()) -> dict[str, object]:
-    """The facts as the prompt and the template may use them.
-
-    A string passes the redaction chokepoint (a fact can be an upstream
-    error verbatim, and four upstreams put their key in the query string -
-    #112 round 4) and must be one of the monitor's own values; a fact that
-    is not a scalar is no fact. Either way it renders as a dash.
-    """
-    admitted: dict[str, object] = {}
-    for key, value in facts.items():
-        if isinstance(value, str):
-            cleaned = sanitize(value)
-            proved = key in authorized and registry_authored(cleaned)
-            admitted[key] = cleaned if proved or _admissible(key, cleaned) else None
-        elif isinstance(value, _SCALARS):
-            admitted[key] = value
-        else:
-            # logged by kind only: no log line carries a caller's string (decision 19)
-            log.warning("message_engine_fact_not_scalar", kind=type(value).__name__)
-            admitted[key] = None
-    return admitted
+def typed_facts(entry: dict[str, Any], facts: dict[str, object]) -> dict[str, object]:
+    """The facts the entry declares in `grounding_fields`, each typed, and
+    None for one the caller did not supply. Nothing else reaches the prompt
+    or the template: not an undeclared key, and not another spelling of a
+    declared one."""
+    return {name: typed(name, facts.get(name)) for name in entry.get("grounding_fields") or []}
 
 
 def render_fallback(template: str, facts: dict[str, object]) -> str:
@@ -414,198 +242,17 @@ def render_fallback(template: str, facts: dict[str, object]) -> str:
     "{F_BREADTH}": the fallback exists precisely for the moments when
     something is already wrong, and it must degrade into something a person
     can read.
+
+    A slot renders a TYPED fact and nothing else, whatever dict this is
+    given: the callers pass typed_facts, and the function holds the same
+    line on its own (#145 round 1, SOTA-C).
     """
     def _sub(match: re.Match[str]) -> str:
-        value = _slot_value(match.group(1), facts)
-        # Substituted values are DATA, and one line of it. A fact carrying a
-        # newline split the message into a second line — and an SMS is not a
-        # thing that has lines; a multiline body becomes a multipart send or a
-        # truncated one, depending on the transport (round 33, SOTA-A defect
-        # 2). Control characters go the same way.
-        text = "-" if value is None else str(value)
-        return _CONTROL_RE.sub(" ", text)
+        name = match.group(1)
+        value = typed(name, facts.get(name))
+        return "-" if value is None else str(value)
 
     return _SLOT_RE.sub(_sub, template).strip()
-
-
-#: Characters that CARRY MEANING and have an exact GSM-7 counterpart. Dropping
-#: any of these changes what the message says; mapping them does not.
-_GSM7_EQUIVALENTS = str.maketrans({
-    "\u2212": "-",   # MINUS SIGN            -> the sign is the message
-    "\u2013": "-",   # EN DASH
-    "\u2014": "-",   # EM DASH
-    "\u2010": "-",   # HYPHEN
-    "\u2011": "-",   # NON-BREAKING HYPHEN
-    "\u00b1": "+/-",  # PLUS-MINUS
-    "\u00d7": "x",   # MULTIPLICATION SIGN
-    "\u2018": "'", "\u2019": "'",
-    "\u201c": '"', "\u201d": '"',
-    "\u2026": "...",
-    "\u00a0": " ", "\u202f": " ", "\u2009": " ",
-    "\u2032": "'", "\u2033": '"',
-})
-
-
-def _overflows(text: str, channel: Channel, settings: Settings) -> bool:
-    """Does this text break the channel's length contract, in its own unit?"""
-    if channel is Channel.SMS:
-        from app.alerts.gsm7 import GSM7_BASIC, GSM7_EXT, septets
-
-        carried = text.translate(_GSM7_EQUIVALENTS)
-        carried = "".join(c if (c in GSM7_BASIC or c in GSM7_EXT) else " " for c in carried)
-        return septets(carried) > settings.sms_max_len
-    return len(text) > settings.message_engine_imessage_max_chars
-
-
-def _shorter(value: str, by: int) -> str | None:
-    """A phrase fact shortened by `by` characters on a word boundary, never
-    inside a numeral; None when nothing worth keeping is left."""
-    room = len(value) - by
-    if room < 8:
-        return None
-    cut = value[:_before_numeral(value, room)]
-    space = cut.rfind(" ")
-    if space >= room // 2:
-        cut = cut[:space]
-    cut = cut.rstrip(" ,;:-")
-    return cut or None
-
-
-def _fit_render(template: str, facts: dict[str, object], channel: Channel,
-                settings: Settings) -> tuple[str, dict[str, object]]:
-    """The template rendered to fit the channel: the FACTS give way first.
-
-    The fit clipped the rendered text from the end, so an over-long fact in
-    the middle of a template cost the template its last clause - the
-    breaker notice lost "Scores and alerts unaffected.", the one sentence
-    its library note calls load-bearing (#112 round 12, SOTA-A, executed).
-    The owner's sentences are the message; a fact is a value in it. When
-    the render overflows, a phrase fact is shortened on a word boundary,
-    then the longest fact is blanked to a dash, until the text fits; only
-    a template that overflows on its own is clipped, as before.
-    """
-    facts = dict(facts)
-    text = render_fallback(template, facts)
-    while _overflows(text, channel, settings):
-        strings = {k: v for k, v in facts.items() if isinstance(v, str) and v}
-        if not strings:
-            break
-        phrases = {k: v for k, v in strings.items() if len(v.split()) > 1}
-        if phrases:
-            key = max(phrases, key=lambda k: len(phrases[k]))
-            facts[key] = _shorter(facts[key], 16)   # type: ignore[arg-type]
-        else:
-            facts[max(strings, key=lambda k: len(strings[k]))] = None
-        text = render_fallback(template, facts)
-    return _fit(text, channel, settings), facts
-
-
-def _fit(text: str, channel: Channel, settings: Settings) -> str:
-    """The fallback, guaranteed to satisfy the channel's length contract.
-
-    The generated path is validated and REJECTED when it overruns; the
-    fallback path had no such check, and it is the path taken when something
-    is already wrong. Sweeping every slot of every shipped fallback with an
-    over-long fact produced 40 contract violations, the worst a 432-character
-    body against a 150-character SMS cap.
-
-    Clipped, not rejected: there is nothing to fall back TO from here, so the
-    honest failure mode is a shortened true sentence rather than silence.
-
-    MEASURED IN THE CHANNEL'S OWN UNIT. Round 33 clipped on `len()` and marked
-    the cut with "…", and round 34 refused both, from two vendors
-    independently:
-
-      * an SMS is counted in SEPTETS, not code points. The extended-GSM set
-        (``^{}\\[~]|€``) costs TWO septets per character, so 140 code points of
-        "€" is 280 septets — nearly double the cap — and sailed through.
-      * "…" is not in GSM-7 at all. `septets()` RAISES on it, and the
-        validator rejects it, so the "guaranteed" fallback would have taken
-        down the transport or forced a UCS-2 multipart send: precisely the
-        spill the 150 cap exists to prevent.
-
-    Fixing a contract violation with a contract violation is worth naming as
-    the mistake it was; the module that measures this correctly
-    (`app/alerts/gsm7.py`) was already imported by the alert path.
-    """
-    if channel is Channel.SMS:
-        return _fit_sms(text, settings.sms_max_len)
-    cap = settings.message_engine_imessage_max_chars
-    if len(text) <= cap:
-        return text
-    return _clip(text, cap - 1) + "\u2026"
-
-
-def _fit_sms(text: str, cap: int) -> str:
-    """Clip to `cap` SEPTETS, with a GSM-7-safe marker.
-
-    Non-GSM-7 characters cannot be counted at all, so they are dropped rather
-    than guessed at: an SMS carrying one is not a shorter message, it is a
-    different encoding and a multipart send. The generated path may reject and
-    retry; this path has nothing to retry with.
-    """
-    from app.alerts.gsm7 import GSM7_BASIC, GSM7_EXT, septets
-
-    # TRANSLITERATE FIRST, THEN DROP. Round 34 dropped every non-GSM-7
-    # character outright, which is harmless for decoration and catastrophic
-    # for a SIGN: U+2212 MINUS is not in GSM-7, so "Momentum -51 points."
-    # written with a typographic minus was sent as "Momentum 51 points."
-    # — the same magnitude with the opposite meaning, in a monitor whose whole
-    # job is to report which way a number moved (round 36, SOTA-A defect 3).
-    #
-    # These are not translations. Each maps a character to the SAME character
-    # in a form GSM-7 can carry, so no meaning is invented or lost.
-    text = text.translate(_GSM7_EQUIVALENTS)
-    # Whatever is left is decoration with no ASCII equivalent. It becomes a
-    # SPACE rather than nothing, so removing it cannot fuse two numbers into
-    # one that was never written.
-    text = "".join(c if (c in GSM7_BASIC or c in GSM7_EXT) else " " for c in text)
-    if septets(text) <= cap:
-        return text
-    marker = "..."                       # three septets, and GSM-7 basic
-    room = cap - len(marker)
-    # Walk down by septets, since one code point may cost two.
-    cut = text
-    while cut and septets(cut) > room:
-        cut = cut[:-1]
-    cut = text[:_before_numeral(text, len(cut))]
-    space = cut.rfind(" ")
-    if space >= len(cut) // 2:
-        cut = cut[:space]
-    return cut.rstrip(" ,;:-") + marker
-
-
-#: One numeral as a reader sees it: sign, digits, and the joined forms - a
-#: decimal, a thousands group, a time, a ratio, a date or a range - with an
-#: optional percent.
-_NUMERAL_TOKEN_RE = re.compile(r"[-+\u2212]?\d+(?:[.,:/\-]\d+)*%?")
-
-
-def _before_numeral(text: str, pos: int) -> int:
-    """`pos`, or the start of the numeral it falls inside.
-
-    A cut that lands inside a numeral ships a DIFFERENT number: "Flags
-    123456789/4" clipped after five digits reads 12345. The facts are
-    unbounded, so the clip backs off to the start of the numeral it would
-    have split, and the marker takes its place (#112 round 4, SOTA-A, defect
-    2, executed). A numeral that is itself longer than the room leaves
-    nothing but the marker, which is the honest message.
-    """
-    for found in _NUMERAL_TOKEN_RE.finditer(text):
-        if found.start() >= pos:
-            break
-        if pos < found.end():
-            return found.start()
-    return pos
-
-
-def _clip(text: str, room: int) -> str:
-    """Cut on a word boundary where one is available without gutting it."""
-    cut = text[:_before_numeral(text, room)]
-    space = cut.rfind(" ")
-    if space >= room // 2:
-        cut = cut[:space]
-    return cut.rstrip(" ,;:-")
 
 
 def _cap(channel: Channel, settings: Settings) -> int:
@@ -631,24 +278,11 @@ def translation(entry: dict[str, Any], language: str | None) -> dict[str, Any]:
     return found if isinstance(found, dict) and found.get("fallback") else entry
 
 
-#: The sections of a library prompt the message is written from. Its other
-#: sections (the hard rules, the output format) belong to a design the owner
-#: replaced on 2026-09-25 and are not sent.
-#: The sections a prompt takes from the library: ROLE, TASK and DATA - ten
-#: alert entries call their data "INJECTED DATA". The library's other
-#: sections (HARD RULES, OUTPUT, OUTPUT FORMAT, SMS), written for the replaced
-#: two-variant design, are never sent (#126 round 22, pinned).
-_SECTION_RE = re.compile(r"(?ms)^(ROLE|TASK|DATA|INJECTED DATA):[ \t]*(.*?)(?=^[A-Z][A-Z ]+:|\Z)")
-
-#: The library's tasks were written for an SMS and an iMessage variant in one
-#: reply; the engine writes one message per channel, so the prompt leaves
-#: that instruction out and reads "both variants" as "the message" (#126
-#: round 4, SOTA-A: the stale task got "SMS: A\nIMSG: B" issued).
-_VARIANTS_TASK_RE = re.compile(r"\s*Produce both channel variants \(SMS and IMESSAGE\) of the same message\.")
-
-
-def _one_message(task: str) -> str:
-    return _VARIANTS_TASK_RE.sub("", task).replace("Both variants MUST", "The message MUST")
+#: The sections of a library prompt the message is written from: ROLE, TASK
+#: and DATA. The library's other sections (HARD RULES, OUTPUT, OUTPUT FORMAT,
+#: SMS), written for the design the owner replaced on 2026-09-25, are never
+#: sent (#126 round 22, pinned).
+_SECTION_RE = re.compile(r"(?ms)^(ROLE|TASK|DATA):[ \t]*(.*?)(?=^[A-Z][A-Z ]+:|\Z)")
 
 
 _LANGUAGE_NAMES = {"en": "English", "de": "German"}
@@ -680,24 +314,14 @@ def _well_formed(entry: dict[str, Any]) -> None:
     prompt = entry.get("prompt", "")
     if not isinstance(prompt, str):
         raise TypeError("'prompt' is not text")
-    if not isinstance(entry.get("llm", True), bool):
-        raise TypeError("'llm' is not true or false")
     # A field that is there is a list of names; a falsy "" or {} was read as
     # "none" (#126 round 20, SOTA-A, executed).
-    for key in ("grounding_fields", "authorized_prose"):
-        names = entry.get(key, [])
-        if not isinstance(names, list) or not all(isinstance(name, str) and name.strip() for name in names):
-            raise TypeError(f"'{key}' is not a list of names")
+    names = entry.get("grounding_fields", [])
+    if not isinstance(names, list) or not all(isinstance(name, str) and name.strip() for name in names):
+        raise TypeError("'grounding_fields' is not a list of names")
     # ...and a task is written, not a heading alone (#126 round 20)
-    if entry.get("llm", True) and not dict(_SECTION_RE.findall(prompt)).get("TASK", "").strip():
+    if not dict(_SECTION_RE.findall(prompt)).get("TASK", "").strip():
         raise ValueError("an entry the model writes has no task")
-
-
-def _prompt_value(name: str, value: object) -> object | None:
-    """A declared fact as the prompt shows it: the judgment bounded."""
-    if name == _JUDGMENT_KEY and isinstance(value, str):
-        return value[:_JUDGMENT_MAX]
-    return value
 
 
 def prompt_for(trigger: str, entry: dict[str, Any], facts: dict[str, object],
@@ -706,15 +330,13 @@ def prompt_for(trigger: str, entry: dict[str, Any], facts: dict[str, object],
     from the library with the numbers filled in, every fact the entry
     declares by name, the references, and how to write the message.
 
-    ONLY THE DECLARED FACTS: the entry's `grounding_fields` are the numbers
-    its message is about, so a fact the caller merely carried - a
-    credential, an unrelated value - never reaches the model (#126 round 1,
-    SOTA-A); and a string fact is only ever one of the monitor's own values
-    (`_sanitized`)."""
-    declared = {name: _prompt_value(name, _slot_value(name, facts))
-                for name in entry.get("grounding_fields") or []}
-    shown = {name: value for name, value in declared.items() if value is not None}
-    sections = {("DATA" if name == "INJECTED DATA" else name): render_fallback(body.strip(), shown)
+    ONLY THE DECLARED FACTS, TYPED (typed_facts): the entry's
+    `grounding_fields` are the numbers its message is about, so a fact the
+    caller merely carried - a credential, an unrelated value - never reaches
+    the model (#126 round 1, SOTA-A); and a fact is a number, one of the
+    monitor's own words, or the capped judgment."""
+    shown = {name: value for name, value in typed_facts(entry, facts).items() if value is not None}
+    sections = {name: render_fallback(body.strip(), shown)
                 for name, body in _SECTION_RE.findall(entry.get("prompt", ""))}
     numbers = "\n".join(f"  {name} = {value}" for name, value in sorted(shown.items()))
     references = context_material.render(context_material.references_for(trigger))
@@ -731,7 +353,7 @@ def prompt_for(trigger: str, entry: dict[str, Any], facts: dict[str, object],
     parts = [
         _SYSTEM,
         f"ROLE: {sections['ROLE']}" if sections.get("ROLE") else "",
-        f"TASK: {_one_message(sections['TASK'])}" if sections.get("TASK") else "",
+        f"TASK: {sections['TASK']}" if sections.get("TASK") else "",
         f"DATA:\n{sections['DATA']}" if sections.get("DATA") else "",
         f"ALL NUMBERS (name = value):\n{numbers}" if numbers else "",
         ("REFERENCES - what the indicators measure and where their data comes from:\n"
@@ -743,53 +365,18 @@ def prompt_for(trigger: str, entry: dict[str, Any], facts: dict[str, object],
     return "\n\n".join(part for part in parts if part)
 
 
-def visible_facts(entry: dict[str, Any], facts: dict[str, object]) -> dict[str, object]:
-    """The facts this entry may use - one per declared field, under its
-    declared name: the value supplied under that name, else under another
-    spelling of the same fact ("F_BAND_BASE" for "band_base", #112 round 9).
-    Nothing else reaches the prompt or the template: not an undeclared key
-    (#112 round 15), and not another spelling beside the declared one - a
-    template reads its slot's own spelling first, so "band_effective" next
-    to F_BAND_EFFECTIVE overrode the contract's value (#126 round 14,
-    SOTA-A, executed)."""
-    visible: dict[str, object] = {}
-    for name in entry.get("grounding_fields") or []:
-        if name in facts:
-            visible[name] = facts[name]
-            continue
-        for key, value in facts.items():
-            if _canonical(key) == _canonical(name):
-                visible[name] = value
-                break
-    return visible
-
-
-def _canonical(name: str) -> str:
-    """One spelling for a fact: its contract id where it has one.
-
-    "band_base", "base_action_band" and "F_BAND_BASE" are the same fact to
-    the renderer (see _slot_value); the visibility test compared raw names,
-    so a fact supplied under its id was invisible to a template that
-    declared the attribute (#112 round 9).
-    """
-    if name in _SLOT_ALIASES:
-        return _SLOT_ALIASES[name]
-    return name if name.startswith("F_") else "F_" + name.upper()
-
-
 def _prepare(trigger: str, entry: dict[str, Any], facts: dict[str, object], channel: Channel,
              settings: Settings) -> tuple[str, str] | str:
-    """The prompt and the fitted template for one entry, or why the entry
+    """The prompt and the rendered template for one entry, or why the entry
     cannot give them. Its own function, so the caller binds both or neither
     (SOTA-C's UnboundLocalError claim, #126 rounds 1-7: never reproduced)."""
     language = settings.message_language or LIBRARY_LANGUAGE
     try:
         _well_formed(entry)
-        # ONLY THE DECLARED FACTS, for the prompt and the template alike
-        # (visible_facts; K1 had dropped this for the template).
-        admitted = _sanitized(visible_facts(entry, facts), frozenset(entry.get("authorized_prose") or []))
-        prompt = prompt_for(trigger, entry, admitted, channel, settings)
-        fallback, _ = _fit_render(template_for(entry, language), admitted, channel, settings)
+        # ONLY THE DECLARED FACTS, TYPED, for the prompt and the template alike
+        facts = typed_facts(entry, facts)
+        prompt = prompt_for(trigger, entry, facts, channel, settings)
+        fallback = render_fallback(template_for(entry, language), facts)
     except Exception as exc:  # noqa: BLE001 - a malformed entry is the same class
         return f"library entry is malformed: {type(exc).__name__}"
     return prompt, fallback
@@ -814,32 +401,28 @@ def compose(*, trigger: str, channel: Channel,
         if not isinstance(prompts, dict):
             raise TypeError("'prompts' is not a mapping")
     except Exception as exc:  # noqa: BLE001 - the promise is "never raises"
-        return _bare_event(trigger, channel, settings,
+        return _bare_event(trigger, channel,
                            f"prompt library unreadable: {type(exc).__name__}", known=False)
     unsigned = library_sign_off(lib)
     if unsigned is not None:
         # INERT until the owner signs: no model call, no attempt row.
-        return _bare_event(trigger, channel, settings, unsigned, known=trigger in prompts)
+        return _bare_event(trigger, channel, unsigned, known=trigger in prompts)
     entry = prompts.get(trigger)
     if entry is None:
-        return _bare_event(trigger, channel, settings, "trigger not in library", known=False)
+        return _bare_event(trigger, channel, "trigger not in library", known=False)
 
     prepared = _prepare(trigger, entry, facts, channel, settings)
     if isinstance(prepared, str):
-        return _bare_event(trigger, channel, settings, prepared, known=True)
+        return _bare_event(trigger, channel, prepared, known=True)
     prompt, fallback = prepared
-    # THE TEMPLATE MEETS THE BASIC CHECKS TOO: a fact can carry a link into
-    # it (#126 round 1, SOTA-A and SOTA-C). The bare event is the last resort.
+    # THE TEMPLATE MEETS THE BASIC CHECKS TOO, its length among them: it is
+    # sent as rendered or not at all, and the bare event is the last resort
+    # (owner decision D7; the CI renders every template at its facts' widest).
     problem = basic_check(fallback, channel=channel, max_chars=_cap(channel, settings))
     if problem is not None:
-        return _bare_event(trigger, channel, settings, f"the template fails a basic check: {problem}",
+        return _bare_event(trigger, channel, f"the template fails a basic check: {problem}",
                            known=True)
 
-    if entry.get("llm") is False:
-        # A FIXED trigger is never written by the model: test_message tests
-        # the pipe, host_outage reports the host itself.
-        return _issue(text=fallback, source="deterministic", trigger=trigger,
-                      channel=channel.value, reason="fixed trigger: never LLM-generated")
     short = gov.short_circuit(priority, settings)
     if short is not None:
         # The engine switched off, or a P1 that must arrive: no model, no

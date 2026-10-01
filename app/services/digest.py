@@ -9,7 +9,7 @@ from sqlalchemy import select
 
 from app.config import get_settings, near_miss_env_keys
 from app.db import session_scope
-from app.engine.sms_report import _block_summary, deterministic_report
+from app.engine.sms_report import deterministic_report
 from app.logging_conf import get_logger
 from app.models import Snapshot
 from app.notify.imessage import send_imessage
@@ -18,12 +18,29 @@ from app.notify.sipgate import send_sms
 log = get_logger(__name__)
 
 
+#: The indicators whose sub-scores the digest's prompt carries, by block.
+SUB_SCORES = {"s": ("s1", "s2", "s3", "s4", "s5"), "d": ("d1", "d2", "d3", "d4")}
+
+
+def _sub_scores(block: dict[str, Any] | None, ids: tuple[str, ...]) -> dict[str, object]:
+    """Each indicator's sub-score, rounded as the digest always showed it
+    (two decimals), or None when the indicator has none."""
+    indicators = (block or {}).get("indicators", {})
+    scores: dict[str, object] = {}
+    for key in ids:
+        sub = (indicators.get(key) or {}).get("sub_score")
+        scores[key] = round(sub, 2) if isinstance(sub, int | float) else None
+    return scores
+
+
 def digest_facts(snap: Snapshot) -> dict[str, object]:
     """The daily digest's grounded facts, as the prompt library declares them.
 
     Mirrors deterministic_report(): the same snapshot fields, the same
     rounding, the digest's own scale and flag total injected so the digits
-    are grounded verbatim (the library's daily_digest note).
+    are grounded verbatim (the library's daily_digest note). Every fact is a
+    number, a truth value, one of the monitor's own words or the judgment
+    (owner decision D7; app/message_engine/composer.py, WORDS).
     """
     from app.services.engine_delivery import RED_FLAG_TOTAL, SCORE_SCALE_MAX
 
@@ -33,15 +50,16 @@ def digest_facts(snap: Snapshot) -> dict[str, object]:
         "score_scale_max": SCORE_SCALE_MAX,
         "action_band": snap.action_band,
         "override_fired": bool(snap.override_fired),
+        "override_suffix": " OVERRIDE" if snap.override_fired else "",
         "iqr_lo": round(snap.iqr_lo),
         "iqr_hi": round(snap.iqr_hi),
         "red_flag_count": snap.red_flag_count,
         "red_flag_total": RED_FLAG_TOTAL,
         "spy_trend": trend.get("SPY", {}).get("faber_10mo", "?"),
         "qqq_trend": trend.get("QQQ", {}).get("faber_10mo", "?"),
-        "s_block_summary": _block_summary(snap.block_s, "s"),
-        "d_block_summary": _block_summary(snap.block_d, "d"),
-        "judgment": (snap.judgment_call or "n/a")[:180],
+        **_sub_scores(snap.block_s, SUB_SCORES["s"]),
+        **_sub_scores(snap.block_d, SUB_SCORES["d"]),
+        "judgment": snap.judgment_call or "n/a",
     }
 
 

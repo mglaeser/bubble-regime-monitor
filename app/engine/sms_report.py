@@ -57,14 +57,3 @@ def deterministic_report(snap: Snapshot, limit: int) -> str:
             f"range {round(snap.iqr_lo)}-{round(snap.iqr_hi)}. "
             f"SPY {spy}, QQQ {qqq}. Flags {snap.red_flag_count}/4.")
     return _clip_to_sms(core, limit)
-
-
-def _block_summary(block: dict, prefix: str) -> str:
-    inds = (block or {}).get("indicators", {})
-    parts = []
-    for k, v in inds.items():
-        if not k.startswith(prefix):
-            continue
-        sub = v.get("sub_score")
-        parts.append(f"{k}={sub:.2f}" if isinstance(sub, int | float) else f"{k}=NA")
-    return ",".join(parts)
