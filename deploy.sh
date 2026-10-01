@@ -88,6 +88,11 @@ healthy() {         # /healthz answers within $1 seconds (default HEALTH_TIMEOUT
   return 1
 }
 running_image() { podman inspect -f '{{.Image}}' "$CONTAINER" 2>/dev/null || true; }
+# A record is written whole or not at all: beside the file, synced, renamed
+# over it. Truncated in place, a run killed between the truncation and the
+# write left an empty marker, which read as none, so the next tick built,
+# migrated and restarted the commit just rolled back (#143 round 29, SOTA-A).
+record() { printf '%s\n' "$2" > "$1.tmp" && sync "$1.tmp" && mv -f "$1.tmp" "$1"; }
 die()    { printf '\nERROR: %s\n' "$*" >&2; exit 1; }
 trap 'die "deploy failed at line $LINENO"' ERR
 
@@ -134,7 +139,7 @@ fi
 # that finds the service answering: a healthy switch interrupted before it
 # recorded itself left an older one there (#143 round 4, SOTA-A).
 if [[ "$RUNNING_OK" == "1" ]]; then
-  echo "$RUNNING_IMAGE" > "$GOOD_FILE"
+  record "$GOOD_FILE" "$RUNNING_IMAGE"
 fi
 # Quiet only when the service runs main's commit AND answers: a switch
 # interrupted on an unhealthy target otherwise stayed there for good (#143
@@ -169,7 +174,7 @@ git merge --ff-only -q "$REMOTE_REF"
 # it alone until main moves on or the marker is removed. Unmarked, a build or
 # migration that failed was run again every five minutes, the migration
 # against the production database (#143 retrospective, 2026-09-29).
-failed() { echo "$TARGET" > "$FAILED_FILE"; die "$@"; }
+failed() { record "$FAILED_FILE" "$TARGET"; die "$@"; }
 trap 'failed "deploy of $TARGET failed at line $LINENO"' ERR
 
 # ---- 2. build -------------------------------------------------------------
@@ -220,7 +225,7 @@ if healthy && [[ "$(running_image)" == "$TARGET_ID" ]]; then
   # commit was left alone (#143 round 24, SOTA-A).
   trap - ERR
   rm -f "$FAILED_FILE"
-  echo "$TARGET_ID" > "$GOOD_FILE"
+  record "$GOOD_FILE" "$TARGET_ID"
   # The five newest commit tags stay. Older ones are removed by NAME and
   # without -f, so podman keeps any image a container uses: the running
   # service's image is never deleted, whatever the list holds (#143 round 14,

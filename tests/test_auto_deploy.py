@@ -807,3 +807,22 @@ class TestRoundTwentySevenOn143:
         assert code != 0 and "systemctl --user start bubblegauge-deploy.service" in deploy.output
         assert "systemctl --user show -p MainPID --value bubblegauge-deploy.service" in calls
         assert not any(c.startswith(("git fetch", "podman")) for c in calls), calls
+
+
+class TestRoundTwentyNineOn143:
+    """#143 round 29, SOTA-A: the records were truncated in place and then
+    written, so a run killed in between left an empty marker, which read as
+    none: the next tick built, migrated and restarted the commit just rolled
+    back. A record is written beside its file, synced and renamed over it:
+    whole or not at all."""
+
+    def test_the_records_are_replaced_never_truncated(self):
+        script = (ROOT / "deploy.sh").read_text()
+        assert '> "$FAILED_FILE"' not in script and '> "$GOOD_FILE"' not in script
+        assert 'sync "$1.tmp" && mv -f "$1.tmp" "$1"' in script
+
+    def test_a_run_leaves_whole_records_and_no_half_written_one(self, deploy):
+        deploy(running="old0000", healthy=False)      # records the good image, then the failed commit
+        assert deploy.good_file.read_text() == "sha256:running\n"
+        assert deploy.failed_file.read_text() == f"{TARGET}\n"
+        assert not list((deploy.repo / ".deploy-state").glob("*.tmp"))
