@@ -225,3 +225,13 @@ Branches → add a rule for `main`). That way "completed PR" also means
 | Two deploys at once | Can't happen — the watcher holds the lock on fd 9 and `deploy.sh` inherits it (so the lock lives exactly as long as the deploy, even if systemd kills the watcher), while every container is started with fd 9 closed (so no container ever holds it); a trigger during a deploy waits for the lock (up to `LOCK_WAIT_S`, default 1800 s), then causes exactly one more deploy afterward. |
 | Service shows `failed (Result: start-limit-hit)` and nothing deploys | Your installed unit predates 2026-09-19: the watcher's lock fd leaked into the container's helpers, so every later trigger "skipped" and re-fired. Re-run `./deploy.sh` once by hand (it reinstalls `deploy-watch.sh` and a unit with `StartLimitIntervalSec=600` / `StartLimitBurst=60`), then `systemctl --user reset-failed bubblegauge-deploy.service && systemctl --user enable --now bubblegauge-deploy.path`. |
 | `State 'stop-sigterm' timed out. Killing.` + systemd kills `conmon`/`slirp4netns` mid-deploy | Your installed unit predates 2026-07-17: `TimeoutStartSec=1800` was too short for a cold build on a slow host, and the default `KillMode=control-group` then SIGKILLed the freshly started container's podman runtime (it lives in the unit's cgroup). Fix: run `./deploy.sh` once **manually** (it runs outside systemd, so no timeout applies, and its step 6 re-renders the units with `TimeoutStartSec=3600` + `KillMode=process`), or patch `~/.config/systemd/user/bubblegauge-deploy.service` by hand and `systemctl --user daemon-reload`. Then check `podman ps` / `curl localhost:8000/healthz` — the killed deploy may have left the container down; `SKIP_PULL=1 SKIP_BUILD=1 ./deploy.sh` restarts it from the already-built image in seconds. |
+
+## The dead-man's switch
+
+Set `HEALTHCHECKS_PING_URL` in `.env` to a Healthchecks check's ping URL
+(`https://hc-ping.com/<uuid>`). The service pings it after every successful
+recompute, and nothing after a failed one, which the failure alarm reports at
+once. Configure the check with
+a **4 h period** (the recompute cadence) and a **1 h grace**; Healthchecks then
+alerts on its own channels when the pings stop, which covers the one outage
+the service cannot report itself.
