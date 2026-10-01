@@ -53,6 +53,7 @@ resolve() {
   esac
 }
 case "$1" in
+  build) [[ "$BUILD_FAILS" != "1" ]] || exit 1 ;;
   inspect) running ;;
   image)
     id="$(resolve "${@: -1}")"
@@ -497,10 +498,14 @@ class TestRoundElevenOn143:
         doc = (ROOT / "docs/AUTO_DEPLOY.md").read_text()
         cutover = doc[doc.index("## Moving from the webhook"):]
         steps = [line.split("#")[0].strip() for line in cutover.splitlines()]
+        seed = steps.index("mkdir -p .deploy-state && podman inspect -f '{{.Image}}' bubblegauge > .deploy-state/good")
+        tag = steps.index('podman tag "$(cat .deploy-state/good)" localhost/bubblegauge:latest')
         rm = steps.index("podman rm -f bubblegauge")
         start = steps.index("systemctl --user start bubblegauge.service")
         first_deploy = steps.index("systemctl --user start bubblegauge-deploy.service")
-        assert rm < start < first_deploy
+        # the record and :latest are seeded from the running container while it
+        # still exists (#143 round 19: :latest can be a release that rolled back)
+        assert seed < tag < rm < start < first_deploy
 
     def test_a_failed_rollback_is_marked_too(self, deploy):
         deploy.good_file.write_text("sha256:running\n")   # seen healthy earlier; not any more
@@ -684,3 +689,21 @@ class TestRoundEighteenOn143:
         install = next(i for i, step in enumerate(steps) if step.startswith("install -D"))
         deploy = steps.index("systemctl --user start bubblegauge-deploy.service")
         assert pull < install < deploy
+
+
+class TestRoundTwentyOn143:
+    """#143 retrospective (2026-09-29): a build or migration that failed died
+    through the error trap before the commit could be marked, so the timer ran
+    the build - and the migration, against the production database - again
+    every five minutes until main moved on. From the build on, a failure marks
+    the commit, which then waits for the next commit or a removed marker."""
+
+    def test_a_failed_build_marks_the_commit(self, deploy):
+        code, calls = deploy(running="old0000", env={"BUILD_FAILS": "1"})
+        assert code != 0 and deploy.failed_file.read_text().split() == [TARGET]
+        assert not any("db_migrate" in c or c.startswith("podman tag") for c in calls), calls
+        code, calls = deploy(running="old0000", env={"BUILD_FAILS": "1"})
+        assert code == 0 and not any(c.startswith("podman build") for c in calls), calls
+        deploy.failed_file.unlink()
+        code, calls = deploy(running="old0000")
+        assert code == 0 and any(c.startswith("podman build") for c in calls), calls

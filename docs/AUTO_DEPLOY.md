@@ -77,10 +77,11 @@ rm ~/.config/systemd/user/bubblegauge-deploy.path
 and deactivate the repository's GitHub webhook. The service keeps running the
 image it runs.
 
-After merging - fast-forward the checkout, install the units, move the running
-image under Quadlet, and let the deploy service deploy main. It finds that
-image answering and records it as the last good one, to roll back to; the old
-container's image is `:latest`, which the old chain tagged.
+After merging - fast-forward the checkout, install the units, seed the deploy's
+record and `:latest` from the image the old container runs (the old chain tagged
+`:latest` at build time, so after a release it rolled back the two differ), move
+that image under Quadlet, and let the deploy service deploy main with it as the
+image to roll back to.
 
 ```bash
 cd ~/playground/bubble-regime-monitor
@@ -89,7 +90,9 @@ install -D -m 644 deploy/quadlet/bubblegauge.container ~/.config/containers/syst
 install -D -m 644 deploy/systemd/bubblegauge-deploy.service ~/.config/systemd/user/bubblegauge-deploy.service
 install -D -m 644 deploy/systemd/bubblegauge-deploy.timer ~/.config/systemd/user/bubblegauge-deploy.timer
 systemctl --user daemon-reload
-podman rm -f bubblegauge                         # the old container; its image stays :latest
+mkdir -p .deploy-state && podman inspect -f '{{.Image}}' bubblegauge > .deploy-state/good   # the running image: the rollback target
+podman tag "$(cat .deploy-state/good)" localhost/bubblegauge:latest                       # ... and what the Quadlet unit starts
+podman rm -f bubblegauge                         # the old container
 systemctl --user start bubblegauge.service       # the same image, now a Quadlet unit
 systemctl --user start bubblegauge-deploy.service   # records it as the last good image, then deploys main
 systemctl --user enable --now bubblegauge-deploy.timer

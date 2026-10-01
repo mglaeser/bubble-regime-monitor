@@ -10,8 +10,9 @@
 # image it runs.
 #
 #   1. Fetch main. If the running service already runs that commit and
-#      answers /healthz, stop. A commit that already failed its health check
-#      waits for the next commit, or for its marker to be removed by hand.
+#      answers /healthz, stop. A commit that already failed - its build, its
+#      migration or its health check - waits for the next commit, or for its
+#      marker to be removed by hand.
 #   2. Fast-forward the checkout and build the image, labelled with the commit.
 #   3. Migrate the database in a throwaway container; a failure stops here,
 #      while the service keeps running the old image.
@@ -148,6 +149,13 @@ git merge --ff-only -q "origin/$BRANCH"
 [[ "$(git rev-parse HEAD)" == "$(git rev-parse "origin/$BRANCH")" ]] \
   || die "local $BRANCH is not origin/$BRANCH after the fast-forward; reconcile by hand."
 
+# From here on a failure is the commit's: it is marked, and the timer leaves
+# it alone until main moves on or the marker is removed. Unmarked, a build or
+# migration that failed was run again every five minutes, the migration
+# against the production database (#143 retrospective, 2026-09-29).
+failed() { echo "$TARGET" > "$FAILED_FILE"; die "$@"; }
+trap 'failed "deploy of $TARGET failed at line $LINENO"' ERR
+
 # ---- 2. build -------------------------------------------------------------
 banner "Building $IMAGE:$TARGET"
 podman build --label "$REVISION_LABEL=$TARGET" -t "$IMAGE:$TARGET" -f Containerfile .
@@ -203,7 +211,6 @@ journalctl --user -u "$SERVICE" -n 40 --no-pager 2>&1 | sed 's/^/    | /' || tru
 # tries the commit again and, when it fails again, rolls back again (#143
 # round 16, SOTA-A: marked first, a unit stopped mid-rollback left every later
 # run quiet and the last good image never restored).
-failed() { echo "$TARGET" > "$FAILED_FILE"; die "$@"; }
 [[ -n "$PREVIOUS" ]] \
   || failed "deploy of $TARGET failed its health check; no image was seen healthy before it, so there is nothing to roll back to. Fix forward."
 banner "Rolling back to the last good image"
