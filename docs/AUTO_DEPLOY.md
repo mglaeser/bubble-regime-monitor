@@ -100,3 +100,19 @@ systemctl --user restart bubblegauge.service             # apply a changed .env,
 cat .deploy-state/failed                                 # a failed commit, left alone until main moves on
 rm .deploy-state/failed                                  # ... unless removed: the next run tries it again
 ```
+
+## The dead-man's switch
+
+Set `HEALTHCHECKS_PING_URL` in `.env` to a Healthchecks check's ping URL
+(`https://hc-ping.com/<uuid>`). The service pings it after every successful
+recompute, and nothing after a failed one, which the failure alarm reports at
+once. Configure the check with
+a **4 h period** (the recompute cadence) and a **1 h grace**; Healthchecks then
+alerts on its own channels when the pings stop, which covers the one outage
+the service cannot report itself.
+
+A check alerts only once it has been pinged: until then it is "New", and a
+host lost before the first successful recompute would alert nobody. So after
+setting the URL and restarting the service, prime the check with a recompute
+(`POST /api/v1/admin/refresh`, or the next 4-hourly slot) and confirm in
+Healthchecks that it shows **Up** before relying on it.
