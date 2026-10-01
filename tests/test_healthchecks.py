@@ -1,9 +1,13 @@
-"""The dead-man's switch (owner decision D6, 2026-09-28): every recompute pings
-the Healthchecks check; a failure pings nothing (the failure alarm reports it);
-empty is off; plain http is refused; it never raises."""
+"""The dead-man's switch (owner decision D6, 2026-09-28): every successful
+recompute pings the Healthchecks check; a failure pings nothing (the failure
+alarm reports it); empty is off; only a plain https URL is accepted; the call
+is one curl process bounded by --max-time and killed if it overruns; the URL
+travels on stdin, never on the command line; it never raises. No test here
+reaches the network: subprocess.run is replaced throughout."""
 from __future__ import annotations
 
-import httpx
+import subprocess
+
 import pytest
 
 from app.services import healthchecks
@@ -11,16 +15,38 @@ from app.services import healthchecks
 URL = "https://hc-ping.com/00000000-0000-4000-8000-000000000000"
 
 
+class _Curl:
+    """A stand-in for subprocess.run that records each call and answers as
+    told: a status code, a curl exit code, or a timeout."""
+
+    def __init__(self, status: str = "200", exit_code: int = 0, hangs: bool = False):
+        self.calls: list[tuple[list[str], bytes, float]] = []
+        self.status, self.exit_code, self.hangs = status, exit_code, hangs
+
+    def __call__(self, args, *, input, capture_output, timeout, check):
+        self.calls.append((args, input, timeout))
+        if self.hangs:
+            raise subprocess.TimeoutExpired(args, timeout)
+        return subprocess.CompletedProcess(args, self.exit_code, stdout=self.status.encode(), stderr=b"")
+
+
 @pytest.fixture()
-def posts(monkeypatch):
-    sent: list[tuple[str, bytes]] = []
+def curl(monkeypatch):
+    fake = _Curl()
+    monkeypatch.setattr(healthchecks.subprocess, "run", fake)
+    return fake
 
-    def _post(url, *, content, timeout):
-        sent.append((url, content))
-        return httpx.Response(200, text="OK")
 
-    monkeypatch.setattr(healthchecks.httpx, "post", _post)
-    return sent
+@pytest.fixture()
+def warned(monkeypatch):
+    seen: list[tuple[str, dict]] = []
+
+    class _Log:
+        def warning(self, event, **fields):
+            seen.append((event, fields))
+
+    monkeypatch.setattr(healthchecks, "log", _Log())
+    return seen
 
 
 def _configure(monkeypatch, url):
@@ -30,155 +56,94 @@ def _configure(monkeypatch, url):
     get_settings.cache_clear()
 
 
-def test_off_by_default(monkeypatch, posts):
+def test_off_by_default(monkeypatch, curl):
     _configure(monkeypatch, "")
     healthchecks.ping(None)
-    assert posts == []
+    assert curl.calls == []
 
 
-def test_a_success_pings_the_check(monkeypatch, posts):
+def test_a_success_pings_the_check_with_the_url_on_stdin(monkeypatch, curl):
     _configure(monkeypatch, URL)
     healthchecks.ping(None)
-    assert posts == [(URL, b"ok")]
+    (args, config, timeout), = curl.calls
+    assert args == ["curl", "-K", "-"]                     # the URL is not on the command line
+    assert f'url = "{URL}"' in config.decode() and 'data = "ok"' in config.decode()
+    assert f"max-time = {healthchecks._DEADLINE_S}" in config.decode()
+    assert timeout > healthchecks._DEADLINE_S
 
 
-def test_a_failure_pings_nothing(monkeypatch, posts):
-    """#143 round 23, SOTA-A: a success ping abandoned at its deadline could
-    land after a newer run's /fail and read the check back to "up". Only
-    successes ping, so every ping says the same thing; a failed recompute is
-    the failure alarm's to report, at once."""
+def test_a_failure_pings_nothing(monkeypatch, curl):
+    """Only successes ping: every ping says the same thing, so a ping that
+    lands late changes nothing, and a failed recompute is the failure alarm's
+    to report, at once."""
     _configure(monkeypatch, URL)
     healthchecks.ping("fred: HTTP 500 for https://api.stlouisfed.org/x?api_key=abcdef0123456789abcdef")  # pragma: allowlist secret
-    assert posts == []
+    assert curl.calls == []
 
 
-def test_plain_http_is_refused(monkeypatch, posts):
-    _configure(monkeypatch, "http://hc-ping.com/uuid")
+def test_an_empty_failure_is_a_failure(monkeypatch, curl):
+    """#143 round 2, SOTA-A: the ping read a failure by truthiness, so a
+    recompute whose exception had no message was reported as a success."""
+    _configure(monkeypatch, URL)
+    healthchecks.ping("")
+    assert curl.calls == []
+
+
+@pytest.mark.parametrize("url", ["http://hc-ping.com/uuid", 'https://hc-ping.com/a"b', "https://hc-ping.com/a b"])
+def test_only_a_plain_https_url_is_accepted(monkeypatch, curl, warned, url):
+    _configure(monkeypatch, url)
     healthchecks.ping(None)
-    assert posts == []
+    assert curl.calls == [] and warned[0][0] == "healthchecks_ping_refused"
 
 
-def test_it_never_raises(monkeypatch):
+def test_a_refused_ping_is_said_with_the_status_only(monkeypatch, warned):
+    """#143 round 12, SOTA-A: the response was discarded, so a ping
+    Healthchecks refused looked delivered. The URL is the credential."""
+    _configure(monkeypatch, URL)
+    monkeypatch.setattr(healthchecks.subprocess, "run", _Curl(status="404"))
+    healthchecks.ping(None)
+    assert warned == [("healthchecks_ping_rejected", {"status": "404"})]
+
+
+def test_a_curl_error_is_said_by_its_exit_code_only(monkeypatch, warned):
+    _configure(monkeypatch, URL)
+    monkeypatch.setattr(healthchecks.subprocess, "run", _Curl(exit_code=6))   # could not resolve
+    healthchecks.ping(None)
+    assert warned == [("healthchecks_ping_failed", {"error": "curl exit 6"})]
+
+
+def test_a_ping_that_overruns_is_killed_and_said(monkeypatch, warned):
+    """#144 round 1, SOTA-A: a sender that could only be abandoned could land
+    after a newer run, and held a thread and a socket meanwhile. curl's
+    --max-time bounds the whole transfer and subprocess.run kills an overrun:
+    the ping lands within its deadline or not at all."""
+    _configure(monkeypatch, URL)
+    monkeypatch.setattr(healthchecks.subprocess, "run", _Curl(hangs=True))
+    healthchecks.ping(None)
+    assert warned == [("healthchecks_ping_slow", {"deadline_s": healthchecks._DEADLINE_S})]
+
+
+def test_it_never_raises(monkeypatch, warned):
     _configure(monkeypatch, URL)
 
     def _boom(*_a, **_kw):
-        raise RuntimeError("network down")
+        raise OSError("curl not found")
 
-    monkeypatch.setattr(healthchecks.httpx, "post", _boom)
+    monkeypatch.setattr(healthchecks.subprocess, "run", _boom)
     healthchecks.ping(None)
+    assert warned == [("healthchecks_ping_failed", {"error": "OSError"})]
 
 
-def test_every_recompute_reports_its_outcome(monkeypatch, isolated_db):
+def test_every_recompute_reports_its_outcome_under_the_lock(monkeypatch, isolated_db):
     from app.routers import admin
     from app.services import compute, failure_alert
 
-    seen: list[str | None] = []
-    monkeypatch.setattr(healthchecks, "ping", lambda failure: seen.append(failure))
+    seen: list[tuple[str | None, bool]] = []
+    monkeypatch.setattr(healthchecks, "ping", lambda failure: seen.append((failure, admin.recompute_lock.locked())))
     monkeypatch.setattr(failure_alert, "notify_recompute_outcome", lambda *_a, **_kw: {})
     monkeypatch.setattr(compute, "run_recompute", lambda: 42)
     admin.run_recompute_guarded()
     monkeypatch.setattr(compute, "run_recompute",
                         lambda: (_ for _ in ()).throw(RuntimeError("gather failed")))
     admin.run_recompute_guarded()
-    assert seen == [None, "gather failed"]
-
-
-
-def test_the_outcome_is_pinged_before_the_recompute_lock_is_released(monkeypatch):
-    """#143 round 1, SOTA-A: the ping went out after the lock was released, so
-    an older run's success could land after a newer run's /fail and read the
-    check up again. The lock orders the outcomes; the pings follow the order."""
-    from app.routers import admin
-    from app.services import compute
-
-    held: list[bool] = []
-    monkeypatch.setattr(compute, "run_recompute", lambda: 1)
-    monkeypatch.setattr("app.services.failure_alert.notify_recompute_outcome", lambda *a, **k: {})
-    monkeypatch.setattr(healthchecks, "ping", lambda failure: held.append(admin.recompute_lock.locked()))
-    admin.run_recompute_guarded()
-    assert held == [True]
-
-
-
-def test_an_empty_failure_is_a_failure(monkeypatch, posts):
-    """#143 round 2, SOTA-A: the ping read a failure by truthiness, so a
-    recompute whose exception had an empty message pinged success. None is
-    success; any string, the empty one too, is a failure."""
-    _configure(monkeypatch, URL)
-    healthchecks.ping("")
-    assert posts == []
-
-
-def test_a_ping_healthchecks_refuses_is_said_without_the_url(monkeypatch):
-    """#143 round 12, SOTA-A: the response was discarded, so a ping
-    Healthchecks refused (an unknown check, a rate limit, its outage) looked
-    delivered. It is logged, with the status only: the URL is the credential."""
-    _configure(monkeypatch, URL)
-    warned: list[tuple[str, dict]] = []
-
-    class _Log:
-        def warning(self, event, **fields):
-            warned.append((event, fields))
-
-    def _refused(url, *, content, timeout):
-        return httpx.Response(404, text="not found")
-
-    monkeypatch.setattr(healthchecks, "log", _Log())
-    monkeypatch.setattr(healthchecks.httpx, "post", _refused)
-    healthchecks.ping(None)
-    assert warned == [("healthchecks_ping_rejected", {"status": 404})]
-
-
-def test_a_ping_that_never_finishes_holds_nothing(monkeypatch):
-    """#143 round 14, SOTA-A: httpx's timeouts bound each read, not the call,
-    and the ping runs under the recompute lock - so a peer dripping bytes held
-    every later recompute. The whole call has a deadline now."""
-    import threading
-    import time
-
-    _configure(monkeypatch, URL)
-    monkeypatch.setattr(healthchecks, "_DEADLINE_S", 0.5, raising=False)
-    warned: list[tuple[str, dict]] = []
-
-    class _Log:
-        def warning(self, event, **fields):
-            warned.append((event, fields))
-
-    def _hang(*_a, **_kw):                   # a call that never ends
-        time.sleep(8)
-
-    monkeypatch.setattr(healthchecks, "log", _Log())
-    monkeypatch.setattr(healthchecks.httpx, "post", _hang)
-    done = threading.Event()
-    threading.Thread(target=lambda: (healthchecks.ping(None), done.set()), daemon=True).start()
-    assert done.wait(5), "the ping held its caller - and the recompute lock - past its deadline"
-    assert warned == [("healthchecks_ping_slow", {"deadline_s": 0.5})]
-    # nothing waits for the abandoned call, the interpreter at shutdown included
-    # (#143 round 22, SOTA-A: a stuck resolver worker hung a graceful shutdown)
-    stuck = [t for t in threading.enumerate() if t.name == "healthchecks-ping"]
-    assert stuck and all(t.daemon for t in stuck)
-
-
-def test_a_resolver_that_hangs_holds_nothing(monkeypatch):
-    """#143 round 17, SOTA-A: the deadline cancelled the request, but name
-    resolution ran on the loop's executor, which asyncio.run then waited for
-    on its way out - a blocked getaddrinfo held the ping, and the recompute
-    lock, past the deadline. Since round 22 the call runs on a daemon thread
-    that nothing waits for past the deadline."""
-    import socket
-    import threading
-    import time
-
-    _configure(monkeypatch, URL)
-    monkeypatch.setattr(healthchecks, "_DEADLINE_S", 0.5, raising=False)
-    real = socket.getaddrinfo
-
-    def _hang(host, *args, **kwargs):
-        if host in ("hc-ping.com", b"hc-ping.com"):   # str or bytes, by resolver path
-            time.sleep(8)                    # a resolver that does not answer
-        return real(host, *args, **kwargs)
-
-    monkeypatch.setattr(socket, "getaddrinfo", _hang)
-    done = threading.Event()
-    threading.Thread(target=lambda: (healthchecks.ping(None), done.set()), daemon=True).start()
-    assert done.wait(4), "a hanging resolver held the ping - and the recompute lock - past its deadline"
+    assert seen == [(None, True), ("gather failed", True)]
