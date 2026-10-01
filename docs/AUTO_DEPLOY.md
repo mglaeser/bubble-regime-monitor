@@ -235,3 +235,9 @@ once. Configure the check with
 a **4 h period** (the recompute cadence) and a **1 h grace**; Healthchecks then
 alerts on its own channels when the pings stop, which covers the one outage
 the service cannot report itself.
+
+A check alerts only once it has been pinged: until then it is "New", and a
+host lost before the first successful recompute would alert nobody. So after
+setting the URL and restarting the service, prime the check with a recompute
+(`POST /api/v1/admin/refresh`, or the next 4-hourly slot) and confirm in
+Healthchecks that it shows **Up** before relying on it.

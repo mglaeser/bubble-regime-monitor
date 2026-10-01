@@ -158,3 +158,14 @@ def test_every_recompute_reports_its_outcome_under_the_lock(monkeypatch, isolate
                         lambda: (_ for _ in ()).throw(RuntimeError("gather failed")))
     admin.run_recompute_guarded()
     assert seen == [(None, True), ("gather failed", True)]
+
+
+def test_the_runbook_primes_the_check_before_relying_on_it():
+    """#144 round 3, SOTA-A: a check that has never been pinged stays "New" and
+    alerts on nothing, so a host lost before the first successful recompute
+    would alert nobody. The runbook says to prime it and see it Up."""
+    from pathlib import Path
+
+    doc = Path(__file__).resolve().parents[1] / "docs" / "AUTO_DEPLOY.md"
+    section = doc.read_text(encoding="utf-8").split("## The dead-man's switch", 1)[1]
+    assert "New" in section and "admin/refresh" in section and "**Up**" in section
