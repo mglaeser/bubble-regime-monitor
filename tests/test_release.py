@@ -29,7 +29,8 @@ _SHIMS = {
     "podman": r"""#!/usr/bin/env bash
 echo "podman $*" >> "$CALLS"
 case "$1 $2" in
-  "container inspect") cat "$SHIM_STATE/label" 2>/dev/null || exit 1 ;;   # no container: inspect fails
+  "container inspect") [[ -f "$SHIM_STATE/label" ]] || exit 1              # no container: inspect fails
+                       [[ -f "$SHIM_STATE/stopped" ]] || cat "$SHIM_STATE/label" ;;   # exited: inspect answers, the template empties
   "build "*) [[ "$BUILD_FAILS" != "1" ]] || exit 1
              echo "${5#*:}" >> "$SHIM_STATE/images"; cp -r "$8" "$SHIM_STATE/context" ;;
   "run "*) [[ "$MIGRATE_FAILS" != "1" ]] || exit 1 ;;
@@ -49,6 +50,7 @@ fi
 if [[ "$*" == *restart* ]]; then
   [[ "$RESTART_FAILS" != "1" ]] || exit 1
   [[ "$RESTART_NOOP" == "1" ]] || cp "$SHIM_STATE/latest" "$SHIM_STATE/label"   # the new container carries :latest's commit
+  [[ "$RESTART_NOOP" == "1" ]] || rm -f "$SHIM_STATE/stopped"                    # ...and runs
 fi
 exit 0
 """,
@@ -160,6 +162,25 @@ def test_a_release_when_no_container_runs(release):
     assert f"{LABEL}={target}" in calls[build] and f"-t {IMAGE}:{target}" in calls[build]
     assert (release.state / "label").read_text().strip() == target
     assert _git("rev-parse", "HEAD", cwd=release.checkout) == target     # the checkout followed
+
+
+def test_a_stopped_container_carrying_mains_commit_is_released(release):
+    """A container inspect answers for an exited container too; the release
+    reads the label of a RUNNING one, so a stopped service is started on
+    main's commit rather than left for carrying its label (#147 round 3)."""
+    target = release.advance()
+    (release.state / "stopped").write_text("")
+    code, calls = release(running=target)
+    assert code == 0 and "systemctl --user restart bubblegauge.service" in calls
+
+
+def test_a_running_container_that_carries_mains_commit_is_left_to_its_unit(release):
+    """Health on the quiet path is the unit's (podman's health check kills a
+    container that stops answering, Restart= boots it again): the release
+    probes nothing and restarts nothing it would only restart."""
+    target = release.advance()
+    code, calls = release(running=target, env={"STATUS": "503"})
+    assert code == 0 and not any(c.startswith(("curl", "systemctl --user restart")) for c in calls)
 
 
 def test_a_release_when_the_label_differs(release):

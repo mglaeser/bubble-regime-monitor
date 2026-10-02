@@ -26,10 +26,14 @@ HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-120}"   # seconds to wait for /healthz after t
 
 die() { printf '\nERROR: %s\n' "$*" >&2; exit 1; }
 trap 'die "release failed at line $LINENO"' ERR
-# The commit the running CONTAINER carries - never what a tag names: with no
+# The commit the RUNNING container carries - never what a tag names: with no
 # container, `podman inspect` falls back to the image called bubblegauge and
-# answered for a service that was not running (#143 round 1).
-running() { podman container inspect -f "{{index .Config.Labels \"$LABEL\"}}" "$CONTAINER" 2>/dev/null || true; }
+# answered for a service that was not running (#143 round 1). And running: a
+# container inspect answers for an exited one too, which would have read as
+# released (#147 round 3); empty unless the container is up.
+running() {
+  podman container inspect -f "{{if .State.Running}}{{index .Config.Labels \"$LABEL\"}}{{end}}" "$CONTAINER" 2>/dev/null || true
+}
 
 # Only as the unit's main process: systemd runs one instance of a oneshot at a
 # time, and stopping it stops the build and the migration with it (MainPID is
@@ -42,6 +46,11 @@ cd "$(dirname "$0")/.."
 # tag named like the branch nor a local ref stands in for it (#143 round 27).
 git fetch --quiet --prune --no-tags origin "+refs/heads/$BRANCH:$REMOTE"
 TARGET="$(git rev-parse "$REMOTE")"
+# The one comparison. A container that runs main's commit and does not answer
+# is the unit's: podman's health check kills it after three failed checks,
+# Restart= boots it again, and the alarms report it. The release probes
+# nothing here - the probe on this path was where #143's rounds 3, 29 and 37
+# came from - and releases nothing it would only restart.
 [[ "$TARGET" != "$(running)" ]] || exit 0
 
 printf '\n==> Releasing %s (running: %s)\n' "${TARGET:0:7}" "$(running | cut -c1-7)"

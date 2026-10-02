@@ -240,7 +240,7 @@ keeps deploying, and nothing here runs.
 | Piece | File | What it does |
 |---|---|---|
 | The service | `deploy/quadlet/bubblegauge.container` | A Podman Quadlet unit: systemd starts the container at boot (with linger), restarts it when it dies, and kills it when it stops answering `/healthz` (podman's own health check). It runs `localhost/bubblegauge:latest`. |
-| The release | `deploy/release.sh` via `deploy/systemd/bubblegauge-release.service` | One comparison and no memory: the commit the running container carries (its OCI revision label) against `origin/main`. Different: build main's commit from an export, migrate in a throwaway container (one transaction), point `:latest` at the image, restart the service, wait for `/healthz`. |
+| The release | `deploy/release.sh` via `deploy/systemd/bubblegauge-release.service` | One comparison and no memory: the commit the running container carries (its OCI revision label; a stopped container carries none) against `origin/main`. Different: build main's commit from an export, migrate in a throwaway container (one transaction), point `:latest` at the image, restart the service, wait for `/healthz`. Equal: nothing - a container that runs main's commit and does not answer is the service unit's to kill and restart, not the release's. |
 | The schedule | `deploy/systemd/bubblegauge-release.timer` | Five minutes after the last release ended, and two minutes after boot. |
 | The alarm | `deploy/systemd/bubblegauge-notify-failed@.service` | A failed release is reported once over iMessage through the host's notifier, then at most once an hour while it persists. |
 
