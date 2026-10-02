@@ -240,14 +240,17 @@ keeps deploying, and nothing here runs.
 | Piece | File | What it does |
 |---|---|---|
 | The service | `deploy/quadlet/bubblegauge.container` | A Podman Quadlet unit: systemd starts the container at boot (with linger), restarts it when it dies, and kills it when it stops answering `/healthz` (podman's own health check). It runs `localhost/bubblegauge:latest`. |
-| The release | `deploy/release.sh` via `deploy/systemd/bubblegauge-release.service` | One comparison and no memory: the commit the running container carries (its OCI revision label; a stopped container carries none) against `origin/main`. Different: build main's commit from an export, migrate in a throwaway container (one transaction), point `:latest` at the image, restart the service, wait for `/healthz`. Equal: nothing - a container that runs main's commit and does not answer is the service unit's to kill and restart, not the release's. |
+| The release | `deploy/release.sh` via `deploy/systemd/bubblegauge-release.service` | One comparison and no memory: the commit the running container carries (its OCI revision label; a stopped container carries none) against `origin/main`. Different: build main's commit from an export, point `:latest` at the image, restart the service - the new image migrates the database as it boots, one transaction - and wait for `/healthz`. Equal: nothing - a container that runs main's commit and does not answer is the service unit's to kill and restart, not the release's. |
 | The schedule | `deploy/systemd/bubblegauge-release.timer` | Five minutes after the last release ended, and two minutes after boot. |
 | The alarm | `deploy/systemd/bubblegauge-notify-failed@.service` | A failed release is reported once over iMessage through the host's notifier, then at most once an hour while it persists. |
 
 **The contract.** The service runs `origin/main`'s commit. A release that fails
 exits non-zero, is reported, and is tried again at the next tick; a commit that
-cannot be built or migrated touches nothing - the migration is one transaction
-and the service keeps running what it ran. After the switch the service is
+cannot be built touches nothing. The database moves only under the code that
+fits it: the new image migrates as it boots, in one transaction, and a
+migration that fails rolls back with the service not up on the new image -
+the database unchanged, so the hand rollback below restores the previous
+image. A boot, its migration included, has five minutes. After the switch the service is
 systemd's: `Restart=always` every ten seconds without limit, and the health
 check kills a container that stops answering. Nothing rolls back: a release
 that answers nothing after the switch is what main says to run, and the next
@@ -300,7 +303,7 @@ systemctl --user daemon-reload
 podman tag "$(podman inspect -f '{{.Image}}' bubblegauge)" localhost/bubblegauge:latest
 podman rm -f bubblegauge
 systemctl --user start bubblegauge.service
-# 4. the first release - the old image carries no label, so main is built and released once - then the timer
+# 4. the first release - the old image carries no label, so main is built and released once (its boot migrates, a no-op at head) - then the timer
 systemctl --user start bubblegauge-release.service
 systemctl --user enable --now bubblegauge-release.timer
 ```

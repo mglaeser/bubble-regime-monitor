@@ -4,8 +4,8 @@
 The contract, pinned here and stated in docs/AUTO_DEPLOY.md: one comparison
 and no memory. The commit the running container carries is compared with
 origin/main; when they differ, main's commit is built from an export,
-migrated in a throwaway container, tagged :latest and restarted, and the
-release waits for /healthz. A release that fails exits non-zero and is tried
+tagged :latest and restarted - the new image migrates as it boots - and
+the release waits for /healthz. A release that fails exits non-zero and is tried
 again at the next tick; nothing rolls back, and a release main cannot run is
 fixed forward.
 
@@ -33,7 +33,7 @@ case "$1 $2" in
                        [[ -f "$SHIM_STATE/stopped" ]] || cat "$SHIM_STATE/label" ;;   # exited: inspect answers, the template empties
   "build "*) [[ "$BUILD_FAILS" != "1" ]] || exit 1
              echo "${5#*:}" >> "$SHIM_STATE/images"; cp -r "$8" "$SHIM_STATE/context" ;;
-  "run "*) [[ "$MIGRATE_FAILS" != "1" ]] || exit 1 ;;
+  "run "*) ;;
   "tag "*) echo "${2#*:}" > "$SHIM_STATE/latest" ;;
   "images "*) tac "$SHIM_STATE/images" 2>/dev/null | sed "s|^|localhost/bubblegauge:|"; echo localhost/bubblegauge:latest ;;
   "rmi "*) ;;
@@ -154,11 +154,12 @@ def test_a_release_when_no_container_runs(release):
     code, calls = release(running=None)
     assert code == 0
     build = _index(calls, "podman build")
-    migrate = next(i for i, c in enumerate(calls) if "python -m app.db_migrate" in c)
     tag = calls.index(f"podman tag {IMAGE}:{target} {IMAGE}:latest")
     restart = calls.index("systemctl --user restart bubblegauge.service")
     probe = _index(calls, "curl -q -fsS --noproxy * --max-time 5 -o /dev/null -w %{http_code} http://127.0.0.1:8000/healthz")
-    assert build < migrate < tag < restart < probe
+    assert build < tag < restart < probe
+    # the database moves under the new image as it boots, never before the switch
+    assert not any("db_migrate" in c for c in calls)
     assert f"{LABEL}={target}" in calls[build] and f"-t {IMAGE}:{target}" in calls[build]
     assert (release.state / "label").read_text().strip() == target
     assert _git("rev-parse", "HEAD", cwd=release.checkout) == target     # the checkout followed
@@ -207,14 +208,7 @@ def test_a_build_that_fails_touches_nothing(release):
     release.advance()
     code, calls = release(running=None, env={"BUILD_FAILS": "1"})
     assert code != 0
-    assert not any("db_migrate" in c or c.startswith(("podman tag", "systemctl --user restart")) for c in calls), calls
-
-
-def test_a_migration_that_fails_touches_nothing(release):
-    release.advance()
-    code, calls = release(running=None, env={"MIGRATE_FAILS": "1"})
-    assert code != 0
-    assert not any(c.startswith(("podman tag", "systemctl --user restart")) for c in calls), calls
+    assert not any(c.startswith(("podman run", "podman tag", "systemctl --user restart")) for c in calls), calls
 
 
 def test_a_restart_that_fails_is_a_failed_release(release):
@@ -338,7 +332,9 @@ class TestTheUnits:
         assert health == "HealthCmd=c=$$(curl -q -fsS --noproxy '*' --max-time 5 -o /dev/null -w '%%{http_code}' http://127.0.0.1:8000/healthz) && [ x$$c = x200 ]"
         probe = next(line for line in (ROOT / "deploy/release.sh").read_text().splitlines() if "until c=$(curl" in line)
         assert "curl -q -fsS --noproxy '*' --max-time 5 -o /dev/null -w '%{http_code}'" in probe and "|" not in probe
-        assert {"Restart=always", "RestartSec=10s"} <= set(service)
+        assert {"Restart=always", "RestartSec=10s", "TimeoutStartSec=300"} <= set(service)
+        assert "HealthStartPeriod=300s" in container      # a boot, migration included, has five minutes
+        assert 'HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-300}"' in (ROOT / "deploy/release.sh").read_text()
         assert "StartLimitIntervalSec=0" in unit["[Unit]"]
         assert not any(line.startswith("Exec") for line in service)     # no shell of our own in the unit
 

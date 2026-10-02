@@ -52,13 +52,15 @@ HealthCmd=c=$$(curl -q -fsS --noproxy '*' --max-time 5 -o /dev/null -w '%%{http_
 HealthInterval=30s
 HealthTimeout=5s
 HealthRetries=3
-HealthStartPeriod=120s
+HealthStartPeriod=300s
 HealthOnFailure=kill
 
 [Service]
 Restart=always
 # ...every ten seconds: a crash loop is a restart every ten seconds, not a spin.
 RestartSec=10s
+# A boot, its migration included, has five minutes - the same five the health
+# check's start period and the release's wait give it.
 TimeoutStartSec=300
 
 [Install]

@@ -6,8 +6,8 @@
 #
 # One comparison and no memory: the commit the RUNNING container carries (its
 # OCI revision label) against origin/main. Equal: nothing to do. Different:
-# build main's commit from an export, migrate the database in a throwaway
-# container (one transaction), point :latest at the image, restart the service
+# build main's commit from an export, point :latest at the image, restart the
+# service - the new image migrates the database as it boots, one transaction -
 # and wait for /healthz. A release that fails exits non-zero - the unit's
 # OnFailure= reports it - and is tried again at the next tick. Nothing rolls
 # back: after the switch the service is systemd's, and a release main cannot
@@ -22,7 +22,9 @@ PORT=8000
 BRANCH=main
 REMOTE="refs/remotes/origin/$BRANCH"
 LABEL=org.opencontainers.image.revision
-HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-120}"   # seconds to wait for /healthz after the restart (the tests shorten it)
+# A boot, its migration included, has five minutes: the unit's TimeoutStartSec,
+# its health start period and this wait agree (the tests shorten it).
+HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-300}"
 
 die() { printf '\nERROR: %s\n' "$*" >&2; exit 1; }
 trap 'die "release failed at line $LINENO"' ERR
@@ -65,16 +67,14 @@ git archive "$TARGET" | tar -x -C "$RUNTIME_DIRECTORY/src"
 podman build --label "$LABEL=$TARGET" -t "$IMAGE:$TARGET" \
   -f "$RUNTIME_DIRECTORY/src/Containerfile" "$RUNTIME_DIRECTORY/src"
 
-# The migration, in a throwaway container on the production data: one
-# transaction (migrations/env.py), so a failure leaves the database as it was
-# and the service untouched. --init: as PID 1, python ignores the SIGTERM a
-# stopping unit sends; under catatonit the container ends with the unit
-# (executed on the host, #143 round 15).
-mkdir -p data
-podman run --rm --init --env-file .env -v "$PWD/data:/data:z" "$IMAGE:$TARGET" python -m app.db_migrate
-
-# The switch: :latest is what the Quadlet unit runs. A restart that fails is a
-# failed release, reported and tried again at the next tick.
+# The switch: :latest is what the Quadlet unit runs. The new image migrates the
+# database as it boots (app.main's lifespan, one transaction since #146): the
+# database moves only under the code that fits it, never while the old code
+# serves (a migration run before the switch left old code on the moved schema
+# when the switch failed, #147 round 4), and a migration that fails rolls
+# back with the service not up on the new image - the database unchanged, the
+# previous image's to run again by hand. A restart that fails is a failed
+# release, reported and tried again at the next tick.
 podman tag "$IMAGE:$TARGET" "$IMAGE:latest"
 systemctl --user restart "$SERVICE"
 # Healthy is a 200 and nothing else, the same line as the unit's health check:
