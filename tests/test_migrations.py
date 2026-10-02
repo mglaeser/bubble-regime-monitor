@@ -654,3 +654,34 @@ def test_render_integrity_migration_refuses_competing_final_renders(tmp_path):
         connection.close()
 
     _run_with_db(db, _seed_and_refuse)
+
+
+
+class TestTheUpgradeIsOneTransaction:
+    """Alembic treats SQLite's DDL as non-transactional (one begin() per
+    revision), and pysqlite opens no transaction before DDL at all, so a
+    failed upgrade could leave the database between revisions, or part-way
+    through one - the state this module's docstring once described. Under
+    SQLAlchemy's recipe for pysqlite (app.db.sqlite_transactional_ddl) and
+    transactional_ddl=True the whole upgrade is one transaction: a failed
+    one leaves the database as it found it."""
+
+    def test_a_failed_transaction_leaves_no_ddl_behind(self, tmp_path):
+        from sqlalchemy import create_engine, inspect
+
+        from app.db import sqlite_transactional_ddl
+
+        engine = create_engine(f"sqlite:///{tmp_path / 'probe.db'}")
+        sqlite_transactional_ddl(engine)
+        with pytest.raises(RuntimeError), engine.connect() as conn, conn.begin():
+            conn.exec_driver_sql("CREATE TABLE probe (x INTEGER)")
+            conn.exec_driver_sql("INSERT INTO probe VALUES (1)")
+            raise RuntimeError("the migration fails after its DDL")
+        assert "probe" not in inspect(engine).get_table_names()
+
+    def test_the_migrations_run_as_one_transaction(self):
+        from pathlib import Path
+
+        env = (Path(__file__).resolve().parents[1] / "migrations" / "env.py").read_text(encoding="utf-8")
+        assert "sqlite_transactional_ddl(connectable)" in env
+        assert "transactional_ddl=True" in env
