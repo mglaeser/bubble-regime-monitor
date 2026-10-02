@@ -1,0 +1,22 @@
+# The release: the service runs origin/main's commit (owner decision D6).
+# Started by bubblegauge-release.timer or by hand; one instance at a time, and
+# stopping it stops the build and the migration with it (the default
+# KillMode=control-group). No NoNewPrivileges: rootless podman sets up its user
+# namespace through the setuid newuidmap/newgidmap (executed on the host, #143
+# round 22). The runtime directory is where the commit is exported for the
+# build; systemd creates it with the unit and removes it when the unit ends.
+[Unit]
+Description=bubblegauge release: the service runs origin/main's commit
+Wants=network-online.target
+After=network-online.target
+OnFailure=bubblegauge-notify-failed@%N.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/playground/bubble-regime-monitor
+ExecStart=%h/playground/bubble-regime-monitor/deploy/release.sh
+RuntimeDirectory=bubblegauge-release
+TimeoutStartSec=3600
+
+[Install]
+WantedBy=default.target
