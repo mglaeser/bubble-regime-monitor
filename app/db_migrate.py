@@ -16,10 +16,12 @@ Used both at app boot (main.lifespan) and by deploy.sh (via
 `python -m app.db_migrate`), so an update self-migrates with or without the
 deploy script.
 
-A migration that fails fails the boot; nothing falls back. The fallback this
-replaced ran create_all, which only adds tables that are missing and never
-alters one that exists: after a migration that failed part-way on an
-existing database, the service came up on a schema between two revisions.
+A migration that fails fails the boot; nothing falls back, and the database
+is as it was: the upgrade runs as one transaction (migrations/env.py). The
+fallback this replaced ran create_all, which only adds tables that are
+missing and never alters one that exists: after a migration that failed
+part-way on an existing database, the service came up on a schema between
+two revisions.
 deploy.sh runs the upgrade before it replaces the container and aborts on
 failure; a boot that fails anyway fails the health check, and the deploy
 rolls back.
