@@ -73,8 +73,11 @@ podman build --label "$LABEL=$TARGET" -t "$IMAGE:$TARGET" \
 # serves (a migration run before the switch left old code on the moved schema
 # when the switch failed, #147 round 4), and a migration that fails rolls
 # back with the service not up on the new image - the database unchanged, the
-# previous image's to run again by hand. A restart that fails is a failed
-# release, reported and tried again at the next tick.
+# previous image's to run again by hand. The migration is the service unit's,
+# not this one's: stopping this unit ends the build, stopping the service ends
+# a boot in flight with an uncommitted migration rolled back (the hand
+# rollback in the docs stops both, #147 round 5). A restart that fails is a
+# failed release, reported and tried again at the next tick.
 podman tag "$IMAGE:$TARGET" "$IMAGE:latest"
 systemctl --user restart "$SERVICE"
 # Healthy is a 200 and nothing else, the same line as the unit's health check:

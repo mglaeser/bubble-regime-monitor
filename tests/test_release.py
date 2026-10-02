@@ -342,7 +342,9 @@ class TestTheUnits:
         script = (ROOT / "deploy/release.sh").read_text()
         assert "CONTAINER=bubblegauge\n" in script and "SERVICE=bubblegauge.service\n" in script
         assert "UNIT=bubblegauge-release.service\n" in script and "PORT=8000\n" in script
-        assert ".deploy-state" not in script and "rollback" not in script.lower().replace("hand rollback", "")
+        # no memory and no rollback in the CODE (the comments may name what the docs do by hand)
+        code = "\n".join(line for line in script.splitlines() if not line.lstrip().startswith("#"))
+        assert ".deploy-state" not in code and "rollback" not in code.lower()
 
     def test_the_cutover_is_in_its_order(self):
         doc = (ROOT / "docs/AUTO_DEPLOY.md").read_text()
@@ -363,6 +365,10 @@ class TestTheUnits:
         rollback = doc[doc.index("The hand rollback"):doc.index("### Install")]
         steps = [line.split("#")[0].strip() for line in rollback.splitlines()]
         timer = steps.index("systemctl --user stop bubblegauge-release.timer")
-        service = steps.index("systemctl --user stop bubblegauge-release.service")
+        release_unit = steps.index("systemctl --user stop bubblegauge-release.service")
+        # the migration is the service unit's (it runs as the new image boots): a
+        # boot in flight is stopped too, its uncommitted migration rolled back
+        service = steps.index("systemctl --user stop bubblegauge.service")
         tag = next(i for i, s in enumerate(steps) if s.startswith("podman tag localhost/bubblegauge:<previous"))
-        assert timer < service < tag
+        start = steps.index("systemctl --user start bubblegauge.service")
+        assert timer < release_unit < service < tag < start

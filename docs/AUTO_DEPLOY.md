@@ -250,7 +250,10 @@ cannot be built touches nothing. The database moves only under the code that
 fits it: the new image migrates as it boots, in one transaction, and a
 migration that fails rolls back with the service not up on the new image -
 the database unchanged, so the hand rollback below restores the previous
-image. A boot, its migration included, has five minutes. After the switch the service is
+image. A boot, its migration included, has five minutes. The migration is
+the service unit's, not the release's: stopping the release ends its build,
+and stopping the service ends a boot in flight, with an uncommitted
+migration rolled back. After the switch the service is
 systemd's: `Restart=always` every ten seconds without limit, and the health
 check kills a container that stops answering. Nothing rolls back: a release
 that answers nothing after the switch is what main says to run, and the next
@@ -259,11 +262,16 @@ five newest commit tags are kept):
 
 ```bash
 systemctl --user stop bubblegauge-release.timer       # no new release...
-systemctl --user stop bubblegauge-release.service     # ...and none in flight: a stop ends its build and migration
+systemctl --user stop bubblegauge-release.service     # ...none in flight: a stop ends its build...
+systemctl --user stop bubblegauge.service             # ...and no boot in flight: an uncommitted migration rolls back with it
 podman tag localhost/bubblegauge:<previous commit> localhost/bubblegauge:latest
-systemctl --user restart bubblegauge.service
+systemctl --user start bubblegauge.service
 ```
 
+A previous image that does not come up has found a schema it does not know
+(the journal names the revision): the schema has moved, and the way is
+forward - restore `:latest` to main's image, start the service, fix the
+commit.
 A merge reaches production within one tick plus the release, about six
 minutes: merge outside the stretch from :50 before to :35 after the recompute
 slots (02/06/10/14/18/22 UTC).
