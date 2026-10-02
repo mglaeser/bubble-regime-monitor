@@ -402,6 +402,9 @@ class TestTheUnits:
         unit = _directives((ROOT / "deploy/systemd/bubblegauge-release.service").read_text())
         assert "Type=oneshot" in unit["[Service]"]
         assert "RuntimeDirectory=bubblegauge-release" in unit["[Service]"]
+        # removed when the unit ends, success or failure, with the smoke boot's
+        # database in it: nothing of a run outlives it (#148 round 2)
+        assert not any(line.startswith("RuntimeDirectoryPreserve=") for line in unit["[Service]"])
         assert "OnFailure=bubblegauge-notify-failed@%N.service" in unit["[Unit]"]
         # the copy installed by hand, run in the checkout - never the checkout's file
         assert "ExecStart=%h/.local/bin/bubblegauge-release" in unit["[Service]"]

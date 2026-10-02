@@ -87,10 +87,13 @@ podman build --label "$LABEL=$TARGET" -t "$IMAGE:$TARGET" \
 # (--entrypoint sh): no ENTRYPOINT the image declares stands in for it - one of
 # /bin/true passed without running a thing (executed on the host, #148 round
 # 1). Its database directory is new and empty, whatever the runtime directory
-# holds (mktemp -d). Attached and --init, so it ends with the unit; and it ends
-# by itself at a two-minute deadline in seconds - a count of probes, each
-# bounded at five, would stretch to twelve against a server that accepts and
-# never answers (executed on the host: /healthz answers in three seconds).
+# holds (mktemp -d), and it goes with the runtime directory when the unit ends,
+# success or failure, the database podman wrote into it included: nothing
+# accumulates across retries (executed on the host, #148 round 2). Attached
+# and --init, so it ends with the unit; and it ends by itself at a two-minute
+# deadline in seconds - a count of probes, each bounded at five, would stretch
+# to twelve against a server that accepts and never answers (executed on the
+# host: /healthz answers in three seconds).
 smoke="$(mktemp -d "$RUNTIME_DIRECTORY/smoke.XXXXXX")"
 podman run --rm --init --network none --entrypoint sh -e TESTING=true -v "$smoke:/data:z" "$IMAGE:$TARGET" \
   -c 'uvicorn app.main:app --port 8000 >/dev/null 2>&1 & p=$!
