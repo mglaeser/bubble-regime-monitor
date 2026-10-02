@@ -157,7 +157,7 @@ def _record_quiet_window(
     this append-only scheduler event answers the retrospective question "which
     closed window did the job actually inspect?".  It deliberately is not an
     ``AlertDelivery`` and therefore cannot counterfeit a successfully sent
-    digest in the Stage-4 cutover gate.
+    digest.
 
     Repeated observations are retained rather than deduplicated: each is a
     truthful scheduler execution, while the stable causation id groups every
@@ -358,8 +358,8 @@ def plan_digest(session: Session, *, mode: str, live_profile: str,
     # Mandate 21.3 is structural: TEST is the ONLY delivery kind permitted to
     # have zero alert_delivery_member rows.  The digest heartbeat is the
     # durable proof that this scheduled job ran; a quiet provider intent would
-    # invent a memberless market delivery and could falsely satisfy cutover's
-    # successful-digest evidence gate.  Do not burn the window key: if a late
+    # invent a memberless market delivery that would read as a sent digest.
+    # Do not burn the window key: if a late
     # item arrives, a later run can still create the real memberful digest.
     if not items:
         plan.quiet = True

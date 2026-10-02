@@ -207,8 +207,8 @@ def test_a_quiet_job_persists_window_proof_without_provider_intent(monkeypatch):
 
     A component heartbeat answers "is the digest job alive now?" while the
     scheduler event preserves which closed window was actually inspected.
-    Neither is a provider intent, so a quiet week cannot counterfeit one of
-    the two successfully SENT weekly digests required for Stage 4 cutover.
+    Neither is a provider intent, so a quiet week cannot counterfeit a
+    successfully SENT weekly digest.
     """
     from app.alerts.calendars import last_closed_digest_window
     from app.alerts.health import health_projection
@@ -273,19 +273,6 @@ def test_a_quiet_job_persists_window_proof_without_provider_intent(monkeypatch):
             now=datetime.now(UTC),
         )
         assert projection["components"]["digest"]["healthy"] is True
-
-        # The two-digest observation gate was removed 2026-08-27 by explicit
-        # operator decision, so the counterfeit surface this assertion guarded
-        # is gone with it. The invariant that REMAINS is stronger and still
-        # pinned above: a quiet window persists a heartbeat and a scheduler
-        # event, never an AlertDelivery — nothing here can impersonate a
-        # provider intent whatever any future gate counts.
-        from app.alerts.cutover import preflight
-        cutover = preflight(session, now=datetime.now(UTC))
-        assert not any(
-            item.startswith("weekly_digests")
-            for item in cutover.unsatisfied + cutover.satisfied
-        ), "the removed two-digest observation gate has quietly returned"
 
 
 def test_replanning_the_same_window_is_a_no_op():

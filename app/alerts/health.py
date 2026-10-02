@@ -509,8 +509,7 @@ _RECOVERY_MAX_SILENCE_S = 90 * 60
 #: Retention is daily; allow one missed-hour window without masking a missed
 #: day. The scheduler's own misfire grace is six hours.
 _RETENTION_MAX_SILENCE_S = 36 * 60 * 60
-#: Digest is weekly. Its Stage-4 preflight has a stricter two-hour proof tied
-#: to the cutover run; ordinary health still needs to detect a missed week.
+#: Digest is weekly; health detects a missed week.
 _DIGEST_MAX_SILENCE_S = 8 * 24 * 60 * 60
 #: Recompute runs every four hours.  Ten hours permits two missed slots, the
 #: watchdog's 90-minute grace and ordinary timer jitter without allowing a

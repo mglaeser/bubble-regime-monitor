@@ -108,9 +108,8 @@ def persist_plan(
             if normalized_reasons:
                 # The episode snapshot is intentionally cumulative, which
                 # makes it useful for diagnosis but unable to answer WHEN a
-                # suppression happened.  Stage-4 cutover needs an exact
-                # two-week observation window, so every planner suppression
-                # also receives immutable, timestamped provenance.
+                # suppression happened, so every planner suppression also
+                # receives immutable, timestamped provenance.
                 session.add(AlertEvent(
                     event_id=new_ulid(utc_ms(now)),
                     occurred_at=now,
