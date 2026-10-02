@@ -34,7 +34,12 @@ case "$1 $2" in
                        [[ -f "$SHIM_STATE/stopped" ]] || cat "$SHIM_STATE/label" ;;   # exited: inspect answers, the template empties
   "build "*) [[ "$BUILD_FAILS" != "1" ]] || exit 1
              echo "${5#*:}" >> "$SHIM_STATE/images"; cp -r "$8" "$SHIM_STATE/context" ;;
-  "run "*) [[ "$SMOKE_FAILS" != "1" ]] || exit 1 ;;
+  "run "*) for ((i = 1; i < $#; i++)); do                    # what the smoke's /data held as it started
+             j=$((i + 1)); [[ "${!i}" == -v ]] || continue
+             src="${!j%%:*}"; echo "$src" >> "$SHIM_STATE/smoke-dirs"
+             ls -A "$src" | wc -l | tr -d " " > "$SHIM_STATE/smoke-entries"
+           done
+           [[ "$SMOKE_FAILS" != "1" ]] || exit 1 ;;
   "tag "*) echo "${2#*:}" > "$SHIM_STATE/latest" ;;
   "images "*) tac "$SHIM_STATE/images" 2>/dev/null | sed "s|^|localhost/bubblegauge:|"; echo localhost/bubblegauge:latest ;;
   "rmi "*) ;;
@@ -238,10 +243,28 @@ def test_the_candidate_boots_from_scratch_before_the_switch(release):
     assert _index(calls, "podman build") < smoke < _index(calls, "podman tag")
     assert "--network none" in calls[smoke] and "-e TESTING=true" in calls[smoke]
     assert "--env-file" not in calls[smoke] and "-p " not in calls[smoke] and "--publish" not in calls[smoke]
-    assert "/smoke:/data:z" in calls[smoke]
+    # the verifier is the smoke's own: no ENTRYPOINT of the image stands in for it
+    assert "--entrypoint sh" in calls[smoke] and " -c uvicorn" in calls[smoke]
     assert "c=$(curl -fsS" in calls[smoke] and "-w \"%{http_code}\"" in calls[smoke] and "x200" in calls[smoke]
     # a deadline in seconds, not a count of probes (each bounded at five)
     assert "end=$(( $(date +%s) + 120 ))" in calls[smoke] and "seq" not in calls[smoke]
+
+
+def test_the_smoke_boots_on_a_new_empty_database_whatever_the_runtime_directory_holds(release):
+    """#148 round 1, SOTA-C: a fixed smoke directory created with mkdir -p
+    would boot on whatever an earlier run left there, and a migration that
+    cannot run from nothing could pass on a database it had already moved.
+    The directory is mktemp -d's: new and empty on every run."""
+    (release.runtime / "smoke").mkdir(parents=True)
+    (release.runtime / "smoke" / "bubble.db").write_text("an earlier run's\n")
+    release.advance("one")
+    assert release(running=None)[0] == 0
+    assert (release.state / "smoke-entries").read_text().strip() == "0"
+    release.advance("two")
+    assert release(running=None)[0] == 0
+    assert (release.state / "smoke-entries").read_text().strip() == "0"
+    first, second = (release.state / "smoke-dirs").read_text().split()
+    assert first != second and str(release.runtime / "smoke") not in (first, second)
 
 
 def test_a_candidate_that_does_not_boot_touches_nothing(release):

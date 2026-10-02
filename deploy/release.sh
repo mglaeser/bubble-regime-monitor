@@ -82,14 +82,18 @@ podman build --label "$LABEL=$TARGET" -t "$IMAGE:$TARGET" \
 # runtime directory, with no .env, no network and no published port, the
 # scheduler and the warm-ups off (TESTING). It proves the image imports, runs
 # the whole Alembic chain from nothing, binds and answers; what it cannot
-# prove - the production configuration, the data, the scheduler - is fixed
-# forward. Attached and --init, so it ends with the unit; and it ends by itself
-# at a two-minute deadline in seconds - a count of probes, each bounded at five,
-# would stretch to twelve against a server that accepts and never answers
-# (executed on the host: /healthz answers in three seconds).
-mkdir -p "$RUNTIME_DIRECTORY/smoke"
-podman run --rm --init --network none -e TESTING=true -v "$RUNTIME_DIRECTORY/smoke:/data:z" "$IMAGE:$TARGET" \
-  sh -c 'uvicorn app.main:app --port 8000 >/dev/null 2>&1 & p=$!
+# prove - the image's own start command, the production configuration, the
+# data, the scheduler - is fixed forward. Its verifier is its own
+# (--entrypoint sh): no ENTRYPOINT the image declares stands in for it - one of
+# /bin/true passed without running a thing (executed on the host, #148 round
+# 1). Its database directory is new and empty, whatever the runtime directory
+# holds (mktemp -d). Attached and --init, so it ends with the unit; and it ends
+# by itself at a two-minute deadline in seconds - a count of probes, each
+# bounded at five, would stretch to twelve against a server that accepts and
+# never answers (executed on the host: /healthz answers in three seconds).
+smoke="$(mktemp -d "$RUNTIME_DIRECTORY/smoke.XXXXXX")"
+podman run --rm --init --network none --entrypoint sh -e TESTING=true -v "$smoke:/data:z" "$IMAGE:$TARGET" \
+  -c 'uvicorn app.main:app --port 8000 >/dev/null 2>&1 & p=$!
          end=$(( $(date +%s) + 120 ))
          while [ "$(date +%s)" -lt "$end" ]; do
            c=$(curl -fsS --max-time 5 -o /dev/null -w "%{http_code}" http://127.0.0.1:8000/healthz 2>/dev/null) && [ x$c = x200 ] && exit 0
