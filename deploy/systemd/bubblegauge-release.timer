@@ -1,0 +1,12 @@
+# Starts the release five minutes after its last run ended, and two minutes
+# after boot. A merge reaches production within one tick plus the release.
+[Unit]
+Description=bubblegauge release, five minutes after the last run
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=5min
+Unit=bubblegauge-release.service
+
+[Install]
+WantedBy=timers.target

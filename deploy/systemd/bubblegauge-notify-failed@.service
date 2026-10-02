@@ -1,0 +1,15 @@
+# Reports a failed unit over iMessage from the host, through the notifier the
+# alert watchdog already uses (~/.local/bin/bubblegauge-notify-outage, its
+# credentials in ~/.config/bubblegauge/imessage.env). The release unit names
+# this as its OnFailure=. One message, then at most one per hour while the
+# failure persists: systemd's own start rate limit is the throttle.
+[Unit]
+Description=Report a failed %i over iMessage from the host
+StartLimitIntervalSec=1h
+StartLimitBurst=1
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.config/bubblegauge/imessage.env
+ExecStart=%h/.local/bin/bubblegauge-notify-outage "%i failed"
+TimeoutStartSec=120

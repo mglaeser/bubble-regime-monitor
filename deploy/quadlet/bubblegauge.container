@@ -1,0 +1,67 @@
+# bubblegauge as a Podman Quadlet unit (owner decision D6).
+#
+# Install (docs/AUTO_DEPLOY.md): copy to ~/.config/containers/systemd/, then
+# `systemctl --user daemon-reload` and `systemctl --user start bubblegauge.service`.
+# systemd starts it at boot (with linger) and restarts it when it dies or stops
+# answering; the release (deploy/release.sh) only moves :latest and restarts it.
+
+[Unit]
+Description=bubblegauge API and scheduler
+Wants=network-online.target
+After=network-online.target
+# No start limit: this unit is the service's only keeper, and systemd's default
+# (five starts in ten seconds) left a fast-crashing service in `failed` for
+# good, down after the fault cleared (reproduced on the host: NRestarts=5, then
+# nothing).
+StartLimitIntervalSec=0
+
+[Container]
+ContainerName=bubblegauge
+Image=localhost/bubblegauge:latest
+EnvironmentFile=%h/playground/bubble-regime-monitor/.env
+# :z, the SELinux label every container that mounts /data shares: the release's
+# migration container mounts it too, and a private :Z would relabel it away.
+Volume=%h/playground/bubble-regime-monitor/data:/data:z
+# Loopback only: the reverse proxy (host network) is the one way in. Rootless
+# Podman's port handler rewrites every forwarded connection's source to
+# 10.0.2.100 inside the container, so uvicorn trusts X-Forwarded-For from
+# exactly that hop; "*" would take the LEFTMOST entry, which a client writes.
+PublishPort=127.0.0.1:8000:8000
+Environment=FORWARDED_ALLOW_IPS=10.0.2.100
+# The resolvers compose.yml pins since the July 2026 outage (broken in-container
+# DNS); checked from the image on the host, the providers and hc-ping.com
+# resolve through them.
+DNS=1.1.1.1
+DNS=8.8.8.8
+# Hardening (audit B-12): no capabilities, no privilege escalation. The image
+# runs as container-root, which rootless Podman maps to the unprivileged host
+# user; that is what keeps the /data bind mount writable.
+DropCapability=ALL
+NoNewPrivileges=true
+# The health check is podman's: a container that stops answering /healthz -
+# alive and wedged, which Restart= never sees - is killed after three failed
+# checks, and Restart= boots it again. Healthy is a 200 and nothing else: curl's
+# --fail refuses 400 and above and a broken transfer, the comparison refuses a
+# 3xx, and curl's exit is kept (a pipe to grep lost it, so a 200 with a cut body
+# read healthy). Straight to the loopback, no proxy from the environment and no
+# ~/.curlrc; the image carries curl, and podman runs the line in its sh. $$ and
+# %% are systemd's escapes for a literal $ and % (executed on the host: the
+# generated unit hands podman the line with $( and %{, and podman's health
+# check answers healthy on the live app and unhealthy on a dead port).
+HealthCmd=c=$$(curl -q -fsS --noproxy '*' --max-time 5 -o /dev/null -w '%%{http_code}' http://127.0.0.1:8000/healthz) && [ x$$c = x200 ]
+HealthInterval=30s
+HealthTimeout=5s
+HealthRetries=3
+HealthStartPeriod=300s
+HealthOnFailure=kill
+
+[Service]
+Restart=always
+# ...every ten seconds: a crash loop is a restart every ten seconds, not a spin.
+RestartSec=10s
+# A boot, its migration included, has five minutes - the same five the health
+# check's start period and the release's wait give it.
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target
