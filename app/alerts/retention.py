@@ -15,10 +15,6 @@ H-07 says must not happen. So the body is emptied in place, `body_redacted_at`
 is stamped, and migration 0009's trigger permits that ONE transition and no
 other: a render still cannot be rewritten, and cannot be redacted twice.
 
-Raw model output needs no sweep at all. `alert_llm_attempt` has never stored
-it — only status, timing, hashes and an already-redacted error string — so
-there is nothing to expire, which is a better guarantee than expiring it.
-
 The long sweep is intentionally narrow. It removes CLOSED, fully-settled
 history and nothing else, because "delete rows older than N days" applied to a
 table with open episodes is how an open episode loses the ruleset that opened
@@ -52,7 +48,6 @@ METADATA_PRESERVED: tuple[str, ...] = (
     "delivery status and timing",
     "member mapping",
     "rule and ruleset provenance",
-    "actionability labels",
     "budget decisions",
     "replay eligibility",
 )
@@ -199,9 +194,6 @@ def run_retention(session: Session, *, settings, now: datetime | None = None,
     report.message_bodies_redacted = redact_message_bodies(
         session, older_than=message_cutoff, now=now)
     report.events_deleted = sweep_settled_events(session, older_than=metadata_cutoff)
-    report.notes.append(
-        "raw model output is never persisted (alert_llm_attempt stores status, "
-        "hashes and a redacted error only), so it needs no sweep")
 
     if dry_run:
         session.rollback()

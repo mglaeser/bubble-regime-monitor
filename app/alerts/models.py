@@ -685,31 +685,6 @@ class AlertRender(Base):
     )
 
 
-class AlertLlmAttempt(Base):
-    """EVERY external model call, including timeouts and rejections.
-
-    Counted against the budget whether or not it produced anything — otherwise
-    a failing model would get unlimited retries.
-    """
-
-    __tablename__ = "alert_llm_attempt"
-
-    attempt_id: Mapped[str] = mapped_column(String(ULID_LEN), primary_key=True)
-    delivery_id: Mapped[str] = mapped_column(
-        ForeignKey("alert_delivery.delivery_id"), nullable=False, index=True)
-    render_id: Mapped[str | None] = mapped_column(
-        ForeignKey("alert_render.render_id"), nullable=True)
-    attempted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False,
-                                                   index=True)
-    model: Mapped[str] = mapped_column(String(64), nullable=False)
-    request_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    status: Mapped[str] = mapped_column(String(16), nullable=False)
-    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    error_message_redacted: Mapped[str | None] = mapped_column(String(512), nullable=True)
-    context_hash: Mapped[str] = mapped_column(String(SHA_LEN), nullable=False)
-
-
 # ===========================================================================
 # A.16-A.19  silences, idempotency, reviews, heartbeats
 # ===========================================================================
@@ -748,45 +723,6 @@ class ApiIdempotencyRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False,
                                                  index=True)
-
-
-class AlertActionabilityReview(Base):
-    """Human labels for the actionability KPI.
-
-    AMBIGUOUS is a first-class value: an ambiguous label must not be allowed to
-    inflate the metric by being rounded to YES.
-    """
-
-    __tablename__ = "alert_actionability_review"
-    __table_args__ = (
-        # the DB-level backstop for "one label per alert": the route's
-        # duplicate check is a race, and the race's loser must become a
-        # constraint violation, not a second label. Two partial indexes
-        # because SQLite treats NULLs as distinct in a plain unique index.
-        Index("uq_alert_actionability_delivery", "delivery_id",
-              unique=True, sqlite_where=text("delivery_id IS NOT NULL")),
-        Index("uq_alert_actionability_episode_memberless", "episode_id",
-              unique=True, sqlite_where=text("delivery_id IS NULL")),
-        # Stage-7 aggregates slice by decision and review time. Without these,
-        # the evidence query becomes a full 800-day metadata scan precisely
-        # when the operator is deciding whether the model path is beneficial.
-        Index("ix_alert_actionability_reviewed_at", "reviewed_at"),
-        Index("ix_alert_actionability_value_reviewed_at", "actionable", "reviewed_at"),
-        CheckConstraint("actionable IN ('YES','NO','AMBIGUOUS')",
-                        name="ck_alert_actionability_value"),
-    )
-
-    review_id: Mapped[str] = mapped_column(String(ULID_LEN), primary_key=True)
-    episode_id: Mapped[str] = mapped_column(
-        ForeignKey("alert_episode.episode_id"), nullable=False, index=True)
-    delivery_id: Mapped[str | None] = mapped_column(
-        ForeignKey("alert_delivery.delivery_id"), nullable=True)
-    actionable: Mapped[str] = mapped_column(String(16), nullable=False)
-    action_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    reason_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    reviewer_redacted: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    reviewed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    comment_redacted: Mapped[str | None] = mapped_column(String(512), nullable=True)
 
 
 class AlertComponentHeartbeat(Base):

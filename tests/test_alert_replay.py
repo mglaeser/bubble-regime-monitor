@@ -181,7 +181,7 @@ def test_replay_module_cannot_reach_a_provider_or_a_transport():
     from sending real SMS out of a historical simulation.
     """
     forbidden = {"httpx", "requests", "anthropic", "app.llm_gateway", "app.alerts.sender",
-                 "app.alerts.dispatcher", "app.alerts.llm_selector",
+                 "app.alerts.dispatcher",
                  "app.jobs.alert_dispatch", "app.services.sms"}
     tree = ast.parse(REPLAY_SOURCE.read_text(encoding="utf-8"))
     imported: set[str] = set()

@@ -295,17 +295,9 @@ class SenderOutcome(StrEnum):
 
 
 class RenderSource(StrEnum):
-    LLM_SELECTION = "llm_selection"
+    LLM_SELECTION = "llm_selection"   # stored vocabulary only: no code selects since D2b
     TEMPLATE_FULL = "template_full"
     TEMPLATE_MINIMAL = "template_minimal"
-
-
-class LlmAttemptStatus(StrEnum):
-    SUCCESS = "SUCCESS"
-    TIMEOUT = "TIMEOUT"
-    ERROR = "ERROR"
-    REJECTED = "REJECTED"
-    BUDGET_SKIPPED = "BUDGET_SKIPPED"
 
 
 class Priority:

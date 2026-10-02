@@ -1047,7 +1047,7 @@ def test_replay_never_queries_current_provider_state():
     forbidden = ("app.sources", "httpx", "anthropic", "app.http_client",
                  "app.llm_gateway", "requests")
     for path in sorted(root.glob("*.py")):
-        if path.name in {"sender.py", "llm_selector.py", "dispatcher.py"}:
+        if path.name in {"sender.py", "dispatcher.py"}:
             continue          # transport modules, evaluated by their own tests
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):

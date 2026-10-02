@@ -10,7 +10,7 @@ controls are implemented, but the committed ruleset remains at Stage 1.**
 Sidecar capture is on (`ALERT_INPUT_CAPTURE`
 defaults true — it records evidence and nothing else) while `ALERTS_MODE`
 defaults `disabled`. Deterministic delivery, reminders, bundles, the weekly
-digest, watchdog/recovery, retention and actionability evidence
+digest, watchdog/recovery and retention
 are implemented and tested. They are not permission to send: live alert
 delivery is refused below Stage 3, and the committed Stage-3 replay currently
 fails its non-P1 volume gate. The separate daily digest sends through its
@@ -320,8 +320,7 @@ and a digest without one is named by the alert health projection ("the daily
 digest has no transport").
 
 Volume, lease, retention and LLM settings live in `app/config.py`; each has a
-safe default. The `ALERTS_LLM_*` settings reserve the dormant Stage-7/A-B
-selector — the dispatcher does not invoke it, and configuring the runtime
+safe default. Alert phrasing has no model path: configuring the runtime
 gateway activates only the judgment/digest paths. Configuration alone never
 grants delivery permission: the stage, evidence, promotion and per-delivery
 admission checks remain authoritative.
@@ -421,7 +420,6 @@ POST /api/v1/admin/alerts/render      validate reviewed TEST bytes; never persis
 GET  /api/v1/admin/alerts/renders/{id} operator-only message text
 POST /api/v1/admin/alerts/send-test   queue an audited TEST delivery
 POST /api/v1/admin/alerts/deliveries/{id}/retry
-POST /api/v1/admin/alerts/actionability
 ```
 
 A mechanism that has never fired is still in `/mechanisms`, with
@@ -484,12 +482,12 @@ refuses to use it in production.
 | 4 | legacy daily-digest cutover | deleted with its switch (owner decision D2c, 2026-10-02): the daily digest is the message engine's product and is not retired. The gate's CLI never checked the switch - `alerts cutover apply` recorded the operator's intent and printed "set DAILY_SMS_ENABLED=false in the deployment environment", its one importer was that CLI, and the production database holds no cutover event (read-only, 2026-10-02) - and the `DAILY_SMS_ENABLED` alias, the cutover's one purpose, is gone (unset on the production host). The digest's transports decide; `/api/v1/alerts/health` names a digest without one |
 | 5 | constellations and bundled P2 | evaluators, dominance and atomic multi-member bundling are implemented and stage-gated |
 | 6 | EWMA / CUSUM | intentionally absent until immutable calibration and out-of-sample evidence exist |
-| 7 | P3 enrichment and LLM A/B review | P3 inventory, code-only selector and actionability evidence trail are implemented; the selector is not invoked by the production dispatcher and retention depends on future A/B evidence |
+| 7 | P3 enrichment and LLM A/B review | the dormant code-only selector and the actionability evidence trail are deleted (owner decision D2b, 2026-10-02): the dispatcher never called the selector, and neither table ever held a row |
 
 The weekly digest is a real scheduler job, with quiet-week liveness recorded by
 its durable component heartbeat,
-missed-window recovery and digest-item outcome reconciliation. Actionability is
-a real append-only admin workflow, and Stage-5 bundling is exercised by the
+missed-window recovery and digest-item outcome reconciliation. Stage-5
+bundling is exercised by the
 planner, renderer and concurrency tests. Watchdog, dispatcher, digest,
 recovery, sidecar reconciliation and retention each expose a scored component
 heartbeat with a cadence-appropriate freshness limit. The evaluator is scored
@@ -513,10 +511,6 @@ eligible work without a provider call, while forward-looking Stage-3 replay
 runs notification planning and records the actual resulting volume. Mandatory
 event recall remains unmeasured because the frozen catalogue is deliberately
 empty; filling it with invented events would be false evidence.
-
-The LLM code selector stays dormant Stage-7/A-B work: the dispatcher neither
-imports nor calls it, so neither shadow nor live alert delivery opens the
-runtime gateway for alert phrasing.
 
 Operational mechanisms use the strongest producer that actually exists. The
 recompute watchdog captures and evaluates its own typed input; recovery and the
@@ -553,10 +547,6 @@ could still reuse that exact render), and events belonging to an open episode
 needed). Inverted horizons — metadata shorter than messages — are refused
 outright rather than half-applied.
 
-The dormant selector's attempt schema needs no raw-output sweep:
-`alert_llm_attempt` stores only status, timing, hashes and an already-redacted
-error string, never raw model output.
-
 ---
 
 ## 11a2. Promotion is not a delivery switch
@@ -573,8 +563,7 @@ Two questions that look like one, and must not be:
 Stage 1 has no sender by design. The dispatcher therefore refuses BEFORE
 constructing one rather than after: building one and declining to use it would
 break that promise quietly, since the object reads credentials and can open a
-client. Separately, the dispatcher has no LLM path at any current stage: it
-never imports or calls the dormant future Stage-7/A-B selector.
+client. Separately, the dispatcher has no LLM path at any stage.
 
 The floor was briefly removed on the reasoning that `ops.indicator_stale` and
 `ops.coverage_degraded_info` are enabled at Stage 1 and could therefore send.
@@ -693,12 +682,6 @@ The HTTP operator actions are admin-scoped and `no-store`:
    episode and silence eligibility without rewriting the historical UNKNOWN
    row; if the frozen bytes no longer represent exactly what may be sent, it
    returns 409 and leaves the original blocker intact.
-* **`POST /api/v1/admin/alerts/actionability`** — one human label per confirmed-SENT
-  provider message (or per episode when no delivery is supplied), the Stage 7
-  evidence. Dropped/undelivered members, TEST and DIGEST messages are refused;
-  AMBIGUOUS is first-class so an unsure reviewer cannot inflate the KPI. A
-  delivery-less episode label is qualitative evidence only; because it cannot
-  identify a render source, it cannot enter a deterministic-vs-LLM A/B result.
 
 ## 11e. Render-time truth (mandate 17.5)
 

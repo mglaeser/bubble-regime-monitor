@@ -1266,16 +1266,6 @@ def test_a_render_still_cannot_be_rewritten(isolated_db):
             session.flush()
 
 
-def test_raw_model_output_is_never_persisted():
-    """H-07's other half needs no sweep because nothing is ever stored."""
-    from app.alerts.models import AlertLlmAttempt
-
-    columns = {c.name for c in AlertLlmAttempt.__table__.columns}
-    for forbidden in ("response", "completion", "raw_output", "output_text",
-                      "model_output", "prompt"):
-        assert forbidden not in columns
-    assert "error_message_redacted" in columns
-
 
 def test_retention_refuses_inverted_horizons(isolated_db):
     """Metadata must outlive bodies; a misconfiguration is refused, not applied."""

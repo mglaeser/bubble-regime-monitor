@@ -1,8 +1,8 @@
 """Which dynamic slots a model may write — enforced, not just documented.
 
 The program's founding invariant is that the model never writes a number
-(app/alerts/llm_selector.py contains it for the alert path by having the model
-select CODES). Phase D generates PROSE for the dashboard, and the slot registry
+(the alert path renders its reviewed templates without a model). Phase D
+generates PROSE for the dashboard, and the slot registry
 mixes prose with computed statistics: signed coefficients, bounded
 percentages, weights, date stamps. Nothing stopped a generator from filling
 those, so the split is made explicit here and checked.
