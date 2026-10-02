@@ -5,7 +5,7 @@ services:
       dockerfile: Containerfile
     container_name: bubblegauge
     # Loopback only, and trust X-Forwarded-For from the one hop rootless
-    # Podman presents the proxy as (see deploy.sh: PUBLISH / PROXY_HOP).
+    # Podman presents the proxy as (as deploy/quadlet/bubblegauge.container does).
     ports: ["127.0.0.1:8000:8000"]
     env_file: [.env]
     environment:

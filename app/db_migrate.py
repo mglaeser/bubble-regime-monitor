@@ -12,19 +12,17 @@ the project accumulated before migrations were authoritative:
       since a create_all DB matches the current models exactly (verified: the
       migration chain reproduces create_all's schema column-for-column).
 
-Used both at app boot (main.lifespan) and by deploy.sh (via
-`python -m app.db_migrate`), so an update self-migrates with or without the
-deploy script.
+Used at app boot (main.lifespan): every release migrates the database as its
+new image boots, under the code that fits it (docs/AUTO_DEPLOY.md);
+`python -m app.db_migrate` runs the same upgrade by hand.
 
 A migration that fails fails the boot; nothing falls back, and the database
 is as it was: the upgrade runs as one transaction (migrations/env.py). The
 fallback this replaced ran create_all, which only adds tables that are
 missing and never alters one that exists: after a migration that failed
 part-way on an existing database, the service came up on a schema between
-two revisions.
-deploy.sh runs the upgrade before it replaces the container and aborts on
-failure; a boot that fails anyway fails the health check, and the deploy
-rolls back.
+two revisions. A boot that fails its migration fails the release's health
+check: the release is reported, and the previous image is the hand rollback.
 """
 
 from __future__ import annotations
@@ -81,12 +79,12 @@ def upgrade_to_head() -> str:
     return "upgraded"
 
 
-if __name__ == "__main__":  # `python -m app.db_migrate` — used by deploy.sh
+if __name__ == "__main__":  # `python -m app.db_migrate` — the upgrade by hand
     import sys
 
     try:
         status = upgrade_to_head()
         print(f"migration: {status} (head)")
-    except Exception as exc:  # deploy.sh treats a non-zero exit as a hard failure
+    except Exception as exc:  # a non-zero exit is a hard failure
         print(f"migration FAILED: {exc}", file=sys.stderr)
         sys.exit(1)

@@ -49,14 +49,6 @@ class Settings(BaseSettings):
 
     # Auto-deploy webhook (v3.5.0, docs/AUTO_DEPLOY.md). The endpoint is
     # FAIL-CLOSED: it returns 503 unless BOTH values are set. The secret is the
-    # GitHub webhook HMAC secret (X-Hub-Signature-256), verified constant-time —
-    # never an API key in the URL. The app only WRITES a trigger file on /data;
-    # the host-side systemd watchdog runs deploy.sh (a container cannot and
-    # must not replace itself).
-    github_webhook_secret: str = ""
-    deploy_branch: str = ""          # e.g. claude/bubblegauge-build-spec-fzthju
-    deploy_trigger_dir: str = "/data/deploy-trigger"
-
     # SEC EDGAR etiquette (MANDATORY, format: "Name email").
     # SEC_EDGAR_UA is the v3.1 name; SEC_USER_AGENT remains accepted.
     sec_user_agent: str = "bubblegauge-monitor admin@example.com"

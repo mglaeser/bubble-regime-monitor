@@ -454,24 +454,9 @@ class TestTheUnits:
         code = "\n".join(line for line in script.splitlines() if not line.lstrip().startswith("#"))
         assert ".deploy-state" not in code and "rollback" not in code.lower()
 
-    def test_the_cutover_is_in_its_order(self):
-        doc = (ROOT / "docs/AUTO_DEPLOY.md").read_text()
-        cutover = doc[doc.index("## Moving from the webhook"):]
-        steps = [line.split("#")[0].strip() for line in cutover.splitlines()]
-        order = [steps.index(step) for step in (
-            "systemctl --user disable --now bubblegauge-deploy.path",
-            "install -D -m 755 deploy/release.sh ~/.local/bin/bubblegauge-release",
-            "systemctl --user daemon-reload",
-            "podman tag \"$(podman inspect -f '{{.Image}}' bubblegauge)\" localhost/bubblegauge:latest",
-            "podman rm -f bubblegauge",
-            "systemctl --user start bubblegauge.service",
-            "systemctl --user start bubblegauge-release.service",
-            "systemctl --user enable --now bubblegauge-release.timer")]
-        assert order == sorted(order)
-
     def test_the_release_script_is_installed_by_hand(self):
         doc = (ROOT / "docs/AUTO_DEPLOY.md").read_text()
-        install = doc[doc.index("### Install (once"):doc.index("## Moving from the webhook")]
+        install = doc[doc.index("### Install (once"):doc.index("### Operate")]
         assert "install -D -m 755 deploy/release.sh ~/.local/bin/bubblegauge-release" in install
 
     def test_the_hand_rollback_stops_a_release_in_flight_first(self):

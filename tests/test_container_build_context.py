@@ -60,9 +60,9 @@ REQUIRED_BUILD_INPUTS = (
     "migrations/env.py",
     "r/gsadf.R",
     "frozen_methodology.json",
-    "deploy.sh",
-    "deploy/deploy-watch.sh",
-    "deploy/systemd/bubblegauge-deploy.service",
+    "deploy/release.sh",
+    "deploy/quadlet/bubblegauge.container",
+    "deploy/systemd/bubblegauge-release.service",
     "compose.yml",
 )
 
