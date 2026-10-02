@@ -77,6 +77,27 @@ git archive "$TARGET" | tar -x -C "$RUNTIME_DIRECTORY/src"
 podman build --label "$LABEL=$TARGET" -t "$IMAGE:$TARGET" \
   -f "$RUNTIME_DIRECTORY/src/Containerfile" "$RUNTIME_DIRECTORY/src"
 
+# The candidate boots from scratch before the switch, so before anything of
+# production is touched: a throwaway container on an empty database in the
+# runtime directory, with no .env, no network and no published port, the
+# scheduler and the warm-ups off (TESTING). It proves the image imports, runs
+# the whole Alembic chain from nothing, binds and answers; what it cannot
+# prove - the production configuration, the data, the scheduler - is fixed
+# forward. Attached and --init, so it ends with the unit; and it ends by itself
+# at a two-minute deadline in seconds - a count of probes, each bounded at five,
+# would stretch to twelve against a server that accepts and never answers
+# (executed on the host: /healthz answers in three seconds).
+mkdir -p "$RUNTIME_DIRECTORY/smoke"
+podman run --rm --init --network none -e TESTING=true -v "$RUNTIME_DIRECTORY/smoke:/data:z" "$IMAGE:$TARGET" \
+  sh -c 'uvicorn app.main:app --port 8000 >/dev/null 2>&1 & p=$!
+         end=$(( $(date +%s) + 120 ))
+         while [ "$(date +%s)" -lt "$end" ]; do
+           c=$(curl -fsS --max-time 5 -o /dev/null -w "%{http_code}" http://127.0.0.1:8000/healthz 2>/dev/null) && [ x$c = x200 ] && exit 0
+           kill -0 $p 2>/dev/null || exit 1
+           sleep 1
+         done; exit 1' \
+  || die "${TARGET:0:7} does not boot from scratch; $SERVICE is untouched: fix forward"
+
 # The switch: :latest is what the Quadlet unit runs. The new image migrates the
 # database as it boots (app.main's lifespan, one transaction since #146): the
 # database moves only under the code that fits it, never while the old code

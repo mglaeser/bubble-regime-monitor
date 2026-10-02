@@ -255,8 +255,12 @@ files and, with `--no-overwrite-ignore`, ignored ones such as `.env` and
 `data/`: a commit that tracked them would otherwise replace the host's
 secrets or its database. A release that fails
 exits non-zero, is reported, and is tried again at the next tick; a commit that
-cannot be built touches nothing. The database moves only under the code that
-fits it: the new image migrates as it boots, in one transaction, and a
+cannot be built, or cannot boot from scratch, touches nothing - the candidate
+is booted first in a throwaway container on an empty database (no `.env`, no
+network, the scheduler off, two minutes at most), which proves it imports,
+runs the whole migration chain from nothing and answers; what that cannot
+prove (the production configuration, the data, the scheduler) is fixed
+forward. The database moves only under the code that fits it: the new image migrates as it boots, in one transaction, and a
 migration that fails rolls back with the service not up on the new image -
 the database unchanged, so the hand rollback below restores the previous
 image. A boot, its migration included, has five minutes. The migration is
