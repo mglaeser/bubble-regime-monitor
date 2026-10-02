@@ -85,6 +85,7 @@ def release(tmp_path):
     (seed / "deploy").mkdir()
     shutil.copy2(ROOT / "deploy/release.sh", seed / "deploy/release.sh")   # tracked, with its mode
     (seed / "tracked.txt").write_text("in the commit\n")
+    (seed / ".gitignore").write_text(".env\ndata/\n")          # as the repository ignores them
     _git("add", "-A", cwd=seed)
     _git("commit", "--quiet", "-m", "seed", cwd=seed)
     _git("remote", "add", "origin", str(origin), cwd=seed)
@@ -112,11 +113,13 @@ def release(tmp_path):
     runtime = tmp_path / "runtime"
     calls = tmp_path / "calls.log"
 
-    def commit(path: str, content: str, mode: int = 0o644) -> str:
-        """A commit on origin/main that writes `path`; the checkout is behind it."""
+    def commit(path: str, content: str, mode: int = 0o644, force: bool = False) -> str:
+        """A commit on origin/main that writes `path` (`force`: even an ignored
+        one); the checkout is behind it."""
+        (seed / path).parent.mkdir(parents=True, exist_ok=True)
         (seed / path).write_text(content)
         (seed / path).chmod(mode)
-        _git("add", "-A", cwd=seed)
+        _git("add", "-f", path, cwd=seed) if force else _git("add", "-A", cwd=seed)
         _git("commit", "--quiet", "-m", f"write {path}", cwd=seed)
         _git("push", "--quiet", "origin", "main", cwd=seed)
         return _git("rev-parse", "HEAD", cwd=seed)
@@ -295,6 +298,22 @@ def test_only_the_units_main_process_releases(release):
     code, calls = release(running=None, env={"NOT_THE_UNIT": "1"})
     assert code != 0 and "runs as its unit" in release.output
     assert not any(c.startswith("podman") for c in calls)
+
+
+@pytest.mark.parametrize("path", [".env", "data/bubble.db"])
+def test_a_commit_that_tracks_host_state_overwrites_nothing(release, path):
+    """#147 round 7, SOTA-A: git treats ignored files as expendable, so a
+    fast-forward to a commit that tracked .env or the database replaced the
+    host's own without a word (executed on the host, git 2.43). With
+    --no-overwrite-ignore git refuses instead: the host's file stays, and the
+    release fails before anything is built."""
+    host = release.checkout / path
+    host.parent.mkdir(exist_ok=True)
+    host.write_text("the host's own\n")
+    release.commit(path, "main's copy\n", force=True)
+    code, calls = release(running=None)
+    assert code != 0 and host.read_text() == "the host's own\n"
+    assert not any(c.startswith(("podman build", "podman tag", "systemctl --user restart")) for c in calls), calls
 
 
 def test_a_diverged_checkout_is_refused(release):

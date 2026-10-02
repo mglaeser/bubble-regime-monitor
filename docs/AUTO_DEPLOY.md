@@ -249,7 +249,11 @@ production only as images, built and run in rootless containers: what runs
 on the host - the units and the release script, installed by hand from the
 checkout - changes only by hand, so neither a hostile nor a broken commit of
 the release script runs there, and a broken one cannot stop the release that
-would fetch its fix. A release that fails
+would fetch its fix. The checkout follows main fast-forward only, and git
+refuses rather than overwrite anything of the host's - local edits, untracked
+files and, with `--no-overwrite-ignore`, ignored ones such as `.env` and
+`data/`: a commit that tracked them would otherwise replace the host's
+secrets or its database. A release that fails
 exits non-zero, is reported, and is tried again at the next tick; a commit that
 cannot be built touches nothing. The database moves only under the code that
 fits it: the new image migrates as it boots, in one transaction, and a

@@ -62,9 +62,13 @@ TARGET="$(git rev-parse "$REMOTE")"
 [[ "$TARGET" != "$(running)" ]] || exit 0
 
 printf '\n==> Releasing %s (running: %s)\n' "${TARGET:0:7}" "$(running | cut -c1-7)"
-# The checkout follows, fast-forward only: a diverged checkout is refused, not
-# discarded. The build never reads the tree.
-git merge --ff-only -q "$REMOTE"
+# The checkout follows, fast-forward only, and git refuses rather than
+# overwrite anything of the host's: a diverged checkout, a local edit, an
+# untracked file - and, with --no-overwrite-ignore, an ignored one. Git treats
+# ignored files as expendable, and a commit that tracked .env or data/ replaced
+# the host's secrets or its database without a word (executed on the host,
+# #147 round 7). The build never reads the tree.
+git merge --ff-only --no-overwrite-ignore -q "$REMOTE"
 # Built from an export of the commit: git decides what the commit contains, and
 # an untracked file in the checkout never ships (#143 round 20). The runtime
 # directory is systemd's, created with the unit and removed when it ends.
