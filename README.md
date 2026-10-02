@@ -131,32 +131,32 @@ Base path `/api/v1`; every response is `{"data": ..., "meta": ...}` with the fiv
 | `GET /api/v1/admin/refresh/status` | Running state + last recompute outcome (X-API-Key) |
 | `POST /api/v1/admin/send-sms` | Send the daily digest now over the configured transport (iMessage or SMS) — test path (X-API-Key) |
 | `POST /api/v1/admin/falsification` | Record a falsification outcome — append-only (X-API-Key) |
-| `POST /api/v1/admin/deploy` | Write a deploy-trigger for the host watchdog — manual auto-deploy path (X-API-Key) |
-| `POST /api/v1/webhooks/github` | GitHub auto-deploy webhook — HMAC-verified, fail-closed (v3.5.0, `docs/AUTO_DEPLOY.md`) |
 
 ## Deployment & updates
 
-Updating a running server is a single command:
+Merges to `main` reach production by themselves (owner decision D6). A
+`systemd --user` timer starts `deploy/release.sh` five minutes after its last
+run. It compares the commit the running container carries with `origin/main`
+and, when they differ, builds main's commit from an export, boots it once
+from scratch in a throwaway container, points `:latest` at it and restarts the
+Podman Quadlet service, which migrates the database as it boots (one
+transaction), then waits for `/healthz`. A release that fails is reported over
+iMessage and tried again at the next tick; nothing rolls back. A merge reaches
+production within about six minutes. Install, operation and the hand rollback:
+**`docs/AUTO_DEPLOY.md`**.
 
-```bash
-./deploy.sh        # or: make deploy
-```
+To release at once: `make deploy` (`systemctl --user start bubblegauge-release.service`).
 
-It performs, in order (each step announced with a `==>` banner):
+The app **self-migrates at boot** (`app.db_migrate.upgrade_to_head` runs
+`alembic upgrade head` as one transaction; a failed migration fails the boot
+and leaves the database as it was), so `podman-compose up -d --build` stays
+valid for a local run. To apply migrations locally without a container:
+`make migrate`.
 
-1. **Pull** — `git fetch` + fast-forward the deployment branch (refuses to run on a diverged/dirty tree rather than discard local work).
-2. **Build** — a container image tagged with the short commit (and `:latest`).
-3. **Migrate** — `alembic upgrade head` in a throwaway container against the same `./data` volume. Migrations run **before** the new container starts, so a bad migration aborts the deploy instead of taking the service down. Alembic is the single source of truth for the schema; a legacy database created by the old `create_all` path is detected and stamped automatically, so **you no longer need to `rm data/bubble.db` on schema changes**.
-4. **Recreate** — replaces the container with one built from the new image.
-5. **Health-check + auto-rollback** — polls `/healthz`; if the new container does not become healthy it prints the logs and rolls back to the previously running image.
-
-Configuration is via environment variables (all optional, sensible defaults): `BRANCH`, `IMAGE`, `CONTAINER`, `DATA_DIR`, `PORT`, `ENV_FILE`, `ENGINE` (podman/docker), `HEALTH_TIMEOUT`, `KEEP_IMAGES`, plus `SKIP_PULL=1` / `SKIP_BUILD=1`. Example: `PORT=8080 BRANCH=main ./deploy.sh`.
-
-The app also **self-migrates at boot** (`app.db_migrate.upgrade_to_head` runs `alembic upgrade head`; a failed migration fails the boot rather than falling back), so a plain `podman-compose up -d --build` stays valid too — `deploy.sh` just makes the pull/build/migrate/health-check flow explicit and safe. To apply migrations locally without a container: `make migrate`.
-
-### Auto-deploy on merged PRs (v3.5.0)
-
-A merged PR into the deploy branch (or a push to it) redeploys the service automatically: GitHub calls the HMAC-verified in-app webhook (`POST /api/v1/webhooks/github`), the app writes one atomic trigger file on the `/data` volume, and a host-side `systemd --user` path watchdog runs `./deploy.sh` — the container itself holds no host-control capability. Fail-closed: the webhook returns 503 until **both** `GITHUB_WEBHOOK_SECRET` and `DEPLOY_BRANCH` are set in `.env`; the watchdog deploys only its pinned branch, ignoring anything a trigger names. `deploy.sh` self-provisions the watchdog on a healthy deploy (`SETUP_AUTODEPLOY=0` opts out). A **Healthchecks** dead-man's switch (`HEALTHCHECKS_PING_URL`) is pinged after every successful recompute, so an outage the service cannot report itself (host, container or scheduler gone, or no recompute succeeding any more) still reaches you. Full setup guide incl. the GitHub webhook configuration: **`docs/AUTO_DEPLOY.md`**.
+A **Healthchecks** dead-man's switch (`HEALTHCHECKS_PING_URL`) is pinged after
+every successful recompute, so an outage the service cannot report itself
+(host, container or scheduler gone, or no recompute succeeding any more) still
+reaches you.
 
 ## Status & spec UI
 

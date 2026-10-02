@@ -35,9 +35,10 @@ build:
 up:
 	podman-compose up -d
 
-# One-command update & deploy: pull -> build -> migrate -> recreate -> health-check.
+# Release main now; the release timer does it five minutes after every merge
+# (docs/AUTO_DEPLOY.md).
 deploy:
-	./deploy.sh
+	systemctl --user start bubblegauge-release.service
 
 # Apply DB migrations to head against the local DB_URL (no container).
 migrate:

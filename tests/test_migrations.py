@@ -361,7 +361,8 @@ def test_legacy_create_all_db_is_self_healed(tmp_path):
 def test_a_failed_migration_fails_the_boot(isolated_db, monkeypatch):
     """Nothing falls back: create_all only adds missing tables, so after a
     migration that failed part-way the service would run on a schema between
-    two revisions. The boot must stop instead (deploy.sh then rolls back)."""
+    two revisions. The boot must stop instead (the release then fails its
+    health check and is reported)."""
     from alembic import command
     from fastapi.testclient import TestClient
 

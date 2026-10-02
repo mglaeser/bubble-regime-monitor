@@ -104,7 +104,6 @@ def create_app() -> FastAPI:
         replay,
         score,
         status,
-        webhooks,
     )
     from app.security import limiter
 
@@ -145,7 +144,6 @@ def create_app() -> FastAPI:
     app.include_router(status.router)
     app.include_router(content.router)
     app.include_router(dashboard.router)
-    app.include_router(webhooks.router)
     app.include_router(replay.router)
     # Alert API. Reads use ALERTS_READ_API_KEY (or ALERTS_PUBLIC_READ); writes
     # use ALERTS_WRITE_API_KEY; neither falls back to the admin key. CORS above

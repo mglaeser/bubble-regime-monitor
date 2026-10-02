@@ -8,7 +8,7 @@ reproduced before the fixes these tests pin:
   1. an upstream 4xx wrote the key verbatim into SourceHealth.note, which the
      UNAUTHENTICATED GET /readyz returns;
   2. httpx logged the key on the SUCCESS path, six times a day, into a
-     container log that deploy.sh tails to the console on a bad rollout.
+     container's journal, which the operator reads on a failed release.
 
 The repository had already written down the first guarantee — the /readyz entry
 in scripts/regime/authz_coverage.py states that SourceHealth.note must stay free

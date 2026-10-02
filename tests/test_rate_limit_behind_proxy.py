@@ -13,7 +13,6 @@ default trusts 127.0.0.1. The port is no longer reachable from outside.
 """
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import httpx
@@ -64,20 +63,11 @@ def test_the_default_trust_keys_every_visitor_as_the_proxy_hop():
     assert _key_seen_by_the_limiter("127.0.0.1", "203.0.113.9, 198.51.100.7") == PROXY_HOP
 
 
-def _runs(deploy: str) -> list[str]:
-    """Each `$ENGINE run -d ...` command in deploy.sh, joined across lines."""
-    return [re.sub(r"\\\n\s*", " ", block)
-            for block in re.findall(r"\$ENGINE run -d(?:[^\n]*\\\n)+[^\n]*", deploy)]
-
-
-def test_deploy_publishes_on_loopback_and_trusts_only_the_proxy_hop():
-    deploy = (ROOT / "deploy.sh").read_text(encoding="utf-8")
-    assert f'PROXY_HOP="{PROXY_HOP}"' in deploy
-    assert 'PUBLISH="127.0.0.1:$PORT:8000"' in deploy
-    runs = _runs(deploy)
-    assert len(runs) == 2, "the deploy and the rollback each start the container"
-    for run in runs:
-        assert '-p "$PUBLISH"' in run and 'FORWARDED_ALLOW_IPS="$PROXY_HOP"' in run, run
+def test_the_service_publishes_on_loopback_and_trusts_only_the_proxy_hop():
+    unit = (ROOT / "deploy/quadlet/bubblegauge.container").read_text(encoding="utf-8")
+    lines = {line.strip() for line in unit.splitlines() if not line.lstrip().startswith("#")}
+    assert "PublishPort=127.0.0.1:8000:8000" in lines
+    assert f"Environment=FORWARDED_ALLOW_IPS={PROXY_HOP}" in lines
 
 
 def test_compose_publishes_on_loopback_and_trusts_only_the_proxy_hop():

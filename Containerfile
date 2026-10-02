@@ -31,8 +31,9 @@ RUN mkdir -p /data
 # 2026-07-15 deploy failed on it and auto-rolled back). Container-root under
 # rootless Podman already maps to the UNPRIVILEGED host user, so the escape
 # blast radius is unchanged; the defence-in-depth is provided instead by
-# --cap-drop=ALL --security-opt no-new-privileges at run time (deploy.sh /
-# compose.yml), which does not fight the bind-mount ownership.
+# --cap-drop=ALL --security-opt no-new-privileges at run time (the Quadlet
+# unit deploy/quadlet/bubblegauge.container / compose.yml), which does not
+# fight the bind-mount ownership.
 ENV TZ=UTC PYTHONUNBUFFERED=1
 EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

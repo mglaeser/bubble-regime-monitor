@@ -42,14 +42,10 @@ AUTH_DEPENDENCIES = frozenset({
 # Kept separate from PUBLIC_ALLOWLIST on purpose: calling an HMAC-verified
 # webhook "public" would be false, and a control that files authorised routes
 # under "public" teaches its readers to distrust it.
-IN_HANDLER_AUTH: dict[str, str] = {
-    "POST /github": (
-        "GitHub webhook: constant-time HMAC-SHA256 over the RAW body "
-        "(X-Hub-Signature-256), app/routers/webhooks.py:32-37, enforced at :55 "
-        "with 401 on mismatch. Fail-closed — :49 refuses outright unless both "
-        "GITHUB_WEBHOOK_SECRET and DEPLOY_BRANCH are configured."
-    ),
-}
+#
+# None today: the GitHub webhook, the one such route, left with the old deploy
+# chain (owner decision D6, 2026-10-02).
+IN_HANDLER_AUTH: dict[str, str] = {}
 
 # Routes that are PUBLIC BY DECISION, each with the reason it is safe to be.
 # Adding a line here is the deliberate act the control exists to force.
@@ -62,8 +58,8 @@ IN_HANDLER_AUTH: dict[str, str] = {
 PUBLIC_ALLOWLIST: dict[str, str] = {
     "GET /healthz": "liveness probe: returns a constant, reads nothing",
     "GET /readyz": (
-        "readiness probe for the deploy health-poll in deploy.sh, which runs "
-        "before the service holds a credentialed session. Its body is a "
+        "readiness probe for the operator and uptime checks, which carry no "
+        "credential. Its body is a "
         "per-source status matrix; SourceHealth.note MUST stay free of raw "
         "provider error text"
     ),
