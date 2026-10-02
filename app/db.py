@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from typing import Any
 
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
@@ -30,6 +31,22 @@ def _connect_args(url: str) -> dict[str, object]:
     if url.startswith("sqlite"):
         return {"check_same_thread": False}
     return {}
+
+
+def sqlite_transactional_ddl(engine: Engine) -> None:
+    """One transaction for DDL and data alike: SQLAlchemy's recipe for
+    pysqlite, which opens no transaction of its own before DDL - the
+    driver's implicit transactions off, a BEGIN from SQLAlchemy's begin().
+    The migrations run under it (migrations/env.py, transactional_ddl=True):
+    an upgrade that fails leaves the database as it found it, whole
+    revisions and partial ones alike."""
+    @event.listens_for(engine, "connect")
+    def _no_implicit_transactions(dbapi_connection: Any, _record: object) -> None:
+        dbapi_connection.isolation_level = None
+
+    @event.listens_for(engine, "begin")
+    def _begin(conn: Any) -> None:
+        conn.exec_driver_sql("BEGIN")
 
 
 def _set_sqlite_pragmas(dbapi_connection: object, _record: object) -> None:

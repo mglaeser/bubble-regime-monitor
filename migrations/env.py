@@ -8,6 +8,7 @@ from alembic import context
 from sqlalchemy import engine_from_config, pool
 
 from app.config import get_settings
+from app.db import sqlite_transactional_ddl
 from app.models import Base
 
 config = context.config
@@ -29,8 +30,24 @@ def run_migrations_offline() -> None:
 def run_migrations_online() -> None:
     connectable = engine_from_config(config.get_section(config.config_ini_section, {}),
                                      prefix="sqlalchemy.", poolclass=pool.NullPool)
+    # THE WHOLE UPGRADE IS ONE TRANSACTION. Alembic treats SQLite's DDL as
+    # non-transactional and would commit revision by revision - with pysqlite
+    # not even that, since the driver opens no transaction before DDL - so a
+    # migration that failed left the database between two revisions, with
+    # the running image unable to boot it. SQLite's DDL is transactional under
+    # an explicit BEGIN (app.db.sqlite_transactional_ddl); told so, Alembic
+    # runs the upgrade as one transaction, and a failed one leaves the
+    # database as it found it.
+    is_sqlite = connectable.dialect.name == "sqlite"
+    if is_sqlite:
+        sqlite_transactional_ddl(connectable)
     with connectable.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata)
+        # SQLite's DDL is transactional under the recipe above, so Alembic is told
+        # so; every other dialect keeps Alembic's own knowledge of whether its DDL
+        # is (forced on one that cannot, a later revision's failure would roll back
+        # the version rows while the DDL stayed, and a retry would reapply it).
+        context.configure(connection=connection, target_metadata=target_metadata,
+                          transactional_ddl=True if is_sqlite else None)
         with context.begin_transaction():
             context.run_migrations()
 
