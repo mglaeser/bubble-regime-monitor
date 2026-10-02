@@ -684,4 +684,6 @@ class TestTheUpgradeIsOneTransaction:
 
         env = (Path(__file__).resolve().parents[1] / "migrations" / "env.py").read_text(encoding="utf-8")
         assert "sqlite_transactional_ddl(connectable)" in env
-        assert "transactional_ddl=True" in env
+        # told to Alembic for SQLite only: another dialect keeps Alembic's own
+        # knowledge of whether its DDL is transactional
+        assert "transactional_ddl=True if is_sqlite else None" in env

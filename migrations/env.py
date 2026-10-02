@@ -38,11 +38,16 @@ def run_migrations_online() -> None:
     # an explicit BEGIN (app.db.sqlite_transactional_ddl); told so, Alembic
     # runs the upgrade as one transaction, and a failed one leaves the
     # database as it found it.
-    if connectable.dialect.name == "sqlite":
+    is_sqlite = connectable.dialect.name == "sqlite"
+    if is_sqlite:
         sqlite_transactional_ddl(connectable)
     with connectable.connect() as connection:
+        # SQLite's DDL is transactional under the recipe above, so Alembic is told
+        # so; every other dialect keeps Alembic's own knowledge of whether its DDL
+        # is (forced on one that cannot, a later revision's failure would roll back
+        # the version rows while the DDL stayed, and a retry would reapply it).
         context.configure(connection=connection, target_metadata=target_metadata,
-                          transactional_ddl=True)
+                          transactional_ddl=True if is_sqlite else None)
         with context.begin_transaction():
             context.run_migrations()
 
