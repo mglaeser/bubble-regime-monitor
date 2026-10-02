@@ -1016,11 +1016,37 @@ class TestRoundThirtyEightOn143:
 
     def test_the_next_tick_lines_latest_up_with_the_image_it_finds_healthy(self, deploy):
         code, calls = deploy(running="old0000", env={"TERM_ON_RESTART": "1"})
-        assert code == 143 and calls.count("systemctl --user restart bubblegauge.service") == 1
+        assert code == 143 and calls.count("systemctl --user restart bubblegauge.service") == 2
         assert (deploy.state / "latest").read_text().strip() == "sha256:running"     # restored on the way out
-        assert (deploy.state / "running").read_text().strip() == f"sha256:img-{TARGET}"   # ...but the new image runs
+        assert (deploy.state / "running").read_text().strip() == "sha256:running"    # ...and running again (round 39)
         assert not deploy.failed_file.exists()
+        # a kill between the retag and the restart leaves the candidate running
+        # under a restored :latest - the sliver the next tick lines up
+        (deploy.state / "running").write_text(f"sha256:img-{TARGET}\n")
         code, calls = deploy(running=TARGET)                                        # the next tick
         assert code == 0 and not any(c.startswith("podman build") for c in calls)
         assert deploy.good_file.read_text().strip() == f"sha256:img-{TARGET}"
         assert (deploy.state / "latest").read_text().strip() == f"sha256:img-{TARGET}"
+
+
+class TestRoundThirtyNineOn143:
+    """#143 round 39, SOTA-A: the restore of round 38 retagged :latest but
+    left the candidate serving after a unit stop, and a kill mid-switch left
+    :latest on the candidate for a later crash or reboot to boot, unjudged.
+    Fail-closed for every signal the host can deliver: a unit stop puts the
+    service back onto the restored image when the candidate is what runs
+    (executed above, TestRoundThirtyEightOn143), and the unit itself refuses
+    to boot an image that is not the one recorded good unless the deploy
+    service is running it for its verdict."""
+
+    def test_the_unit_boots_no_unjudged_image(self):
+        unit = (ROOT / "deploy/quadlet/bubblegauge.container").read_text()
+        pre = next(line for line in unit.splitlines() if line.startswith("ExecStartPre="))
+        assert "systemctl --user is-active --quiet bubblegauge-deploy.service ||" in pre
+        assert "podman image inspect -f {{.Id}} localhost/bubblegauge:latest" in pre
+        assert "%h/playground/bubble-regime-monitor/.deploy-state/good" in pre
+        assert "$$(" in pre and "$(" not in pre.replace("$$(", "")   # systemd's escape for a literal $
+
+    def test_a_unit_stop_puts_the_service_back(self):
+        script = (ROOT / "deploy.sh").read_text()
+        assert '[[ "$(running_image)" != "$TARGET_ID" ]] || systemctl --user restart "$SERVICE" || true' in script

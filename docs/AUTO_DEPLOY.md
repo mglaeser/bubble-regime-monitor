@@ -39,9 +39,13 @@ before its verdict leaves the new image running with `:latest` back on the
 previous one, and the next tick, finding it answering, lines them up again);
 the rollback counts only if that image answers too. `:latest` goes
 back to that image on every other exit before a successful verdict as well -
-a rejected switch, a unit stop - so that a later restart of the service never
-boots an image the gate did not pass; a kill mid-switch is left to the next
-tick. The rollback knows
+a rejected switch, a unit stop (which also puts the service back onto that
+image, so the candidate never serves unjudged) - so that a later restart of
+the service never boots an image the gate did not pass. A kill mid-switch
+leaves `:latest` on the candidate, and the unit refuses to boot an image that
+is not the one recorded good unless the deploy service is running it for its
+verdict (`ExecStartPre`): the service waits for the next tick's verdict
+instead of running an unjudged image. The rollback knows
 no schema: whether an image can run the database is decided by the image as it
 boots, where Alembic fails the upgrade to its own head - and with it the boot -
 on a revision the image does not ship. After a migration the old image

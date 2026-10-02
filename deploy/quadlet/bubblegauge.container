@@ -48,6 +48,13 @@ DropCapability=ALL
 NoNewPrivileges=true
 
 [Service]
+# Only a validated image boots outside a deploy: :latest is the image recorded
+# good (.deploy-state/good in the checkout the units name), or the deploy
+# service is running it for its verdict. A deploy killed mid-switch leaves
+# :latest on the candidate, and a crash or reboot booted it unjudged; refused,
+# it waits for the next tick's verdict (#143 round 39, SOTA-A). $$ is systemd's
+# escape for a literal $.
+ExecStartPre=/bin/sh -c 'systemctl --user is-active --quiet bubblegauge-deploy.service || [ "$$(podman image inspect -f {{.Id}} localhost/bubblegauge:latest)" = "$$(cat %h/playground/bubble-regime-monitor/.deploy-state/good)" ]'
 Restart=always
 # ... every ten seconds, so a crash loop is a restart every ten seconds, not a spin.
 RestartSec=10s

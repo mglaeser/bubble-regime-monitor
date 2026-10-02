@@ -108,11 +108,17 @@ die()    { printf '\nERROR: %s\n' "$*" >&2; exit 1; }
 # the script controls, a unit stop included (TERM); a kill is left to the next
 # tick, which starts from whatever :latest is. A successful verdict sets DONE,
 # and :latest stays on the new image.
-CONTEXT=""; PREVIOUS=""; SWITCHED=0; DONE=0
+CONTEXT=""; PREVIOUS=""; TARGET_ID=""; SWITCHED=0; DONE=0
 cleanup() {
   [[ -z "$CONTEXT" ]] || rm -rf "$CONTEXT"
   if (( SWITCHED && ! DONE )) && [[ -n "$PREVIOUS" ]]; then
     podman tag "$PREVIOUS" "$IMAGE:latest" 2>/dev/null || true
+    # ...and the candidate does not serve past this run: stopped mid-verdict,
+    # the deploy left it answering, unjudged, until the next tick (#143 round
+    # 39, SOTA-A). The service goes back onto the restored image. A kill,
+    # which runs none of this, is the unit's own case: it boots no image but
+    # the one recorded good unless a deploy is running it for its verdict.
+    [[ "$(running_image)" != "$TARGET_ID" ]] || systemctl --user restart "$SERVICE" || true
   fi
 }
 trap cleanup EXIT
