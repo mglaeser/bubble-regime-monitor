@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 # bubblegauge release: the service runs origin/main's commit (owner decision
-# D6, re-cut on 2026-10-02 after #143). Started by bubblegauge-release.timer
-# five minutes after its last run, or by hand:
+# D6, re-cut on 2026-10-02 after #143). Installed by hand as
+# ~/.local/bin/bubblegauge-release (docs/AUTO_DEPLOY.md) and started by
+# bubblegauge-release.timer five minutes after its last run, or by hand:
 #   systemctl --user start bubblegauge-release.service
+# What runs on the host - this script and the units - changes only by hand;
+# main reaches production only as images, built and run in rootless
+# containers. Run from the checkout, this file was whatever the last
+# fast-forward made it, on the host, at the next tick, and a commit that broke
+# it stopped the very release that could fetch its fix (#147 round 6).
 #
 # One comparison and no memory: the commit the RUNNING container carries (its
 # OCI revision label) against origin/main. Equal: nothing to do. Different:
@@ -38,11 +44,11 @@ running() {
 }
 
 # Only as the unit's main process: systemd runs one instance of a oneshot at a
-# time, and stopping it stops the build and the migration with it (MainPID is
+# time, and stopping it stops the build with it (MainPID is
 # this shell inside the unit, executed on the host, #143 round 28).
 [[ "$(systemctl --user show -p MainPID --value "$UNIT")" == "$$" ]] \
   || die "release.sh runs as its unit: systemctl --user start $UNIT"
-cd "$(dirname "$0")/.."
+# In the checkout: the unit's WorkingDirectory. The script lives outside it.
 
 # Exactly origin's branch head, by explicit refspec and without tags: neither a
 # tag named like the branch nor a local ref stands in for it (#143 round 27).

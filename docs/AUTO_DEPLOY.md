@@ -240,11 +240,16 @@ keeps deploying, and nothing here runs.
 | Piece | File | What it does |
 |---|---|---|
 | The service | `deploy/quadlet/bubblegauge.container` | A Podman Quadlet unit: systemd starts the container at boot (with linger), restarts it when it dies, and kills it when it stops answering `/healthz` (podman's own health check). It runs `localhost/bubblegauge:latest`. |
-| The release | `deploy/release.sh` via `deploy/systemd/bubblegauge-release.service` | One comparison and no memory: the commit the running container carries (its OCI revision label; a stopped container carries none) against `origin/main`. Different: build main's commit from an export, point `:latest` at the image, restart the service - the new image migrates the database as it boots, one transaction - and wait for `/healthz`. Equal: nothing - a container that runs main's commit and does not answer is the service unit's to kill and restart, not the release's. |
+| The release | `deploy/release.sh`, installed as `~/.local/bin/bubblegauge-release`, via `deploy/systemd/bubblegauge-release.service` | One comparison and no memory: the commit the running container carries (its OCI revision label; a stopped container carries none) against `origin/main`. Different: build main's commit from an export, point `:latest` at the image, restart the service - the new image migrates the database as it boots, one transaction - and wait for `/healthz`. Equal: nothing - a container that runs main's commit and does not answer is the service unit's to kill and restart, not the release's. |
 | The schedule | `deploy/systemd/bubblegauge-release.timer` | Five minutes after the last release ended, and two minutes after boot. |
 | The alarm | `deploy/systemd/bubblegauge-notify-failed@.service` | A failed release is reported once over iMessage through the host's notifier, then at most once an hour while it persists. |
 
-**The contract.** The service runs `origin/main`'s commit. A release that fails
+**The contract.** The service runs `origin/main`'s commit, and main reaches
+production only as images, built and run in rootless containers: what runs
+on the host - the units and the release script, installed by hand from the
+checkout - changes only by hand, so neither a hostile nor a broken commit of
+the release script runs there, and a broken one cannot stop the release that
+would fetch its fix. A release that fails
 exits non-zero, is reported, and is tried again at the next tick; a commit that
 cannot be built touches nothing. The database moves only under the code that
 fits it: the new image migrates as it boots, in one transaction, and a
@@ -280,6 +285,7 @@ slots (02/06/10/14/18/22 UTC).
 
 ```bash
 cd ~/playground/bubble-regime-monitor
+install -D -m 755 deploy/release.sh ~/.local/bin/bubblegauge-release
 install -D -m 644 deploy/quadlet/bubblegauge.container ~/.config/containers/systemd/bubblegauge.container
 install -D -m 644 deploy/systemd/bubblegauge-release.service ~/.config/systemd/user/bubblegauge-release.service
 install -D -m 644 deploy/systemd/bubblegauge-release.timer ~/.config/systemd/user/bubblegauge-release.timer
@@ -301,7 +307,8 @@ cd ~/playground/bubble-regime-monitor
 # 1. the old chain stops listening: deactivate the repository's GitHub webhook, then
 systemctl --user disable --now bubblegauge-deploy.path
 while pgrep -u "$USER" -af '(^|/)deploy(-watch)?\.sh|podman (build|run)' >/dev/null; do sleep 10; done   # a release in flight finishes first
-# 2. the units (the install lines above)
+# 2. the release script and the units (the install lines above)
+install -D -m 755 deploy/release.sh ~/.local/bin/bubblegauge-release
 install -D -m 644 deploy/quadlet/bubblegauge.container ~/.config/containers/systemd/bubblegauge.container
 install -D -m 644 deploy/systemd/bubblegauge-release.service ~/.config/systemd/user/bubblegauge-release.service
 install -D -m 644 deploy/systemd/bubblegauge-release.timer ~/.config/systemd/user/bubblegauge-release.timer
@@ -337,8 +344,8 @@ systemctl --user restart bubblegauge.service             # apply a changed .env:
 systemctl --user stop bubblegauge-release.timer          # before stopping the service by hand
 ```
 
-A changed unit file is reinstalled by hand (the install lines) and
-`daemon-reload`ed.
+A changed unit file or release script is reinstalled by hand (the install
+lines) and `daemon-reload`ed: what runs on the host changes only by hand.
 
 ## The dead-man's switch
 

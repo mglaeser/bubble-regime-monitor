@@ -16,6 +16,7 @@ shims that log every call and keep a little state in $SHIM_STATE.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -82,16 +83,25 @@ def release(tmp_path):
     _git("init", "--quiet", "-b", "main", cwd=seed)
     (seed / "Containerfile").write_text("FROM scratch\n")
     (seed / "deploy").mkdir()
-    (seed / "deploy/release.sh").write_text((ROOT / "deploy/release.sh").read_text())
+    shutil.copy2(ROOT / "deploy/release.sh", seed / "deploy/release.sh")   # tracked, with its mode
     (seed / "tracked.txt").write_text("in the commit\n")
     _git("add", "-A", cwd=seed)
     _git("commit", "--quiet", "-m", "seed", cwd=seed)
     _git("remote", "add", "origin", str(origin), cwd=seed)
     _git("push", "--quiet", "origin", "main", cwd=seed)
-    checkout = tmp_path / "checkout"
+    # The host as the units name it: the checkout under %h, the release script
+    # installed by hand with the docs' line, and the unit's own ExecStart and
+    # WorkingDirectory - run as systemd runs them, the file by its own shebang.
+    home = tmp_path / "home"
+    checkout = home / "playground" / "bubble-regime-monitor"
+    checkout.parent.mkdir(parents=True)
     _git("clone", "--quiet", str(origin), str(checkout), cwd=tmp_path)
     (checkout / ".env").write_text("X=1\n")
-    (checkout / "deploy/release.sh").chmod(0o755)
+    subprocess.run(["install", "-D", "-m", "755", str(checkout / "deploy/release.sh"),  # noqa: S603, S607
+                    str(home / ".local/bin/bubblegauge-release")], check=True)
+    service = _directives((ROOT / "deploy/systemd/bubblegauge-release.service").read_text())["[Service]"]
+    exec_start, workdir = (next(line for line in service if line.startswith(key)).split("=", 1)[1]
+                           .replace("%h", str(home)) for key in ("ExecStart=", "WorkingDirectory="))
     shims = tmp_path / "bin"
     shims.mkdir()
     for name, body in _SHIMS.items():
@@ -101,6 +111,15 @@ def release(tmp_path):
     state.mkdir()
     runtime = tmp_path / "runtime"
     calls = tmp_path / "calls.log"
+
+    def commit(path: str, content: str, mode: int = 0o644) -> str:
+        """A commit on origin/main that writes `path`; the checkout is behind it."""
+        (seed / path).write_text(content)
+        (seed / path).chmod(mode)
+        _git("add", "-A", cwd=seed)
+        _git("commit", "--quiet", "-m", f"write {path}", cwd=seed)
+        _git("push", "--quiet", "origin", "main", cwd=seed)
+        return _git("rev-parse", "HEAD", cwd=seed)
 
     def advance(message: str = "a change") -> str:
         """A new commit on origin/main; the checkout is behind it."""
@@ -118,15 +137,16 @@ def release(tmp_path):
         else:
             label.write_text(running)
         runtime.mkdir(exist_ok=True)
-        environ = {**os.environ, "PATH": f"{shims}:{os.environ['PATH']}", "CALLS": str(calls),
+        environ = {**os.environ, "HOME": str(home), "PATH": f"{shims}:{os.environ['PATH']}", "CALLS": str(calls),
                    "SHIM_STATE": str(state), "RUNTIME_DIRECTORY": str(runtime), "HEALTH_TIMEOUT": "2",
                    **(env or {})}
-        result = subprocess.run(["bash", str(checkout / "deploy/release.sh")], env=environ,  # noqa: S603
+        result = subprocess.run([exec_start], cwd=workdir, env=environ,  # noqa: S603
                                 capture_output=True, text=True, timeout=120)
         run.output = result.stdout + result.stderr  # type: ignore[attr-defined]
         return result.returncode, calls.read_text().splitlines()
 
     run.advance = advance  # type: ignore[attr-defined]
+    run.commit = commit  # type: ignore[attr-defined]
     run.checkout = checkout  # type: ignore[attr-defined]
     run.seed = seed  # type: ignore[attr-defined]
     run.state = state  # type: ignore[attr-defined]
@@ -255,6 +275,21 @@ def test_a_service_that_answers_on_another_commit_is_a_failed_release(release):
     assert code != 0 and "fix forward" in release.output
 
 
+def test_a_commit_of_the_release_script_never_runs_on_the_host(release, tmp_path):
+    """#147 round 6, SOTA-A: run from the checkout, the release script was
+    whatever the last fast-forward made it - main's code on the host, with its
+    home, keys and podman, at the next tick - and a commit that broke it
+    stopped the release that could fetch its fix. The unit runs the copy
+    installed by hand: a commit that replaces the script is released like
+    any other, and its copy never runs, this tick or the next."""
+    marker = tmp_path / "mains-copy-ran"
+    target = release.commit("deploy/release.sh", f"#!/usr/bin/env bash\ntouch {marker}\n", mode=0o755)
+    code, _ = release(running=None)              # released: the checkout fast-forwards to it
+    assert code == 0 and (release.checkout / "deploy/release.sh").read_text().endswith(f"touch {marker}\n")
+    code, _ = release(running=target)            # the next tick
+    assert code == 0 and not marker.exists()
+
+
 def test_only_the_units_main_process_releases(release):
     release.advance()
     code, calls = release(running=None, env={"NOT_THE_UNIT": "1"})
@@ -302,7 +337,9 @@ class TestTheUnits:
         assert "Type=oneshot" in unit["[Service]"]
         assert "RuntimeDirectory=bubblegauge-release" in unit["[Service]"]
         assert "OnFailure=bubblegauge-notify-failed@%N.service" in unit["[Unit]"]
-        assert "ExecStart=%h/playground/bubble-regime-monitor/deploy/release.sh" in unit["[Service]"]
+        # the copy installed by hand, run in the checkout - never the checkout's file
+        assert "ExecStart=%h/.local/bin/bubblegauge-release" in unit["[Service]"]
+        assert "WorkingDirectory=%h/playground/bubble-regime-monitor" in unit["[Service]"]
         assert not any(line.startswith(("KillMode=", "NoNewPrivileges=")) for line in unit["[Service]"])
 
     def test_the_timer(self):
@@ -352,6 +389,7 @@ class TestTheUnits:
         steps = [line.split("#")[0].strip() for line in cutover.splitlines()]
         order = [steps.index(step) for step in (
             "systemctl --user disable --now bubblegauge-deploy.path",
+            "install -D -m 755 deploy/release.sh ~/.local/bin/bubblegauge-release",
             "systemctl --user daemon-reload",
             "podman tag \"$(podman inspect -f '{{.Image}}' bubblegauge)\" localhost/bubblegauge:latest",
             "podman rm -f bubblegauge",
@@ -359,6 +397,11 @@ class TestTheUnits:
             "systemctl --user start bubblegauge-release.service",
             "systemctl --user enable --now bubblegauge-release.timer")]
         assert order == sorted(order)
+
+    def test_the_release_script_is_installed_by_hand(self):
+        doc = (ROOT / "docs/AUTO_DEPLOY.md").read_text()
+        install = doc[doc.index("### Install (once"):doc.index("## Moving from the webhook")]
+        assert "install -D -m 755 deploy/release.sh ~/.local/bin/bubblegauge-release" in install
 
     def test_the_hand_rollback_stops_a_release_in_flight_first(self):
         doc = (ROOT / "docs/AUTO_DEPLOY.md").read_text()
