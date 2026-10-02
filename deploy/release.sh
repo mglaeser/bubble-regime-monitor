@@ -83,26 +83,27 @@ podman build --label "$LABEL=$TARGET" -t "$IMAGE:$TARGET" \
 # scheduler and the warm-ups off (TESTING). It proves the image imports, runs
 # the whole Alembic chain from nothing, binds and answers; what it cannot
 # prove - the image's own start command, the production configuration, the
-# data, the scheduler - is fixed forward. Its verifier is its own
-# (--entrypoint sh): no ENTRYPOINT the image declares stands in for it - one of
-# /bin/true passed without running a thing (executed on the host, #148 round
-# 1). Its database directory is new and empty, whatever the runtime directory
-# holds (mktemp -d), and it goes with the runtime directory when the unit ends,
-# success or failure, the database podman wrote into it included: nothing
-# accumulates across retries (executed on the host, #148 round 2). Attached
-# and --init, so it ends with the unit; and it ends by itself at a two-minute
-# deadline in seconds - a count of probes, each bounded at five, would stretch
-# to twelve against a server that accepts and never answers (executed on the
-# host: /healthz answers in three seconds).
+# data, the scheduler - is fixed forward. Its verifier is its own, set as the
+# container's entrypoint: no ENTRYPOINT the image declares stands in for it -
+# one of /bin/true passed without running a thing (executed on the host, #148
+# round 1). It runs under coreutils' timeout, two minutes and not a second
+# more: a deadline of our own, checked before each probe, let the last probe
+# and its pause run past it (#148 round 3), and a count of probes would have
+# stretched to twelve minutes against a server that accepts and never answers
+# (executed on the host: the live image answers in about two seconds; such a
+# server under an eight-second cap ends with 124 after 8.2). Its database
+# directory is new and empty, whatever the runtime directory holds (mktemp -d),
+# and it goes with the runtime directory when the unit ends, success or
+# failure, the database podman wrote into it included: nothing accumulates
+# across retries (executed on the host, #148 round 2). Attached and --init, so
+# it ends with the unit.
 smoke="$(mktemp -d "$RUNTIME_DIRECTORY/smoke.XXXXXX")"
-podman run --rm --init --network none --entrypoint sh -e TESTING=true -v "$smoke:/data:z" "$IMAGE:$TARGET" \
-  -c 'uvicorn app.main:app --port 8000 >/dev/null 2>&1 & p=$!
-         end=$(( $(date +%s) + 120 ))
-         while [ "$(date +%s)" -lt "$end" ]; do
-           c=$(curl -fsS --max-time 5 -o /dev/null -w "%{http_code}" http://127.0.0.1:8000/healthz 2>/dev/null) && [ x$c = x200 ] && exit 0
-           kill -0 $p 2>/dev/null || exit 1
-           sleep 1
-         done; exit 1' \
+podman run --rm --init --network none --entrypoint timeout -e TESTING=true -v "$smoke:/data:z" "$IMAGE:$TARGET" \
+  120 sh -c 'uvicorn app.main:app --port 8000 >/dev/null 2>&1 & p=$!
+             until c=$(curl -q -fsS --noproxy "*" --max-time 5 -o /dev/null -w "%{http_code}" http://127.0.0.1:8000/healthz 2>/dev/null) && [ x$c = x200 ]; do
+               kill -0 $p 2>/dev/null || exit 1
+               sleep 1
+             done' \
   || die "${TARGET:0:7} does not boot from scratch; $SERVICE is untouched: fix forward"
 
 # The switch: :latest is what the Quadlet unit runs. The new image migrates the

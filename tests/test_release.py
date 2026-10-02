@@ -244,10 +244,11 @@ def test_the_candidate_boots_from_scratch_before_the_switch(release):
     assert "--network none" in calls[smoke] and "-e TESTING=true" in calls[smoke]
     assert "--env-file" not in calls[smoke] and "-p " not in calls[smoke] and "--publish" not in calls[smoke]
     # the verifier is the smoke's own: no ENTRYPOINT of the image stands in for it
-    assert "--entrypoint sh" in calls[smoke] and " -c uvicorn" in calls[smoke]
-    assert "c=$(curl -fsS" in calls[smoke] and "-w \"%{http_code}\"" in calls[smoke] and "x200" in calls[smoke]
-    # a deadline in seconds, not a count of probes (each bounded at five)
-    assert "end=$(( $(date +%s) + 120 ))" in calls[smoke] and "seq" not in calls[smoke]
+    assert "--entrypoint timeout" in calls[smoke] and " 120 sh -c uvicorn" in calls[smoke]
+    assert "c=$(curl -q -fsS --noproxy" in calls[smoke] and "-w \"%{http_code}\"" in calls[smoke] and "x200" in calls[smoke]
+    # two minutes enforced by coreutils' timeout: no deadline or count of our own,
+    # which let the last probe run past it (#148 round 3)
+    assert "date +%s" not in calls[smoke] and "seq" not in calls[smoke]
 
 
 def test_the_smoke_boots_on_a_new_empty_database_whatever_the_runtime_directory_holds(release):
@@ -436,7 +437,8 @@ class TestTheUnits:
         # the same line as the release's gate: curl's exit kept (no pipe), --fail on,
         # the status compared to 200; $$ and %% are systemd's escapes in a unit file
         assert health == "HealthCmd=c=$$(curl -q -fsS --noproxy '*' --max-time 5 -o /dev/null -w '%%{http_code}' http://127.0.0.1:8000/healthz) && [ x$$c = x200 ]"
-        probe = next(line for line in (ROOT / "deploy/release.sh").read_text().splitlines() if "until c=$(curl" in line)
+        probe = next(line for line in (ROOT / "deploy/release.sh").read_text().splitlines()
+                     if "until c=$(curl" in line and "$PORT" in line)   # the release's gate, not the smoke's
         assert "curl -q -fsS --noproxy '*' --max-time 5 -o /dev/null -w '%{http_code}'" in probe and "|" not in probe
         assert {"Restart=always", "RestartSec=10s", "TimeoutStartSec=300"} <= set(service)
         assert "HealthStartPeriod=300s" in container      # a boot, migration included, has five minutes
