@@ -40,10 +40,15 @@ DropCapability=ALL
 NoNewPrivileges=true
 # The health check is podman's: a container that stops answering /healthz -
 # alive and wedged, which Restart= never sees - is killed after three failed
-# checks, and Restart= boots it again. Healthy is a 200 and nothing else (curl's
-# --fail passes a 302); straight to the loopback, no proxy from the environment
-# and no ~/.curlrc; the image carries curl, and podman runs the line in its sh.
-HealthCmd=curl -q -sS --noproxy '*' --max-time 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/healthz | grep -qx 200
+# checks, and Restart= boots it again. Healthy is a 200 and nothing else: curl's
+# --fail refuses 400 and above and a broken transfer, the comparison refuses a
+# 3xx, and curl's exit is kept (a pipe to grep lost it, so a 200 with a cut body
+# read healthy). Straight to the loopback, no proxy from the environment and no
+# ~/.curlrc; the image carries curl, and podman runs the line in its sh. $$ and
+# %% are systemd's escapes for a literal $ and % (executed on the host: the
+# generated unit hands podman the line with $( and %{, and podman's health
+# check answers healthy on the live app and unhealthy on a dead port).
+HealthCmd=c=$$(curl -q -fsS --noproxy '*' --max-time 5 -o /dev/null -w '%%{http_code}' http://127.0.0.1:8000/healthz) && [ x$$c = x200 ]
 HealthInterval=30s
 HealthTimeout=5s
 HealthRetries=3

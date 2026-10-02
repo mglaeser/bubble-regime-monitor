@@ -255,7 +255,8 @@ commit fixes it. The hand rollback, valid while the schema has not moved (the
 five newest commit tags are kept):
 
 ```bash
-systemctl --user stop bubblegauge-release.timer
+systemctl --user stop bubblegauge-release.timer       # no new release...
+systemctl --user stop bubblegauge-release.service     # ...and none in flight: a stop ends its build and migration
 podman tag localhost/bubblegauge:<previous commit> localhost/bubblegauge:latest
 systemctl --user restart bubblegauge.service
 ```

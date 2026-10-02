@@ -54,8 +54,11 @@ exit 0
 """,
     "curl": r"""#!/usr/bin/env bash
 echo "curl $*" >> "$CALLS"
-# the status curl writes for -w %{http_code}: a 200, or what the test says
-printf '%s' "${STATUS:-200}"
+# the status curl writes for -w %{http_code} (a 200, or what the test says), and
+# curl's exit: 22 on 400 and above under --fail, 18 on a transfer cut short
+status="${STATUS:-200}"; printf '%s' "$status"
+[[ "$TRUNCATED" != "1" ]] || exit 18
+[[ "$*" != *" -f"* && "$*" != *"-fsS"* ]] || (( status < 400 )) || exit 22
 exit 0
 """,
 }
@@ -152,7 +155,7 @@ def test_a_release_when_no_container_runs(release):
     migrate = next(i for i, c in enumerate(calls) if "python -m app.db_migrate" in c)
     tag = calls.index(f"podman tag {IMAGE}:{target} {IMAGE}:latest")
     restart = calls.index("systemctl --user restart bubblegauge.service")
-    probe = _index(calls, "curl -q -sS --noproxy * --max-time 5 -o /dev/null -w %{http_code} http://127.0.0.1:8000/healthz")
+    probe = _index(calls, "curl -q -fsS --noproxy * --max-time 5 -o /dev/null -w %{http_code} http://127.0.0.1:8000/healthz")
     assert build < migrate < tag < restart < probe
     assert f"{LABEL}={target}" in calls[build] and f"-t {IMAGE}:{target}" in calls[build]
     assert (release.state / "label").read_text().strip() == target
@@ -217,6 +220,14 @@ def test_healthy_is_a_200_and_nothing_else(release, status):
     healthy (#147 round 1): the status is compared, in both gates."""
     release.advance()
     code, _ = release(running=None, env={"STATUS": status})
+    assert code != 0 and "fix forward" in release.output
+
+
+def test_a_200_with_a_broken_transfer_is_not_healthy(release):
+    """A pipe to grep lost curl's exit, so a 200 whose body was cut short read
+    healthy (#147 round 2): curl's exit is kept, in both gates."""
+    release.advance()
+    code, _ = release(running=None, env={"TRUNCATED": "1"})
     assert code != 0 and "fix forward" in release.output
 
 
@@ -301,9 +312,11 @@ class TestTheUnits:
         assert "DropCapability=ALL" in container and "NoNewPrivileges=true" in container
         health = next(line for line in container if line.startswith("HealthCmd="))
         assert "HealthOnFailure=kill" in container
-        assert "-w '%{http_code}'" in health and health.endswith("| grep -qx 200") and " -f" not in health
-        probe = next(line for line in (ROOT / "deploy/release.sh").read_text().splitlines() if "until curl" in line)
-        assert "-w '%{http_code}'" in probe and " -f" not in probe       # the release's gate says 200 the same way
+        # the same line as the release's gate: curl's exit kept (no pipe), --fail on,
+        # the status compared to 200; $$ and %% are systemd's escapes in a unit file
+        assert health == "HealthCmd=c=$$(curl -q -fsS --noproxy '*' --max-time 5 -o /dev/null -w '%%{http_code}' http://127.0.0.1:8000/healthz) && [ x$$c = x200 ]"
+        probe = next(line for line in (ROOT / "deploy/release.sh").read_text().splitlines() if "until c=$(curl" in line)
+        assert "curl -q -fsS --noproxy '*' --max-time 5 -o /dev/null -w '%{http_code}'" in probe and "|" not in probe
         assert {"Restart=always", "RestartSec=10s"} <= set(service)
         assert "StartLimitIntervalSec=0" in unit["[Unit]"]
         assert not any(line.startswith("Exec") for line in service)     # no shell of our own in the unit
@@ -327,3 +340,12 @@ class TestTheUnits:
             "systemctl --user start bubblegauge-release.service",
             "systemctl --user enable --now bubblegauge-release.timer")]
         assert order == sorted(order)
+
+    def test_the_hand_rollback_stops_a_release_in_flight_first(self):
+        doc = (ROOT / "docs/AUTO_DEPLOY.md").read_text()
+        rollback = doc[doc.index("The hand rollback"):doc.index("### Install")]
+        steps = [line.split("#")[0].strip() for line in rollback.splitlines()]
+        timer = steps.index("systemctl --user stop bubblegauge-release.timer")
+        service = steps.index("systemctl --user stop bubblegauge-release.service")
+        tag = next(i for i, s in enumerate(steps) if s.startswith("podman tag localhost/bubblegauge:<previous"))
+        assert timer < service < tag
