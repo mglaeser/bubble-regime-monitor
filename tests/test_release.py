@@ -54,7 +54,8 @@ exit 0
 """,
     "curl": r"""#!/usr/bin/env bash
 echo "curl $*" >> "$CALLS"
-[[ "$UNHEALTHY" != "1" ]] || exit 22
+# the status curl writes for -w %{http_code}: a 200, or what the test says
+printf '%s' "${STATUS:-200}"
 exit 0
 """,
 }
@@ -151,7 +152,7 @@ def test_a_release_when_no_container_runs(release):
     migrate = next(i for i, c in enumerate(calls) if "python -m app.db_migrate" in c)
     tag = calls.index(f"podman tag {IMAGE}:{target} {IMAGE}:latest")
     restart = calls.index("systemctl --user restart bubblegauge.service")
-    probe = _index(calls, "curl -q -fsS --noproxy * --max-time 5 http://127.0.0.1:8000/healthz")
+    probe = _index(calls, "curl -q -sS --noproxy * --max-time 5 -o /dev/null -w %{http_code} http://127.0.0.1:8000/healthz")
     assert build < migrate < tag < restart < probe
     assert f"{LABEL}={target}" in calls[build] and f"-t {IMAGE}:{target}" in calls[build]
     assert (release.state / "label").read_text().strip() == target
@@ -203,11 +204,20 @@ def test_a_release_that_does_not_answer_is_fixed_forward(release):
     candidate is what main says to run; :latest stays on it, the failure is
     reported by the unit's OnFailure=, and the next commit fixes it."""
     target = release.advance()
-    code, calls = release(running=None, env={"UNHEALTHY": "1"})
+    code, calls = release(running=None, env={"STATUS": "503"})
     assert code != 0 and "fix forward" in release.output
     assert (release.state / "latest").read_text().strip() == target        # nothing moved it back
     assert calls.count("systemctl --user restart bubblegauge.service") == 1
     assert not any(c.startswith("podman rmi") for c in calls)             # no prune on a failed release
+
+
+@pytest.mark.parametrize("status", ["302", "304", "000"])
+def test_healthy_is_a_200_and_nothing_else(release, status):
+    """curl's --fail fails on 400 and above only, so a redirect passed as
+    healthy (#147 round 1): the status is compared, in both gates."""
+    release.advance()
+    code, _ = release(running=None, env={"STATUS": status})
+    assert code != 0 and "fix forward" in release.output
 
 
 def test_a_service_that_answers_on_another_commit_is_a_failed_release(release):
@@ -289,7 +299,11 @@ class TestTheUnits:
         assert [line.split("=", 1)[1] for line in container if line.startswith("DNS=")] == ["1.1.1.1", "8.8.8.8"]
         assert "Volume=%h/playground/bubble-regime-monitor/data:/data:z" in container
         assert "DropCapability=ALL" in container and "NoNewPrivileges=true" in container
-        assert "HealthOnFailure=kill" in container and any(line.startswith("HealthCmd=curl -q -fsS --noproxy") for line in container)
+        health = next(line for line in container if line.startswith("HealthCmd="))
+        assert "HealthOnFailure=kill" in container
+        assert "-w '%{http_code}'" in health and health.endswith("| grep -qx 200") and " -f" not in health
+        probe = next(line for line in (ROOT / "deploy/release.sh").read_text().splitlines() if "until curl" in line)
+        assert "-w '%{http_code}'" in probe and " -f" not in probe       # the release's gate says 200 the same way
         assert {"Restart=always", "RestartSec=10s"} <= set(service)
         assert "StartLimitIntervalSec=0" in unit["[Unit]"]
         assert not any(line.startswith("Exec") for line in service)     # no shell of our own in the unit

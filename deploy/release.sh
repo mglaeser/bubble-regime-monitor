@@ -68,11 +68,14 @@ podman run --rm --init --env-file .env -v "$PWD/data:/data:z" "$IMAGE:$TARGET" p
 # failed release, reported and tried again at the next tick.
 podman tag "$IMAGE:$TARGET" "$IMAGE:latest"
 systemctl --user restart "$SERVICE"
+# Healthy is a 200 and nothing else: curl's --fail fails on 400 and above only,
+# and a 302 passed as healthy (#147 round 1), so the status is compared.
 # Straight to the loopback: no proxy from the environment (--noproxy) and no
 # ~/.curlrc (-q), since a proxy answering 2xx for anything forged a verdict
 # (executed on the host, #143 round 32).
 deadline=$((SECONDS + HEALTH_TIMEOUT))
-until curl -q -fsS --noproxy '*' --max-time 5 "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1; do
+until curl -q -sS --noproxy '*' --max-time 5 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/healthz" 2>/dev/null \
+      | grep -qx 200; do
   (( SECONDS < deadline )) \
     || die "${TARGET:0:7} did not answer /healthz in ${HEALTH_TIMEOUT} s; it is what main says to run: fix forward (journalctl --user -u $SERVICE)"
   sleep 1
