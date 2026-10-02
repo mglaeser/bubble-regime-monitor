@@ -28,13 +28,18 @@ IMAGE = "localhost/bubblegauge"
 
 _SHIMS = {
     "podman": r"""#!/usr/bin/env bash
-echo "podman $*" >> "$CALLS"
+echo "podman ${*//$'\n'/ }" >> "$CALLS"   # one line per call, a multi-line argument folded
 case "$1 $2" in
   "container inspect") [[ -f "$SHIM_STATE/label" ]] || exit 1              # no container: inspect fails
                        [[ -f "$SHIM_STATE/stopped" ]] || cat "$SHIM_STATE/label" ;;   # exited: inspect answers, the template empties
   "build "*) [[ "$BUILD_FAILS" != "1" ]] || exit 1
              echo "${5#*:}" >> "$SHIM_STATE/images"; cp -r "$8" "$SHIM_STATE/context" ;;
-  "run "*) ;;
+  "run "*) for ((i = 1; i < $#; i++)); do                    # what the smoke's /data held as it started
+             j=$((i + 1)); [[ "${!i}" == -v ]] || continue
+             src="${!j%%:*}"; echo "$src" >> "$SHIM_STATE/smoke-dirs"
+             ls -A "$src" | wc -l | tr -d " " > "$SHIM_STATE/smoke-entries"
+           done
+           [[ "$SMOKE_FAILS" != "1" ]] || exit 1 ;;
   "tag "*) echo "${2#*:}" > "$SHIM_STATE/latest" ;;
   "images "*) tac "$SHIM_STATE/images" 2>/dev/null | sed "s|^|localhost/bubblegauge:|"; echo localhost/bubblegauge:latest ;;
   "rmi "*) ;;
@@ -227,6 +232,49 @@ def test_the_build_context_is_the_commits_export(release):
     assert not (context / "untracked.txt").exists()
 
 
+def test_the_candidate_boots_from_scratch_before_the_switch(release):
+    """A throwaway container on an empty database, no .env, no network, the
+    scheduler off: the image must import, migrate from nothing and answer
+    before the service is touched. Its probe is the gates' exit-keeping one."""
+    release.advance()
+    code, calls = release(running=None)
+    assert code == 0
+    smoke = next(i for i, c in enumerate(calls) if c.startswith("podman run"))
+    assert _index(calls, "podman build") < smoke < _index(calls, "podman tag")
+    assert "--network none" in calls[smoke] and "-e TESTING=true" in calls[smoke]
+    assert "--env-file" not in calls[smoke] and "-p " not in calls[smoke] and "--publish" not in calls[smoke]
+    # the verifier is the smoke's own: no ENTRYPOINT of the image stands in for it
+    assert "--entrypoint timeout" in calls[smoke] and " 120 sh -c uvicorn" in calls[smoke]
+    assert "c=$(curl -q -fsS --noproxy" in calls[smoke] and "-w \"%{http_code}\"" in calls[smoke] and "x200" in calls[smoke]
+    # two minutes enforced by coreutils' timeout: no deadline or count of our own,
+    # which let the last probe run past it (#148 round 3)
+    assert "date +%s" not in calls[smoke] and "seq" not in calls[smoke]
+
+
+def test_the_smoke_boots_on_a_new_empty_database_whatever_the_runtime_directory_holds(release):
+    """#148 round 1, SOTA-C: a fixed smoke directory created with mkdir -p
+    would boot on whatever an earlier run left there, and a migration that
+    cannot run from nothing could pass on a database it had already moved.
+    The directory is mktemp -d's: new and empty on every run."""
+    (release.runtime / "smoke").mkdir(parents=True)
+    (release.runtime / "smoke" / "bubble.db").write_text("an earlier run's\n")
+    release.advance("one")
+    assert release(running=None)[0] == 0
+    assert (release.state / "smoke-entries").read_text().strip() == "0"
+    release.advance("two")
+    assert release(running=None)[0] == 0
+    assert (release.state / "smoke-entries").read_text().strip() == "0"
+    first, second = (release.state / "smoke-dirs").read_text().split()
+    assert first != second and str(release.runtime / "smoke") not in (first, second)
+
+
+def test_a_candidate_that_does_not_boot_touches_nothing(release):
+    release.advance()
+    code, calls = release(running=None, env={"SMOKE_FAILS": "1"})
+    assert code != 0 and "does not boot from scratch" in release.output
+    assert not any(c.startswith(("podman tag", "systemctl --user restart")) for c in calls), calls
+
+
 def test_a_build_that_fails_touches_nothing(release):
     release.advance()
     code, calls = release(running=None, env={"BUILD_FAILS": "1"})
@@ -355,6 +403,9 @@ class TestTheUnits:
         unit = _directives((ROOT / "deploy/systemd/bubblegauge-release.service").read_text())
         assert "Type=oneshot" in unit["[Service]"]
         assert "RuntimeDirectory=bubblegauge-release" in unit["[Service]"]
+        # removed when the unit ends, success or failure, with the smoke boot's
+        # database in it: nothing of a run outlives it (#148 round 2)
+        assert not any(line.startswith("RuntimeDirectoryPreserve=") for line in unit["[Service]"])
         assert "OnFailure=bubblegauge-notify-failed@%N.service" in unit["[Unit]"]
         # the copy installed by hand, run in the checkout - never the checkout's file
         assert "ExecStart=%h/.local/bin/bubblegauge-release" in unit["[Service]"]
@@ -386,7 +437,8 @@ class TestTheUnits:
         # the same line as the release's gate: curl's exit kept (no pipe), --fail on,
         # the status compared to 200; $$ and %% are systemd's escapes in a unit file
         assert health == "HealthCmd=c=$$(curl -q -fsS --noproxy '*' --max-time 5 -o /dev/null -w '%%{http_code}' http://127.0.0.1:8000/healthz) && [ x$$c = x200 ]"
-        probe = next(line for line in (ROOT / "deploy/release.sh").read_text().splitlines() if "until c=$(curl" in line)
+        probe = next(line for line in (ROOT / "deploy/release.sh").read_text().splitlines()
+                     if "until c=$(curl" in line and "$PORT" in line)   # the release's gate, not the smoke's
         assert "curl -q -fsS --noproxy '*' --max-time 5 -o /dev/null -w '%{http_code}'" in probe and "|" not in probe
         assert {"Restart=always", "RestartSec=10s", "TimeoutStartSec=300"} <= set(service)
         assert "HealthStartPeriod=300s" in container      # a boot, migration included, has five minutes
