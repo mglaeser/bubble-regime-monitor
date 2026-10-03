@@ -675,68 +675,28 @@ class TestTransportSelection:
         assert get_settings().daily_digest_transport == "none"
         get_settings.cache_clear()
 
-    def test_explicit_stage4_toggle_disables_imessage_legacy_digest_too(
-            self, isolated_db, monkeypatch):
-        """DAILY_SMS_ENABLED=false retires the daily digest on every transport
-        while alerts are live.
-
-        The old implementation applied ``false`` only to sipgate, so a fully
-        configured iMessage digest remained scheduled after an operator had
-        switched the daily digest off.
-        """
-        monkeypatch.setenv("ALERTS_MODE", "live")
-        monkeypatch.setenv("DAILY_SMS_ENABLED", "false")
-        monkeypatch.setenv("IMESSAGE_ENABLED", "true")
-        monkeypatch.setenv("IMESSAGE_API_BASE_URL", "http://127.0.0.1:12345")
-        monkeypatch.setenv("IMESSAGE_API_KEY", "configured-test-key-123456789")
-        monkeypatch.setenv("IMESSAGE_RECIPIENT", "+491510000000")
-        monkeypatch.setenv("SMS_ENABLED", "true")
-        from app.config import get_settings
-
-        get_settings.cache_clear()
-        settings = get_settings()
-        assert settings.effective_daily_sms_enabled is False
-        assert settings.daily_digest_transport == "none"
-        get_settings.cache_clear()
-
-    @pytest.mark.parametrize("alerts_mode, transport", [
-        ("live", "none"), ("shadow", "imessage"), ("disabled", "imessage")])
-    def test_retiring_the_daily_digest_needs_live_alerts(
-            self, isolated_db, monkeypatch, alerts_mode, transport):
-        """#151, SOTA-A: the deleted Stage-4 cutover gate's one property is
-        enforced where the switch is read. DAILY_SMS_ENABLED=false retires the
-        daily digest only while alerts are live; with alerts disabled or in
-        shadow the switch is held and the digest keeps its transport, so the
-        owner is never left with nothing at all. (The gate's CLI only recorded
-        an operator's intent and printed "set DAILY_SMS_ENABLED=false in the
-        deployment environment" - nothing at runtime checked the switch.)
+    @pytest.mark.parametrize("alerts_mode", ["disabled", "shadow", "live"])
+    def test_the_daily_digest_is_governed_by_its_transports_alone(
+            self, isolated_db, monkeypatch, alerts_mode):
+        """#151 (owner decision D2c): the Stage-4 cutover went with its switch.
+        DAILY_SMS_ENABLED - the migration alias whose one purpose was the
+        cutover - is gone, so the daily digest has no retirement switch: its
+        transports decide in every alerts mode, and a key left in an
+        environment changes nothing. (The deleted cutover CLI only recorded an
+        operator's intent and printed "set DAILY_SMS_ENABLED=false"; nothing at
+        runtime ever checked that switch.)
         """
         monkeypatch.setenv("ALERTS_MODE", alerts_mode)
-        monkeypatch.setenv("DAILY_SMS_ENABLED", "false")
+        monkeypatch.setenv("DAILY_SMS_ENABLED", "false")          # a leftover key
         monkeypatch.setenv("IMESSAGE_ENABLED", "true")
         monkeypatch.setenv("IMESSAGE_API_BASE_URL", "http://127.0.0.1:12345")
         monkeypatch.setenv("IMESSAGE_API_KEY", "configured-test-key-123456789")  # pragma: allowlist secret
         monkeypatch.setenv("IMESSAGE_RECIPIENT", "+491510000000")
-        from app.config import get_settings
+        from app.config import Settings, get_settings
 
         get_settings.cache_clear()
-        assert get_settings().daily_digest_transport == transport
-        get_settings.cache_clear()
-
-    def test_a_held_retirement_keeps_sipgate_too(self, isolated_db, monkeypatch):
-        """The hold covers every transport: an SMS digest keeps sending."""
-        monkeypatch.setenv("ALERTS_MODE", "disabled")
-        monkeypatch.setenv("DAILY_SMS_ENABLED", "false")
-        monkeypatch.setenv("IMESSAGE_ENABLED", "false")
-        monkeypatch.setenv("SMS_ENABLED", "true")
-        monkeypatch.setenv("SIPGATE_TOKEN_ID", "token-id-123")
-        monkeypatch.setenv("SIPGATE_TOKEN", "sipgate-token-123456789")  # pragma: allowlist secret
-        monkeypatch.setenv("SIPGATE_RECIPIENT", "+491510000000")
-        from app.config import get_settings
-
-        get_settings.cache_clear()
-        settings = get_settings()
-        assert settings.effective_daily_sms_enabled is True and settings.daily_digest_transport == "sipgate"
+        assert get_settings().daily_digest_transport == "imessage"
+        assert "daily_sms_enabled" not in Settings.model_fields
         get_settings.cache_clear()
 
     def test_nothing_in_the_application_reads_a_cutover_record(self):

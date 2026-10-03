@@ -225,11 +225,6 @@ class Settings(BaseSettings):
     alerts_llm_timeout_s: int = 6
     alerts_llm_render_cap_24h: int = 12
 
-    # Migration-friendly alias for the legacy `sms_enabled`, and the daily
-    # digest's retirement switch, held until alerts are live: ALERTS_MODE=live
-    # must NOT implicitly disable the digest. See `daily_digest_transport`.
-    daily_sms_enabled: bool | None = None
-
     # Runtime. mc_samples / mc_seed DEFAULT to the canonical frozen artifact
     # (F-01/L-07) so the runtime MC seed is causally the frozen value; env vars
     # may still override for operational runs.
@@ -307,20 +302,6 @@ class Settings(BaseSettings):
                     and self.sipgate_token and self.sipgate_recipient)
 
     @property
-    def effective_daily_sms_enabled(self) -> bool:
-        """Whether the daily digest runs over sipgate's switch.
-
-        DAILY_SMS_ENABLED=true wins; DAILY_SMS_ENABLED=false retires the digest
-        only while alerts are live (see `daily_digest_transport`) and is held
-        otherwise; SMS_ENABLED governs the rest. Turning alerts on never
-        switches the digest off by itself."""
-        if self.daily_sms_enabled is True:
-            return True
-        if self.daily_sms_enabled is False and self.alerts_mode == "live":
-            return False
-        return self.sms_enabled
-
-    @property
     def imessage_configured(self) -> bool:
         """Credentials + destination present. Independent of the switch, so a
         half-configured deployment reports "enabled but not configured" rather
@@ -336,26 +317,15 @@ class Settings(BaseSettings):
 
     @property
     def daily_digest_transport(self) -> Literal["imessage", "sipgate", "none"]:
-        """Which transport carries the daily digest.
+        """Which transport carries the daily digest: its own switches alone.
 
-        ``DAILY_SMS_ENABLED=false`` retires the daily digest, whichever
-        transport carries it - sipgate or iMessage - and ONLY WHILE ALERTS ARE
-        LIVE: with ALERTS_MODE disabled or shadow the switch is held and the
-        digest keeps its transport, so retiring the digest can never leave the
-        owner with nothing at all (#151, SOTA-A). This one line is what is
-        left of the Stage-4 cutover gate that owner decision D2c deleted
-        (2026-10-02): its CLI recorded an operator's intent and printed "set
-        DAILY_SMS_ENABLED=false in the deployment environment" - the switch was
-        never checked at runtime until now, and its one importer was that CLI.
-        Transports switched off by hand are the remaining way to silence the
-        digest; health names that state ("no outbound message path",
-        app/alerts/health.py).
-
-        In the absence of that explicit value, iMessage wins when both
-        transport switches are on — see the IMESSAGE_* block. Legacy
-        ``SMS_ENABLED=false`` plus ``IMESSAGE_ENABLED=true`` still means "send
-        my digest over iMessage"; only the explicit alias switches the digest
-        off on every transport.
+        iMessage when IMESSAGE_ENABLED is on and configured, else sipgate when
+        SMS_ENABLED is on, else none - turning alerts on never changes it. The
+        digest has no retirement switch: DAILY_SMS_ENABLED, the migration alias
+        whose one purpose was the Stage-4 cutover, went with the cutover (owner
+        decision D2c, 2026-10-02; no backward compatibility, ruling of
+        2026-09-20). A digest without a transport is named by health ("the
+        daily digest has no transport", app/alerts/health.py).
 
         REQUIRES `imessage_configured`, not merely the switch. Selecting on the
         switch alone meant that adding IMESSAGE_ENABLED=true to a WORKING SMS
@@ -370,11 +340,9 @@ class Settings(BaseSettings):
         configured one over nothing loses no information. The unconfigured
         switch is reported loudly by every operator surface rather than being
         absorbed here: see `imessage_enabled_but_unconfigured`."""
-        if self.daily_sms_enabled is False and self.alerts_mode == "live":
-            return "none"
         if self.imessage_enabled and self.imessage_configured:
             return "imessage"
-        if self.effective_daily_sms_enabled:
+        if self.sms_enabled:
             return "sipgate"
         return "none"
 

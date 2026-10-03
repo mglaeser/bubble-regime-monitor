@@ -123,7 +123,7 @@ def cmd_preflight(_args: argparse.Namespace) -> int:
     check("alerts_mode_recorded", True, f"ALERTS_MODE={settings.alerts_mode}")
     check("legacy_daily_digest", True,
           f"transport={settings.daily_digest_transport} "
-          f"(effective_daily_sms_enabled={settings.effective_daily_sms_enabled}, "
+          f"(sms_enabled={settings.sms_enabled}, "
           f"imessage_enabled={settings.imessage_enabled})")
     # Fails the preflight rather than merely reporting: a digest configured
     # under a misspelt key is indistinguishable from one deliberately off, and

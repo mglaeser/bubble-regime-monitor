@@ -14,7 +14,7 @@ digest, watchdog/recovery, retention and actionability evidence
 are implemented and tested. They are not permission to send: live alert
 delivery is refused below Stage 3, and the committed Stage-3 replay currently
 fails its non-P1 volume gate. The separate daily digest sends through its
-configured transport; `DAILY_SMS_ENABLED=false` retires it only while alerts are live (ALERTS_MODE=live) and is held otherwise. See [Rollout status and remaining evidence](#rollout-status-and-remaining-evidence).
+configured transport, governed by its transport switches alone. See [Rollout status and remaining evidence](#rollout-status-and-remaining-evidence).
 
 ---
 
@@ -306,15 +306,14 @@ Three separate scopes. **Alert reads do not fall back to the admin key** —
 unlike the scoring API, which does. That fallback is exactly what would put an
 admin credential in a browser.
 
-`DAILY_SMS_ENABLED` is the migration alias for `SMS_ENABLED` and the
-**retirement switch** for the whole daily digest. When the alias is unset,
-`IMESSAGE_ENABLED` may select iMessage and iMessage wins when both configured
-transports are on; there is no send-failure fallback. `DAILY_SMS_ENABLED=false`
-retires the digest on every transport - sipgate or iMessage - **only while
-alerts are live**; with ALERTS_MODE disabled or shadow it is held and the
-digest keeps its transport, so retiring it never leaves the owner with nothing
-at all. Turning the alert system on still never changes this value or
-implicitly disables the digest.
+The daily digest is governed by its transport switches alone:
+`IMESSAGE_ENABLED` selects iMessage when it is configured, and iMessage wins
+when both configured transports are on; otherwise `SMS_ENABLED` selects
+sipgate; there is no send-failure fallback. It has no retirement switch: the
+`DAILY_SMS_ENABLED` migration alias went with the Stage-4 cutover it served
+(owner decision D2c). Turning the alert system on never changes the digest's
+transport, and a digest without one is named by the alert health projection
+("the daily digest has no transport").
 
 Volume, lease, retention and LLM settings live in `app/config.py`; each has a
 safe default. The `ALERTS_LLM_*` settings reserve the dormant Stage-7/A-B
@@ -478,7 +477,7 @@ refuses to use it in production.
 | 1 | schema, sidecar capture, pure evaluation, CAS, read API, replay | **implemented; this is the committed active stage** |
 | 2 | `[PIN]` calibration, replay budgets, mandatory-event fixtures | gate machinery is implemented; real calibration/mandatory-event artifacts remain operator evidence and are not invented |
 | 3 | deterministic P1/P2 delivery and weekly digest | planner, outbox, renderer, typed sender, dispatcher, reminders, digest and admission controls are implemented; promotion is blocked by the measured non-P1 volume failures below |
-| 4 | legacy daily-digest cutover | the gate's CLI and its two-phase audit are deleted (owner decision D2c, 2026-10-02): the daily digest is the message engine's product. The CLI never checked the switch - `alerts cutover apply` recorded the operator's intent and printed "set DAILY_SMS_ENABLED=false in the deployment environment", its one importer was that CLI, and the production database holds no cutover event (read-only, 2026-10-02). The gate's one property is now enforced where the switch is read: `DAILY_SMS_ENABLED=false` retires the digest only while alerts are live (`Settings.daily_digest_transport`). Transports switched off by hand remain the way to silence it, and `/api/v1/alerts/health` names that state ("no outbound message path") |
+| 4 | legacy daily-digest cutover | deleted with its switch (owner decision D2c, 2026-10-02): the daily digest is the message engine's product and is not retired. The gate's CLI never checked the switch - `alerts cutover apply` recorded the operator's intent and printed "set DAILY_SMS_ENABLED=false in the deployment environment", its one importer was that CLI, and the production database holds no cutover event (read-only, 2026-10-02) - and the `DAILY_SMS_ENABLED` alias, the cutover's one purpose, is gone (unset on the production host). The digest's transports decide; `/api/v1/alerts/health` names a digest without one |
 | 5 | constellations and bundled P2 | evaluators, dominance and atomic multi-member bundling are implemented and stage-gated |
 | 6 | EWMA / CUSUM | intentionally absent until immutable calibration and out-of-sample evidence exist |
 | 7 | P3 enrichment and LLM A/B review | P3 inventory, code-only selector and actionability evidence trail are implemented; the selector is not invoked by the production dispatcher and retention depends on future A/B evidence |

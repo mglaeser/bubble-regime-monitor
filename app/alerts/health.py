@@ -1022,15 +1022,13 @@ def health_projection(
             for blocker in live_admission_blockers
         )
 
-    # With the daily digest's transports switched off and alerts not live,
-    # nothing at all goes out to the owner. DAILY_SMS_ENABLED=false cannot
-    # cause it - it is held until alerts are live (Settings.daily_digest_
-    # transport, owner decision D2c) - but transports switched off by hand can,
-    # and health says so.
-    no_outbound_path = settings.daily_digest_transport == "none" and mode != "live"
-    if no_outbound_path:
-        conditions.append("no outbound message path: the daily digest is off and "
-                          "alerts are not live")
+    # The daily digest is the owner's standing message, governed by its
+    # transports alone (owner decision D2c removed its retirement switch).
+    # A digest without a transport is named whatever the alerts do: health
+    # makes no promise about what else reaches the owner.
+    no_digest_transport = settings.daily_digest_transport == "none"
+    if no_digest_transport:
+        conditions.append("the daily digest has no transport")
     critical = (
         ruleset is None
         or schema_fault
@@ -1058,7 +1056,7 @@ def health_projection(
     return {
         "status": (
             "critical" if critical
-            else "degraded" if fallback_reason or queue_degraded or no_outbound_path
+            else "degraded" if fallback_reason or queue_degraded or no_digest_transport
             else "ok"
         ),
         "components": components,
