@@ -1,8 +1,10 @@
-"""Loading the immutable artifacts.
+"""Loading the immutable artifacts, and promoting them.
 
-Promotion is an OPERATOR action, and it does not live in this module at all —
-see `app.alerts.promotion_service`, which checks the replay evidence before
-writing any promotion metadata. Nothing here promotes anything.
+Promotion is an OPERATOR action: `promote` below, reached from the CLI
+(`validate --promote`) and from POST /api/v1/admin/alerts/promote, and from
+nothing else. It marks the exact bytes live mode runs and reads no evidence
+(owner decision D2d): the CI replay gate is the evidence. `register` never
+promotes.
 
 Fallback never escalates. If the candidate ruleset on disk is invalid, the
 service keeps evaluating the ruleset that was already promoted and reports
@@ -38,8 +40,9 @@ from app.logging_conf import get_logger
 
 log = get_logger(__name__)
 
-#: Shipped defaults. An operator overrides them with ALERTS_RULES_PATH /
-#: ALERTS_PHRASE_PATH; the shipped copies are what CI validates.
+#: Shipped defaults. A host may point ALERTS_RULES_PATH / ALERTS_PHRASE_PATH
+#: at a candidate for shadow mode; the shipped copies are what CI replays and
+#: the only artifacts an operator can promote (`shipped_blocker`).
 REPO_RULES = Path(__file__).resolve().parents[2] / "config" / "alert_rules.v3.2.yaml"
 REPO_PHRASES = Path(__file__).resolve().parents[2] / "config" / "alert_phrases.v3.5.json"
 
@@ -212,11 +215,9 @@ def register(session: Session, artifacts: LoadedArtifacts, *,
              registered_by: str | None = None) -> str:
     """Persist the artifacts as VALIDATED. It does NOT promote.
 
-    Registering is cheap and idempotent — the bytes are addressed by their
-    hash, and re-registering the same hash is a no-op. It also carries no
-    authority, which is why promotion is not a keyword argument here:
-    promotion lives in `app.alerts.promotion_service`, behind the evidence
-    check.
+    Registering is cheap and idempotent - the bytes are addressed by their
+    hash, and re-registering the same hash is a no-op. It carries no
+    authority: promotion is `promote`, an operator action.
     """
     now = now or datetime.now(UTC)
     phrase = artifacts.phrase_set
@@ -253,6 +254,64 @@ def register(session: Session, artifacts: LoadedArtifacts, *,
         session.flush()
 
     return row.rules_sha256
+
+
+def shipped_blocker(artifacts: LoadedArtifacts) -> str | None:
+    """Why these artifacts cannot be promoted by an operator, or None.
+
+    Promotion reads no evidence (owner decision D2d): the CI replay gate is
+    the evidence, and it checks exactly the artifacts this image ships
+    (REPO_RULES, REPO_PHRASES). So an operator promotes only those bytes; a
+    candidate elsewhere - a variant, or a file a host placed at
+    ALERTS_RULES_PATH / ALERTS_PHRASE_PATH - runs in shadow mode only.
+    """
+    shipped = validate_from_disk(rules_path=REPO_RULES, phrase_path=REPO_PHRASES)
+    if (artifacts.ruleset.rules_sha256, artifacts.phrase_set.sha256) == (
+            shipped.ruleset.rules_sha256, shipped.phrase_set.sha256):
+        return None
+    return ("only the artifacts this image ships can be promoted - the CI replay gate "
+            f"checks exactly those bytes: these are rules {artifacts.ruleset.rules_sha256[:12]} "
+            f"and phrases {artifacts.phrase_set.sha256[:12]}, the shipped ones "
+            f"{shipped.ruleset.rules_sha256[:12]} and {shipped.phrase_set.sha256[:12]}")
+
+
+def promote(session: Session, artifacts: LoadedArtifacts, *, actor: str,
+            now: datetime | None = None) -> str:
+    """Register the exact bytes and mark them PROMOTED. Returns their hash.
+
+    Live mode runs only the promoted bytes (`load_active_for_mode`), so this
+    decides what a live deployment evaluates and sends. It does not enable
+    delivery - `ALERTS_MODE=live` does - and it reads no evidence (owner
+    decision D2d): the CI replay gate is the evidence.
+
+    Every other PROMOTED row becomes SUPERSEDED. A re-promoted row is not
+    superseded any more: leaving the old stamp made the row say two things at
+    once, and anything reading `superseded_at` as "no longer current" would
+    treat the current promotion as retired.
+    """
+    now = now or datetime.now(UTC)
+    ruleset = artifacts.ruleset
+    rules_sha256 = register(session, artifacts, now=now, registered_by=actor)
+    for other in session.execute(
+        select(AlertRulesetRegistry).where(
+            AlertRulesetRegistry.status == RulesetStatus.PROMOTED,
+            AlertRulesetRegistry.rules_sha256 != rules_sha256,
+        )
+    ).scalars().all():
+        other.status = RulesetStatus.SUPERSEDED
+        other.superseded_at = now
+
+    row = session.get(AlertRulesetRegistry, rules_sha256)
+    if row is None:                                # pragma: no cover - registered above
+        raise LookupError(f"ruleset {rules_sha256[:12]} is not registered")
+    row.status = RulesetStatus.PROMOTED
+    row.promoted_at = now
+    row.promoted_by = sanitize(actor)
+    row.superseded_at = None
+    log.info("alert_ruleset_promoted", rules_sha256=rules_sha256[:12],
+             rule_version=ruleset.rule_version,
+             stage=ruleset.document.meta.active_stage, actor=actor)
+    return rules_sha256
 
 
 def archived_rulesets(session: Session, hashes: list[str], *,

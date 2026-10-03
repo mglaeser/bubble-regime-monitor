@@ -1,7 +1,7 @@
 {
   "artifact": "alert-stage1-gate",
   "artifacts": {
-    "digests": "carried GROUPED above — the full sha256 split into eight-character runs, so an entropy detector does not read it as a credential. The promotion gate binds evidence to bytes with them; per-run summaries still omit bare digests. See app.alerts.promotion.group_digest",
+    "digests": "carried GROUPED above - the full sha256 split into eight-character runs, so an entropy detector does not read it as a credential. They bind this evidence to the committed bytes: the CI check fails when the bytes change and this file is not regenerated. Per-run summaries still omit bare digests. See scripts/export_alert_stage1_gate.py group_digest",
     "phrase_set_sha256_grouped": "25d82b6a-0f45233c-ee228ee2-f964a8cd-ea7f40b4-3bdd48a9-8a333393-a9c96c87",
     "phrase_set_version": "v3.5",
     "rule_version": "v3.2.3",

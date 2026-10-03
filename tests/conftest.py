@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -132,23 +131,14 @@ def make_golden_raw_inputs():
 
 
 def register_promoted(session, artifacts, *, now=None, actor="tests"):
-    """Register artifacts and mark them PROMOTED, bypassing the evidence gate.
+    """Register artifacts and mark them PROMOTED through `artifacts.promote`.
 
-    Most tests want a promoted ruleset as a FIXTURE — something to continue
-    from, supersede, or resolve bytes against — not to exercise promotion
-    itself. `register(promote=True)` used to serve that, and it also served
-    production, which is exactly why a failing ruleset could be marked promoted
-    with no evidence.
-
-    The production path is `promotion_service.validate_register_and_promote`
-    and it is tested on its own. This helper reaches the private state mutation
-    deliberately, from test code, so no production caller has to.
+    Most tests want a promoted ruleset as a FIXTURE - something to continue
+    from, supersede, or resolve bytes against - not to exercise promotion
+    itself, which tests/test_alert_promotion.py does.
     """
-    from app.alerts.artifacts import register
-    from app.alerts.promotion_service import _mark_promoted
+    from app.alerts.artifacts import promote
 
-    now = now or datetime.now(UTC)
-    sha = register(session, artifacts, now=now, registered_by=actor)
-    _mark_promoted(session, sha, actor=actor, now=now)
+    sha = promote(session, artifacts, actor=actor, now=now)
     session.flush()
     return sha

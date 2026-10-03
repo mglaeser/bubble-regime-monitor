@@ -168,9 +168,9 @@ class ReplaySummary:
     mean_non_p1_per_168h: float = 0.0
     #: The cap values the verdict was judged AGAINST. Without these the
     #: artifact says "passed" or "failed" while omitting the limits that
-    #: decision used — and the planner enforces whatever the runtime settings
-    #: say, so raising an env var would quietly run live under caps the
-    #: evidence never saw. Recording them is what lets admission notice.
+    #: decision used. Recorded, they are part of the evidence CI compares byte
+    #: for byte, so a change to the default caps changes the artifact; a
+    #: host's override of them is compared with nothing (owner decision D2d).
     budget_limits: dict[str, int] = field(default_factory=dict)
     p1_total: int = 0
 
@@ -485,10 +485,9 @@ def run_replay(
 
     Returns the summary. Nothing is sent, nothing in production is written.
     """
-    from app.alerts.artifacts import LoadedArtifacts
+    from app.alerts.artifacts import LoadedArtifacts, register
     from app.alerts.engine import run_evaluation
     from app.alerts.models import AlertDigestItem, AlertInputSnapshot
-    from app.alerts.promotion_service import seed_replay_artifacts
 
     committed_stage = ruleset.document.meta.active_stage
     if config.evaluate_at_stage is not None \
@@ -527,12 +526,14 @@ def run_replay(
     try:
         # Seed the isolated database with the artifacts and the sidecars, so a
         # replay is fully self-contained and can be re-run from its state DB.
+        # Registered, never promoted: replay needs the bytes readable, and
+        # promotion is an operator's act.
         with scope() as session:
-            seed_replay_artifacts(
+            register(
                 session,
                 LoadedArtifacts(ruleset=ruleset, phrase_set=phrase_set,
                                 source="replay"),
-                now=_moment_of(records[0]))
+                now=_moment_of(records[0]), registered_by="replay")
             for alert_input in records:
                 if session.get(AlertInputSnapshot, alert_input.input_identity) is not None:
                     continue

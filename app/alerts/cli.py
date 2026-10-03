@@ -54,19 +54,19 @@ def cmd_validate(args: argparse.Namespace) -> int:
     summary = ruleset_summary(artifacts.ruleset)
     summary["phrase_worst_case"] = artifacts.phrase_set.worst_case
     if args.promote:
-        from app.alerts.promotion_service import validate_register_and_promote
+        from app.alerts.artifacts import promote, shipped_blocker
 
-        with session_scope() as session:
-            decision = validate_register_and_promote(
-                session, artifacts, actor=args.by or "cli")
-        summary["promoted"] = decision.promoted
-        if not decision.promoted:
-            # Refused. The artifact stays VALIDATED and unpromoted, the current
-            # promotion is untouched, and the exit code says so — a promotion
-            # that prints its blockers and exits 0 reads as success in a script.
-            summary["blockers"] = list(decision.blockers)
-            print(json.dumps(summary, indent=2, sort_keys=True))
+        try:
+            blocker = shipped_blocker(artifacts)
+        except AlertError as exc:
+            _print({"valid": False, "error_code": exc.code, "problems": exc.redacted().split("; ")})
             return 1
+        if blocker:
+            _print({"valid": True, **summary, "promoted": False, "blockers": [blocker]})
+            return 1
+        with session_scope() as session:
+            promote(session, artifacts, actor=args.by or "cli")
+        summary["promoted"] = True
         summary["note"] = ("promotion does NOT enable delivery; ALERTS_MODE is "
                            "unchanged and must be set by hand")
     else:

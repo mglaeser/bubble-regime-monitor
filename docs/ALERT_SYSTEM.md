@@ -324,7 +324,7 @@ Volume, lease, retention and LLM settings live in `app/config.py`; each has a
 safe default. Alert phrasing has no model path: configuring the runtime
 gateway activates only the judgment/digest paths. Configuration alone never
 grants delivery permission: live mode runs only the promoted artifact, and
-promotion checks the committed replay evidence.
+promoting it is an operator action.
 
 ---
 
@@ -371,7 +371,9 @@ open ISO week is refused before its dedupe key can be consumed.
 `--promote` is the only way to promote from the CLI, and
 `POST /api/v1/admin/alerts/promote` the only way over HTTP. Nothing promotes as
 a side effect of a boot, a deploy or a validation run, and **promotion does not
-change `ALERTS_MODE`**.
+change `ALERTS_MODE`**. Promotion validates the files structurally, registers
+their exact bytes and marks them PROMOTED, superseding the previous promotion;
+it reads no evidence (owner decision D2d) - the CI replay gate is the evidence.
 
 ### Crash recovery
 
@@ -553,17 +555,22 @@ outright rather than half-applied.
 
 ## 11a2. Promotion is not a delivery switch
 
-Promotion marks the exact rules and phrase bytes that live mode runs; the
-promotion service accepts them against the committed replay evidence for their
-stage. `ALERTS_MODE=live` is the delivery switch, set by hand on the host. In
-live mode the evaluation, the dispatch job and the message engine load through
-`load_active_for_mode`, which refuses a candidate that is not the promoted
-artifact: the dispatch job raises before it constructs a sender, and its
-heartbeat turns health critical.
+Promotion marks the exact rules and phrase bytes that live mode runs, and it
+reads no evidence: it takes only the artifacts this image ships
+(`config/alert_rules.v3.2.yaml`, `config/alert_phrases.v3.5.json`), which are
+exactly the bytes the CI replay gate checks. A candidate elsewhere - a
+variant, or a file a host places at `ALERTS_RULES_PATH` - is refused by `alerts
+validate --promote` (exit 1) and by `POST /api/v1/admin/alerts/promote` (409),
+and runs in shadow mode only
+(tests/test_alert_promotion.py::test_the_cli_promotes_only_the_shipped_bytes_the_replay_gate_checks).
+`ALERTS_MODE=live` is the delivery switch, set by hand on the host. In live mode the evaluation, the dispatch job and the message engine
+load through `load_active_for_mode`, which refuses a candidate that is not the
+promoted artifact: the dispatch job raises before it constructs a sender, and
+its heartbeat turns health critical.
 
-There is no runtime stage floor and no runtime evidence check (owner decision
-D2d, 2026-10-03): the CI replay gate is the evidence - `python -m
-scripts.export_alert_stage1_gate --check`, a blocking step of
+There is no stage floor and no evidence check at promotion or at runtime
+(owner decision D2d, 2026-10-03): the CI replay gate is the evidence - `python
+-m scripts.export_alert_stage1_gate --check`, a blocking step of
 `.github/workflows/ci.yml` (pinned in tests/test_alert_replay.py), so bytes
 whose replay no longer matches the committed evidence cannot merge. The
 non-P1 budget it judges is code, not a host setting (`app/alerts/budgets.py`
@@ -571,9 +578,10 @@ non-P1 budget it judges is code, not a host setting (`app/alerts/budgets.py`
 replay never judged; the old `ALERTS_NON_P1_*` keys are retired. On leaf
 (read-only, 2026-10-03) the promoted ruleset - rules v3.2.3, phrase set v3.5 -
 is byte-identical to the committed artifact that gate checks, and no delivery
-is queued. Stages 1 and 2 enable
-only the P4 ops rules, and the planner maps P4 to "API and log only", creating
-no delivery. Separately, the dispatcher has no LLM path at any stage.
+is queued. A host that overrides `ALERTS_RULES_PATH`, `ALERTS_PHRASE_PATH` or
+the volume caps runs what CI never replayed. Stages 1 and 2 enable only the P4
+ops rules, and the planner maps P4 to "API and log only", creating no delivery.
+Separately, the dispatcher has no LLM path at any stage.
 
 What the runtime no longer checks, by that decision: the evidence and the
 stage, and nothing is re-checked at the wire - a demotion after planning no
@@ -638,8 +646,9 @@ takes over now"):
   host-side outage notifier, and the weekly digest's own liveness event. Their
   absence is pinned by a test exactly as their presence was.
 
-Superseded in part by owner decision D2d (2026-10-03): nothing at runtime
-re-reads the evidence or compares the caps with it; promotion still does.
+Superseded by owner decision D2d (2026-10-03): neither promotion nor the
+runtime reads the evidence or compares the caps with it. The CI replay gate is
+the evidence, replayed under the default caps.
 
 ## 11c. The weekly digest
 
@@ -696,8 +705,9 @@ the non-P1 budget: it is a scheduled summary, not an interruption.
 The HTTP operator actions are admin-scoped and `no-store`:
 
 * **`POST /api/v1/admin/alerts/evaluate`**, **`promote`** and **`recover`** —
-  exercise one captured input, perform evidence-gated artifact promotion, or
-  sweep stale evaluation leases respectively.
+  exercise one captured input, promote the validated artifacts on disk (no
+  evidence is read, owner decision D2d), or sweep stale evaluation leases
+  respectively.
 * **`POST /api/v1/admin/alerts/render`** — resolves the active reviewed
   `TEST_MESSAGE` and runs the exact TEST renderer, returning phrase-set
   provenance and validation. It creates no delivery/render row and cannot call
@@ -833,9 +843,11 @@ that no reviewer can check.
 The gate artifact records both declared versions and the **complete** rules and
 phrase-set hashes. The hashes are split into stable eight-character groups:
 that preserves all 256 bits for byte binding while avoiding a bare high-entropy
-token-shaped string in the committed artifact. Promotion joins the groups and
-compares the full values. Per-run summaries still omit bare digests, and the
-*Alert artifacts* CI step independently validates the files.
+token-shaped string in the committed artifact. `--check` regenerates them from
+the committed files, so a rules or phrase-set edit that does not regenerate the
+artifact fails CI; nothing at runtime reads them (owner decision D2d). Per-run
+summaries still omit bare digests, and the *Alert artifacts* CI step
+independently validates the files.
 
 The history establishes regression coverage, **not** recall. Recall is a Stage
 2 question and needs `config/alert_mandatory_events.v3.2.json`, which ships
@@ -852,9 +864,10 @@ declared recompute-slot allowance. `NOT_EVALUABLE` is decided per event window,
 not copied from a run-wide missing-input count. If every event window is blind,
 or the deliberately empty shipped catalogue is used, recall remains explicitly
 UNMEASURED. Stage 1 reports that honestly and remains eligible; a Stage 2+
-replay fails, and promotion independently refuses unless the exact shipped
-catalogue is non-empty, frozen, byte-bound, and detected at 100% across its
-evaluable events. These checks validate operator-frozen evidence; they do not
+replay fails unless the shipped catalogue is non-empty, frozen and detected at
+100% across its evaluable events, and the artifact binds the catalogue's bytes,
+so `--check` fails when the catalogue changes without a regeneration. These
+checks validate operator-frozen evidence; they do not
 create the real events, dates, or sources that Stage 2 still requires.
 
 ---
