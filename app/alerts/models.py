@@ -334,7 +334,7 @@ class AlertInstanceNotificationState(Base):
     """Notification memory that must survive a ruleset promotion.
 
     Keyed WITHOUT a rules hash on purpose: promoting a ruleset must not reset a
-    cooldown or forget that an ambiguous delivery is still outstanding.
+    cooldown, a reminder count or the notification generation.
     """
 
     __tablename__ = "alert_instance_notification_state"
@@ -349,8 +349,6 @@ class AlertInstanceNotificationState(Base):
         DateTime(timezone=True), nullable=True)
     reminder_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     next_notification_generation: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
-    open_unknown_delivery_id: Mapped[str | None] = mapped_column(String(ULID_LEN), nullable=True)
-    open_unknown_priority: Mapped[int | None] = mapped_column(Integer, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     __table_args__ = (
@@ -509,15 +507,6 @@ class AlertDelivery(Base):
     delivery_id: Mapped[str] = mapped_column(String(ULID_LEN), primary_key=True)
     dedupe_key: Mapped[str] = mapped_column(String(SHA_LEN), unique=True, nullable=False)
     dedupe_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
-    manual_retry_sequence: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    #: Stable root across a retry-of-a-retry chain.  ``prior_unknown`` below is
-    #: deliberately different: it is the immediately preceding ambiguous
-    #: delivery, while this field owns the monotonic sequence namespace.
-    manual_retry_root_delivery_id: Mapped[str | None] = mapped_column(
-        ForeignKey("alert_delivery.delivery_id"), nullable=True)
-    #: Part of the canonical dedupe material.  Persist it so an authorised
-    #: retry can reproduce the original intent instead of parsing a hash.
-    scheduled_window_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     mode: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
     live_profile: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -555,14 +544,6 @@ class AlertDelivery(Base):
                                                      index=True)
     cancel_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
-    # Ambiguity bookkeeping.
-    blocks_replanning: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    blocks_up_to_priority: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    duplicate_risk_acknowledged: Mapped[bool] = mapped_column(Boolean, default=False,
-                                                              nullable=False)
-    prior_unknown_delivery_id: Mapped[str | None] = mapped_column(
-        ForeignKey("alert_delivery.delivery_id"), nullable=True)
-
     # OPAQUE handle, never the number itself.
     recipient_ref: Mapped[str] = mapped_column(String(64), nullable=False)
 
@@ -575,13 +556,6 @@ class AlertDelivery(Base):
                         name="ck_alert_delivery_kind"),
         CheckConstraint("priority BETWEEN 1 AND 4", name="ck_alert_delivery_priority"),
         CheckConstraint("attempts >= 0", name="ck_alert_delivery_attempts"),
-        CheckConstraint("manual_retry_sequence >= 0", name="ck_alert_delivery_manual_seq"),
-        CheckConstraint(
-            "(manual_retry_root_delivery_id IS NULL AND manual_retry_sequence = 0) OR "
-            "(manual_retry_root_delivery_id IS NOT NULL AND manual_retry_sequence >= 1 "
-            "AND prior_unknown_delivery_id IS NOT NULL)",
-            name="ck_alert_delivery_manual_retry_identity",
-        ),
         # A P1 may never be parked by quiet hours or by budget. Enforced here so
         # a future planner bug cannot even persist the mistake.
         CheckConstraint(
@@ -589,12 +563,6 @@ class AlertDelivery(Base):
             name="ck_alert_delivery_p1_never_held",
         ),
         Index("ix_alert_delivery_claim", "transport_status", "not_before", "priority"),
-        Index(
-            "uq_alert_delivery_manual_retry_root_sequence",
-            "manual_retry_root_delivery_id", "manual_retry_sequence",
-            unique=True,
-            sqlite_where=text("manual_retry_root_delivery_id IS NOT NULL"),
-        ),
     )
 
 
@@ -666,10 +634,9 @@ class AlertRender(Base):
 
     __table_args__ = (
         CheckConstraint("gsm7_septets BETWEEN 0 AND 160", name="ck_alert_render_septets"),
-        # A delivery row is one provider intent. Automatic attempts reuse its
-        # one final render; a manual retry is a new delivery and therefore gets
-        # its own row. Database authority removes timestamp/ULID ordering as a
-        # hidden supersession mechanism.
+        # A delivery row is one provider intent, and its automatic attempts
+        # reuse its one final render. Database authority removes
+        # timestamp/ULID ordering as a hidden supersession mechanism.
         Index("uq_alert_render_delivery", "delivery_id", unique=True),
     )
 

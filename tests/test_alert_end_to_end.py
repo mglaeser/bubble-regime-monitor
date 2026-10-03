@@ -303,6 +303,148 @@ def test_a_reminder_is_persisted_once_and_advances_only_after_confirmed_send(
     get_settings.cache_clear()
 
 
+# --- UNKNOWN is a state, not a workflow (owner decision D2f) ------------------
+
+
+def _stage3_shadow(tmp_path, monkeypatch, name: str) -> None:
+    """The committed rules re-staged to 3 on disk, evaluated in shadow."""
+    import yaml
+
+    from app.config import get_settings
+
+    source = yaml.safe_load(
+        pathlib.Path("config/alert_rules.v3.2.yaml").read_text(encoding="utf-8"))
+    source["meta"]["active_stage"] = 3
+    staged = tmp_path / f"alert_rules.stage3-{name}.yaml"
+    staged.write_text(yaml.safe_dump(source, sort_keys=False, allow_unicode=True),
+                      encoding="utf-8")
+    monkeypatch.setenv("ALERTS_RULES_PATH", str(staged))
+    monkeypatch.setenv("ALERTS_MODE", "shadow")
+    monkeypatch.setenv("ALERT_INPUT_CAPTURE", "true")
+    get_settings.cache_clear()
+
+
+def _sms_whose_answers_are_lost(monkeypatch):
+    """sipgate, losing every answer after the request was written: each
+    attempt may have landed and ends UNKNOWN, as on any transport. Returns
+    the sender and the requests it made."""
+    import httpx
+
+    from app.alerts.sender import SipgateSender
+    from app.config import get_settings
+
+    monkeypatch.setenv("SIPGATE_TOKEN_ID", "token-test")
+    monkeypatch.setenv("SIPGATE_TOKEN", "secret-test")            # pragma: allowlist secret
+    monkeypatch.setenv("SIPGATE_RECIPIENT", "+490000000000")
+    get_settings.cache_clear()
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        raise httpx.ReadTimeout("the answer was lost")
+
+    return SipgateSender(client=httpx.Client(transport=httpx.MockTransport(handler))), requests
+
+
+def _evaluate(state: str, at: datetime, prev_id: int | None) -> int:
+    """Commit a snapshot in `state` at `at`, capture and evaluate it."""
+    from app.services.alert_integration import capture_alert_input, evaluate_input
+
+    with session_scope() as session:
+        snapshot_id = _snapshot(session, computed_at=at, effective=state, prev_id=prev_id).id
+    evaluate_input(capture_alert_input(snapshot_id, now=at), now=at)
+    return snapshot_id
+
+
+def _dispatch(sender, at: datetime):
+    from app.alerts.artifacts import load_active
+    from app.alerts.dispatcher import dispatch_once
+
+    with session_scope() as session:
+        phrase_set = load_active(session).phrase_set
+    return dispatch_once(session_scope, phrase_set=phrase_set, mode="shadow",
+                         live_profile="default", sender=sender, now=at)
+
+
+def test_an_unknown_alert_blocks_nothing_and_the_next_episode_is_planned(
+        tmp_path, monkeypatch):
+    """The P1 band alert goes out over sipgate and its answer is lost: it may
+    have landed, so it ends UNKNOWN and is never sent again, and that pass
+    reports the dispatcher's heartbeat critical. It blocks nothing: when the
+    condition resolves and fires again, the new episode's alert is planned
+    with no suppression and sent, with no operator step."""
+    from app.alerts.models import AlertComponentHeartbeat
+    from app.alerts.sender import NullSender
+    from app.config import get_settings
+
+    _stage3_shadow(tmp_path, monkeypatch, "unknown-blocks-nothing")
+    sms, requests = _sms_whose_answers_are_lost(monkeypatch)
+    base = datetime(2026, 8, 20, 6, 0, tzinfo=UTC)
+    fired = _evaluate("de-risk", base + timedelta(hours=4), _evaluate("trim", base, None))
+    assert _dispatch(sms, base + timedelta(hours=5)).unknown == 1
+    with session_scope() as session:
+        assert session.get(AlertComponentHeartbeat, "dispatcher").status == "critical"
+
+    resolved = _evaluate("trim", base + timedelta(hours=8), fired)
+    _evaluate("de-risk", base + timedelta(hours=12), resolved)
+    sent = _dispatch(NullSender(), base + timedelta(hours=13))
+
+    with session_scope() as session:
+        episodes = session.query(AlertEpisode).filter_by(
+            rule_id="regime.band_to_derisk").order_by(AlertEpisode.opened_at).all()
+        alerts = [[
+            session.get(AlertDelivery, member.delivery_id).transport_status
+            for member in session.query(AlertDeliveryMember).filter_by(
+                episode_id=episode.episode_id).all()
+        ] for episode in episodes]
+        reasons = [list(episode.suppression_reasons) for episode in episodes]
+        is_open = [episode.is_open for episode in episodes]
+    assert is_open == [False, True]
+    assert reasons == [[], []]
+    assert alerts == [[TransportStatus.UNKNOWN], [TransportStatus.SENT]]
+    assert (sent.sent, len(requests)) == (1, 1)
+    get_settings.cache_clear()
+
+
+def test_the_same_reminder_generation_is_not_planned_again_after_an_unknown(
+        tmp_path, monkeypatch):
+    """The reminder goes out over sipgate and its answer is lost: it may be on
+    the phone. Generation 2 is never planned as a second row: the next
+    evaluation plans the same generation of the same episode, whose dedupe
+    key is the UNKNOWN row's own, so the existing intent stands - the identity
+    keeps it from being said twice, not a replanning block. Nothing is sent
+    again, and the notification memory does not advance."""
+    from app.alerts.sender import NullSender
+    from app.config import get_settings
+
+    _stage3_shadow(tmp_path, monkeypatch, "unknown-reminder")
+    sms, requests = _sms_whose_answers_are_lost(monkeypatch)
+    base = datetime(2026, 8, 20, 6, 0, tzinfo=UTC)
+    fired = _evaluate("de-risk", base + timedelta(hours=4), _evaluate("trim", base, None))
+    assert _dispatch(NullSender(), base + timedelta(hours=5)).sent == 1
+
+    due_at = base + timedelta(days=3)
+    due = _evaluate("de-risk", due_at, fired)
+    assert _dispatch(sms, due_at + timedelta(hours=1)).unknown == 1
+    _evaluate("de-risk", due_at + timedelta(hours=4), due)
+    later = _dispatch(sms, due_at + timedelta(hours=5))
+
+    with session_scope() as session:
+        episode = session.query(AlertEpisode).filter_by(
+            rule_id="regime.band_to_derisk", is_open=True).one()
+        reasons = list(episode.suppression_reasons)
+        reminders = [delivery.transport_status for delivery in session.query(
+            AlertDelivery).filter_by(delivery_kind="REMINDER").all()]
+        memory = session.get(AlertInstanceNotificationState,
+                             ("shadow", "default", episode.instance_fingerprint))
+        generation = (memory.next_notification_generation, memory.reminder_count)
+    assert reminders == [TransportStatus.UNKNOWN]
+    assert reasons == []
+    assert generation == (2, 0)
+    assert (later.claimed, len(requests)) == (0, 1)
+    get_settings.cache_clear()
+
+
 def test_persisted_flapping_suppresses_only_the_new_notification(
         tmp_path, monkeypatch):
     """The engine persists chatter history and the planner consumes it.

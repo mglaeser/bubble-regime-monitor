@@ -167,14 +167,12 @@ def test_only_test_may_reach_sending_without_a_represented_member(tmp_path):
         connection.execute(
             """
             INSERT INTO alert_delivery (
-                delivery_id, dedupe_key, dedupe_version,
-                manual_retry_sequence, mode, live_profile,
+                delivery_id, dedupe_key, dedupe_version, mode, live_profile,
                 planning_rules_sha256, delivery_kind, priority,
                 transport_status, planning_state, created_at, updated_at,
-                attempts, blocks_replanning, duplicate_risk_acknowledged,
-                recipient_ref
-            ) VALUES (?, ?, 1, 0, 'shadow', 'default', ?, ?, 3,
-                      'PENDING', 'READY', ?, ?, 0, 0, 0, 'default')
+                attempts, recipient_ref
+            ) VALUES (?, ?, 1, 'shadow', 'default', ?, ?, 3,
+                      'PENDING', 'READY', ?, ?, 0, 'default')
             """,
             (delivery_id, delivery_id, "r" * 64, kind, timestamp, timestamp),
         )
@@ -210,16 +208,13 @@ def test_only_test_may_reach_sending_without_a_represented_member(tmp_path):
         connection.execute(
             """
             INSERT INTO alert_delivery (
-                delivery_id, dedupe_key, dedupe_version,
-                manual_retry_sequence, mode, live_profile,
+                delivery_id, dedupe_key, dedupe_version, mode, live_profile,
                 planning_rules_sha256, delivery_kind, priority,
                 transport_status, planning_state, created_at, updated_at,
-                attempts, blocks_replanning, duplicate_risk_acknowledged,
-                recipient_ref
+                attempts, recipient_ref
             ) VALUES ('01M0MEMBERGUARDINSERT00000',
-                      '01M0MEMBERGUARDINSERT00000', 1, 0, 'shadow', 'default',
-                      ?, 'INITIAL', 2, 'SENDING', 'READY', ?, ?, 0, 0, 0,
-                      'default')
+                      '01M0MEMBERGUARDINSERT00000', 1, 'shadow', 'default',
+                      ?, 'INITIAL', 2, 'SENDING', 'READY', ?, ?, 0, 'default')
             """,
             ("r" * 64, timestamp, timestamp),
         )
@@ -228,16 +223,13 @@ def test_only_test_may_reach_sending_without_a_represented_member(tmp_path):
         connection.execute(
             """
             INSERT INTO alert_delivery (
-                delivery_id, dedupe_key, dedupe_version,
-                manual_retry_sequence, mode, live_profile,
+                delivery_id, dedupe_key, dedupe_version, mode, live_profile,
                 planning_rules_sha256, delivery_kind, priority,
                 transport_status, planning_state, created_at, updated_at,
-                attempts, blocks_replanning, duplicate_risk_acknowledged,
-                recipient_ref
+                attempts, recipient_ref
             ) VALUES ('01M0MEMBERGUARDINSENT00000',
-                      '01M0MEMBERGUARDINSENT00000', 1, 0, 'shadow', 'default',
-                      ?, 'INITIAL', 2, 'SENT', 'NONE', ?, ?, 1, 0, 0,
-                      'default')
+                      '01M0MEMBERGUARDINSENT00000', 1, 'shadow', 'default',
+                      ?, 'INITIAL', 2, 'SENT', 'NONE', ?, ?, 1, 'default')
             """,
             ("r" * 64, timestamp, timestamp),
         )
@@ -388,9 +380,6 @@ def test_alert_admin_atomicity_indexes_exist_in_create_all_and_alembic(tmp_path)
     _run_with_db(created, lambda: Base.metadata.create_all(get_engine()))
 
     expected = {
-        "uq_alert_delivery_manual_retry_root_sequence": (
-            "alert_delivery", ("manual_retry_root_delivery_id",
-                               "manual_retry_sequence"), 1, 1),
         "uq_alert_render_delivery": (
             "alert_render", ("delivery_id",), 1, 0),
     }
@@ -413,7 +402,7 @@ def test_admin_atomicity_migration_upgrade_downgrade_upgrade(tmp_path):
         from app.db_migrate import _alembic_config
 
         cfg = _alembic_config()
-        command.upgrade(cfg, "head")
+        command.upgrade(cfg, "0022")
         connection = sqlite3.connect(db)
         assert {"manual_retry_root_delivery_id", "scheduled_window_key"} \
             <= {row[1] for row in connection.execute(
@@ -447,7 +436,7 @@ def test_admin_atomicity_migration_upgrade_downgrade_upgrade(tmp_path):
     # Bump this in the same PR that adds a migration — that is the point of
     # pinning it rather than reading `head`, which would pass vacuously.
     assert connection.execute(
-        "select version_num from alembic_version").fetchone() == ("0022",)
+        "select version_num from alembic_version").fetchone() == ("0023",)
     connection.close()
 
 
@@ -540,7 +529,7 @@ def test_the_evidence_stamp_drop_round_trips_and_keeps_the_immutability_trigger(
             connection.execute(
                 "update alert_ruleset_registry set canonical_yaml = 'changed'")
         assert connection.execute(
-            "select version_num from alembic_version").fetchone() == ("0022",)
+            "select version_num from alembic_version").fetchone() == ("0023",)
     finally:
         connection.close()
 
@@ -810,7 +799,156 @@ def test_the_inheritance_drop_resets_inherited_state_and_round_trips(tmp_path):
         assert _alert_episode_shape(db) == rebuilt
 
     _run_with_db(db, _cycle)
-    assert _read("select version_num from alembic_version") == [("0022",)]
+    assert _read("select version_num from alembic_version") == [("0023",)]
+
+
+def _delivery_and_memory_shape(db: str) -> dict[str, object]:
+    """The whole schema (`_schema`), and the CHECK constraints of the two
+    tables 0023 changes, by name and text as SQLAlchemy's inspector reads
+    them - `_schema` does not compare CHECKs."""
+    from sqlalchemy import create_engine, inspect
+
+    engine = create_engine(f"sqlite:///{db}")
+    try:
+        inspector = inspect(engine)
+        checks = {table: sorted((check["name"], " ".join(check["sqltext"].split()))
+                                for check in inspector.get_check_constraints(table))
+                  for table in ("alert_delivery", "alert_instance_notification_state")}
+    finally:
+        engine.dispose()
+    return {"schema": _schema(db), "checks": checks}
+
+
+def test_the_manual_retry_drop_round_trips_and_keeps_the_delivery_triggers(tmp_path):
+    """Owner decision D2f: UNKNOWN is a terminal state, and the manual retry
+    and the replanning block go with their columns in 0023.
+
+    alert_delivery's seven are named by CHECKs, foreign keys and a partial
+    index, which SQLite's native DROP COLUMN refuses, so that table is
+    rebuilt; a rebuild drops the table's triggers, and 0023 re-creates both
+    member guards (health calls a missing one critical) - present and
+    guarding. The notification state's two carry no key, index or trigger and
+    go natively. Rows survive both ways. The downgrade restores the 0022
+    schema exactly, CHECKs included; the dropped values come back as 0 and
+    NULL - they are not recoverable.
+    """
+    db = str(tmp_path / "manual-retry.db")
+    phrases = hashlib.sha256(b"the phrase set").hexdigest()
+    rules = hashlib.sha256(b"the ruleset that planned it").hexdigest()
+    fingerprint = hashlib.sha256(b"one mechanism").hexdigest()
+    delivery = "01M0UNKNOWNDELIVERY0000000"
+    at = "2026-10-03 10:00:00.000000"
+    dropped = ("manual_retry_sequence", "manual_retry_root_delivery_id", "scheduled_window_key",
+               "blocks_replanning", "blocks_up_to_priority", "duplicate_risk_acknowledged",
+               "prior_unknown_delivery_id")
+    memory = ("open_unknown_delivery_id", "open_unknown_priority")
+    guards = {"alert_delivery_requires_member", "alert_delivery_insert_requires_member"}
+
+    def _read(sql: str) -> list[tuple]:
+        connection = sqlite3.connect(db)
+        try:
+            return connection.execute(sql).fetchall()
+        finally:
+            connection.close()
+
+    def _columns(table: str) -> set[str]:
+        return {row[1] for row in _read(f"pragma table_info('{table}')")}
+
+    def _rows() -> list[tuple]:
+        return _read(
+            "select delivery_id, dedupe_key, mode, delivery_kind, priority, transport_status, "
+            "planning_state, attempts, last_error_code, recipient_ref from alert_delivery") + _read(
+            "select mode, live_profile, instance_fingerprint, rule_id, reminder_count, "
+            "next_notification_generation, updated_at from alert_instance_notification_state")
+
+    def _refused(sql: str) -> None:
+        connection = sqlite3.connect(db)
+        try:
+            with pytest.raises(sqlite3.IntegrityError, match="represented member"):
+                connection.execute(sql)
+        finally:
+            connection.close()
+
+    def _cycle():
+        from alembic import command
+
+        from app.db_migrate import _alembic_config
+
+        cfg = _alembic_config()
+        command.upgrade(cfg, "0022")
+        connection = sqlite3.connect(db)
+        connection.execute(
+            "insert into alert_phrase_set_registry (phrase_set_version, phrase_set_sha256, "
+            "canonical_json, validator_version, validated_at, worst_case_test_sha256) "
+            "values ('v9.9', ?, '{}', '1', ?, ?)", (phrases, at, phrases))
+        connection.execute(
+            "insert into alert_ruleset_registry (rules_sha256, rule_version, "
+            "canonical_yaml, phrase_set_version, phrase_set_sha256, "
+            "alert_input_schema_version, methodology_version, "
+            "methodology_manifest_sha256, min_service_version, max_service_version, "
+            "validated_at, status) values (?, 'v9.9.9', 'meta: {}', 'v9.9', ?, 1, 'm', ?, "
+            "'3.8.0', '3.99.99', ?, 'VALIDATED')", (rules, phrases, phrases, at))
+        # An UNKNOWN P1 alert as 0022 kept it: blocking its generation, and
+        # named by its instance's notification memory.
+        connection.execute(
+            "insert into alert_delivery (delivery_id, dedupe_key, dedupe_version, "
+            "manual_retry_sequence, mode, live_profile, planning_rules_sha256, delivery_kind, "
+            "priority, transport_status, planning_state, created_at, updated_at, attempts, "
+            "last_error_code, blocks_replanning, blocks_up_to_priority, "
+            "duplicate_risk_acknowledged, recipient_ref) values (?, ?, 1, 0, 'shadow', "
+            "'default', ?, 'INITIAL', 1, 'UNKNOWN', 'NONE', ?, ?, 1, 'AMBIGUOUS', 1, 1, 0, "
+            "'default')", (delivery, rules, rules, at, at))
+        connection.execute(
+            "insert into alert_instance_notification_state (mode, live_profile, "
+            "instance_fingerprint, rule_id, reminder_count, next_notification_generation, "
+            "open_unknown_delivery_id, open_unknown_priority, updated_at) values "
+            "('shadow', 'default', ?, 'regime.band_to_derisk', 0, 1, ?, 1, ?)",
+            (fingerprint, delivery, at))
+        connection.commit()
+        connection.close()
+        before, rows = _delivery_and_memory_shape(db), _rows()
+
+        command.upgrade(cfg, "0023")
+        after = _delivery_and_memory_shape(db)
+        assert set(dropped).isdisjoint(_columns("alert_delivery"))
+        assert set(memory).isdisjoint(_columns("alert_instance_notification_state"))
+        assert _rows() == rows
+        assert after["schema"]["triggers"] == before["schema"]["triggers"]
+        assert guards <= set(after["schema"]["triggers"])
+        assert after["checks"] == {**before["checks"], "alert_delivery": [
+            check for check in before["checks"]["alert_delivery"]
+            if check[0] not in {"ck_alert_delivery_manual_seq",
+                                "ck_alert_delivery_manual_retry_identity"}]}
+        assert after["schema"]["foreign_keys"]["alert_delivery"] == [
+            ("alert_ruleset_registry", "planning_rules_sha256", "rules_sha256",
+             "NO ACTION", "NO ACTION", "NONE")]
+        assert after["schema"]["indexes"] == {
+            name: index for name, index in before["schema"]["indexes"].items()
+            if name != "alert_delivery.uq_alert_delivery_manual_retry_root_sequence"}
+        assert _read("pragma foreign_key_check") == []
+        # Present AND guarding: no non-TEST row reaches the wire without a member.
+        _refused(f"update alert_delivery set transport_status = 'SENT' "  # noqa: S608
+                 f"where delivery_id = '{delivery}'")
+        _refused("insert into alert_delivery (delivery_id, dedupe_key, dedupe_version, mode, "
+                 "live_profile, planning_rules_sha256, delivery_kind, priority, "
+                 "transport_status, planning_state, created_at, updated_at, attempts, "
+                 f"recipient_ref) values ('01M0INSERTEDSENT0000000000', 'k', 1, 'shadow', "
+                 f"'default', '{rules}', 'INITIAL', 1, 'SENT', 'NONE', '{at}', '{at}', 1, "
+                 "'default')")
+
+        command.downgrade(cfg, "0022")
+        assert _delivery_and_memory_shape(db) == before
+        assert _rows() == rows
+        assert _read(f"select {', '.join(dropped)} from alert_delivery") == [  # noqa: S608
+            (0, None, None, 0, None, 0, None)]
+        assert _read(f"select {', '.join(memory)} "  # noqa: S608
+                     "from alert_instance_notification_state") == [(None, None)]
+
+        command.upgrade(cfg, "head")
+        assert _delivery_and_memory_shape(db) == after
+
+    _run_with_db(db, _cycle)
+    assert _read("select version_num from alembic_version") == [("0023",)]
 
 
 def test_admin_atomicity_migration_backfills_retry_chain_and_window(tmp_path):
@@ -848,7 +986,8 @@ def test_admin_atomicity_migration_backfills_retry_chain_and_window(tmp_path):
             second, "b" * 64, 2, rules, timestamp, timestamp, 1, first))
         connection.commit()
         connection.close()
-        command.upgrade(cfg, "head")
+        # The last revision that keeps the columns: 0023 drops them.
+        command.upgrade(cfg, "0022")
 
     _run_with_db(db, _seed_then_upgrade)
     connection = sqlite3.connect(db)

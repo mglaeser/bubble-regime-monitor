@@ -88,11 +88,11 @@ def session_scope() -> Iterator[Session]:
 def immediate_session_scope() -> Iterator[Session]:
     """A short write transaction whose decision starts before its reads.
 
-    SQLite's default transaction is deferred: two admin requests can both
-    read "no idempotency record" / the same MAX(sequence), then race at
-    commit.  ``BEGIN IMMEDIATE`` takes the single-writer reservation before
-    either request makes that decision.  ``busy_timeout`` makes the loser wait
-    for the winner and then observe its committed row.
+    SQLite's default transaction is deferred: two requests can both read
+    "no idempotency record", then race at commit.  ``BEGIN IMMEDIATE`` takes
+    the single-writer reservation before either request makes that decision.
+    ``busy_timeout`` makes the loser wait for the winner and then observe its
+    committed row.
 
     Keep this boundary for short database-only commands.  Never hold it across
     provider I/O; the dispatcher deliberately sends outside transactions.

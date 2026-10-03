@@ -8,9 +8,8 @@ Three things it has to get right, each of which the mandate states because the
 obvious implementation gets it wrong:
 
 1. A digest item has its OWN lifecycle, not a pair of columns on the episode.
-   A definite failure may be replanned in a later window; an UNKNOWN may not be
-   replanned for the same window without an operator, because the message may
-   already have arrived.
+   A definite failure may be replanned in a later window; an UNKNOWN is never
+   replanned, because the message may already have arrived.
 
 2. TEST is the sole memberless delivery kind.  A quiet run records the digest
    heartbeat plus an append-only scheduler event, but creates no provider
@@ -393,9 +392,6 @@ def plan_digest(session: Session, *, mode: str, live_profile: str,
         dedupe_key=digest_dedupe_key(mode=mode, live_profile=live_profile,
                                      window_key=window),
         dedupe_version=DEDUPE_VERSION,
-        manual_retry_sequence=0,
-        manual_retry_root_delivery_id=None,
-        scheduled_window_key=window,
         mode=mode,
         live_profile=live_profile,
         planning_rules_sha256=planning_rules_sha256,
@@ -410,8 +406,6 @@ def plan_digest(session: Session, *, mode: str, live_profile: str,
         created_at=now,
         updated_at=now,
         attempts=0,
-        duplicate_risk_acknowledged=False,
-        prior_unknown_delivery_id=None,
         recipient_ref=recipient_ref,
     ))
 

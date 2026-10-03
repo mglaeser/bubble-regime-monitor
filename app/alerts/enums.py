@@ -72,7 +72,6 @@ class SuppressionReason(StrEnum):
     FEATURE_PROFILE = "FEATURE_PROFILE"
     ROLLOUT_STAGE = "ROLLOUT_STAGE"
     DATA_QUALITY_GUARD = "DATA_QUALITY_GUARD"
-    UNKNOWN_BLOCK = "UNKNOWN_BLOCK"
     RULESET_REPLACED = "RULESET_REPLACED"
 
 
@@ -141,8 +140,9 @@ class TransportStatus(StrEnum):
     """Provider-intent lifecycle (mandate 7.6).
 
     `UNKNOWN` is the one that matters: the request may or may not have reached
-    the provider. It is never retried automatically and it blocks recreation of
-    the same notification generation.
+    the provider. It is a terminal state, not a workflow (owner decision D2f):
+    nothing sends it again, and it blocks nothing - its own dedupe key keeps
+    the same notification generation from being planned as a second intent.
     """
 
     PENDING = "PENDING"
@@ -159,6 +159,7 @@ class TransportStatus(StrEnum):
     def is_terminal(self) -> bool:
         return self in (
             TransportStatus.SENT,
+            TransportStatus.UNKNOWN,
             TransportStatus.CANCELLED,
             TransportStatus.DEAD_PERMANENT,
             TransportStatus.RENDER_FAILED,
@@ -187,9 +188,8 @@ class MemberRole(StrEnum):
 class DigestItemStatus(StrEnum):
     """A digest item has its own lifecycle — not a pair of episode columns.
 
-    FAILED may be replanned in a later window. UNKNOWN may NOT be replanned for
-    the same window/generation without operator reconciliation: the message may
-    already have been delivered.
+    FAILED may be replanned in a later window. UNKNOWN is never replanned: the
+    message may already have been delivered.
     """
 
     PENDING = "PENDING"

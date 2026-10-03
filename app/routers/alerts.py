@@ -600,8 +600,6 @@ def _delivery_projection(row: AlertDelivery,
         "created_at": iso(row.created_at),
         "sent_at": iso(row.sent_at),
         "last_error_code": row.last_error_code,
-        "duplicate_risk_acknowledged": bool(row.duplicate_risk_acknowledged),
-        "blocks_replanning": bool(row.blocks_replanning),
     }
     if members is not None:
         payload["members"] = [

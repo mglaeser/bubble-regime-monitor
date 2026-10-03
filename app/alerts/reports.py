@@ -303,10 +303,6 @@ def transition_statistics(session: Session) -> dict[str, Any]:
         1 for episode in episodes
         if "DATA_QUALITY_GUARD" in (episode.suppression_reasons or [])
     )
-    unknown_block_episodes = sum(
-        1 for episode in episodes
-        if "UNKNOWN_BLOCK" in (episode.suppression_reasons or [])
-    )
 
     sidecar_gaps = session.execute(
         select(func.count(Snapshot.id))
@@ -341,7 +337,6 @@ def transition_statistics(session: Session) -> dict[str, Any]:
         "non_fresh_evidence_by_state": dict(sorted(evidence_states.items())),
         "stale_episode_count": stale_episodes,
         "data_quality_guard_episode_count": data_quality_episodes,
-        "unknown_block_episode_count": unknown_block_episodes,
         "sidecar_gap_count": int(sidecar_gaps),
         "evaluation_status_counts": dict(sorted(evaluation_statuses.items())),
         "evaluation_timeout_count": evaluation_statuses["TIMED_OUT"],

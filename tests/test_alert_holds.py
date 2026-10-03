@@ -335,7 +335,6 @@ def _memberless_delivery(kind: DeliveryKind) -> tuple[str, object]:
             priority=3,
             transport_status=TransportStatus.PENDING,
             planning_state=PlanningState.READY,
-            scheduled_window_key="2026-W34" if kind == DeliveryKind.DIGEST else None,
             not_before=NOW,
             created_at=NOW,
             updated_at=NOW,

@@ -415,8 +415,8 @@ next transition (tests/test_alert_recovery.py::test_promotion_resolves_the_repla
 `recover-leases --once` is the separate delivery-lease sweep. An expired
 `LEASED` row with no `request_started_at` is definitely pre-wire and returns to
 `RETRY_DUE`; an expired `SENDING` row, or any row whose request had started,
-becomes `UNKNOWN` because the provider may have accepted it. The latter is
-never auto-retried under the same generation.
+becomes `UNKNOWN` because the provider may have accepted it. `UNKNOWN` is
+terminal: nothing sends it again (section 11d).
 
 `reconcile-sidecars` lists committed snapshots with no sidecar. A gap is
 reported, never quietly filled: a sidecar reconstructed after the fact is
@@ -451,7 +451,6 @@ POST /api/v1/admin/alerts/recover
 POST /api/v1/admin/alerts/render      validate reviewed TEST bytes; never persist/send
 GET  /api/v1/admin/alerts/renders/{id} operator-only message text
 POST /api/v1/admin/alerts/send-test   queue an audited TEST delivery
-POST /api/v1/admin/alerts/deliveries/{id}/retry
 ```
 
 A mechanism that has never fired is still in `/mechanisms`, with
@@ -484,7 +483,7 @@ to that choice are enforced rather than intended:
 | redacted projection only | no recipient, no provider correlation id, no raw provider error, no raw model output — **and no rendered message text** |
 | rate-limited | every alert read route carries a limit; `ALERTS_PUBLIC_READ_RATE_LIMIT` (30/min) is the public ceiling, tighter than the operator read limit |
 | rotates independently | `ALERTS_READ_API_KEY_PREVIOUS` keeps the outgoing key valid during overlap, so rotation needs no synchronized dashboard deploy; clearing it is its own edit |
-| no silence / retry / render / admin | the scopes deliberately do **not** nest — the write key cannot read, the admin key is not a read key, and message text is not on the read surface at all |
+| no silence / render / admin | the scopes deliberately do **not** nest — the write key cannot read, the admin key is not a read key, and message text is not on the read surface at all |
 
 That last row is why `GET /api/v1/alerts/renders/{id}` returns
 `final_message: null` with a stated reason. Since no caller can present a
@@ -530,12 +529,15 @@ reports the evaluator as not required.
 
 The health projection also reports the latest and p95 evaluation duration, P1
 enqueue-to-provider-attempt p95, rolling LLM cap/call/fallback evidence,
-missing typed sidecars, overdue or malformed outbox holds, unresolved UNKNOWN
-blockers, SQLite WAL/foreign-key/busy-timeout/RETURNING capabilities, the
-Alembic revision, required partial indexes and immutability triggers, and live
-artifact/promotion agreement. Missing scheduler components or required schema
-objects are critical; sidecar gaps, overdue holds, unresolved ambiguities and
-P1 latency above 60 seconds are degraded rather than silently green.
+missing typed sidecars, overdue or malformed outbox holds, the UNKNOWN
+deliveries and digest items, SQLite WAL/foreign-key/busy-timeout/RETURNING
+capabilities, the Alembic revision, required partial indexes and immutability
+triggers, and live artifact/promotion agreement. Missing scheduler components
+or required schema objects are critical; sidecar gaps, overdue holds and P1
+latency above 60 seconds are degraded rather than silently green. An UNKNOWN
+delivery is counted and degrades nothing: it is terminal, and no operator step
+awaits it (owner decision D2f, section 11d); a dispatch pass whose send ends
+UNKNOWN reports its heartbeat critical.
 
 None of that bypasses rollout. In live mode the evaluation, the dispatch job
 and the message engine load through `load_active_for_mode`, which refuses a
@@ -577,8 +579,10 @@ of what was sent stays auditable after the text is gone.
 Two things are never swept: a body whose delivery is not yet terminal (a retry
 could still reuse that exact render), and events belonging to an open episode
 (the trail explaining a still-firing mechanism is the one most likely to be
-needed). Inverted horizons — metadata shorter than messages — are refused
-outright rather than half-applied.
+needed) or to a delivery not yet terminal. `UNKNOWN` is terminal (owner
+decision D2f): nothing sends it again, so its body and its events expire on
+these horizons as any settled delivery's do. Inverted horizons — metadata
+shorter than messages — are refused outright rather than half-applied.
 
 ---
 
@@ -678,7 +682,8 @@ takes over now"):
 
 Superseded by owner decision D2d (2026-10-03): neither promotion nor the
 runtime reads the evidence or compares the caps with it. The CI replay gate is
-the evidence, replayed under the default caps.
+the evidence, replayed under the default caps. And by owner decision D2f
+(2026-10-03): an UNKNOWN delivery blocks nothing (section 11d).
 
 ## 11c. The weekly digest
 
@@ -750,20 +755,36 @@ The HTTP operator actions are admin-scoped and `no-store`:
   reviewed `TEST_MESSAGE` fragment. It goes through the ordinary dispatcher —
   same claim, same admission, same classification — because a test that
   bypassed the pipeline would prove the wrong thing.
-* **`POST /api/v1/admin/alerts/deliveries/{id}/retry`** — the ONLY way past an
-  UNKNOWN outcome. Requires an `Idempotency-Key`, an operator comment, and
-  `acknowledge_duplicate_risk=true`; creates a NEW delivery with the same
-  members and generation, `manual_retry_sequence` incremented (which changes
-  the dedupe key), linked through `prior_unknown_delivery_id`. Same key with a
-  different body is 409. Anything not UNKNOWN is refused: definite failures
-  retry automatically, successes need nothing. Authorization keeps the
-  ancestor's immutable transport status `UNKNOWN` but retires its open-blocker
-  fields and notification-memory pointer in the same transaction. The pending
-   child reserves that exact generation; if it also becomes UNKNOWN, it becomes
-   the sole unresolved chain tip. Authorization also revalidates current
-   episode and silence eligibility without rewriting the historical UNKNOWN
-   row; if the frozen bytes no longer represent exactly what may be sent, it
-   returns 409 and leaves the original blocker intact.
+
+No route sends an UNKNOWN delivery again (owner decision D2f, 2026-10-03).
+Until then `POST /api/v1/admin/alerts/deliveries/{id}/retry` was the only way
+past an UNKNOWN outcome - a new delivery under a new key, which an operator
+authorised with a duplicate-risk acknowledgement - and an UNKNOWN blocked its
+notification generation until an operator retried it. Both are deleted, with
+their columns (migration 0023), and nothing retries an ambiguous attempt in
+their place: a send that may have landed ends `UNKNOWN` on every transport.
+D2f as first planned also retried an ambiguous iMessage attempt automatically
+under its own idempotency key; that was dropped because an automatic retry can
+send twice - across an idempotency-domain change (a transport switch, an
+`IMESSAGE_API_KEY` rotation) or when a retry still waiting for the proxy's
+verdict is cancelled and its digest items are carried again - so `UNKNOWN` is
+terminal instead. It is a state, not a workflow: never claimed, recovered or
+sent again, and blocking nothing
+(tests/test_alert_delivery.py::test_unknown_is_a_terminal_state_nothing_claims_or_recovers).
+The same generation of the same episode, planned again, carries the UNKNOWN
+row's dedupe key and is that intent, not a second one; a new episode is
+planned as usual
+(tests/test_alert_end_to_end.py::test_an_unknown_alert_blocks_nothing_and_the_next_episode_is_planned,
+::test_the_same_reminder_generation_is_not_planned_again_after_an_unknown).
+A reminder is planned as after a definite failure: nothing confirmed advances
+the notification memory, so its delay counts from the instance's last
+confirmed send, and when that send is older than the delay, an episode whose
+first alert ended UNKNOWN is reminded at the next evaluation (while the
+instance has a reminder left). An UNKNOWN body and its events expire on the
+normal horizons (section 11a). Health counts UNKNOWN deliveries and digest
+items, and a dispatch pass whose send ends UNKNOWN reports its heartbeat
+critical; nothing awaits an operator. Production held no UNKNOWN delivery, no
+manual retry and no replanning block when they went (read-only, 2026-10-03).
 
 ## 11e. Render-time truth (mandate 17.5)
 
@@ -860,6 +881,11 @@ recall unmeasured; Stage 1 remains green. None of these is a scoring input:
 `frozen_methodology.json`, `MC_SEED=20260711`, and the score golden fixture are
 outside this alert-only artifact and remain separately gated and unchanged by
 the alert implementation.
+
+Owner decision D2f (2026-10-03) bumps replay-summary schema `2 -> 3`: the
+summary's `unknown_blocks` and `p1_bypasses_of_unknown` went with the
+replanning block they counted. Both were 0 in every run, and no other number
+moved.
 
 `tests/fixtures/alert_replay_history.json` declares the **arc** — twenty
 recompute slots through hold → trim → de-risk → recovery, with two blind slots

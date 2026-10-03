@@ -72,27 +72,8 @@ def redact_message_bodies(session: Session, *, older_than: datetime,
 
     Only renders whose delivery has reached a terminal transport status are
     touched: a body that a retry might still reuse is not expired, whatever
-    its age.
+    its age. UNKNOWN is terminal (owner decision D2f): nothing sends it again.
     """
-    # UNKNOWN remains the immutable transport verdict even after an operator
-    # authorises an exact-byte child retry.  In that reconciled state the old
-    # body should still obey the 400-day privacy horizon, but only after the
-    # child owns a durable, non-redacted clone.  ``blocks_replanning = false``
-    # alone is not enough: it is the model default and cannot prove that the
-    # bytes needed for a retry survived elsewhere.
-    cloned_unknown_parents = set(session.execute(
-        select(AlertDelivery.prior_unknown_delivery_id)
-        .join(AlertRender, AlertRender.delivery_id == AlertDelivery.delivery_id)
-        .where(
-            AlertDelivery.prior_unknown_delivery_id.is_not(None),
-            AlertDelivery.manual_retry_root_delivery_id.is_not(None),
-            AlertDelivery.manual_retry_sequence > 0,
-            AlertDelivery.duplicate_risk_acknowledged.is_(True),
-            AlertRender.body_redacted_at.is_(None),
-            AlertRender.final_message != "",
-        )
-    ).scalars().all())
-
     rows = session.execute(
         select(AlertRender, AlertDelivery)
         .join(AlertDelivery, AlertDelivery.delivery_id == AlertRender.delivery_id)
@@ -105,13 +86,7 @@ def redact_message_bodies(session: Session, *, older_than: datetime,
     for render, delivery in rows:
         from app.alerts.enums import TransportStatus
 
-        status = TransportStatus(delivery.transport_status)
-        reconciled_unknown = (
-            status == TransportStatus.UNKNOWN
-            and not delivery.blocks_replanning
-            and delivery.delivery_id in cloned_unknown_parents
-        )
-        if not status.is_terminal and not reconciled_unknown:
+        if not TransportStatus(delivery.transport_status).is_terminal:
             continue
         render.final_message = ""
         render.body_redacted_at = now
@@ -124,10 +99,10 @@ def sweep_settled_events(session: Session, *, older_than: datetime) -> int:
 
     An event belonging to an open episode is never removed regardless of age —
     the trail that explains a still-firing mechanism is the trail an operator
-    is most likely to need.  The same protection applies to unresolved
-    deliveries and replay evidence.  Delivery audit events commonly have no
-    episode link, so checking episodes alone silently deleted the exact UNKNOWN
-    trail an operator still had to reconcile.
+    is most likely to need.  The same protection applies to deliveries not yet
+    terminal and to replay evidence.  Delivery audit events commonly have no
+    episode link, so checking episodes alone would delete the trail of a
+    delivery still waiting for its retry.
     """
     from app.alerts.enums import TransportStatus
 

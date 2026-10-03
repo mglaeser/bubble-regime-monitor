@@ -469,7 +469,6 @@ def test_a_legacy_memberless_digest_is_cancelled_before_render_or_send():
             delivery_id=delivery_id,
             dedupe_key=f"v1|DIGEST|shadow|default|{WINDOW}",
             dedupe_version=1,
-            manual_retry_sequence=0,
             mode="shadow",
             live_profile="default",
             planning_rules_sha256=rules_sha,
@@ -477,12 +476,10 @@ def test_a_legacy_memberless_digest_is_cancelled_before_render_or_send():
             priority=Priority.P3,
             transport_status=TransportStatus.PENDING,
             planning_state=PlanningState.READY,
-            scheduled_window_key=WINDOW,
             not_before=NOW,
             created_at=NOW,
             updated_at=NOW,
             attempts=0,
-            duplicate_risk_acknowledged=False,
             recipient_ref="default",
         ))
 
