@@ -1,7 +1,9 @@
-"""Crash recovery, artifact promotion, and episode continuity across a promotion.
+"""Crash recovery, artifact promotion, and what a promotion ends and keeps.
 
 The properties here are about what survives: a crash mid-evaluation, a ruleset
-promotion, and a candidate whose originating rules have been archived.
+promotion - which resolves the episodes the replaced rules opened (owner
+decision D2e) and keeps notification memory - and a candidate whose
+originating rules have been archived.
 """
 
 from __future__ import annotations
@@ -167,52 +169,254 @@ def test_origin_phrase_bytes_are_recoverable_from_the_registry(isolated_db, tmp_
     assert rebuilt.phrase_set.sha256 == artifacts.phrase_set.sha256
 
 
-def test_old_ruleset_episode_continues_after_promotion(isolated_db, tmp_path):
-    """An episode opened under an archived ruleset stays evaluable under IT."""
+def _utc(moment: datetime) -> datetime:
+    """SQLite hands timestamps back naive; they were written in UTC."""
+    return moment if moment.tzinfo else moment.replace(tzinfo=UTC)
+
+
+def _fire_under(artifacts) -> list[str]:
+    """Promote `artifacts`, then evaluate two inputs under them in shadow and
+    in live mode: the band moves trim -> de-risk and rf4 turns true. Returns
+    the open episode ids, three per mode: regime.band_to_derisk and
+    tripwire.rf4_first FIRING, each with a queued alert, and
+    tripwire.rf4_persistent PENDING, half-way through confirmation.
+    """
     from app.alerts.engine import run_evaluation
     from app.alerts.models import AlertEpisode
-    from app.alerts.repository import origin_rulesets_with_open_episodes
 
-    old = _artifacts(stage=3, tmp_path=tmp_path / "old")
-    before = make_input(identity="i1", effective="trim",
+    before = make_input(identity="fired-before", effective="trim", rf4=False,
                         computed_at="2026-08-15T06:00:00+00:00")
-    after = make_input(identity="i2", effective="de-risk",
+    after = make_input(identity="fired-after", effective="de-risk", rf4=True,
+                       rf4_period="2026-08-15", breadth_period="2026-08-15",
                        computed_at="2026-08-15T10:00:00+00:00")
     _store_input(before, datetime(2026, 8, 15, 6, 0, tzinfo=UTC))
     _store_input(after, NOW)
-
     with session_scope() as session:
-        register_promoted(session, old, now=NOW)
-    run_evaluation(session_scope, alert_input=before, current=old.ruleset,
-                   mode="shadow", now=datetime(2026, 8, 15, 6, 1, tzinfo=UTC))
-    run_evaluation(session_scope, alert_input=after, current=old.ruleset,
-                   mode="shadow", now=NOW)
-
+        register_promoted(session, artifacts, now=NOW - timedelta(hours=5))
+    for mode in ("shadow", "live"):
+        for alert_input, at in ((before, NOW - timedelta(hours=4)), (after, NOW)):
+            outcome = run_evaluation(session_scope, alert_input=alert_input,
+                                     current=artifacts.ruleset, mode=mode, now=at)
+            assert outcome.status == EvaluationRunStatus.COMMITTED
     with session_scope() as session:
-        open_rows = session.execute(
-            select(AlertEpisode).where(AlertEpisode.is_open.is_(True))).scalars().all()
-        assert open_rows, "expected at least one open episode under the old ruleset"
+        return sorted(session.execute(
+            select(AlertEpisode.episode_id).where(AlertEpisode.is_open.is_(True))
+        ).scalars().all())
 
-    # Promote a DIFFERENT ruleset; the open episode's origin must still be
-    # reported as needing continuation.
+
+def test_promotion_resolves_the_replaced_rulesets_open_episodes(isolated_db, tmp_path):
+    """Owner decision D2e: a promotion ends every open episode a different
+    ruleset opened, in every mode, in the promoting transaction - RESOLVED as
+    RULESET_REPLACED, one event caused by the promoted ruleset, the owner's
+    rule state back to NORMAL. It plans nothing and leaves the outbox, the
+    digest items and the notification memory alone: the dispatcher withdraws
+    the queued alerts (next test) and the cooldowns survive."""
+    from sqlalchemy import func
+
+    from app.alerts.artifacts import promote
+    from app.alerts.enums import (
+        ActorType,
+        CausationType,
+        ConditionState,
+        EpisodeStatus,
+        SuppressionReason,
+    )
+    from app.alerts.models import (
+        AlertDelivery,
+        AlertDeliveryMember,
+        AlertDigestItem,
+        AlertEpisode,
+        AlertEvent,
+        AlertInstanceNotificationState,
+        AlertRender,
+        AlertRuleState,
+    )
+
+    old = _artifacts(stage=3, tmp_path=tmp_path / "old")
     new = _artifacts(stage=4, tmp_path=tmp_path / "new")
-    assert new.ruleset.rules_sha256 != old.ruleset.rules_sha256
+    replaced = _fire_under(old)
+    assert len(replaced) == 6
+
+    def _untouched(session):
+        return (
+            sorted((d.delivery_id, d.transport_status, d.updated_at)
+                   for d in session.execute(select(AlertDelivery)).scalars()),
+            sorted((m.delivery_id, m.episode_id, m.dropped_at)
+                   for m in session.execute(select(AlertDeliveryMember)).scalars()),
+            session.scalar(select(func.count()).select_from(AlertDigestItem)),
+            session.scalar(select(func.count()).select_from(AlertRender)),
+            sorted((n.instance_fingerprint, n.last_sent_at,
+                    n.next_notification_generation, n.open_unknown_delivery_id,
+                    n.updated_at)
+                   for n in session.execute(
+                       select(AlertInstanceNotificationState)).scalars()),
+        )
+
+    def _owner(session, episode):
+        return session.get(AlertRuleState, (
+            episode.mode, episode.live_profile, episode.origin_rules_sha256,
+            episode.instance_fingerprint))
+
     with session_scope() as session:
-        register_promoted(session, new, now=NOW + timedelta(hours=1))
-        origins = origin_rulesets_with_open_episodes(
-            session, mode="shadow", live_profile="default",
-            current_rules_sha256=new.ruleset.rules_sha256)
-    assert old.ruleset.rules_sha256 in origins
+        before = _untouched(session)
+        assert len(before[0]) == 4, "the FIRING episodes each queued an alert"
+        versions = {episode_id: _owner(session, session.get(AlertEpisode, episode_id)).state_version
+                    for episode_id in replaced}
+
+    at = NOW + timedelta(hours=1)
+    with session_scope() as session:
+        promote(session, new, actor="operator", now=at)
+
+    with session_scope() as session:
+        assert _untouched(session) == before
+        events = session.execute(
+            select(AlertEvent).where(AlertEvent.causation_type == CausationType.RULESET)
+        ).scalars().all()
+        assert sorted(event.episode_id for event in events) == replaced
+        for event in events:
+            assert event.action == "episode_resolved"
+            assert event.causation_id == new.ruleset.rules_sha256
+            assert (event.actor_type, event.actor_id_redacted) == (
+                ActorType.OPERATOR, "operator")
+            assert event.rules_sha256 == old.ruleset.rules_sha256
+            assert _utc(event.occurred_at) == at
+        for episode_id in replaced:
+            episode = session.get(AlertEpisode, episode_id)
+            assert episode.episode_status == EpisodeStatus.RESOLVED
+            assert episode.is_open is False
+            assert episode.resolution_reason == SuppressionReason.RULESET_REPLACED
+            assert _utc(episode.resolved_at) == at
+            state = _owner(session, episode)
+            assert (state.condition_state, state.last_known_condition_state,
+                    state.current_episode_id, state.consecutive_true) == (
+                ConditionState.NORMAL, ConditionState.NORMAL, None, 0)
+            assert (state.candidate_from_state, state.candidate_target_state,
+                    state.candidate_started_input, state.candidate_expires_at,
+                    state.candidate_ttl_policy, state.candidate_ttl_basis) == (None,) * 6
+            # the bump makes an evaluation of the replaced rules still in
+            # flight fail its compare-and-set instead of re-opening anything
+            assert state.state_version == versions[episode_id] + 1
+            assert _utc(state.updated_at) == at
+
+
+def test_the_promoted_rulesets_own_episodes_stay_open(isolated_db, tmp_path):
+    """Only ANOTHER ruleset's episodes end. Promoting the bytes that opened
+    them again - an operator re-running the promotion - ends nothing."""
+    from app.alerts.artifacts import promote
+    from app.alerts.enums import CausationType
+    from app.alerts.models import AlertEpisode, AlertEvent, AlertRuleState
+
+    current = _artifacts(stage=3, tmp_path=tmp_path / "current")
+    opened = _fire_under(current)
+
+    def _states(session):
+        return sorted((s.instance_fingerprint, s.state_version, s.current_episode_id)
+                      for s in session.execute(select(AlertRuleState)).scalars())
+
+    with session_scope() as session:
+        states = _states(session)
+    with session_scope() as session:
+        promote(session, current, actor="operator", now=NOW + timedelta(hours=1))
+
+    with session_scope() as session:
+        assert sorted(session.execute(
+            select(AlertEpisode.episode_id).where(AlertEpisode.is_open.is_(True))
+        ).scalars().all()) == opened
+        assert session.execute(select(AlertEvent).where(
+            AlertEvent.causation_type == CausationType.RULESET)).first() is None
+        assert _states(session) == states
+
+
+def test_promotion_and_resolution_commit_or_roll_back_together(isolated_db, tmp_path):
+    """One transaction. A promotion that fails before it commits leaves the
+    replaced ruleset promoted AND its episodes open; one that commits
+    supersedes the ruleset AND resolves its episodes."""
+    from app.alerts.artifacts import promote
+    from app.alerts.enums import CausationType, RulesetStatus
+    from app.alerts.models import AlertEpisode, AlertEvent
+
+    old = _artifacts(stage=3, tmp_path=tmp_path / "old")
+    new = _artifacts(stage=4, tmp_path=tmp_path / "new")
+    opened = _fire_under(old)
+
+    def _outcome():
+        with session_scope() as session:
+            old_row = session.get(AlertRulesetRegistry, old.ruleset.rules_sha256)
+            new_row = session.get(AlertRulesetRegistry, new.ruleset.rules_sha256)
+            still_open = sorted(session.execute(
+                select(AlertEpisode.episode_id).where(AlertEpisode.is_open.is_(True))
+            ).scalars().all())
+            events = len(session.execute(select(AlertEvent).where(
+                AlertEvent.causation_type == CausationType.RULESET)).scalars().all())
+            return (old_row.status, new_row.status if new_row else None,
+                    still_open, events)
+
+    with pytest.raises(RuntimeError, match="before it commits"), \
+            session_scope() as session:
+        promote(session, new, actor="operator", now=NOW + timedelta(hours=1))
+        raise RuntimeError("the promoting transaction fails before it commits")
+    assert _outcome() == (RulesetStatus.PROMOTED, None, opened, 0)
+
+    with session_scope() as session:
+        promote(session, new, actor="operator", now=NOW + timedelta(hours=2))
+    assert _outcome() == (RulesetStatus.SUPERSEDED, RulesetStatus.PROMOTED,
+                          [], len(opened))
+
+
+def test_a_still_true_condition_reopens_under_the_promoted_ruleset(
+        isolated_db, tmp_path):
+    """What a promotion ends, a condition that is still true opens again at
+    the next evaluation, under the promoted rules and from the start: a rule
+    that needs two confirmations counts them again."""
+    from app.alerts.engine import run_evaluation
+    from app.alerts.enums import EpisodeStatus
+    from app.alerts.models import AlertEpisode
+
+    old = _artifacts(stage=3, tmp_path=tmp_path / "old")
+    new = _artifacts(stage=4, tmp_path=tmp_path / "new")
+    first, second, third = (
+        make_input(identity=f"rf4-true-{day}", rf4=True,
+                   rf4_period=f"2026-08-{day}", breadth_period=f"2026-08-{day}",
+                   computed_at=f"2026-08-{day}T20:00:00+00:00")
+        for day in (14, 15, 16))
+    for alert_input in (first, second, third):
+        _store_input(alert_input, datetime.fromisoformat(alert_input.computed_at))
+
+    def _evaluate(alert_input, artifacts):
+        return run_evaluation(
+            session_scope, alert_input=alert_input, current=artifacts.ruleset,
+            mode="shadow",
+            now=datetime.fromisoformat(alert_input.computed_at) + timedelta(minutes=1))
+
+    def _rf4_persistent(session):
+        return session.execute(select(AlertEpisode).where(
+            AlertEpisode.rule_id == "tripwire.rf4_persistent")).scalars().all()
+
+    with session_scope() as session:
+        register_promoted(session, old, now=datetime(2026, 8, 14, tzinfo=UTC))
+    for alert_input in (first, second):
+        assert _evaluate(alert_input, old).status == EvaluationRunStatus.COMMITTED
+    with session_scope() as session:
+        [fired] = _rf4_persistent(session)
+        assert fired.episode_status == EpisodeStatus.FIRING
+        register_promoted(session, new, now=datetime(2026, 8, 16, tzinfo=UTC))
+
+    assert _evaluate(third, new).status == EvaluationRunStatus.COMMITTED
+    with session_scope() as session:
+        episodes = _rf4_persistent(session)
+    assert [(e.origin_rules_sha256, e.episode_status) for e in episodes if e.is_open] == [
+        (new.ruleset.rules_sha256, EpisodeStatus.PENDING)]
 
 
 def test_current_ruleset_inherits_an_archived_open_episode(isolated_db, tmp_path):
-    """A promotion must not open a second lifecycle for one mechanism.
+    """A candidate switch must not open a second lifecycle for one mechanism.
 
     The archived ruleset remains the authority for resolving or activating the
     episode it opened.  The current ruleset may project its own condition, but
     that projection must point at the inherited episode instead of competing
     with it for the one-open-episode invariant.
     """
+    from app.alerts.artifacts import register
     from app.alerts.engine import run_evaluation
     from app.alerts.models import AlertEpisode, AlertRuleState
 
@@ -260,7 +464,10 @@ def test_current_ruleset_inherits_an_archived_open_episode(isolated_db, tmp_path
         ).scalars().one()
         episode_id = origin_episode.episode_id
         fingerprint = origin_episode.instance_fingerprint
-        register_promoted(session, new, now=NOW + timedelta(minutes=2))
+        # Registered, not promoted: the candidate on disk changed, which a
+        # shadow evaluation runs without a promotion. A promotion resolves
+        # the episode instead (owner decision D2e, tests above).
+        register(session, new, now=NOW + timedelta(minutes=2))
 
     outcome = run_evaluation(
         session_scope,
@@ -419,16 +626,18 @@ def test_unknown_notification_block_survives_a_promotion(isolated_db, tmp_path):
     assert memory.next_notification_generation == 4
 
 
-def test_removed_rule_closes_under_its_origin_and_cancels_unsent_delivery(
+def test_a_promotion_withdraws_the_replaced_rulesets_queued_alert_and_sends_nothing(
         isolated_db, tmp_path):
-    """Removing a rule cannot orphan the episode or send its stale queued work."""
+    """The promotion plans no message, and the alert the replaced ruleset
+    queued never reaches the wire: its episode resolved, so the dispatcher
+    withdraws it - even when the promoted ruleset no longer has the rule."""
     import yaml
 
     from app.alerts.artifacts import validate_from_disk
     from app.alerts.dispatcher import dispatch_once
     from app.alerts.engine import run_evaluation
-    from app.alerts.enums import EpisodeStatus, TransportStatus
-    from app.alerts.models import AlertDelivery, AlertDeliveryMember, AlertEpisode
+    from app.alerts.enums import SuppressionReason, TransportStatus
+    from app.alerts.models import AlertDelivery, AlertDeliveryMember, AlertEpisode, AlertRender
     from app.alerts.sender import NullSender
 
     old = _artifacts(stage=3, tmp_path=tmp_path / "old")
@@ -462,16 +671,8 @@ def test_removed_rule_closes_under_its_origin_and_cancels_unsent_delivery(
         breadth_period="2026-08-15",
         computed_at="2026-08-15T20:00:00+00:00",
     )
-    cleared = make_input(
-        identity="removed-cleared",
-        rf4=False,
-        rf4_period="2026-08-16",
-        breadth_period="2026-08-16",
-        computed_at="2026-08-16T20:00:00+00:00",
-    )
     _store_input(first, datetime(2026, 8, 14, 20, 0, tzinfo=UTC))
     _store_input(second, datetime(2026, 8, 15, 20, 0, tzinfo=UTC))
-    _store_input(cleared, datetime(2026, 8, 16, 20, 0, tzinfo=UTC))
 
     with session_scope() as session:
         register_promoted(session, old, now=NOW)
@@ -501,39 +702,28 @@ def test_removed_rule_closes_under_its_origin_and_cancels_unsent_delivery(
         delivery_id = delivery.delivery_id
         register_promoted(session, new, now=NOW + timedelta(minutes=2))
 
-    outcome = run_evaluation(
-        session_scope,
-        alert_input=cleared,
-        current=new.ruleset,
-        archived={old.ruleset.rules_sha256: old.ruleset},
-        mode="shadow",
-        now=NOW + timedelta(minutes=3),
-    )
-    assert outcome.status == EvaluationRunStatus.COMMITTED
-
-    with session_scope() as session:
-        episode = session.get(AlertEpisode, episode_id)
-        assert episode is not None
-        assert episode.is_open is False
-        assert episode.episode_status == EpisodeStatus.RESOLVED
-        assert episode.origin_rules_sha256 == old.ruleset.rules_sha256
-
+    sender = NullSender()
     report = dispatch_once(
         session_scope,
         phrase_set=new.phrase_set,
         mode="shadow",
         live_profile="default",
-        sender=NullSender(),
+        sender=sender,
         now=NOW + timedelta(minutes=4),
     )
-    assert report.cancelled >= 1
+    assert sender.sent == []
+    assert report.cancelled == 1
     with session_scope() as session:
+        episode = session.get(AlertEpisode, episode_id)
         delivery = session.get(AlertDelivery, delivery_id)
         member = session.get(AlertDeliveryMember, (delivery_id, episode_id))
         assert delivery is not None and member is not None
+        assert episode.resolution_reason == SuppressionReason.RULESET_REPLACED
         assert delivery.transport_status == TransportStatus.CANCELLED
         assert delivery.cancel_reason == "ALL_MEMBERS_RESOLVED"
         assert member.drop_reason == "RESOLVED_BEFORE_SEND"
+        assert session.execute(select(AlertRender).where(
+            AlertRender.delivery_id == delivery_id)).first() is None
 
 
 def test_the_fallback_to_the_promoted_ruleset_never_escalates_the_mode(

@@ -26,7 +26,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app import methodology as _M
-from app.alerts.enums import RulesetStatus
+from app.alerts.enums import ActorType, RulesetStatus
 from app.alerts.errors import AlertingUnavailable, RulesetInvalid, sanitize
 from app.alerts.models import AlertPhraseSetRegistry, AlertRulesetRegistry
 from app.alerts.phrase_registry import (
@@ -35,6 +35,7 @@ from app.alerts.phrase_registry import (
     validate_phrase_set,
 )
 from app.alerts.registry import ValidatedRuleset, validate_ruleset
+from app.alerts.repository import resolve_replaced_episodes
 from app.config import get_settings
 from app.logging_conf import get_logger
 
@@ -288,6 +289,10 @@ def promote(session: Session, artifacts: LoadedArtifacts, *, actor: str,
     superseded any more: leaving the old stamp made the row say two things at
     once, and anything reading `superseded_at` as "no longer current" would
     treat the current promotion as retired.
+
+    In the same transaction every open episode another ruleset opened is
+    resolved as RULESET_REPLACED (owner decision D2e). Nothing is planned for
+    them; the dispatcher withdraws their queued alerts.
     """
     now = now or datetime.now(UTC)
     ruleset = artifacts.ruleset
@@ -308,9 +313,13 @@ def promote(session: Session, artifacts: LoadedArtifacts, *, actor: str,
     row.promoted_at = now
     row.promoted_by = sanitize(actor)
     row.superseded_at = None
+    replaced = resolve_replaced_episodes(
+        session, replacing_rules_sha256=rules_sha256, now=now,
+        actor_type=ActorType.OPERATOR, actor_id=actor)
     log.info("alert_ruleset_promoted", rules_sha256=rules_sha256[:12],
              rule_version=ruleset.rule_version,
-             stage=ruleset.document.meta.active_stage, actor=actor)
+             stage=ruleset.document.meta.active_stage, actor=actor,
+             episodes_replaced=len(replaced))
     return rules_sha256
 
 
