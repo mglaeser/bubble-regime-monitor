@@ -152,6 +152,7 @@ def test_a_summary_goes_out_with_the_codes_score_line(host, monkeypatch):
     "Breadth now comes from one provider and probably changes nothing.",
     "Breadth now comes from one provider - no chance of a different reading.",
     "Breadth now comes from one provider, a zero percent effect.",
+    "Breadth now comes from one provider; the rescoring stays as it was.",    # #150 round 12
 ])
 def test_only_the_codes_line_speaks_of_the_score(host, monkeypatch, reply):
     """The note never carries two estimates: a summary that names the score or
@@ -185,6 +186,7 @@ def test_a_summary_that_fails_the_checks_sends_the_titles(host, monkeypatch):
 @pytest.mark.parametrize("title", [
     "Delete deploy.sh",            # file names end in real top-level domains: a link to the checks
     "Aggregate: no score change",  # a title's own estimate beside the code's line
+    "Rescoring logic definitely remains unchanged",  # #150 round 12: a word carrying a stem
 ])
 def test_a_title_the_checks_refuse_sends_the_bare_deploy(host, monkeypatch, title):
     note_path, sent = host

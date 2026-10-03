@@ -75,9 +75,11 @@ _LOG_BYTES = 1 << 20
 #: The words that speak of the score or of a likelihood. The code's line is the
 #: only text in the note that may use them: a summary or a title that does is
 #: not sent, so the note never carries a second estimate. The words are the
-#: contract (tests/test_deploy_note.py); an estimate implied in other words is
-#: beyond this check - the system prompt forbids it.
-SCORE_TALK = re.compile(r"\bscor|likel|probab|\bchances?\b|percent|%", re.IGNORECASE)
+#: contract (tests/test_deploy_note.py), matched anywhere in a word - rescoring,
+#: unlikely, improbable carry them too (#150 round 12); a false hit (underscore)
+#: only sends less text. An estimate implied in other words is beyond this
+#: check - the system prompt forbids it.
+SCORE_TALK = re.compile(r"scor|likel|probab|chance|percent|%", re.IGNORECASE)
 
 SYSTEM = (
     "You write a short deploy note for the owner of bubblegauge, a research service that "
