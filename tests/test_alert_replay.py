@@ -8,6 +8,7 @@ worse than no replay at all — it would produce evidence that looks like proof.
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 from datetime import UTC, datetime
 from pathlib import Path
@@ -704,6 +705,10 @@ def test_the_gate_artifact_exercises_more_than_the_committed_stage():
     )
     assert stage3["mandatory_event_total"] == 5
     assert stage3["mandatory_event_detected"] == 5
+    # The caps the verdict was judged against, as the operator raised them on
+    # 2026-08-27: recorded, they are part of what CI compares byte for byte.
+    assert stage3["budget_limits"] == {"cap_24h": 5, "cap_168h": 8,
+                                       "target_168h": 2}
 
     # the MEAN is the only volume figure a 76-hour window cannot establish
     assert any("mean" in u for u in stage3["not_measured"])
@@ -757,7 +762,7 @@ def test_the_gate_artifact_binds_to_bytes_and_not_only_to_versions():
     detector — so per-run summaries can still omit bare digests, and the
     provenance section can bind bytes.
     """
-    from app.alerts.promotion import ungroup_digest
+    from scripts.export_alert_stage1_gate import ungroup_digest
 
     payload = json.loads(Path("docs/alert-stage1-gate.json").read_text(encoding="utf-8"))
     declared = payload["artifacts"]
@@ -779,7 +784,7 @@ def test_the_gate_artifact_binds_to_bytes_and_not_only_to_versions():
 def test_the_gate_artifact_digests_are_the_committed_ones():
     """Evidence that binds to the wrong bytes binds to nothing."""
     from app.alerts.artifacts import validate_from_disk
-    from app.alerts.promotion import ungroup_digest
+    from scripts.export_alert_stage1_gate import ungroup_digest
 
     payload = json.loads(Path("docs/alert-stage1-gate.json").read_text(encoding="utf-8"))
     ruleset = validate_from_disk(rules_path=RULES, phrase_path=PHRASES,
@@ -789,6 +794,17 @@ def test_the_gate_artifact_digests_are_the_committed_ones():
         "docs/alert-stage1-gate.json is stale — regenerate it")
     assert ungroup_digest(declared["phrase_set_sha256_grouped"]) \
         == ruleset.phrase_set_sha256
+
+
+def test_grouping_is_reversible_and_full_fidelity():
+    from scripts.export_alert_stage1_gate import group_digest, ungroup_digest
+
+    # Computed rather than pasted: a literal 64-hex string in a tracked file is
+    # indistinguishable from a leaked token to the secret scanner, which is the
+    # whole reason the artifact carries these grouped in the first place.
+    digest = hashlib.sha256(b"a ruleset").hexdigest()
+    assert ungroup_digest(group_digest(digest)) == digest
+    assert max(len(p) for p in group_digest(digest).split("-")) <= 8
 
 
 # ---------------------------------------------------------------------------

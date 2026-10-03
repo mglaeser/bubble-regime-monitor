@@ -52,19 +52,31 @@ STAGES = (1, 3, 4)
 #: entropy detector cannot tell a 64-hex digest from a 64-hex token, which is
 #: the correct default, and this repository's secret baseline is a
 #: byte-identical ratchet that may not grow to carry them. Truncation is not
-#: the answer either — the detector scores Shannon entropy rather than length,
+#: the answer either - the detector scores Shannon entropy rather than length,
 #: so whether a prefix passes depends on which characters the hash happened to
 #: produce, and a future ruleset edit would fail CI for reasons that have
 #: nothing to do with the ruleset.
 #:
-#: The artifact's PROVENANCE section does carry them, GROUPED (see
-#: `app.alerts.promotion.group_digest`): the full digest, split into
-#: eight-character runs, none of which is long enough to score as
-#: high-entropy. Nothing is weakened and the result is stable rather than
-#: luck-of-the-hash — which matters, because the promotion gate binds evidence
-#: to bytes with it. Versions alone were not enough: a version string is
-#: something a human types, so an edit that forgot to bump it was invisible.
+#: The artifact's PROVENANCE section does carry them, GROUPED (`group_digest`
+#: below): the full digest, split into eight-character runs, none of which is
+#: long enough to score as high-entropy. Nothing is weakened and the result is
+#: stable rather than luck-of-the-hash. They bind the committed evidence to
+#: the committed bytes: `--check` fails when the rules or the phrase set change
+#: and this artifact is not regenerated, which a version string alone would
+#: not show for an edit that forgot to bump it. Nothing at runtime reads them
+#: (owner decision D2d): this CI check is the evidence.
 _DIGEST_FIELDS = ("rules_sha256", "phrase_set_sha256")
+
+#: A sha256 written as eight hyphen-separated 8-character groups.
+_GROUP = 8
+
+
+def group_digest(digest: str) -> str:
+    return "-".join(digest[i:i + _GROUP] for i in range(0, len(digest), _GROUP))
+
+
+def ungroup_digest(grouped: str) -> str:
+    return grouped.replace("-", "")
 
 
 def _without_digests(summary: dict) -> dict:
@@ -73,7 +85,6 @@ def _without_digests(summary: dict) -> dict:
 
 def build_evidence() -> dict:
     from app.alerts.artifacts import validate_from_disk
-    from app.alerts.promotion import group_digest
     from app.alerts.replay import ReplayConfig, run_replay
     from tests.fixtures import alert_replay_history as history
 
@@ -119,12 +130,13 @@ def build_evidence() -> dict:
                 artifacts.ruleset.phrase_set_sha256),
             "rule_version": artifacts.ruleset.rule_version,
             "phrase_set_version": artifacts.ruleset.phrase_set_version,
-            "digests": ("carried GROUPED above — the full sha256 split into "
+            "digests": ("carried GROUPED above - the full sha256 split into "
                         "eight-character runs, so an entropy detector does not "
-                        "read it as a credential. The promotion gate binds "
-                        "evidence to bytes with them; per-run summaries still "
-                        "omit bare digests. See app.alerts.promotion."
-                        "group_digest"),
+                        "read it as a credential. They bind this evidence to "
+                        "the committed bytes: the CI check fails when the "
+                        "bytes change and this file is not regenerated. "
+                        "Per-run summaries still omit bare digests. See "
+                        "scripts/export_alert_stage1_gate.py group_digest"),
         },
         "history": {
             "source": str(HISTORY.relative_to(ROOT)),
