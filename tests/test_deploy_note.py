@@ -197,6 +197,32 @@ def test_a_title_the_checks_refuse_sends_the_bare_deploy(host, monkeypatch, titl
                     "Score logic: very low - no scoring code and no data-input adapter changed."]
 
 
+def test_the_titles_count_what_they_do_not_show(host, monkeypatch):
+    """#150 round 13, SOTA-A: the titles took the first six and counted the
+    rest from six, so a capped log of four complete commits out of ten said
+    "(+4 more)" and accounted for eight. The rest is counted from what is
+    shown: four titles, "(+6 more)"."""
+    note_path, sent = host
+    commits = tuple((f"{i:07x}" + "0" * 33, f"Title {i}", "") for i in range(4))
+    _write(note_path, commits=commits)
+    (note_path / "range").write_text(f"{BASE} {TARGET} 10\n", encoding="utf-8")   # ten in the range
+    _model(monkeypatch, error=RuntimeError("gateway down"))
+    dn.announce()
+    assert sent[0].startswith(f"bubblegauge deployed {TARGET[:7]}: Title 0; Title 1; Title 2; Title 3 (+6 more).")
+
+
+def test_the_prompt_says_when_it_shows_fewer_commits_than_the_deploy(tmp_path):
+    """The same count, in the model's prompt: a deploy whose commits are not
+    all shown (the log's cap, or more than the prompt takes) says how many are."""
+    commits = tuple((f"{i:07x}" + "0" * 33, f"Title {i}", "") for i in range(4))
+    note = dn.read_note(_write(tmp_path / "n", commits=commits))
+    (tmp_path / "n" / "range").write_text(f"{BASE} {TARGET} 10\n", encoding="utf-8")
+    note = dn.read_note(tmp_path / "n")
+    assert note is not None and dn.prompt(note).startswith("A deploy of 10 commit(s), the first 4 below:\n- Title 0")
+    many = dn.read_note(_write(tmp_path / "m", files=tuple(f"docs/p{i:03d}.md" for i in range(100))))
+    assert many is not None and "Changed files (100, the first 80): docs/p000.md" in dn.prompt(many)
+
+
 def test_a_failed_send_is_reported_and_kept_nowhere(host, monkeypatch, tmp_path):
     """The release runs the announcement once (deploy/release.sh); a send that
     fails is reported failed and is not tried again - best effort - and the

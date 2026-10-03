@@ -177,12 +177,16 @@ def read_note(path: Path) -> Note | None:
 
 def prompt(note: Note) -> str:
     """The user prompt: the commits' titles and descriptions and the changed paths."""
-    lines = [f"A deploy of {note.count} commit(s):"]
-    for commit in note.commits[:_PROMPT_COMMITS]:
+    shown = note.commits[:_PROMPT_COMMITS]
+    first = "" if len(shown) == note.count else f", the first {len(shown)} below"
+    lines = [f"A deploy of {note.count} commit(s){first}:"]
+    for commit in shown:
         lines.append(f"- {commit.title}")
         if commit.body:
             lines.append("  " + commit.body[:_COMMIT_BODY_CHARS].replace("\n", " "))
-    lines.append(f"Changed files ({len(note.files)}): " + ", ".join(note.files[:_PROMPT_FILES]))
+    files = note.files[:_PROMPT_FILES]
+    first = "" if len(files) == len(note.files) else f", the first {len(files)}"
+    lines.append(f"Changed files ({len(note.files)}{first}): " + ", ".join(files))
     return "\n".join(lines)
 
 
@@ -196,11 +200,21 @@ def _sendable(text: str, line: str) -> bool:
             and basic_check(text + line, channel=Channel.IMESSAGE, max_chars=MAX_CHARS) is None)
 
 
+def _bare(note: Note) -> str:
+    return f"bubblegauge deployed {note.target[:7]} ({note.count} commit(s))."
+
+
 def _titles(note: Note) -> str:
+    """The first titles, and the rest counted from what is shown - the log
+    may be capped, so fewer than the range's commits can be shown (#150
+    round 13). No title at all is the bare deploy."""
     from app.engine.sms_report import _asciify
 
-    listed = "; ".join(_asciify(c.title) for c in note.commits[:_TITLES])
-    more = f" (+{note.count - _TITLES} more)" if note.count > _TITLES else ""
+    shown = note.commits[:_TITLES]
+    if not shown:
+        return _bare(note)
+    listed = "; ".join(_asciify(c.title) for c in shown)
+    more = f" (+{note.count - len(shown)} more)" if note.count > len(shown) else ""
     return f"bubblegauge deployed {note.target[:7]}: {listed}{more}."
 
 
@@ -222,7 +236,7 @@ def compose(note: Note) -> tuple[str, str]:
     titles = _titles(note)[: MAX_CHARS - len(line)]
     if _sendable(titles, line):
         return titles + line, "template"
-    return f"bubblegauge deployed {note.target[:7]} ({note.count} commit(s)).{line}", "template"
+    return _bare(note) + line, "template"
 
 
 def announce() -> dict[str, Any]:
