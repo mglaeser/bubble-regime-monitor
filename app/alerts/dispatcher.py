@@ -33,7 +33,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.alerts.artifacts import load_by_hash
-from app.alerts.budgets import BUDGETED_KINDS, check_budget
+from app.alerts.budgets import BUDGETED_KINDS, LIMITS, check_budget
 from app.alerts.canonical import new_ulid
 from app.alerts.digest import render_digest_body
 from app.alerts.enums import (
@@ -53,7 +53,6 @@ from app.alerts.outbox import (
     cancel,
     claim,
     claimable,
-    default_limits,
     dispatch_budget_usage,
     hold_for_budget,
     hold_for_quiet,
@@ -583,7 +582,7 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
                 now=now,
                 current_delivery_id=delivery.delivery_id,
             )
-            decision = check_budget(delivery.priority, usage, default_limits(settings))
+            decision = check_budget(delivery.priority, usage, LIMITS)
             record_dispatch_budget_decision(session, delivery, decision, now=now)
             if not decision.allowed:
                 hold_for_budget(session, delivery, decision.reason or "budget", now=now)

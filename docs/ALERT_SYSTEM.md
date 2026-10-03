@@ -565,7 +565,10 @@ There is no runtime stage floor and no runtime evidence check (owner decision
 D2d, 2026-10-03): the CI replay gate is the evidence - `python -m
 scripts.export_alert_stage1_gate --check`, a blocking step of
 `.github/workflows/ci.yml` (pinned in tests/test_alert_replay.py), so bytes
-whose replay no longer matches the committed evidence cannot merge. On leaf
+whose replay no longer matches the committed evidence cannot merge. The
+non-P1 budget it judges is code, not a host setting (`app/alerts/budgets.py`
+`LIMITS`: target 2, caps 5 per 24 h and 8 per 168 h), so no host runs caps the
+replay never judged; the old `ALERTS_NON_P1_*` keys are retired. On leaf
 (read-only, 2026-10-03) the promoted ruleset - rules v3.2.3, phrase set v3.5 -
 is byte-identical to the committed artifact that gate checks, and no delivery
 is queued. Stages 1 and 2 enable

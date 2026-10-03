@@ -471,11 +471,9 @@ def test_a_refused_promotion_changes_no_promotion_state(monkeypatch):
 
 
 def test_changed_caps_invalidate_the_evidence_that_never_saw_them(monkeypatch):
-    """The planner enforces settings; the evidence must name the caps it judged.
-
-    Raise an env cap after the replay and the deployment runs live under
-    limits the evidence never saw, with the artifact still reading "passed".
-    Changed caps need new evidence, not inherited approval.
+    """The evidence must name the caps it judged, and they must be the caps
+    the code enforces (app/alerts/budgets.py LIMITS). Changed caps need new
+    evidence, not inherited approval.
     """
     artifact = {
         "runs": {"stage_3": {
@@ -487,14 +485,10 @@ def test_changed_caps_invalidate_the_evidence_that_never_saw_them(monkeypatch):
     initial = promotion_blockers(target_stage=3, artifact=artifact)
     assert not any("changed caps need new evidence" in item for item in initial)
 
-    monkeypatch.setenv("ALERTS_NON_P1_CAP_24H", "30")
-    from app.config import get_settings
-    get_settings.cache_clear()
-    try:
-        blockers = promotion_blockers(target_stage=3, artifact=artifact)
-    finally:
-        monkeypatch.delenv("ALERTS_NON_P1_CAP_24H")
-        get_settings.cache_clear()
+    from app.alerts import budgets
+
+    monkeypatch.setattr(budgets, "LIMITS", budgets.BudgetLimits(target_168h=2, cap_24h=30, cap_168h=8))
+    blockers = promotion_blockers(target_stage=3, artifact=artifact)
 
     assert any("changed caps need new evidence" in b for b in blockers), blockers
 
@@ -635,6 +629,37 @@ def test_live_dispatch_sends_no_work_planned_under_rules_nobody_promoted(monkeyp
     assert result["claimed"] == 0
     assert sender.sent == []
     assert status == TransportStatus.PENDING
+
+
+def test_the_alert_budget_is_code_the_replay_gate_checks_not_a_host_setting():
+    """#153 round 6, SOTA-A: with the runtime admission gone, nothing compared
+    a host's cap override with the evidence, so promoting at one cap and then
+    raising it ran volume the replay never judged. The non-P1 budget is no
+    longer a host setting: one constant, app/alerts/budgets.py LIMITS, which
+    the replay behind the CI gate, the planner's evaluation, the dispatcher's
+    pre-send recheck and health all read. Changing it is a code change the
+    gate re-checks; a host that still sets an old key is told it is retired."""
+    import ast
+    from pathlib import Path
+
+    from app.alerts.budgets import LIMITS
+    from app.config import Settings, retired_env_keys
+
+    old = {"ALERTS_NON_P1_TARGET_168H", "ALERTS_NON_P1_CAP_24H", "ALERTS_NON_P1_CAP_168H"}
+    assert not {key.lower() for key in old} & set(Settings.model_fields)
+    assert {key for key, _ in retired_env_keys({key: "30" for key in old})} == old
+    assert (LIMITS.target_168h, LIMITS.cap_24h, LIMITS.cap_168h) == (2, 5, 8)
+
+    readers = set()
+    for path in sorted((Path(__file__).resolve().parents[1] / "app" / "alerts").glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        names = {alias.name for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
+                 and node.module == "app.alerts.budgets" for alias in node.names}
+        if "LIMITS" in names:
+            readers.add(path.name)
+        assert "default_limits" not in {getattr(node, "attr", getattr(node, "id", None))
+                                        for node in ast.walk(tree)}, path.name
+    assert {"engine.py", "dispatcher.py", "replay.py", "health.py"} <= readers
 
 
 def test_what_the_live_claim_admits_stays_admitted():

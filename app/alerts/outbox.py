@@ -30,7 +30,6 @@ from app.alerts.budgets import (
     DISPATCH_ORDERED_READY_STATUSES,
     PLANNER_RESERVED_STATUSES,
     BudgetDecision,
-    BudgetLimits,
     BudgetUsage,
     window_start,
 )
@@ -1362,10 +1361,3 @@ def _event(
         rules_sha256=rules_sha256,
     ))
 
-
-def default_limits(settings: object) -> BudgetLimits:
-    return BudgetLimits(
-        target_168h=int(getattr(settings, "alerts_non_p1_target_168h", 2)),
-        cap_24h=int(getattr(settings, "alerts_non_p1_cap_24h", 3)),
-        cap_168h=int(getattr(settings, "alerts_non_p1_cap_168h", 6)),
-    )

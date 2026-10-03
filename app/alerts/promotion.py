@@ -314,17 +314,14 @@ def promotion_blockers(*, target_stage: int, artifact: dict[str, Any],
     ))
 
     # A run that judged volume must say WHICH caps it judged against, and they
-    # must be the caps this deployment enforces now. The planner reads its
-    # limits from settings, so an env var raised after the evidence was
-    # produced would run live under caps the evidence never saw — with the
-    # artifact still reading "passed". Evidence that names no limits cannot
+    # must be the caps the code enforces (app/alerts/budgets.py LIMITS, a
+    # constant since owner decision D2d). Evidence that names no limits cannot
     # make a volume claim at all.
     if run.get("notification_planning_ran"):
-        from app.alerts.outbox import default_limits
-        from app.config import get_settings
+        from app.alerts import budgets
 
         recorded = run.get("budget_limits")
-        current = default_limits(get_settings())
+        current = budgets.LIMITS
         if not isinstance(recorded, dict) or not recorded:
             blockers.append(
                 f"stage {target_stage}: the replay judged volume but recorded "

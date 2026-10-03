@@ -16,6 +16,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.alerts.budgets import LIMITS
 from app.alerts.dto import AlertInput
 from app.alerts.enums import (
     PLANNING_STATE_PRECEDENCE,
@@ -1120,9 +1121,9 @@ def health_projection(
             "missing_sidecars": missing_sidecars,
         },
         "budgets": {
-            "non_p1_target_168h": settings.alerts_non_p1_target_168h,
-            "non_p1_cap_24h": settings.alerts_non_p1_cap_24h,
-            "non_p1_cap_168h": settings.alerts_non_p1_cap_168h,
+            "non_p1_target_168h": LIMITS.target_168h,
+            "non_p1_cap_24h": LIMITS.cap_24h,
+            "non_p1_cap_168h": LIMITS.cap_168h,
             "sent_24h": current_budget_usage.sent_24h,
             "sent_168h": current_budget_usage.sent_168h,
             "queued_reservations": current_budget_usage.reserved,

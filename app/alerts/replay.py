@@ -37,7 +37,7 @@ from typing import Any
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.alerts.budgets import BUDGETED_KINDS
+from app.alerts.budgets import BUDGETED_KINDS, LIMITS
 from app.alerts.dto import AlertInput
 from app.alerts.enums import (
     EpisodeStatus,
@@ -49,7 +49,6 @@ from app.alerts.enums import (
     SuppressionReason,
     TransportStatus,
 )
-from app.alerts.outbox import default_limits
 from app.alerts.registry import ValidatedRuleset
 from app.config import get_settings
 from app.engine.snapshot_contract import BAND_DERISK, STATE_SUPPRESSED
@@ -345,7 +344,6 @@ def ruleset_at_stage(ruleset: ValidatedRuleset, stage: int,
 
     from app import methodology as _M
     from app.alerts.registry import validate_ruleset
-    from app.config import get_settings
 
     document = yaml.safe_load(ruleset.canonical_yaml)
     document["meta"]["active_stage"] = int(stage)
@@ -881,7 +879,7 @@ def _decide(summary: ReplaySummary) -> None:
         # them. Leaving them merely reported would turn "unmeasured" into
         # "measured and ignored", which is the worse of the two: a number on a
         # dashboard that no one compares to its limit reads as compliance.
-        limits = default_limits(get_settings())
+        limits = LIMITS
         summary.budget_limits = {"cap_24h": limits.cap_24h,
                                  "cap_168h": limits.cap_168h,
                                  "target_168h": limits.target_168h}
