@@ -6,14 +6,15 @@ frontend, and — once an operator explicitly turns it on — sends deterministi
 SMS notifications. It never changes scoring.
 
 **Current rollout: the governed deterministic delivery path and its operational
-controls are implemented, but the committed ruleset remains at Stage 1.**
+controls are implemented, and the committed ruleset is at Stage 3** (operator
+decision 2026-08-27; its replay evidence passes in CI, section 12).
 Sidecar capture is on (`ALERT_INPUT_CAPTURE`
 defaults true — it records evidence and nothing else) while `ALERTS_MODE`
 defaults `disabled`. Deterministic delivery, reminders, bundles, the weekly
 digest, watchdog/recovery and retention
-are implemented and tested. They are not permission to send: live alert
-delivery is refused below Stage 3, and the committed Stage-3 replay currently
-fails its non-P1 volume gate. The separate daily digest sends through its
+are implemented and tested. They are not permission to send: a deployment
+delivers only with `ALERTS_MODE=live`, and live mode runs only the promoted
+artifact (section 11a2). The separate daily digest sends through its
 configured transport, governed by its transport switches alone. See [Rollout status and remaining evidence](#rollout-status-and-remaining-evidence).
 
 ---
@@ -322,8 +323,8 @@ digest has no transport").
 Volume, lease, retention and LLM settings live in `app/config.py`; each has a
 safe default. Alert phrasing has no model path: configuring the runtime
 gateway activates only the judgment/digest paths. Configuration alone never
-grants delivery permission: the stage, evidence, promotion and per-delivery
-admission checks remain authoritative.
+grants delivery permission: live mode runs only the promoted artifact, and
+promotion checks the committed replay evidence.
 
 ---
 
@@ -476,9 +477,9 @@ refuses to use it in production.
 | stage | scope | current status |
 |---|---|---|
 | 0 | typed snapshot contract | **implemented and regression-gated** |
-| 1 | schema, sidecar capture, pure evaluation, CAS, read API, replay | **implemented; this is the committed active stage** |
+| 1 | schema, sidecar capture, pure evaluation, CAS, read API, replay | **implemented** |
 | 2 | `[PIN]` calibration, replay budgets, mandatory-event fixtures | gate machinery is implemented; real calibration/mandatory-event artifacts remain operator evidence and are not invented |
-| 3 | deterministic P1/P2 delivery and weekly digest | planner, outbox, renderer, typed sender, dispatcher, reminders, digest and admission controls are implemented; promotion is blocked by the measured non-P1 volume failures below |
+| 3 | deterministic P1/P2 delivery and weekly digest | planner, outbox, renderer, typed sender, dispatcher, reminders and digest are implemented; **this is the committed active stage** (operator decision 2026-08-27, section 11b), and its replay evidence passes |
 | 4 | legacy daily-digest cutover | deleted with its switch (owner decision D2c, 2026-10-02): the daily digest is the message engine's product and is not retired. The gate's CLI never checked the switch - `alerts cutover apply` recorded the operator's intent and printed "set DAILY_SMS_ENABLED=false in the deployment environment", its one importer was that CLI, and the production database holds no cutover event (read-only, 2026-10-02) - and the `DAILY_SMS_ENABLED` alias, the cutover's one purpose, is gone (unset on the production host). The digest's transports decide; `/api/v1/alerts/health` names a digest without one |
 | 5 | constellations and bundled P2 | evaluators, dominance and atomic multi-member bundling are implemented and stage-gated |
 | 6 | EWMA / CUSUM | intentionally absent until immutable calibration and out-of-sample evidence exist |
@@ -505,12 +506,13 @@ artifact/promotion agreement. Missing scheduler components or required schema
 objects are critical; sidecar gaps, overdue holds, unresolved ambiguities and
 P1 latency above 60 seconds are degraded rather than silently green.
 
-None of that bypasses rollout. At committed Stage 1 the live-admission floor
-refuses before a sender is constructed. Shadow and dry-run paths exercise
-eligible work without a provider call, while forward-looking Stage-3 replay
-runs notification planning and records the actual resulting volume. Mandatory
-event recall remains unmeasured because the frozen catalogue is deliberately
-empty; filling it with invented events would be false evidence.
+None of that bypasses rollout. In live mode the evaluation, the dispatch job
+and the message engine load through `load_active_for_mode`, which refuses a
+candidate that is not the promoted artifact; the dispatch job refuses before a
+sender is constructed. Shadow and dry-run paths exercise eligible work without
+a provider call, while the Stage-3 replay runs notification planning and
+records the actual resulting volume. Mandatory event recall is measured
+against the five frozen catalogue entries (section 11b).
 
 Operational mechanisms use the strongest producer that actually exists. The
 recompute watchdog captures and evaluates its own typed input; recovery and the
@@ -551,26 +553,58 @@ outright rather than half-applied.
 
 ## 11a2. Promotion is not a delivery switch
 
-Two questions that look like one, and must not be:
+Promotion marks the exact rules and phrase bytes that live mode runs; the
+promotion service accepts them against the committed replay evidence for their
+stage. `ALERTS_MODE=live` is the delivery switch, set by hand on the host. In
+live mode the evaluation, the dispatch job and the message engine load through
+`load_active_for_mode`, which refuses a candidate that is not the promoted
+artifact: the dispatch job raises before it constructs a sender, and its
+heartbeat turns health critical.
 
-* **May these artifact bytes be accepted as a Stage-N artifact?** —
-  `promotion_blockers`. It can pass at Stage 1, and passing means an operator
-  accepted the exact rules and phrase bytes against evidence for that stage.
-* **May this deployment construct a sender and deliver?** —
-  `live_admission_blockers`. Below `LIVE_DELIVERY_STAGE` (3) the answer is
-  always no, and neither passing evidence nor exact promotion lifts it.
+There is no runtime stage floor and no runtime evidence check (owner decision
+D2d, 2026-10-03): the CI replay gate is the evidence - `python -m
+scripts.export_alert_stage1_gate --check`, a blocking step of
+`.github/workflows/ci.yml` (pinned in tests/test_alert_replay.py), so bytes
+whose replay no longer matches the committed evidence cannot merge. The
+non-P1 budget it judges is code, not a host setting (`app/alerts/budgets.py`
+`LIMITS`: target 2, caps 5 per 24 h and 8 per 168 h), so no host runs caps the
+replay never judged; the old `ALERTS_NON_P1_*` keys are retired. On leaf
+(read-only, 2026-10-03) the promoted ruleset - rules v3.2.3, phrase set v3.5 -
+is byte-identical to the committed artifact that gate checks, and no delivery
+is queued. Stages 1 and 2 enable
+only the P4 ops rules, and the planner maps P4 to "API and log only", creating
+no delivery. Separately, the dispatcher has no LLM path at any stage.
 
-Stage 1 has no sender by design. The dispatcher therefore refuses BEFORE
-constructing one rather than after: building one and declining to use it would
-break that promise quietly, since the object reads credentials and can open a
-client. Separately, the dispatcher has no LLM path at any stage.
-
-The floor was briefly removed on the reasoning that `ops.indicator_stale` and
-`ops.coverage_degraded_info` are enabled at Stage 1 and could therefore send.
-They are enabled and they cannot send — both are P4, and the planner maps P4 to
-"API and log only", creating no delivery. Checking that the rules were enabled
-without checking what they produce turned a refusal into an evidence check, and
-a promoted Stage-1 artifact then cleared live admission.
+What the runtime no longer checks, by that decision: the evidence and the
+stage, and nothing is re-checked at the wire - a demotion after planning no
+longer withholds work already queued, and a promotion change reaches the wire
+at the next dispatch pass, at most one pass later (the job runs at least every
+20 s). What stops a live send now: ALERTS_MODE other than `live`; a silence;
+the dispatch job's own check before every pass - a candidate that is not the
+promoted artifact refuses the pass before any sender exists
+(tests/test_alert_promotion.py::test_the_live_dispatch_job_refuses_an_unpromoted_candidate);
+and the claim, which judges the ruleset that planned the work by how it was
+promoted, never by re-reading evidence: in live mode it takes only work
+planned under a ruleset promoted through the evidence-gated service and not
+revoked - REVOKED outranks a past promotion - however and whenever the work
+was queued, and a ruleset superseded since still finishes what it planned
+(tests/test_alert_promotion.py::test_live_dispatch_sends_no_work_planned_under_rules_nobody_promoted,
+::test_live_dispatch_sends_work_planned_under_a_promoted_ruleset). The
+listing and the claim's own conditional UPDATE carry the same condition, so a
+ruleset revoked after the listing is not claimed
+(::test_a_ruleset_revoked_after_the_listing_is_not_claimed); a delivery
+already claimed goes out. To stop live sends, set ALERTS_MODE to anything but
+`live`, or add a silence.
+Live work is also planned under the ruleset promoted at that moment:
+evaluation, the weekly digest and the admin send-test load through
+`load_active_for_mode`, so in live mode a ruleset that was never promoted
+plans nothing (tests/test_alert_api.py::test_a_live_send_test_is_planned_under_the_promoted_ruleset_only,
+tests/test_alert_digest.py::test_the_live_weekly_digest_is_planned_under_the_promoted_ruleset_only);
+a row planned under a ruleset since superseded was authorized when it was
+planned. On leaf (read-only, 2026-10-03) both registry rows - the PROMOTED one
+(rules v3.2.3, phrase set v3.5) and the SUPERSEDED v3.2.2 - were promoted
+through the evidence-gated service. Production holds no REVOKED ruleset and
+held no queued delivery when the gate went (read-only, 2026-10-03).
 
 ## 11b. The former Stage 2 blocker, resolved by named operator decisions
 
@@ -598,6 +632,9 @@ takes over now"):
   component heartbeats bounded on both sides, any-open-UNKNOWN blocking, the
   host-side outage notifier, and the weekly digest's own liveness event. Their
   absence is pinned by a test exactly as their presence was.
+
+Superseded in part by owner decision D2d (2026-10-03): nothing at runtime
+re-reads the evidence or compares the caps with it; promotion still does.
 
 ## 11c. The weekly digest
 

@@ -897,11 +897,10 @@ def test_the_committed_stage_is_not_one_whose_replay_failed():
     enforcement. Nothing stopped `active_stage: 3` being committed next to
     evidence saying stage 3 breaches its budget.
 
-    This is the repository-level half of that enforcement, and it is
-    deliberately small: it reads the committed ruleset and the committed
-    artifact and refuses the combination. The runtime half — a container
-    checking the same thing before it delivers — is the promotion gate, which
-    is its own change.
+    This is that enforcement, and it is deliberately small: it reads the
+    committed ruleset and the committed artifact and refuses the combination.
+    Since owner decision D2d there is no runtime half - no container re-reads
+    the evidence before it delivers; the CI replay gate is the evidence.
     """
     ruleset = validate_from_disk(rules_path=RULES, phrase_path=PHRASES,
                                  service_version="3.8.0").ruleset
@@ -935,3 +934,21 @@ def test_the_artifact_carries_evidence_for_the_stage_the_cutover_targets():
     stage4 = payload["runs"]["stage_4"]
     assert stage4["evaluated_at_stage"] == 4
     assert stage4["passed"] is (stage4["failures"] == [])
+
+
+def test_the_ci_replay_gate_is_the_evidence_and_it_blocks():
+    """Owner decision D2d (2026-10-03): at runtime only load_active_for_mode
+    remains; the evidence is CI's replay gate. Pinned: ci.yml runs it as a
+    blocking step - no continue-on-error, no `|| true` - so bytes whose replay
+    no longer matches the committed evidence cannot merge."""
+    from pathlib import Path
+
+    ci = (Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    start = ci.index("- name: Alert Stage 1 gate")
+    end = ci.index("\n      - name:", start + 1)
+    step = ci[start:end]
+    assert "run: python -m scripts.export_alert_stage1_gate --check" in step
+    assert "continue-on-error" not in step and "|| true" not in step
+    job_header = ci[:start]
+    assert "continue-on-error: true" not in job_header
+

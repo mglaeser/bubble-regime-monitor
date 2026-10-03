@@ -128,10 +128,14 @@ class TestComposeInGerman:
         monkeypatch.setenv("MESSAGE_LANGUAGE", "de")
         get_settings.cache_clear()
         try:
+            from app.alerts.artifacts import load_active
+            from tests.conftest import register_promoted
+
             with session_scope() as s:
                 s.add(self._snapshot())
+                # Live mode runs only the promoted bytes (owner decision D2d).
+                register_promoted(s, load_active(s))
                 s.commit()
-            monkeypatch.setattr("app.alerts.promotion.live_admission_blockers", lambda _s, *, path=None: [])
             sends: list[str] = []
             monkeypatch.setattr("app.services.engine_delivery.send_imessage",
                                 lambda body, *, recipient=None: sends.append(body) or type("R", (), {

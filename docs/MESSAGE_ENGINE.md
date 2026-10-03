@@ -214,38 +214,41 @@ registry. Synthesising fake rules to satisfy a foreign key would put rules in
 Python, which the rule-as-data invariant forbids, and would force a rule
 version bump plus a re-promotion for a purely cosmetic reason.
 
-The engine therefore calls the SAME admission check the dispatcher calls
-(`live_admission_blockers`) before any send, and refuses identically when it
-returns blockers — including the Stage-3 floor. Rule-backed triggers continue
-through the normal planner/dispatcher path unchanged.
+The engine therefore calls the alert system's live-mode check,
+`load_active_for_mode(session, mode="live")`, before any send, and refuses
+when it raises: the ruleset and phrase set this deployment loads must be the
+promoted ones. Since owner decision D2d (2026-10-03) that is the whole runtime
+check - the CI replay gate is the evidence, and there is no runtime stage floor
+or evidence read. The mode is "live" whatever `ALERTS_MODE` says, because an
+engine send is a real send in every mode. Rule-backed triggers continue through
+the normal planner/dispatcher path unchanged.
 
 Implemented in `app/message_engine/gate.py`. Three things about it are load
-bearing, and each is pinned by a test that goes red when the control is
-reverted:
+bearing, each pinned by a test in `tests/test_message_engine_go_live.py`
+(`TestAdmission`):
 
-**It is checked immediately before the wire, not once per compose.** The
-dispatcher reaches the same conclusion in `withdrawn_admission`: admission can
-turn false in the gap, and a demotion is precisely the change an operator
-makes when they want messages to stop. A compose can legitimately take fifteen
-minutes, so a gate checked at the start of one is a gate with a fifteen-minute
-hole in it.
+**It is checked immediately before the wire, not once per compose.** `emit`
+asks, right before the transport: admission can turn false in the gap - a new
+ruleset file deployed and not yet promoted - and a compose can legitimately
+take fifteen minutes, so a gate checked at the start of one is a gate with a
+fifteen-minute hole in it (`test_a_gate_that_cannot_be_evaluated_refuses` and
+`test_nothing_promoted_refuses_every_priority` refuse an already-composed
+message inside `emit`).
 
 **A P1 does NOT bypass it.** This is the one place the P1 exemption stops, and
 the distinction is worth stating plainly: decision 2 exempts a P1 from pacing,
 budget and breaker because those govern PHRASING, and delaying the message that
 must arrive in order to think about wording is indefensible. Admission is not
-phrasing — it is whether this deployment may put bytes on a wire at all. A P1
-that bypassed it would make the Stage-3 floor advisory, because a deployment
-held below the delivery stage would still send its most urgent messages. The
-gate records `priority` and never branches on it.
+phrasing - it is whether this deployment may put bytes on a wire at all. A P1
+that bypassed it would send from a deployment whose loaded artifacts nobody
+promoted. The gate records `priority` and never branches on it
+(`test_nothing_promoted_refuses_every_priority`, priorities 1 to 3).
 
 **A gate that cannot be evaluated is a blocker, not an absence of blockers.**
-`live_admission_blockers` reports rather than raises in the paths its authors
-anticipated, but `promotion_blockers` runs unguarded on a payload that only had
-to be a `dict` to reach it, so a malformed evidence artifact can still raise
-out. An escaping exception would reach the engine's caller, which classifies
-exceptions as `TECHNICAL_ERROR` and retries — silently converting "this
-deployment is not authorised to send" into "try again in two minutes", forever.
+An exception escaping the check would reach the engine's caller, which
+classifies exceptions as `TECHNICAL_ERROR` and retries - silently converting
+"this deployment is not authorised to send" into "try again in two minutes",
+forever (`test_a_gate_that_cannot_be_evaluated_refuses`).
 
 ## The governor settings (ruling Q42 — settings, these defaults)
 

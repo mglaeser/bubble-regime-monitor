@@ -9,6 +9,12 @@ The job refuses to run unless ALERTS_MODE is `live` or `shadow`. In shadow it
 uses the NullSender, so a shadow deployment exercises the whole path —
 claiming, revalidation, budget recheck, rendering, outcome classification —
 without a single SMS leaving the host.
+
+The artifacts load through `load_active_for_mode`: in live mode a candidate
+that is not the promoted one raises before the dispatcher, and so before any
+sender, exists, and `job()` reports the raise as a critical heartbeat. That is
+the one runtime check left since owner decision D2d; the CI replay gate is the
+evidence.
 """
 
 from __future__ import annotations
@@ -28,11 +34,11 @@ def run_once() -> dict[str, Any]:
     if settings.alerts_mode == "disabled":
         return {"status": "skipped", "reason": "ALERTS_MODE=disabled"}
 
-    from app.alerts.artifacts import load_active
+    from app.alerts.artifacts import load_active_for_mode
     from app.alerts.dispatcher import dispatch_once
 
     with session_scope() as session:
-        artifacts = load_active(session)
+        artifacts = load_active_for_mode(session, mode=settings.alerts_mode)
 
     report = dispatch_once(
         session_scope,

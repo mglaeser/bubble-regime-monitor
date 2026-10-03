@@ -14,7 +14,9 @@ So this module is fail-closed in all three directions:
 
 It answers one question — "may the ruleset run at stage N?" — and answers it
 from the committed artifact only. It never re-runs the replay, because a gate
-that recomputes its own evidence can be made to agree with itself.
+that recomputes its own evidence can be made to agree with itself. Since owner
+decision D2d only promotion asks it (`app.alerts.promotion_service`); nothing
+at runtime reads the evidence.
 
 The binding is on BYTES as well as declared versions. The artifact could not
 carry bare digests — see `group_digest` — so they are written grouped, which
@@ -29,23 +31,6 @@ import hashlib
 import json
 from pathlib import Path
 from typing import Any, TypeGuard, cast
-
-#: The stage at which provider-backed delivery begins. Below it, live delivery
-#: is REFUSED — not merely unevidenced.
-#:
-#: I previously removed this floor, reasoning that `ops.indicator_stale` and
-#: `ops.coverage_degraded_info` are enabled from stage 1 and could therefore
-#: send. They are enabled, and they cannot send: both are P4, and the planner
-#: maps P4 to "API and log only", creating no delivery at all. Checking that
-#: the rules were enabled without checking what they produce turned the floor
-#: into an evidence check, and a promoted stage-1 artifact then cleared live
-#: admission — which is the opposite of what stage 1 promises.
-#:
-#: Passing evidence and exact promotion cannot lift this. They answer a
-#: different question: whether these bytes may be ACCEPTED as a stage-N
-#: artifact. Whether this deployment may construct a sender and deliver is
-#: this constant's question alone.
-LIVE_DELIVERY_STAGE = 3
 
 #: Stage 2's recall evidence is meaningful only for the exact operator-frozen
 #: catalogue replayed by the gate artifact.  The grouped digest in that
@@ -329,17 +314,14 @@ def promotion_blockers(*, target_stage: int, artifact: dict[str, Any],
     ))
 
     # A run that judged volume must say WHICH caps it judged against, and they
-    # must be the caps this deployment enforces now. The planner reads its
-    # limits from settings, so an env var raised after the evidence was
-    # produced would run live under caps the evidence never saw — with the
-    # artifact still reading "passed". Evidence that names no limits cannot
+    # must be the caps the code enforces (app/alerts/budgets.py LIMITS, a
+    # constant since owner decision D2d). Evidence that names no limits cannot
     # make a volume claim at all.
     if run.get("notification_planning_ran"):
-        from app.alerts.outbox import default_limits
-        from app.config import get_settings
+        from app.alerts import budgets
 
         recorded = run.get("budget_limits")
-        current = default_limits(get_settings())
+        current = budgets.LIMITS
         if not isinstance(recorded, dict) or not recorded:
             blockers.append(
                 f"stage {target_stage}: the replay judged volume but recorded "
@@ -411,10 +393,10 @@ def mandatory_event_catalogue_document(
 def load_evidence(path: str | Path | None = None) -> dict[str, Any] | None:
     """The committed gate artifact, or None if it cannot be read as one.
 
-    None means "no usable evidence", which every caller must treat as a
-    blocker. It deliberately does not raise: an unreadable artifact is a
-    condition to report through the same channel as a failing one, not a
-    traceback out of the dispatch loop.
+    None means "no usable evidence", which the promotion service treats as
+    a blocker. It deliberately does not raise: an unreadable artifact is a
+    refusal to report through the same channel as a failing one, not a
+    traceback out of a promotion.
     """
     candidate = Path(path) if path is not None else _repo_root() / EVIDENCE_PATH
     try:
@@ -422,208 +404,3 @@ def load_evidence(path: str | Path | None = None) -> dict[str, Any] | None:
     except (OSError, ValueError):
         return None
     return payload if isinstance(payload, dict) else None
-
-
-def live_admission_blockers(session: Any, *, path: str | Path | None = None,
-                            ) -> list[str]:
-    """Whether the ACTIVE ruleset may deliver at the stage it claims.
-
-    This is the runtime half of the gate, and the reason the module is not just
-    a test helper: a check that only CI performs protects the repository, not
-    the operator. A container started from an image whose evidence does not
-    support its own `active_stage` must not send.
-
-    Fail-closed throughout — including on an unreadable artifact, and including
-    when the active ruleset cannot be loaded at all.
-    """
-    from app.alerts.artifacts import load_active
-
-    try:
-        ruleset = load_active(session).ruleset
-    except Exception as exc:                       # noqa: BLE001 - reported, not raised
-        return [f"the active ruleset could not be loaded, so its stage cannot "
-                f"be justified: {type(exc).__name__}"]
-
-    stage = ruleset.document.meta.active_stage
-    blockers: list[str] = []
-    if stage < LIVE_DELIVERY_STAGE:
-        blockers.append(
-            f"live delivery is not admitted before Stage {LIVE_DELIVERY_STAGE} "
-            f"(active_stage={stage})")
-
-    # NOT an early return. Evidence and promoted-byte checks still run, so a
-    # deployment that is both too early AND unevidenced reports both rather
-    # than hiding the second behind the first.
-    evidence = load_evidence(path)
-    if evidence is None:
-        blockers.append(
-            f"stage {stage}: the gate evidence at {EVIDENCE_PATH} is missing "
-            "or unreadable, so nothing justifies delivering at this stage")
-        return blockers
-
-    blockers += promotion_blockers(
-        target_stage=stage, artifact=evidence,
-        rule_version=ruleset.document.meta.rule_version,
-        phrase_set_version=getattr(ruleset, "phrase_set_version", None),
-        rules_sha256=ruleset.rules_sha256,
-        phrase_set_sha256=ruleset.phrase_set_sha256,
-    )
-    blockers.extend(_digest_blockers(session, ruleset))
-    return blockers
-
-
-def _digest_blockers(session: Any, ruleset: Any) -> list[str]:
-    """Bind the running ruleset to promoted BYTES as a second runtime proof.
-
-    The evidence artifact above already carries grouped full digests.  The
-    registry adds a separate fact: these were the bytes deliberately promoted,
-    not merely bytes for which a replay artifact exists.
-
-    The registry stores what was promoted. Requiring the running ruleset to BE
-    the promoted one closes the gap the version binding leaves open — an edit
-    that forgot to bump its version no longer reaches a phone, because its
-    bytes were never promoted.
-    """
-    from app.alerts.artifacts import load_promoted
-
-    try:
-        promoted = load_promoted(session)
-    except Exception as exc:                       # noqa: BLE001 - reported, not raised
-        return [f"the promoted ruleset could not be rebuilt, so the running "
-                f"one cannot be shown to match it: {type(exc).__name__}"]
-    if promoted is None:
-        return ["nothing has been promoted, so no bytes authorise delivery"]
-
-    out: list[str] = []
-    if promoted.ruleset.rules_sha256 != ruleset.rules_sha256:
-        out.append(
-            f"the running rules ({ruleset.rules_sha256[:12]}) are not the "
-            f"promoted ones ({promoted.ruleset.rules_sha256[:12]}), whatever "
-            "version they declare")
-    if promoted.ruleset.phrase_set_sha256 != ruleset.phrase_set_sha256:
-        out.append(
-            f"the running phrase set ({ruleset.phrase_set_sha256[:12]}) is not "
-            f"the promoted one ({promoted.ruleset.phrase_set_sha256[:12]})")
-    return out
-
-
-def delivery_admission_blockers(session: Any, planning_rules_sha256: str, *,
-                                path: str | Path | None = None) -> list[str]:
-    """Whether a QUEUED delivery may be sent, judged by the rules that planned it.
-
-    This asks a NARROWER question than `live_admission_blockers`, and the
-    difference matters. That one asks whether the running deployment is
-    authorised — current evidence, currently promoted bytes. This one asks
-    whether the ruleset that planned THIS message was ever deliberately
-    promoted.
-
-    They have to differ because of archived rulesets. An archived ruleset that
-    still owns open episodes keeps being evaluated until they close, and it is
-    never the currently promoted one — that is what "archived" means. Judging
-    its deliveries against the current promotion blocked every continuation
-    permanently: they could not be sent, and no operator action could ever make
-    them sendable, because the ruleset will not be promoted again. The gate's
-    purpose is to stop messages from rules nobody approved, not to strand
-    messages from rules somebody approved and later replaced.
-
-    So the test is `promoted_at is not None` — a deliberate act that happened,
-    and that archiving does not undo.
-
-    On byte binding, which the panel asked about twice: there is nothing here
-    to check, and adding a check would have been theatre.
-
-    The registry row is fetched BY the planning hash, which is that table's
-    primary key — so what is read is exactly the bytes that hash names.
-    Resolving by version or by name would need a digest comparison; resolving
-    BY digest is the comparison.
-
-    The row's phrase set is referenced by version rather than by hash, which
-    looks like the remaining gap, and the schema already closes it more firmly
-    than this function could: a trigger makes phrase-set bytes immutable under
-    an existing version, and a foreign key stops a referenced set being
-    deleted. I wrote both checks before discovering they were unreachable —
-    `test_the_schema_binds_a_delivery_to_its_reviewed_text` pins the
-    constraints instead, so the guarantee fails loudly if either is ever
-    dropped.
-    """
-    from app.alerts.artifacts import load_active
-    from app.alerts.enums import RulesetStatus
-    from app.alerts.models import AlertRulesetRegistry
-
-    row = session.get(AlertRulesetRegistry, planning_rules_sha256)
-    if row is None:
-        return [f"the ruleset that planned this delivery "
-                f"({planning_rules_sha256[:12]}) is not in the registry, so "
-                "nothing establishes what it was permitted to do"]
-    if row.promoted_at is None:
-        return [f"the ruleset that planned this delivery "
-                f"({planning_rules_sha256[:12]}) was never promoted, so no "
-                "operator ever authorised what it sends"]
-    if row.evidence_checked_at is None:
-        # Promoted, but through the OLD path that checked nothing. The
-        # timestamp alone cannot say whether an operator meant it, so it does
-        # not authorise delivery; re-promoting once through the gated service
-        # is the deliberate, one-command fix.
-        return [f"the ruleset that planned this delivery "
-                f"({planning_rules_sha256[:12]}) was promoted before promotion "
-                "checked evidence; re-promote it through the gated service"]
-    # REVOKED is the one status that outranks a past promotion. Superseding a
-    # ruleset says "there is something newer"; revoking it says "this was
-    # wrong" — and an operator who revokes rules while their messages sit in
-    # the outbox means those messages, or revocation would only apply to
-    # alerts nobody had planned yet.
-    # Compared as the enum, which is equal to its own value: `RulesetStatus`
-    # is a StrEnum, so this holds whether the column hands back the member or
-    # the bare string. Reaching for `str(...)` on one side and `.value` on the
-    # other worked too, and read like it was compensating for something.
-    if row.status == RulesetStatus.REVOKED:
-        return [f"the ruleset that planned this delivery "
-                f"({planning_rules_sha256[:12]}) was REVOKED, which withdraws "
-                "the promotion that authorised it"]
-
-    # Promotion authorises the ruleset's EXISTENCE; it does not freeze the
-    # stage. Checking only "was promoted" let a message planned at stage 3
-    # under a since-superseded ruleset go out after the operator demoted the
-    # deployment to stage 1 — the queue outliving the decision that stopped it.
-    #
-    # So the planning ruleset may not outrank what is permitted NOW. A
-    # continuation from an archived ruleset at the same stage still sends,
-    # which is what the previous fix was protecting; a demotion stops it, which
-    # is what that fix lost.
-    try:
-        current = load_active(session).ruleset.document.meta.active_stage
-    except Exception as exc:                       # noqa: BLE001 - reported, not raised
-        return [f"the active ruleset could not be loaded, so the stage this "
-                f"delivery was planned for cannot be compared to it: "
-                f"{type(exc).__name__}"]
-
-    planned_stage = _stage_of(row)
-    if planned_stage is None:
-        return [f"the ruleset that planned this delivery "
-                f"({planning_rules_sha256[:12]}) does not record a stage, so "
-                "what it was permitted to send cannot be established"]
-    if planned_stage > current:
-        return [f"this delivery was planned at stage {planned_stage} and the "
-                f"deployment now runs at stage {current}; the queue must not "
-                "outlive the decision that lowered it"]
-    if planned_stage < LIVE_DELIVERY_STAGE:
-        # Planned while delivery was not admitted at all. Promotion to stage 3
-        # must not drain a queue that predates it: those messages were built
-        # when nothing was allowed to reach a phone, are stale by the time the
-        # stage rises, and were never part of what the operator promoted.
-        return [f"this delivery was planned at stage {planned_stage}, below "
-                f"the delivery floor (stage {LIVE_DELIVERY_STAGE}); raising "
-                "the stage later does not authorise work queued before it"]
-
-    return []
-
-
-def _stage_of(row: Any) -> int | None:
-    """The `active_stage` recorded in a registry row's canonical YAML."""
-    import yaml
-
-    try:
-        document = yaml.safe_load(row.canonical_yaml)
-        return int(document["meta"]["active_stage"])
-    except Exception:                              # noqa: BLE001 - absent is a blocker
-        return None

@@ -14,7 +14,7 @@ from typing import Any
 
 from sqlalchemy import select
 
-from app.alerts.artifacts import load_active, register
+from app.alerts.artifacts import load_active_for_mode, register
 from app.alerts.calendars import digest_window_key, last_closed_digest_window
 from app.alerts.digest import plan_digest
 from app.alerts.enums import DigestItemStatus
@@ -68,7 +68,9 @@ def run_once(*, now: datetime | None = None,
 
     plans = []
     with session_scope() as session:
-        artifacts = load_active(session)
+        # In live mode only the promoted ruleset plans live work (owner decision
+        # D2d): an unpromoted candidate raises here and the job heartbeats critical.
+        artifacts = load_active_for_mode(session, mode=settings.alerts_mode)
         register(session, artifacts)
 
         if window_key is not None:

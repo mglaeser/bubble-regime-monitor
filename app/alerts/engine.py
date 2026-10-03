@@ -28,6 +28,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.alerts.budgets import LIMITS
 from app.alerts.canonical import new_ulid, sorted_hash_set
 from app.alerts.dto import AlertInput, evaluation_identity
 from app.alerts.enums import (
@@ -40,7 +41,7 @@ from app.alerts.enums import (
 )
 from app.alerts.errors import EvaluationConflict, EvaluationDeadlineExceeded, sanitize
 from app.alerts.models import AlertEvaluation, AlertEvaluationRuleset
-from app.alerts.outbox import default_limits, persist_plan, planner_budget_usage
+from app.alerts.outbox import persist_plan, planner_budget_usage
 from app.alerts.planner import PlanInputs, plan
 from app.alerts.primitives import EvaluationContext, evaluate_rule
 from app.alerts.registry import ValidatedRuleset, instance_fingerprint
@@ -64,7 +65,6 @@ from app.alerts.state_machine import (
     effective_prior_state,
     evaluate_state,
 )
-from app.config import get_settings
 from app.logging_conf import get_logger
 
 log = get_logger(__name__)
@@ -521,7 +521,7 @@ def run_evaluation(
             # 14.8 keeps `origin_rules_sha256` per member precisely so a queued
             # delivery can be rendered from the artifact that produced it.
             active_silences = load_active_silences(session, now=now)
-            limits = default_limits(get_settings())
+            limits = LIMITS
             recipient = _recipient_ref(live_profile)
 
             by_ruleset: dict[str, list[StateDecision]] = {}

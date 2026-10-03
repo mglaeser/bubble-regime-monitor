@@ -30,7 +30,6 @@ from app.alerts.budgets import (
     DISPATCH_ORDERED_READY_STATUSES,
     PLANNER_RESERVED_STATUSES,
     BudgetDecision,
-    BudgetLimits,
     BudgetUsage,
     window_start,
 )
@@ -43,6 +42,7 @@ from app.alerts.enums import (
     EpisodeStatus,
     MemberRole,
     PlanningState,
+    RulesetStatus,
     SuppressionReason,
     TransportStatus,
 )
@@ -55,6 +55,7 @@ from app.alerts.models import (
     AlertEvent,
     AlertInstanceNotificationState,
     AlertRender,
+    AlertRulesetRegistry,
     AlertRuleState,
 )
 from app.alerts.planner import DeliveryIntent, DigestIntent, PlanResult
@@ -355,29 +356,42 @@ def release_due_holds(
     return released
 
 
+def _admitted() -> Any:
+    """The live claim's condition: the ruleset that planned the work was
+    promoted through the evidence-gated service and is not revoked - REVOKED
+    outranks a past promotion. Judged by how it was promoted, never by
+    re-reading evidence (owner decision D2d); a ruleset superseded since still
+    finishes what it planned. Work queued under rules nobody promoted that way
+    - however and whenever it was planned - is never claimed (#153 rounds 3,
+    4 and 7)."""
+    return or_(
+        AlertDelivery.mode != "live",
+        AlertDelivery.planning_rules_sha256.in_(
+            select(AlertRulesetRegistry.rules_sha256).where(
+                AlertRulesetRegistry.promoted_at.is_not(None),
+                AlertRulesetRegistry.evidence_checked_at.is_not(None),
+                AlertRulesetRegistry.status != RulesetStatus.REVOKED)))
+
+
 def claimable(session: Session, *, mode: str, live_profile: str, now: datetime,
-              limit: int = 10,
-              exclude_rules_sha256: Collection[str] | None = None) -> list[AlertDelivery]:
+              limit: int = 10) -> list[AlertDelivery]:
     """READY rows whose `not_before` has passed. P1 first, then oldest.
 
-    `exclude_rules_sha256` drops deliveries planned by named rulesets IN THE
-    QUERY. The caller could filter afterwards, but then unsendable rows would
-    still consume the row limit and everything behind them would starve —
-    excluding them here means the limit is spent on work that can actually go.
+    In live mode, only admitted work (`_admitted`). The claim's own
+    conditional UPDATE carries the same condition, so a ruleset revoked after
+    this listing is not claimed (#153 round 5).
     """
-    conditions = [
+    query = select(AlertDelivery).where(
         AlertDelivery.mode == mode,
         AlertDelivery.live_profile == live_profile,
         AlertDelivery.planning_state == PlanningState.READY,
         AlertDelivery.transport_status.in_(
             [TransportStatus.PENDING, TransportStatus.RETRY_DUE]),
         (AlertDelivery.not_before.is_(None)) | (AlertDelivery.not_before <= now),
-    ]
-    if exclude_rules_sha256:
-        conditions.append(
-            AlertDelivery.planning_rules_sha256.notin_(list(exclude_rules_sha256)))
+        _admitted(),
+    )
     return list(session.execute(
-        select(AlertDelivery).where(*conditions)
+        query
         .order_by(
             AlertDelivery.priority.asc(),
             AlertDelivery.created_at.asc(),
@@ -387,32 +401,14 @@ def claimable(session: Session, *, mode: str, live_profile: str, now: datetime,
     ).scalars().all())
 
 
-def pending_planning_rulesets(session: Session, *, mode: str, live_profile: str,
-                              now: datetime) -> list[str]:
-    """Distinct planning rulesets among the deliveries waiting to go out.
-
-    Admission is a property of the RULESET, not of each message, so checking
-    it once per distinct ruleset costs a handful of queries however long the
-    queue is.
-    """
-    return list(session.execute(
-        select(AlertDelivery.planning_rules_sha256).where(
-            AlertDelivery.mode == mode,
-            AlertDelivery.live_profile == live_profile,
-            AlertDelivery.planning_state == PlanningState.READY,
-            AlertDelivery.transport_status.in_(
-                [TransportStatus.PENDING, TransportStatus.RETRY_DUE]),
-            (AlertDelivery.not_before.is_(None)) | (AlertDelivery.not_before <= now),
-        ).distinct()
-    ).scalars().all())
-
-
 def claim(session: Session, delivery_id: str, *, owner: str, now: datetime,
           lease_seconds: int) -> bool:
     """Take an exclusive lease with a CONDITIONAL update.
 
     The `transport_status IN (PENDING, RETRY_DUE)` predicate is what makes this
-    exclusive: a second worker's UPDATE matches zero rows.
+    exclusive: a second worker's UPDATE matches zero rows. The live condition
+    (`_admitted`) is part of the same UPDATE, so what the listing admitted is
+    judged again in the statement that takes the lease (#153 round 5).
     """
     statement = (
         update(AlertDelivery)
@@ -420,6 +416,7 @@ def claim(session: Session, delivery_id: str, *, owner: str, now: datetime,
             AlertDelivery.delivery_id == delivery_id,
             AlertDelivery.transport_status.in_(
                 [TransportStatus.PENDING, TransportStatus.RETRY_DUE]),
+            _admitted(),
         )
         .values(transport_status=TransportStatus.LEASED, lease_owner=owner,
                 lease_until=now + timedelta(seconds=lease_seconds),
@@ -449,9 +446,9 @@ def release(session: Session, delivery: AlertDelivery, *, now: datetime) -> None
     """Give a claimed delivery back to the queue, unchanged.
 
     Not a hold and not a failure: the message is still exactly as sendable as
-    it was, and something outside it — an authorisation withdrawn between the
-    claim and the wire — means not yet. A hold state would tell an operator
-    this delivery has a problem, and it does not.
+    it was, and something outside it - its membership changed while it was
+    being rendered - means not yet. A hold state would tell an operator this
+    delivery has a problem, and it does not.
     """
     delivery.transport_status = TransportStatus.PENDING
     delivery.lease_owner = None
@@ -1375,10 +1372,3 @@ def _event(
         rules_sha256=rules_sha256,
     ))
 
-
-def default_limits(settings: object) -> BudgetLimits:
-    return BudgetLimits(
-        target_168h=int(getattr(settings, "alerts_non_p1_target_168h", 2)),
-        cap_24h=int(getattr(settings, "alerts_non_p1_cap_24h", 3)),
-        cap_168h=int(getattr(settings, "alerts_non_p1_cap_168h", 6)),
-    )

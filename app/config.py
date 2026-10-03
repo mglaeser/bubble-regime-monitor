@@ -195,17 +195,6 @@ class Settings(BaseSettings):
     alerts_public_read_rate_limit: str = "30/minute"
 
     # Volume governance. P1 is exempt from all three.
-    alerts_non_p1_target_168h: int = 2
-    # Caps raised 3->5 / 6->8 on 2026-08-27 by EXPLICIT operator decision
-    # ("I want that it takes over now"), matching the maxima the stage-3
-    # coverage replay measures. The quiet-regime TARGET stays 2: the target is
-    # what good weeks look like, the caps are where the system refuses to talk
-    # more — and the operator chose delivery now over a quieter ceiling. Not an
-    # implementation convenience: the evidence artifact records the limits it
-    # was judged under, and admission refuses caps the evidence never saw.
-    alerts_non_p1_cap_24h: int = 5
-    alerts_non_p1_cap_168h: int = 8
-
     alerts_dispatch_poll_s: int = 20
     alerts_dispatch_lease_s: int = 120
     alerts_eval_lease_s: int = 300
@@ -387,6 +376,11 @@ RETIRED_ENV_KEYS: dict[str, str] = {
         "removed with the Stage-4 cutover (owner decision D2c, 2026-10-02): the daily "
         "digest follows its transports, so switch IMESSAGE_ENABLED and SMS_ENABLED off "
         "to stop it, and remove this key"),
+    **{key: ("the non-P1 alert budget is a constant since owner decision D2d "
+             "(app/alerts/budgets.py LIMITS): the CI replay gate checks exactly it, "
+             "so a host cannot change it; remove this key")
+       for key in ("ALERTS_NON_P1_TARGET_168H", "ALERTS_NON_P1_CAP_24H",
+                   "ALERTS_NON_P1_CAP_168H")},
 }
 
 

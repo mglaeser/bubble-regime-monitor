@@ -16,6 +16,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.alerts.budgets import LIMITS
 from app.alerts.dto import AlertInput
 from app.alerts.enums import (
     PLANNING_STATE_PRECEDENCE,
@@ -973,23 +974,6 @@ def health_projection(
             "live mode: active ruleset does not match the promoted artifact"
         )
 
-    # Health and dispatch must answer the SAME operational question.  Artifact
-    # matching alone is insufficient: a perfectly promoted Stage-1 ruleset is
-    # intentionally below the provider-delivery floor, so dispatch refuses it
-    # before constructing a sender. Reporting ``ok`` in that state makes the
-    # health endpoint claim a channel exists when the wire is deliberately
-    # unreachable. Only live mode has a delivery-admission decision; shadow and
-    # disabled modes remain honest non-delivery modes rather than "blocked".
-    live_admission_blockers: list[str] = []
-    if mode == "live":
-        from app.alerts.promotion import live_admission_blockers as _blockers
-
-        live_admission_blockers = _blockers(session)
-        conditions.extend(
-            f"live admission: {blocker}"
-            for blocker in live_admission_blockers
-        )
-
     # The daily digest is the owner's standing message, governed by its
     # transports alone (owner decision D2c removed its retirement switch).
     # A digest without a transport is named whatever the alerts do: health
@@ -1003,7 +987,6 @@ def health_projection(
         ruleset is None
         or schema_fault
         or live_artifact_mismatch
-        or bool(live_admission_blockers)
         or any(not c["healthy"] for c in components.values())
     )
     queue_degraded = bool(
@@ -1036,11 +1019,6 @@ def health_projection(
         "live_profile": profile,
         "artifact_source": artifact_source,
         "fallback_reason": fallback_reason,
-        "live_admission": {
-            "evaluated": mode == "live",
-            "permitted": mode == "live" and not live_admission_blockers,
-            "blockers": live_admission_blockers,
-        },
         "ruleset": None if ruleset is None else {
             "rules_sha256": ruleset.rules_sha256,
             "rule_version": ruleset.rule_version,
@@ -1143,9 +1121,9 @@ def health_projection(
             "missing_sidecars": missing_sidecars,
         },
         "budgets": {
-            "non_p1_target_168h": settings.alerts_non_p1_target_168h,
-            "non_p1_cap_24h": settings.alerts_non_p1_cap_24h,
-            "non_p1_cap_168h": settings.alerts_non_p1_cap_168h,
+            "non_p1_target_168h": LIMITS.target_168h,
+            "non_p1_cap_24h": LIMITS.cap_24h,
+            "non_p1_cap_168h": LIMITS.cap_168h,
             "sent_24h": current_budget_usage.sent_24h,
             "sent_168h": current_budget_usage.sent_168h,
             "queued_reservations": current_budget_usage.reserved,

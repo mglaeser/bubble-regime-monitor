@@ -167,6 +167,31 @@ def test_health_names_a_retired_setting(client, monkeypatch):
     assert payload["status"] in ("degraded", "critical")
 
 
+def test_a_live_send_test_is_planned_under_the_promoted_ruleset_only(client, monkeypatch):
+    """#153 round 2, SOTA-A: with the planning-ruleset admission gone (owner
+    decision D2d), live work must never be planned under a ruleset that was
+    not promoted. Evaluation, the weekly digest and the send-test all load
+    through load_active_for_mode: in live mode with nothing promoted the
+    send-test is refused - 503, nothing written."""
+    from sqlalchemy import func, select
+
+    from app.alerts.models import AlertDelivery
+    from app.config import get_settings
+    from app.db import session_scope
+
+    monkeypatch.setenv("ALERTS_MODE", "live")
+    get_settings.cache_clear()
+    try:
+        with session_scope() as session:
+            before = session.scalar(select(func.count()).select_from(AlertDelivery))
+        response = client.post("/api/v1/admin/alerts/send-test", headers={"X-API-Key": TEST_ADMIN_KEY})
+        assert response.status_code == 503 and "PROMOTED" in response.text
+        with session_scope() as session:
+            assert session.scalar(select(func.count()).select_from(AlertDelivery)) == before
+    finally:
+        get_settings.cache_clear()
+
+
 def test_health_projects_every_quick_check_error_without_crashing(
     client, monkeypatch,
 ):
