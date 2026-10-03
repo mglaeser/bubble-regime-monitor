@@ -647,6 +647,38 @@ def test_the_apply_transaction_takes_the_write_lock_first(isolated_db, tmp_path)
     assert begin < check < first_write
 
 
+def test_an_apply_past_its_budget_applies_nothing(isolated_db, tmp_path, monkeypatch):
+    """#159 round 5, SOTA-A: the apply never checked the run's budget, so a
+    wait for its write lock could carry it past the budget and it still
+    committed. The budget is checked once the lock is held, before anything
+    is written: an apply past it ends TIMED_OUT and applies nothing, as an
+    evaluation past it already does."""
+    import app.alerts.engine as engine
+    from app.alerts.models import AlertDelivery, AlertEpisode
+
+    artifacts = _artifacts(stage=3, tmp_path=tmp_path)
+    fired = make_input(identity="late", effective="de-risk", rf4=True,
+                       rf4_period="2026-08-15", breadth_period="2026-08-15",
+                       computed_at="2026-08-15T10:00:00+00:00")
+    _store_input(fired, NOW)
+    with session_scope() as session:
+        register_promoted(session, artifacts, now=NOW - timedelta(hours=1))
+    real = engine.Deadline.check
+
+    def over_budget_at_apply(self, where):
+        if where == "apply":
+            raise engine.EvaluationDeadlineExceeded(f"evaluation exceeded its budget at {where}")
+        return real(self, where)
+
+    monkeypatch.setattr(engine.Deadline, "check", over_budget_at_apply)
+    outcome = engine.run_evaluation(session_scope, alert_input=fired, current=artifacts.ruleset,
+                                    mode="live", now=NOW)
+    assert outcome.status == EvaluationRunStatus.TIMED_OUT
+    with session_scope() as session:
+        assert session.execute(select(AlertEpisode)).scalars().all() == []
+        assert session.execute(select(AlertDelivery)).scalars().all() == []
+
+
 def test_cooldown_memory_survives_a_promotion(isolated_db, tmp_path):
     """Notification memory is keyed WITHOUT a rules hash, on purpose."""
     from app.alerts.engine import run_evaluation
