@@ -1,7 +1,7 @@
 """The deploy note (the owner's request of 2026-09-28): one iMessage per deploy
 with a summary of what it changes and an explicit likelihood that the score
 logic changed. The model writes the summary from repository text; the
-likelihood line is the code's; the commits' titles go out when the model
+likelihood line is the code's; the bare deploy goes out when the model
 cannot."""
 from __future__ import annotations
 
@@ -156,71 +156,38 @@ def test_a_summary_goes_out_with_the_codes_score_line(host, monkeypatch):
 ])
 def test_only_the_codes_line_speaks_of_the_score(host, monkeypatch, reply):
     """The note never carries two estimates: a summary that names the score or
-    a likelihood is not sent, and the titles go out with the code's line. The
+    a likelihood is not sent, and the bare deploy goes out with the code's line. The
     words are the contract (deploy_note.SCORE_TALK); an estimate implied in
     other words is beyond the check - the system prompt forbids it."""
     note_path, sent = host
     _write(note_path, files=("app/engine/aggregate.py",))
     _model(monkeypatch, reply=reply)
     assert dn.announce()["source"] == "template"
-    assert sent == [f"bubblegauge deployed {TARGET[:7]}: Breadth: Polygon only.\n" + MEDIUM]
+    assert sent == [f"bubblegauge deployed {TARGET[:7]} (1 commit(s)).\n" + MEDIUM]
 
 
-def test_a_model_that_fails_sends_the_commits_titles(host, monkeypatch):
+def test_a_model_that_fails_sends_the_bare_deploy(host, monkeypatch):
+    """#150 round 14, SOTA-A: the fallback sent the commits' raw titles, which
+    no instruction governs - "No risk of gauge calculation logic changing"
+    carries none of the score words and contradicted a computed "medium".
+    Raw commit text never goes out: when the model fails, or its summary
+    fails the checks, the note is the bare deploy and the code's line."""
     note_path, sent = host
-    _write(note_path)
+    _write(note_path, commits=(("abc1234", "No risk of gauge calculation logic changing", ""),),
+           files=("app/engine/aggregate.py",))
     _model(monkeypatch, error=RuntimeError("gateway down"))
     out = dn.announce()
     assert out["source"] == "template"
-    assert sent == [f"bubblegauge deployed {TARGET[:7]}: Breadth: Polygon only.\n"
-                    "Score logic: very low - no scoring code and no data-input adapter changed."]
+    assert sent == [f"bubblegauge deployed {TARGET[:7]} (1 commit(s)).\n" + MEDIUM]
 
 
-def test_a_summary_that_fails_the_checks_sends_the_titles(host, monkeypatch):
+def test_a_summary_that_fails_the_checks_sends_the_bare_deploy(host, monkeypatch):
     note_path, sent = host
     _write(note_path)
     _model(monkeypatch, reply="Details at https://example.com/changes.")
-    assert dn.announce()["source"] == "template" and "https://" not in sent[0]
-
-
-@pytest.mark.parametrize("title", [
-    "Delete deploy.sh",            # file names end in real top-level domains: a link to the checks
-    "Aggregate: no score change",  # a title's own estimate beside the code's line
-    "Rescoring logic definitely remains unchanged",  # #150 round 12: a word carrying a stem
-])
-def test_a_title_the_checks_refuse_sends_the_bare_deploy(host, monkeypatch, title):
-    note_path, sent = host
-    _write(note_path, commits=(("abc1234", title, ""),))
-    _model(monkeypatch, error=RuntimeError("gateway down"))
-    dn.announce()
+    assert dn.announce()["source"] == "template"
     assert sent == [f"bubblegauge deployed {TARGET[:7]} (1 commit(s)).\n"
                     "Score logic: very low - no scoring code and no data-input adapter changed."]
-
-
-def test_the_titles_count_what_they_do_not_show(host, monkeypatch):
-    """#150 round 13, SOTA-A: the titles took the first six and counted the
-    rest from six, so a capped log of four complete commits out of ten said
-    "(+4 more)" and accounted for eight. The rest is counted from what is
-    shown: four titles, "(+6 more)"."""
-    note_path, sent = host
-    commits = tuple((f"{i:07x}" + "0" * 33, f"Title {i}", "") for i in range(4))
-    _write(note_path, commits=commits)
-    (note_path / "range").write_text(f"{BASE} {TARGET} 10\n", encoding="utf-8")   # ten in the range
-    _model(monkeypatch, error=RuntimeError("gateway down"))
-    dn.announce()
-    assert sent[0].startswith(f"bubblegauge deployed {TARGET[:7]}: Title 0; Title 1; Title 2; Title 3 (+6 more).")
-
-
-def test_the_prompt_says_when_it_shows_fewer_commits_than_the_deploy(tmp_path):
-    """The same count, in the model's prompt: a deploy whose commits are not
-    all shown (the log's cap, or more than the prompt takes) says how many are."""
-    commits = tuple((f"{i:07x}" + "0" * 33, f"Title {i}", "") for i in range(4))
-    note = dn.read_note(_write(tmp_path / "n", commits=commits))
-    (tmp_path / "n" / "range").write_text(f"{BASE} {TARGET} 10\n", encoding="utf-8")
-    note = dn.read_note(tmp_path / "n")
-    assert note is not None and dn.prompt(note).startswith("A deploy of 10 commit(s), the first 4 below:\n- Title 0")
-    many = dn.read_note(_write(tmp_path / "m", files=tuple(f"docs/p{i:03d}.md" for i in range(100))))
-    assert many is not None and "Changed files (100, the first 80): docs/p000.md" in dn.prompt(many)
 
 
 def test_a_failed_send_is_reported_and_kept_nowhere(host, monkeypatch, tmp_path):

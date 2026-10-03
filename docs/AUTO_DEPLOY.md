@@ -79,12 +79,13 @@ note begins at the commit the last container carried, so a deploy can go
 unannounced; a release that cannot name that commit (no container at all, or
 one off main's history) builds an image without a note. A message never
 describes the wrong change; it can be missing. That last line is the
-only text in the note that speaks of the score: a summary or a commit title
-that uses the words score, likely, probable, chance or percent, or a percent
-sign, is not sent. When the model cannot write a summary that passes these and
-the message checks, the commits' titles go out instead, and when the titles
-cannot, the bare deploy (`app/services/deploy_note.py`; AGENTS.md rule 1 names
-this note as the one prompt that carries repository text).
+only text in the note that speaks of the score: a summary that uses the
+stems score, likely, probable, chance or percent (anywhere in a
+word), or a percent sign, is not sent. When the model cannot write a summary
+that passes these and the message checks, the bare deploy goes out - the commit
+and how many commits it carries - with the score line; raw commit text never
+goes out (`app/services/deploy_note.py`; AGENTS.md rule 1 names this note as
+the one prompt that carries repository text).
 
 ### Install (once, on the host)
 

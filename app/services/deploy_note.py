@@ -28,8 +28,9 @@ note goes only to the owner's own iMessage recipient. The likelihood line is
 the code's, never the model's: a class computed from which files changed, so
 nothing the commits say can talk it down. It is also the only text in the
 note that speaks of the score (SCORE_TALK), so the note never carries two
-estimates. When the model fails, or its summary fails the checks, the commits'
-titles go out instead, and when they fail too, the bare deploy.
+estimates. When the model fails, or its summary fails the checks, the bare
+deploy goes out - the commit and how many commits it carries - with the code's
+line; raw commit text never goes out (#150 round 14).
 """
 
 from __future__ import annotations
@@ -64,7 +65,6 @@ SUMMARY_CHARS = 560
 _COMMIT_BODY_CHARS = 700
 _PROMPT_COMMITS = 20
 _PROMPT_FILES = 80
-_TITLES = 6
 #: The note's own caps. The range is two commits and a count. The log only
 #: feeds the model's text and the titles, which take its first commits, so it
 #: is read up to a cap; the changed paths are read whole - the likelihood needs
@@ -204,25 +204,11 @@ def _bare(note: Note) -> str:
     return f"bubblegauge deployed {note.target[:7]} ({note.count} commit(s))."
 
 
-def _titles(note: Note) -> str:
-    """The first titles, and the rest counted from what is shown - the log
-    may be capped, so fewer than the range's commits can be shown (#150
-    round 13). No title at all is the bare deploy."""
-    from app.engine.sms_report import _asciify
-
-    shown = note.commits[:_TITLES]
-    if not shown:
-        return _bare(note)
-    listed = "; ".join(_asciify(c.title) for c in shown)
-    more = f" (+{note.count - len(shown)} more)" if note.count > len(shown) else ""
-    return f"bubblegauge deployed {note.target[:7]}: {listed}{more}."
-
-
 def compose(note: Note) -> tuple[str, str]:
     """(text, source): the model's summary when it passes the checks, else the
-    commits' titles, else the bare deploy - a title can read as a link, since
-    file names end in real top-level domains, or speak of the score - each with
-    the score line."""
+    bare deploy - each with the code's score line. Raw commit text never goes
+    out: titles are not governed by the system prompt, and one that implies an
+    estimate in other words would sit beside the code's line (#150 round 14)."""
     line = "\n" + note.score_line()
     try:
         from app.llm_gateway import complete
@@ -231,11 +217,8 @@ def compose(note: Note) -> tuple[str, str]:
         if len(summary) <= SUMMARY_CHARS and _sendable(summary, line):
             return summary + line, "generated"
         log.warning("deploy_note_rejected", chars=len(summary))
-    except Exception as exc:  # noqa: BLE001 - the titles are the promise
+    except Exception as exc:  # noqa: BLE001 - the bare deploy is the promise
         log.warning("deploy_note_model_failed", error=sanitize(exc, limit=200))
-    titles = _titles(note)[: MAX_CHARS - len(line)]
-    if _sendable(titles, line):
-        return titles + line, "template"
     return _bare(note) + line, "template"
 
 
