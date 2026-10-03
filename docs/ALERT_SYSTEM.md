@@ -48,7 +48,10 @@ episodes (owner decision D2e): an episode another ruleset opened is resolved
 as `RULESET_REPLACED`, at the promotion that replaces its rules or at the first
 evaluation under a new candidate
 (tests/test_alert_recovery.py::test_a_new_candidate_resolves_the_episodes_of_the_ruleset_it_replaces,
-::test_an_evaluation_covers_exactly_the_current_ruleset). A replay reads
+::test_an_evaluation_covers_exactly_the_current_ruleset). A live evaluation
+applies only while its ruleset is still the promoted one: a promotion that
+commits while it runs ends it CONFLICT with nothing applied
+(::test_a_live_evaluation_applies_nothing_once_a_promotion_superseded_its_rules). A replay reads
 persisted sidecars and archived bytes — it never asks a provider what the world
 looks like now.
 

@@ -518,6 +518,53 @@ def test_an_evaluation_covers_exactly_the_current_ruleset(
     assert decided == written == {current}
 
 
+def test_a_live_evaluation_applies_nothing_once_a_promotion_superseded_its_rules(
+        isolated_db, tmp_path, monkeypatch):
+    """#159 round 1, SOTA-A: a live evaluation of the promoted rules, still in
+    flight when another ruleset was promoted, applied its plan under the now
+    superseded rules - opening an episode and queueing an alert the claim
+    would send. A live evaluation applies only while its ruleset is still the
+    promoted one, checked inside the apply transaction (SQLite serialises it
+    with the promotion's), so the run ends CONFLICT and nothing is applied."""
+    import app.alerts.engine as engine
+    from app.alerts.artifacts import promote
+    from app.alerts.models import AlertDelivery, AlertEpisode
+
+    old = _artifacts(stage=3, tmp_path=tmp_path / "old")
+    new = _artifacts(stage=4, tmp_path=tmp_path / "new")
+    before = make_input(identity="race-before", effective="trim", rf4=False,
+                        computed_at="2026-08-15T06:00:00+00:00")
+    after = make_input(identity="race-after", effective="de-risk", rf4=True,
+                       rf4_period="2026-08-15", breadth_period="2026-08-15",
+                       computed_at="2026-08-15T10:00:00+00:00")
+    _store_input(before, datetime(2026, 8, 15, 6, 0, tzinfo=UTC))
+    _store_input(after, NOW)
+    with session_scope() as session:
+        register_promoted(session, old, now=NOW - timedelta(hours=5))
+    assert engine.run_evaluation(
+        session_scope, alert_input=before, current=old.ruleset, mode="live",
+        now=NOW - timedelta(hours=4)).status == EvaluationRunStatus.COMMITTED
+
+    real = engine.evaluate_ruleset
+
+    def promoted_meanwhile(**kwargs):
+        with session_scope() as session:
+            promote(session, new, actor="operator", now=NOW - timedelta(minutes=1))
+        return real(**kwargs)
+
+    monkeypatch.setattr(engine, "evaluate_ruleset", promoted_meanwhile)
+    outcome = engine.run_evaluation(session_scope, alert_input=after, current=old.ruleset,
+                                    mode="live", now=NOW)
+
+    assert outcome.status == EvaluationRunStatus.CONFLICT
+    with session_scope() as session:
+        assert session.execute(select(AlertEpisode).where(
+            AlertEpisode.origin_rules_sha256 == old.ruleset.rules_sha256,
+            AlertEpisode.is_open.is_(True))).scalars().all() == []
+        assert session.execute(select(AlertDelivery).where(
+            AlertDelivery.planning_rules_sha256 == old.ruleset.rules_sha256)).scalars().all() == []
+
+
 def test_cooldown_memory_survives_a_promotion(isolated_db, tmp_path):
     """Notification memory is keyed WITHOUT a rules hash, on purpose."""
     from app.alerts.engine import run_evaluation

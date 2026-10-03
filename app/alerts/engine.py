@@ -39,9 +39,10 @@ from app.alerts.enums import (
     Mode,
     RulesetItemStatus,
     RulesetRole,
+    RulesetStatus,
 )
 from app.alerts.errors import EvaluationConflict, EvaluationDeadlineExceeded, sanitize
-from app.alerts.models import AlertEvaluation, AlertEvaluationRuleset
+from app.alerts.models import AlertEvaluation, AlertEvaluationRuleset, AlertRulesetRegistry
 from app.alerts.outbox import persist_plan, planner_budget_usage
 from app.alerts.planner import PlanInputs, plan
 from app.alerts.primitives import EvaluationContext, evaluate_rule
@@ -338,6 +339,16 @@ def run_evaluation(
     # ---- P2: one atomic apply --------------------------------------------
     try:
         with session_factory() as session:
+            # A live evaluation applies only while its ruleset is still the
+            # promoted one: a promotion that committed after this run loaded
+            # its rules supersedes them, and nothing is applied (#159 round 1).
+            # Checked inside the apply transaction, which SQLite serialises
+            # with the promotion's.
+            if mode == Mode.LIVE:
+                registered = session.get(AlertRulesetRegistry, current.rules_sha256)
+                if registered is None or registered.status != RulesetStatus.PROMOTED:
+                    raise EvaluationConflict(
+                        f"ruleset {current.rules_sha256[:12]} is no longer the promoted one")
             # Only the current ruleset decides episodes (owner decision D2e).
             # An episode another ruleset opened in this mode and profile - the
             # candidate changed without a promotion - ends here, in the
