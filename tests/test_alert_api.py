@@ -1,13 +1,14 @@
-"""The alert API: scope separation, redaction, contract shape.
+"""The alert API: operator-only reads, the silence scope, redaction, contract shape.
 
 The security properties here are the ones a browser dashboard makes easy to get
-wrong — a read token that can also silence a rule, or a projection that leaks a
-phone number.
+wrong — a key other than the operator's that reads alert state, a silence key
+that reads or acts as the operator, or a projection that leaks a phone number.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -15,15 +16,12 @@ from fastapi.testclient import TestClient
 
 from tests.conftest import TEST_ADMIN_KEY
 
-READ_KEY = "alerts-read-key-not-the-placeholder-0123456789"
 WRITE_KEY = "alerts-write-key-not-the-placeholder-9876543210"
 
 
 @pytest.fixture()
 def client(isolated_db, monkeypatch):
-    monkeypatch.setenv("ALERTS_READ_API_KEY", READ_KEY)
     monkeypatch.setenv("ALERTS_WRITE_API_KEY", WRITE_KEY)
-    monkeypatch.setenv("ALERTS_PUBLIC_READ", "false")
     monkeypatch.setenv("ALERT_INPUT_CAPTURE", "true")
     from app.config import get_settings
 
@@ -36,41 +34,87 @@ def client(isolated_db, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# scope separation
+# operator-only reads (owner decision D3a, 2026-10-03)
 # ---------------------------------------------------------------------------
 
 
-def test_read_key_cannot_call_write_or_admin(client):
-    silence = {"matcher_kind": "RULE_ID", "matcher_value": "regime.band_to_derisk",
-               "duration_seconds": 3600, "comment": "maintenance"}
-    assert client.post("/api/v1/alerts/silences", json=silence,
-                       headers={"X-API-Key": READ_KEY}).status_code == 401
-    assert client.post("/api/v1/admin/alerts/promote",
-                       headers={"X-API-Key": READ_KEY}).status_code == 401
+def _alert_reads(client) -> list[str]:
+    """Every GET route under /api/v1/alerts, enumerated from the app's own
+    OpenAPI document rather than from a list kept here (FastAPI nests included
+    routers, so app.routes holds no flat route list), each path parameter
+    filled with an id that does not exist."""
+    reads = [re.sub(r"\{[^}]+\}", "no-such-id", path)
+             for path, operations in client.app.openapi()["paths"].items()
+             if path.startswith("/api/v1/alerts/") and "get" in operations]
+    assert reads, "no alert read route found"
+    return reads
 
 
-def test_write_key_cannot_read_when_reads_are_keyed(client):
-    assert client.get("/api/v1/alerts/health",
-                      headers={"X-API-Key": WRITE_KEY}).status_code == 401
+def test_the_admin_key_reads_every_alert_get(client):
+    """Owner decision D3a (2026-10-03): the alert read API is operator-only,
+    with no separate read token and no public read. Every alert GET answers to
+    ADMIN_API_KEY: its handler runs - 200, or 404 for the id that does not
+    exist - and the key is never refused."""
+    for path in _alert_reads(client):
+        response = client.get(path, headers={"X-API-Key": TEST_ADMIN_KEY})
+        assert response.status_code in (200, 404), (path, response.status_code, response.text)
 
 
-def test_admin_key_is_not_an_alert_read_key(client):
-    """Unlike the scoring API, alert reads do NOT fall back to the admin key."""
-    assert client.get("/api/v1/alerts/health",
-                      headers={"X-API-Key": TEST_ADMIN_KEY}).status_code == 401
+@pytest.mark.parametrize("key", [None, WRITE_KEY, "not-the-admin-key"],
+                         ids=["no key", "the silence key", "another key"])
+def test_an_alert_read_without_the_admin_key_is_401(client, key):
+    """No key, the silence key (ALERTS_WRITE_API_KEY) or any other key: every
+    alert GET is 401 (owner decision D3a)."""
+    headers = {} if key is None else {"X-API-Key": key}
+    for path in _alert_reads(client):
+        assert client.get(path, headers=headers).status_code == 401, path
 
 
-def test_reads_require_a_key_when_not_public(client):
-    assert client.get("/api/v1/alerts/health").status_code == 401
+@pytest.mark.parametrize("configured", ["empty", "placeholder"])
+def test_alert_reads_fail_closed_without_a_real_admin_key(client, monkeypatch, configured):
+    """ADMIN_API_KEY empty or the shipped placeholder: every alert GET is 503,
+    whatever key is presented, the placeholder itself included - the admin
+    guard's own fail-closed rule (B-06/C-01, AGENTS.md rule 5)."""
+    from app.config import get_settings
+    from app.security import PLACEHOLDER_ADMIN_KEY
+
+    monkeypatch.setenv("ADMIN_API_KEY", PLACEHOLDER_ADMIN_KEY if configured == "placeholder" else "")
+    get_settings.cache_clear()
+    try:
+        for headers in ({}, {"X-API-Key": PLACEHOLDER_ADMIN_KEY}, {"X-API-Key": TEST_ADMIN_KEY}):
+            for path in _alert_reads(client):
+                assert client.get(path, headers=headers).status_code == 503, (path, headers)
+    finally:
+        get_settings.cache_clear()
 
 
-def test_read_key_works(client):
-    assert client.get("/api/v1/alerts/health",
-                      headers={"X-API-Key": READ_KEY}).status_code == 200
+def test_the_removed_read_settings_open_nothing(client, monkeypatch):
+    """D3a removed the separate read token and the public read; D3e the
+    public-read rate limit, which nothing ever applied. A host that still sets
+    one of them reads nothing with it - the old read key is refused like any
+    key that is not the admin key, ALERTS_PUBLIC_READ=true opens nothing - and
+    is told the setting is retired (app/config.py RETIRED_ENV_KEYS: named at
+    boot, in the alerts preflight and in alert health)."""
+    from app.config import Settings, get_settings, retired_env_keys
+
+    old_read_key = "alerts-read-key-not-the-placeholder-0123456789"  # pragma: allowlist secret
+    removed = {"ALERTS_READ_API_KEY": old_read_key, "ALERTS_READ_API_KEY_PREVIOUS": old_read_key,
+               "ALERTS_PUBLIC_READ": "true", "ALERTS_READ_TOKEN_IS_PUBLIC": "false",
+               "ALERTS_PUBLIC_READ_RATE_LIMIT": "30/minute"}
+    for key, value in removed.items():
+        monkeypatch.setenv(key, value)
+    get_settings.cache_clear()
+    try:
+        for headers in ({}, {"X-API-Key": old_read_key}):
+            for path in _alert_reads(client):
+                assert client.get(path, headers=headers).status_code == 401, (path, headers)
+    finally:
+        get_settings.cache_clear()
+    assert not {key.lower() for key in removed} & set(Settings.model_fields)
+    assert {key for key, _ in retired_env_keys(removed)} == set(removed)
 
 
 def test_write_scope_fails_closed_when_unconfigured(isolated_db, monkeypatch):
-    monkeypatch.setenv("ALERTS_READ_API_KEY", READ_KEY)
     monkeypatch.setenv("ALERTS_WRITE_API_KEY", "")
     from app.config import get_settings
 
@@ -103,7 +147,7 @@ def test_cors_is_get_only_so_a_browser_cannot_reach_the_write_routes(client):
 
 def test_health_reports_mode_artifacts_and_sqlite(client):
     payload = client.get("/api/v1/alerts/health",
-                         headers={"X-API-Key": READ_KEY}).json()
+                         headers={"X-API-Key": TEST_ADMIN_KEY}).json()
     assert payload["alerts_mode"] == "disabled"
     assert payload["capture_enabled"] is True
     assert payload["ruleset"]["active_stage"] == 3   # committed 2026-08-27
@@ -140,7 +184,7 @@ def test_health_names_a_daily_digest_without_transport(client, monkeypatch, aler
     monkeypatch.setenv("ALERTS_MODE", alerts_mode)
     get_settings.cache_clear()
     try:
-        payload = client.get("/api/v1/alerts/health", headers={"X-API-Key": READ_KEY}).json()
+        payload = client.get("/api/v1/alerts/health", headers={"X-API-Key": TEST_ADMIN_KEY}).json()
         assert payload["alerts_mode"] == alerts_mode and payload["legacy_daily_digest_enabled"] is False
         assert condition in payload["conditions"] and payload["status"] in ("degraded", "critical")
 
@@ -149,7 +193,7 @@ def test_health_names_a_daily_digest_without_transport(client, monkeypatch, aler
         monkeypatch.setenv("IMESSAGE_API_KEY", "configured-test-key-123456789")  # pragma: allowlist secret
         monkeypatch.setenv("IMESSAGE_RECIPIENT", "+491510000000")
         get_settings.cache_clear()
-        payload = client.get("/api/v1/alerts/health", headers={"X-API-Key": READ_KEY}).json()
+        payload = client.get("/api/v1/alerts/health", headers={"X-API-Key": TEST_ADMIN_KEY}).json()
         assert payload["legacy_daily_digest_enabled"] is True and condition not in payload["conditions"]
     finally:
         get_settings.cache_clear()
@@ -160,7 +204,7 @@ def test_health_names_a_retired_setting(client, monkeypatch):
     degraded, the key named (DAILY_SMS_ENABLED, removed with the Stage-4
     cutover by owner decision D2c)."""
     monkeypatch.setenv("DAILY_SMS_ENABLED", "false")
-    payload = client.get("/api/v1/alerts/health", headers={"X-API-Key": READ_KEY}).json()
+    payload = client.get("/api/v1/alerts/health", headers={"X-API-Key": TEST_ADMIN_KEY}).json()
     assert any(c.startswith("retired setting DAILY_SMS_ENABLED is set and changes nothing")
                for c in payload["conditions"])
     assert payload["status"] in ("degraded", "critical")
@@ -215,7 +259,7 @@ def test_health_projects_every_quick_check_error_without_crashing(
     monkeypatch.setattr(Session, "execute", execute_with_corruption)
     response = client.get(
         "/api/v1/alerts/health",
-        headers={"X-API-Key": READ_KEY},
+        headers={"X-API-Key": TEST_ADMIN_KEY},
     )
 
     assert response.status_code == 200
@@ -233,7 +277,7 @@ def test_health_fails_closed_when_a_required_partial_index_is_missing(client):
         session.execute(text("DROP INDEX uq_alert_episode_open"))
 
     payload = client.get(
-        "/api/v1/alerts/health", headers={"X-API-Key": READ_KEY}).json()
+        "/api/v1/alerts/health", headers={"X-API-Key": TEST_ADMIN_KEY}).json()
     assert payload["status"] == "critical"
     assert payload["schema"]["alert_schema_integrity"] == "critical"
     assert "uq_alert_episode_open" in \
@@ -249,7 +293,7 @@ def test_health_fails_closed_when_render_authority_is_missing(client):
         session.execute(text("DROP INDEX uq_alert_render_delivery"))
 
     payload = client.get(
-        "/api/v1/alerts/health", headers={"X-API-Key": READ_KEY}).json()
+        "/api/v1/alerts/health", headers={"X-API-Key": TEST_ADMIN_KEY}).json()
     assert payload["status"] == "critical"
     assert payload["schema"]["alert_schema_integrity"] == "critical"
     assert payload["schema"]["missing_required_unique_indexes"] \
@@ -273,7 +317,7 @@ def test_health_computes_p1_enqueue_to_attempt_latency(client):
         delivery.sent_at = delivery.request_started_at
 
     payload = client.get(
-        "/api/v1/alerts/health", headers={"X-API-Key": READ_KEY}).json()
+        "/api/v1/alerts/health", headers={"X-API-Key": TEST_ADMIN_KEY}).json()
     assert payload["outbox"]["p1_enqueue_to_attempt_p95_ms"] == 1250
 
 
@@ -298,7 +342,7 @@ def test_health_counts_and_heartbeats_are_scoped_to_the_active_namespace(client)
         ])
 
     payload = client.get(
-        "/api/v1/alerts/health", headers={"X-API-Key": READ_KEY}).json()
+        "/api/v1/alerts/health", headers={"X-API-Key": TEST_ADMIN_KEY}).json()
     assert payload["alerts_mode"] == "disabled"
     assert payload["outbox"]["unknown"] == 0
     for component in ("watchdog", "dispatcher"):
@@ -310,7 +354,7 @@ def test_health_counts_and_heartbeats_are_scoped_to_the_active_namespace(client)
 def test_health_scores_every_mandated_component(client):
     """Raw heartbeat rows are not enough; every scheduled path is evaluated."""
     payload = client.get(
-        "/api/v1/alerts/health", headers={"X-API-Key": READ_KEY}).json()
+        "/api/v1/alerts/health", headers={"X-API-Key": TEST_ADMIN_KEY}).json()
 
     expected = {
         "dispatcher",
@@ -347,7 +391,7 @@ def test_health_expects_no_weekly_digest(client):
         ))
 
     payload = client.get(
-        "/api/v1/alerts/health", headers={"X-API-Key": READ_KEY}).json()
+        "/api/v1/alerts/health", headers={"X-API-Key": TEST_ADMIN_KEY}).json()
     assert "digest" not in payload["components"]
     assert not any(condition.startswith("digest") for condition in payload["conditions"])
     assert "digest" not in payload
@@ -566,7 +610,7 @@ def test_health_counts_a_terminal_unknown_without_degrading(client, monkeypatch)
 
     try:
         payload = client.get(
-            "/api/v1/alerts/health", headers={"X-API-Key": READ_KEY}).json()
+            "/api/v1/alerts/health", headers={"X-API-Key": TEST_ADMIN_KEY}).json()
     finally:
         get_settings.cache_clear()
     assert payload["outbox"]["unknown"] == 1
@@ -577,7 +621,7 @@ def test_health_counts_a_terminal_unknown_without_degrading(client, monkeypatch)
 
 def test_mechanism_list_shows_dark_rules_and_why(client):
     payload = client.get("/api/v1/alerts/mechanisms",
-                         headers={"X-API-Key": READ_KEY}).json()
+                         headers={"X-API-Key": TEST_ADMIN_KEY}).json()
     by_id = {m["rule_id"]: m for m in payload["items"]}
     assert payload["total"] == 90
 
@@ -669,7 +713,7 @@ def test_mechanism_projection_exposes_typed_evidence_and_source_progress(client)
         ))
 
     payload = client.get(
-        "/api/v1/alerts/mechanisms", headers={"X-API-Key": READ_KEY}).json()
+        "/api/v1/alerts/mechanisms", headers={"X-API-Key": TEST_ADMIN_KEY}).json()
     projected = next(
         item for item in payload["items"]
         if item["instance_fingerprint"] == fingerprint)
@@ -719,22 +763,22 @@ def test_notification_disposition_reports_transport_outcome_not_eligibility(
 
 def test_mechanism_detail_uses_fingerprint(client):
     listing = client.get("/api/v1/alerts/mechanisms",
-                         headers={"X-API-Key": READ_KEY}).json()
+                         headers={"X-API-Key": TEST_ADMIN_KEY}).json()
     fingerprint = listing["items"][0]["instance_fingerprint"]
     detail = client.get(f"/api/v1/alerts/mechanisms/{fingerprint}",
-                        headers={"X-API-Key": READ_KEY})
+                        headers={"X-API-Key": TEST_ADMIN_KEY})
     assert detail.status_code == 200
     assert detail.json()["instance_fingerprint"] == fingerprint
 
     missing = client.get("/api/v1/alerts/mechanisms/" + "0" * 64,
-                         headers={"X-API-Key": READ_KEY})
+                         headers={"X-API-Key": TEST_ADMIN_KEY})
     assert missing.status_code == 404
     assert missing.headers["content-type"].startswith("application/problem+json")
 
 
 def test_latest_separates_fired_and_sent(client):
     payload = client.get("/api/v1/alerts/latest",
-                         headers={"X-API-Key": READ_KEY}).json()
+                         headers={"X-API-Key": TEST_ADMIN_KEY}).json()
     for pointer in ("last_evaluation", "last_candidate_episode", "last_activated_episode",
                     "last_notification_eligible_episode", "last_attempted_delivery",
                     "last_sent_delivery"):
@@ -782,7 +826,7 @@ def test_latest_delivery_pointers_sort_by_attempt_and_send_time(client):
         ])
 
     payload = client.get(
-        "/api/v1/alerts/latest", headers={"X-API-Key": READ_KEY}).json()
+        "/api/v1/alerts/latest", headers={"X-API-Key": TEST_ADMIN_KEY}).json()
     assert payload["last_attempted_delivery"]["delivery_id"] == older_id
     assert payload["last_sent_delivery"]["delivery_id"] == older_id
 
@@ -803,7 +847,7 @@ def test_redacted_projection_omits_sensitive_fields(client):
 
 def test_error_responses_are_problem_json(client):
     response = client.get("/api/v1/alerts/episodes/does-not-exist",
-                          headers={"X-API-Key": READ_KEY})
+                          headers={"X-API-Key": TEST_ADMIN_KEY})
     assert response.status_code == 404
     assert response.headers["content-type"].startswith("application/problem+json")
     body = response.json()
@@ -816,7 +860,7 @@ def test_expired_cursor_version_is_410(client):
     stale = base64.urlsafe_b64encode(
         json.dumps({"v": "v0", "event_id": "x"}).encode()).decode().rstrip("=")
     response = client.get(f"/api/v1/alerts/events?cursor={stale}",
-                          headers={"X-API-Key": READ_KEY})
+                          headers={"X-API-Key": TEST_ADMIN_KEY})
     assert response.status_code == 410
     assert response.headers["content-type"].startswith("application/problem+json")
     assert response.json()["status"] == 410
@@ -825,7 +869,7 @@ def test_expired_cursor_version_is_410(client):
 def test_malformed_cursor_is_rfc9457_problem(client):
     response = client.get(
         "/api/v1/alerts/events?cursor=not-valid-base64!",
-        headers={"X-API-Key": READ_KEY},
+        headers={"X-API-Key": TEST_ADMIN_KEY},
     )
     assert response.status_code == 422
     assert response.headers["content-type"].startswith("application/problem+json")
@@ -850,7 +894,7 @@ def test_cursor_expires_after_24_hours_not_only_after_a_version_change(client):
 
     response = client.get(
         f"/api/v1/alerts/events?cursor={cursor}",
-        headers={"X-API-Key": READ_KEY},
+        headers={"X-API-Key": TEST_ADMIN_KEY},
     )
     assert response.status_code == 410
     assert response.json()["title"] == "Cursor expired"
@@ -894,7 +938,7 @@ def test_cursor_is_bound_to_its_resource_namespace_and_filters(
     separator = "&" if "?" in path else "?"
     response = client.get(
         f"{path}{separator}cursor={cursor}",
-        headers={"X-API-Key": READ_KEY},
+        headers={"X-API-Key": TEST_ADMIN_KEY},
     )
     assert response.status_code == 422
     assert response.json()["title"] == title
@@ -902,7 +946,7 @@ def test_cursor_is_bound_to_its_resource_namespace_and_filters(
 
 
 def test_read_responses_carry_an_etag(client):
-    response = client.get("/api/v1/alerts/health", headers={"X-API-Key": READ_KEY})
+    response = client.get("/api/v1/alerts/health", headers={"X-API-Key": TEST_ADMIN_KEY})
     assert response.headers["ETag"]
     assert "max-age=30" in response.headers["Cache-Control"]
     assert "private" in response.headers["Cache-Control"]
@@ -910,7 +954,7 @@ def test_read_responses_carry_an_etag(client):
 
     unchanged = client.get(
         "/api/v1/alerts/health",
-        headers={"X-API-Key": READ_KEY,
+        headers={"X-API-Key": TEST_ADMIN_KEY,
                  "If-None-Match": response.headers["ETag"]},
     )
     assert unchanged.status_code == 304
@@ -939,13 +983,13 @@ def test_event_cursor_uses_timestamp_and_id_together(client):
         ])
 
     first = client.get(
-        "/api/v1/alerts/events?limit=1", headers={"X-API-Key": READ_KEY})
+        "/api/v1/alerts/events?limit=1", headers={"X-API-Key": TEST_ADMIN_KEY})
     assert first.status_code == 200, first.text
     assert [item["event_id"] for item in first.json()["items"]] == ["A-newer"]
     cursor = first.json()["next_cursor"]
     second = client.get(
         f"/api/v1/alerts/events?limit=1&cursor={cursor}",
-        headers={"X-API-Key": READ_KEY},
+        headers={"X-API-Key": TEST_ADMIN_KEY},
     )
     assert second.status_code == 200, second.text
     assert [item["event_id"] for item in second.json()["items"]] == ["Z-older"]
@@ -972,13 +1016,13 @@ def test_paginated_etag_ignores_the_cursor_issue_instant(client):
         ])
 
     first = client.get(
-        "/api/v1/alerts/events?limit=1", headers={"X-API-Key": READ_KEY})
+        "/api/v1/alerts/events?limit=1", headers={"X-API-Key": TEST_ADMIN_KEY})
     assert first.status_code == 200
     assert first.json()["next_cursor"] is not None
     repeated = client.get(
         "/api/v1/alerts/events?limit=1",
         headers={
-            "X-API-Key": READ_KEY,
+            "X-API-Key": TEST_ADMIN_KEY,
             "If-None-Match": first.headers["ETag"],
         },
     )
@@ -1016,7 +1060,7 @@ def test_disabled_mode_never_projects_shadow_state(client):
         ))
 
     payload = client.get(
-        "/api/v1/alerts/mechanisms", headers={"X-API-Key": READ_KEY}).json()
+        "/api/v1/alerts/mechanisms", headers={"X-API-Key": TEST_ADMIN_KEY}).json()
     projected = next(
         item for item in payload["items"]
         if item["instance_fingerprint"] == fingerprint)
@@ -1031,12 +1075,12 @@ def test_delivery_reads_are_scoped_to_the_active_mode_and_profile(client):
         shadow_delivery_id = _unknown_delivery(session)
 
     listing = client.get(
-        "/api/v1/alerts/deliveries", headers={"X-API-Key": READ_KEY})
+        "/api/v1/alerts/deliveries", headers={"X-API-Key": TEST_ADMIN_KEY})
     assert listing.status_code == 200
     assert listing.json()["items"] == []
     detail = client.get(
         f"/api/v1/alerts/deliveries/{shadow_delivery_id}",
-        headers={"X-API-Key": READ_KEY},
+        headers={"X-API-Key": TEST_ADMIN_KEY},
     )
     assert detail.status_code == 404
 
@@ -1095,7 +1139,7 @@ def test_every_populated_event_link_must_match_the_read_namespace(
     monkeypatch.setenv("ALERTS_MODE", "live")
     get_settings.cache_clear()
     response = client.get(
-        "/api/v1/alerts/events", headers={"X-API-Key": READ_KEY})
+        "/api/v1/alerts/events", headers={"X-API-Key": TEST_ADMIN_KEY})
     assert response.status_code == 200, response.text
     event_ids = {item["event_id"] for item in response.json()["items"]}
     assert "event-global" in event_ids
@@ -1117,7 +1161,7 @@ def test_silence_create_list_and_end(client):
     assert created.headers["Cache-Control"] == "no-store"
     silence_id = created.json()["silence_id"]
 
-    listing = client.get("/api/v1/alerts/silences", headers={"X-API-Key": READ_KEY}).json()
+    listing = client.get("/api/v1/alerts/silences", headers={"X-API-Key": TEST_ADMIN_KEY}).json()
     assert [s["silence_id"] for s in listing["items"]] == [silence_id]
 
     ended = client.delete(f"/api/v1/alerts/silences/{silence_id}",
@@ -1179,7 +1223,7 @@ def test_promote_does_not_enable_delivery(client):
     assert payload["promoted_rules_sha256"]
     assert payload["alerts_mode"] == "disabled"
 
-    health = client.get("/api/v1/alerts/health", headers={"X-API-Key": READ_KEY}).json()
+    health = client.get("/api/v1/alerts/health", headers={"X-API-Key": TEST_ADMIN_KEY}).json()
     assert health["promoted_rules_sha256"] == payload["promoted_rules_sha256"]
     assert health["live_matches_promoted"] is True
 
@@ -1309,7 +1353,7 @@ def test_health_says_out_loud_when_the_watchdog_has_never_run(client):
     property the notifier enforces at the transport layer, one level up.
     """
     payload = client.get("/api/v1/alerts/health",
-                         headers={"X-API-Key": READ_KEY}).json()
+                         headers={"X-API-Key": TEST_ADMIN_KEY}).json()
     watchdog = payload["components"]["watchdog"]
     assert watchdog["present"] is False
     assert watchdog["healthy"] is False
@@ -1336,7 +1380,7 @@ def test_health_does_not_let_a_future_heartbeat_mask_silence(client, monkeypatch
             status="ok", detail_json={}))
 
     payload = client.get("/api/v1/alerts/health",
-                         headers={"X-API-Key": READ_KEY}).json()
+                         headers={"X-API-Key": TEST_ADMIN_KEY}).json()
     watchdog = payload["components"]["watchdog"]
     assert watchdog["present"] is True
     assert watchdog["healthy"] is False, "a future heartbeat must not read as healthy"
@@ -1385,7 +1429,7 @@ def test_admin_test_render_previews_reviewed_bytes_without_queueing(client):
 
     denied = client.post(
         "/api/v1/admin/alerts/render",
-        headers={"X-API-Key": READ_KEY},
+        headers={"X-API-Key": WRITE_KEY},
     )
     assert denied.status_code == 401
 
@@ -1468,7 +1512,7 @@ def test_send_test_queues_an_audited_memberless_test_delivery(client):
 
 
 def test_send_test_requires_the_admin_scope(client):
-    for key in (READ_KEY, WRITE_KEY):
+    for key in (WRITE_KEY, "not-the-admin-key"):
         assert client.post("/api/v1/admin/alerts/send-test",
                            headers={"X-API-Key": key}).status_code == 401
 

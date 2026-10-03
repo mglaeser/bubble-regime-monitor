@@ -164,32 +164,8 @@ class Settings(BaseSettings):
     alerts_rules_path: str = "/data/alert_rules.yaml"
     alerts_phrase_path: str = "/data/alert_phrases.json"
 
-    # Separate scopes. A browser never receives the admin key (or the write
-    # key); detailed reads go through a server-side proxy or the redacted
-    # projection. Empty means "this scope is not configured" -> fail closed.
-    alerts_read_api_key: str = ""
+    # The alert silences' key (empty -> 503); alert reads take ADMIN_API_KEY (owner decision D3a).
     alerts_write_api_key: str = ""
-    alerts_public_read: bool = False
-
-    # H-05, decided: the frontend uses a BROWSER-VISIBLE SCOPED TOKEN, not a
-    # server-side proxy. A static key embedded in browser JavaScript is
-    # extractable, so it is treated as a PUBLIC CAPABILITY rather than a
-    # secret: it reaches only the redacted projection, it is rate-limited, it
-    # rotates on its own schedule, and it grants no silence, retry, render-text
-    # or admin right. Setting this false is the assertion that the read key is
-    # only ever held by a trusted server-side proxy — which is a different
-    # architecture, so it must be stated rather than assumed.
-    alerts_read_token_is_public: bool = True
-
-    # Rotation overlap. A public token has to be rotatable without taking the
-    # dashboard down, and a single key forces a hard cutover — which in
-    # practice means the rotation never happens. The previous key stays valid
-    # until it is cleared; it is a SEPARATE variable so retiring it is its own
-    # deliberate edit.
-    alerts_read_api_key_previous: str = ""
-
-    # A public capability gets its own ceiling, tighter than an operator's.
-    alerts_public_read_rate_limit: str = "30/minute"
 
     # Volume governance. P1 is exempt from all three.
     alerts_dispatch_poll_s: int = 20
@@ -386,6 +362,14 @@ RETIRED_ENV_KEYS: dict[str, str] = {
         "removed with the Stooq price tier (2026-10-03; its endpoint answers a proof-of-work "
         "challenge, and no deployment enabled it): the chain is Tiingo, Twelve Data, Alpha "
         "Vantage, then the cache, so remove this key"),
+    **{key: ("removed with the separate alert read scope (owner decision D3a, 2026-10-03): "
+             "the alert reads answer to ADMIN_API_KEY alone and are never public, so remove "
+             "this key")
+       for key in ("ALERTS_READ_API_KEY", "ALERTS_READ_API_KEY_PREVIOUS", "ALERTS_PUBLIC_READ",
+                   "ALERTS_READ_TOKEN_IS_PUBLIC")},
+    "ALERTS_PUBLIC_READ_RATE_LIMIT": (
+        "removed unapplied (owner decision D3e, 2026-10-03): every alert read is limited to "
+        "60/minute per client, like the other reads, so remove this key"),
 }
 
 

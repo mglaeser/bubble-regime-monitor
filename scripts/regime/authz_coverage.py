@@ -31,7 +31,6 @@ HTTP_METHODS = frozenset({"get", "post", "put", "delete", "patch", "head", "opti
 AUTH_DEPENDENCIES = frozenset({
     "require_admin_key",
     "require_read_access",
-    "require_alerts_read",
     "require_alerts_write",
 })
 
@@ -137,7 +136,7 @@ def selftest() -> int:
     expect(routes_in("@router.get('/a', dependencies=[Depends(require_read_access)])\n"
                      "def h(): pass\n") == [("GET", "/a", True)],
            "dependencies=[...] on the decorator counts as auth")
-    expect(routes_in("@router.get('/a')\nasync def h(x=Depends(require_alerts_read)): pass\n")
+    expect(routes_in("@router.get('/a')\nasync def h(x=Depends(require_admin_key)): pass\n")
            == [("GET", "/a", True)], "async handlers are handled")
     expect(routes_in("@router.get('/a')\ndef h(x=Depends(some_other_thing)): pass\n")
            == [("GET", "/a", False)],
