@@ -447,7 +447,7 @@ def test_admin_atomicity_migration_upgrade_downgrade_upgrade(tmp_path):
     # Bump this in the same PR that adds a migration — that is the point of
     # pinning it rather than reading `head`, which would pass vacuously.
     assert connection.execute(
-        "select version_num from alembic_version").fetchone() == ("0021",)
+        "select version_num from alembic_version").fetchone() == ("0022",)
     connection.close()
 
 
@@ -540,9 +540,174 @@ def test_the_evidence_stamp_drop_round_trips_and_keeps_the_immutability_trigger(
             connection.execute(
                 "update alert_ruleset_registry set canonical_yaml = 'changed'")
         assert connection.execute(
-            "select version_num from alembic_version").fetchone() == ("0021",)
+            "select version_num from alembic_version").fetchone() == ("0022",)
     finally:
         connection.close()
+
+
+def _alert_episode_shape(db: str) -> dict[str, object]:
+    """What a rebuild of alert_episode could lose: its named CHECKs, its
+    indexes, its foreign keys - and any trigger in the database."""
+    import re
+
+    connection = sqlite3.connect(db)
+    try:
+        ddl = connection.execute(
+            "select sql from sqlite_master where type='table' and name='alert_episode'"
+        ).fetchone()[0]
+        return {
+            "checks": {name: " ".join(body.split()) for name, body in re.findall(
+                r"CONSTRAINT (ck_\w+) CHECK (.+?),?\s*$", ddl, re.M)},
+            "indexes": {name: " ".join((sql or "").split()) for name, sql in connection.execute(
+                "select name, sql from sqlite_master where type='index' "
+                "and tbl_name='alert_episode'")},
+            "foreign_keys": sorted(row[2:8] for row in connection.execute(
+                "pragma foreign_key_list('alert_episode')")),
+            "triggers": {name: " ".join(sql.split()) for name, sql in connection.execute(
+                "select name, sql from sqlite_master where type='trigger'")},
+        }
+    finally:
+        connection.close()
+
+
+def test_the_inheritance_drop_resets_inherited_state_and_round_trips(tmp_path):
+    """Owner decision D2e: only the current ruleset decides episodes, so 0022
+    drops inherited_open_episode_id from alert_rule_state and alert_episode.
+
+    A rule state that inherited another ruleset's open episode only observed
+    it, and its counters were never a lifecycle of its own; the evaluator
+    that reset them goes, so the upgrade resets such a row once - NORMAL, no
+    candidate, version + 1 - and leaves every other row alone. The
+    alert_episode column carries a foreign key, which SQLite's native DROP
+    COLUMN refuses, so that table is rebuilt: its rows, named CHECKs, indexes
+    and remaining foreign keys survive, and no trigger is lost. The downgrade
+    re-adds both columns, nullable, the episode one with its foreign key; the
+    reset is not reversed.
+    """
+    db = str(tmp_path / "inheritance.db")
+    phrases = hashlib.sha256(b"the phrase set").hexdigest()
+    origin = hashlib.sha256(b"the ruleset that opened the episode").hexdigest()
+    current = hashlib.sha256(b"the ruleset that inherited it").hexdigest()
+    alert_input = hashlib.sha256(b"the input").hexdigest()
+    fingerprint = hashlib.sha256(b"one mechanism").hexdigest()
+    evaluation, episode = "01M0EVALUATIONOFTHEORIGIN0", "01M0EPISODEOPENBYTHEORIGIN"
+    at = "2026-10-01 10:00:00.000000"
+    state_columns = (
+        "rules_sha256, condition_state, last_known_condition_state, current_episode_id, "
+        "consecutive_true, candidate_from_state, candidate_target_state, "
+        "candidate_started_input, candidate_expires_at, candidate_ttl_policy, "
+        "candidate_ttl_basis, state_version, evaluation_status, last_known_input_identity, "
+        "updated_at")
+    owner = (origin, "FIRING", "FIRING", episode, 2, None, None, None, None, None, None,
+             5, "OK", alert_input, at)
+
+    def _read(sql: str) -> list[tuple]:
+        connection = sqlite3.connect(db)
+        try:
+            return connection.execute(sql).fetchall()
+        finally:
+            connection.close()
+
+    def _columns(table: str) -> dict[str, tuple]:
+        return {row[1]: (row[2], row[3]) for row in _read(f"pragma table_info('{table}')")}
+
+    def _states() -> dict[str, tuple]:
+        return {row[0]: row for row in _read(
+            f"select {state_columns} from alert_rule_state")}  # noqa: S608
+
+    def _episodes() -> list[tuple]:
+        return _read("select episode_id, origin_rules_sha256, episode_status, is_open, "
+                     "opened_at, created_evaluation_id from alert_episode")
+
+    def _cycle():
+        from alembic import command
+
+        from app.db_migrate import _alembic_config
+
+        cfg = _alembic_config()
+        command.upgrade(cfg, "0021")
+        connection = sqlite3.connect(db)
+        connection.execute(
+            "insert into alert_phrase_set_registry (phrase_set_version, phrase_set_sha256, "
+            "canonical_json, validator_version, validated_at, worst_case_test_sha256) "
+            "values ('v9.9', ?, '{}', '1', ?, ?)", (phrases, at, phrases))
+        for rules in (origin, current):
+            connection.execute(
+                "insert into alert_ruleset_registry (rules_sha256, rule_version, "
+                "canonical_yaml, phrase_set_version, phrase_set_sha256, "
+                "alert_input_schema_version, methodology_version, "
+                "methodology_manifest_sha256, min_service_version, max_service_version, "
+                "validated_at, status) values (?, ?, 'meta: {}', 'v9.9', ?, 1, 'm', ?, "
+                "'3.8.0', '3.99.99', ?, 'VALIDATED')", (rules, rules[:8], phrases, phrases, at))
+        connection.execute(
+            "insert into alert_input_snapshot (input_identity, origin, built_at, "
+            "alert_input_schema_version, reconstructed, evaluation_eligibility, "
+            "ineligibility_reasons, payload, payload_sha256) values "
+            "(?, 'RECOMPUTE', ?, 1, 0, 'EVALUABLE', '[]', '{}', ?)",
+            (alert_input, at, alert_input))
+        connection.execute(
+            "insert into alert_evaluation (evaluation_id, idempotency_key, input_identity, "
+            "mode, live_profile, current_rules_sha256, evaluation_set_sha256, "
+            "evaluated_ruleset_hashes, evaluator_version, status, attempt_count, "
+            "started_at, plan_applied) values (?, ?, ?, 'shadow', 'default', ?, ?, ?, '1', "
+            "'COMMITTED', 1, ?, 1)",
+            (evaluation, origin, alert_input, origin, origin, f'["{origin}"]', at))
+        connection.execute(
+            "insert into alert_episode (episode_id, mode, live_profile, origin_rules_sha256, "
+            "instance_fingerprint, rule_id, labels, priority, episode_status, is_open, "
+            "suppression_reasons, opened_at, activated_at, trigger_input_identity, "
+            "created_evaluation_id, last_evaluation_id) values (?, 'shadow', 'default', ?, "
+            "?, 'tripwire.rf4_persistent', '{}', 2, 'FIRING', 1, '[]', ?, ?, ?, ?, ?)",
+            (episode, origin, fingerprint, at, at, alert_input, evaluation, evaluation))
+        insert_state = (
+            "insert into alert_rule_state (mode, live_profile, instance_fingerprint, rule_id, "
+            "bucket, priority, policy_status, runtime_readiness, activation_status, "
+            f"flap_projection, inherited_open_episode_id, {state_columns}) values "
+            "('shadow', 'default', ?, 'tripwire.rf4_persistent', 'tripwire', 2, 'APPROVED', "
+            "'READY', 'ACTIVE', '{}', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+        # The origin's own row owns the open episode; the current ruleset's row
+        # observed it, FIRING, with a candidate it should never have kept.
+        connection.execute(insert_state, (fingerprint, None, *owner))
+        connection.execute(insert_state, (
+            fingerprint, episode, current, "FIRING", "FIRING", None, 2, "NORMAL", "FIRING",
+            alert_input, at, "ttl", "basis", 3, "OK", alert_input, at))
+        connection.commit()
+        connection.close()
+        shape, episodes = _alert_episode_shape(db), _episodes()
+        assert ("alert_episode", "inherited_open_episode_id", "episode_id",
+                "NO ACTION", "NO ACTION", "NONE") in shape["foreign_keys"]
+
+        command.upgrade(cfg, "0022")
+        assert "inherited_open_episode_id" not in _columns("alert_rule_state")
+        assert "inherited_open_episode_id" not in _columns("alert_episode")
+        assert _states() == {
+            current: (current, "NORMAL", "NORMAL", None, 0, None, None, None, None, None,
+                      None, 4, "OK", alert_input, at),
+            origin: owner,
+        }
+        assert _episodes() == episodes
+        rebuilt = _alert_episode_shape(db)
+        assert rebuilt == {**shape, "foreign_keys": [
+            fk for fk in shape["foreign_keys"] if fk[1] != "inherited_open_episode_id"]}
+        assert set(rebuilt["checks"]) == {
+            "ck_alert_episode_status", "ck_alert_episode_priority",
+            "ck_alert_episode_open_consistent"}
+        assert "uq_alert_episode_open" in rebuilt["indexes"]
+        assert _read("pragma foreign_key_check") == []
+
+        command.downgrade(cfg, "0021")
+        assert _columns("alert_rule_state")["inherited_open_episode_id"] == ("VARCHAR(26)", 0)
+        assert _columns("alert_episode")["inherited_open_episode_id"] == ("VARCHAR(26)", 0)
+        assert _alert_episode_shape(db) == shape
+        assert _read("select inherited_open_episode_id from alert_rule_state") == [(None,), (None,)]
+        assert _states()[current][1:5] == ("NORMAL", "NORMAL", None, 0), "the reset is not reversed"
+        assert _episodes() == episodes
+
+        command.upgrade(cfg, "head")
+        assert _alert_episode_shape(db) == rebuilt
+
+    _run_with_db(db, _cycle)
+    assert _read("select version_num from alembic_version") == [("0022",)]
 
 
 def test_admin_atomicity_migration_backfills_retry_chain_and_window(tmp_path):

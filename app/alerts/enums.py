@@ -212,8 +212,10 @@ class EvaluationRunStatus(StrEnum):
 class RulesetRole(StrEnum):
     """Why a ruleset was part of an evaluation batch.
 
-    ORIGIN_CONTINUATION rulesets are archived rules kept alive ONLY to continue,
-    resolve or expire the episodes they opened. They never open new episodes.
+    An evaluation covers the CURRENT ruleset alone (owner decision D2e).
+    ORIGIN_CONTINUATION is stored vocabulary only: the archived-ruleset
+    continuation it named is deleted, ck_alert_eval_rs_role still admits it
+    and an older alert_evaluation_ruleset row may carry it.
     """
 
     CURRENT = "CURRENT"

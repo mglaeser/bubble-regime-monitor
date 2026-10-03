@@ -2,8 +2,8 @@
 
 The properties here are about what survives: a crash mid-evaluation, a ruleset
 promotion - which resolves the episodes the replaced rules opened (owner
-decision D2e) and keeps notification memory - and a candidate whose
-originating rules have been archived.
+decision D2e) and keeps notification memory - and a new candidate evaluated
+without a promotion, which resolves them too.
 """
 
 from __future__ import annotations
@@ -408,130 +408,114 @@ def test_a_still_true_condition_reopens_under_the_promoted_ruleset(
         (new.ruleset.rules_sha256, EpisodeStatus.PENDING)]
 
 
-def test_current_ruleset_inherits_an_archived_open_episode(isolated_db, tmp_path):
-    """A candidate switch must not open a second lifecycle for one mechanism.
+def _shadow_and_live(episode_ids: list[str]) -> tuple[list[str], list[str]]:
+    from app.alerts.models import AlertEpisode
 
-    The archived ruleset remains the authority for resolving or activating the
-    episode it opened.  The current ruleset may project its own condition, but
-    that projection must point at the inherited episode instead of competing
-    with it for the one-open-episode invariant.
-    """
+    with session_scope() as session:
+        modes = {episode_id: session.get(AlertEpisode, episode_id).mode
+                 for episode_id in episode_ids}
+    return ([e for e in episode_ids if modes[e] == "shadow"],
+            [e for e in episode_ids if modes[e] == "live"])
+
+
+def _still_true_next_day():
+    """De-risk and rf4 still true the day after `_fire_under`'s inputs."""
+    alert_input = make_input(
+        identity="still-true-next-day", effective="de-risk", rf4=True,
+        rf4_period="2026-08-16", breadth_period="2026-08-16",
+        computed_at="2026-08-16T10:00:00+00:00")
+    _store_input(alert_input, datetime(2026, 8, 16, 10, 0, tzinfo=UTC))
+    return alert_input, datetime(2026, 8, 16, 10, 1, tzinfo=UTC)
+
+
+def test_a_new_candidate_resolves_the_episodes_of_the_ruleset_it_replaces(
+        isolated_db, tmp_path):
+    """Only the current ruleset decides episodes (owner decision D2e). The
+    candidate on disk can change without a promotion - a shadow evaluation
+    runs it registered, not promoted - so the first evaluation under it
+    resolves the episodes another ruleset opened in its mode and profile:
+    RESOLVED as RULESET_REPLACED, one event caused by the evaluated ruleset.
+    A still-true condition then opens under the new rules, and the live
+    episodes, which only the promoted ruleset decides, stay open."""
     from app.alerts.artifacts import register
     from app.alerts.engine import run_evaluation
-    from app.alerts.models import AlertEpisode, AlertRuleState
+    from app.alerts.enums import ActorType, CausationType, EpisodeStatus, SuppressionReason
+    from app.alerts.models import AlertEpisode, AlertEvent
 
     old = _artifacts(stage=3, tmp_path=tmp_path / "old")
     new = _artifacts(stage=4, tmp_path=tmp_path / "new")
-    assert old.ruleset.rules_sha256 != new.ruleset.rules_sha256
-
-    before = make_input(
-        identity="origin-before", rf4=False, breadth_period="2026-08-13",
-        computed_at="2026-08-13T20:00:00+00:00")
-    first_true = make_input(
-        identity="origin-first", rf4=True, breadth_period="2026-08-14",
-        computed_at="2026-08-14T20:00:00+00:00")
-    second_true = make_input(
-        identity="origin-second", rf4=True, breadth_period="2026-08-15",
-        computed_at="2026-08-15T20:00:00+00:00")
-    first_false = make_input(
-        identity="origin-resolves", rf4=False, breadth_period="2026-08-16",
-        computed_at="2026-08-16T20:00:00+00:00")
-    second_false = make_input(
-        identity="current-after-origin", rf4=False,
-        breadth_period="2026-08-17",
-        computed_at="2026-08-17T20:00:00+00:00")
-    _store_input(before, datetime(2026, 8, 13, 20, 0, tzinfo=UTC))
-    _store_input(first_true, datetime(2026, 8, 14, 20, 0, tzinfo=UTC))
-    _store_input(second_true, datetime(2026, 8, 15, 20, 0, tzinfo=UTC))
-    _store_input(first_false, datetime(2026, 8, 16, 20, 0, tzinfo=UTC))
-    _store_input(second_false, datetime(2026, 8, 17, 20, 0, tzinfo=UTC))
-
+    shadow, live = _shadow_and_live(_fire_under(old))
+    assert len(shadow) == len(live) == 3
     with session_scope() as session:
-        register_promoted(session, old, now=NOW)
-    run_evaluation(
-        session_scope, alert_input=before, current=old.ruleset,
-        mode="shadow", now=NOW)
-    run_evaluation(
-        session_scope, alert_input=first_true, current=old.ruleset,
-        mode="shadow", now=NOW + timedelta(minutes=1))
+        register(session, new, now=NOW + timedelta(hours=1))
 
-    with session_scope() as session:
-        origin_episode = session.execute(
-            select(AlertEpisode).where(
-                AlertEpisode.rule_id == "tripwire.rf4_persistent",
-                AlertEpisode.is_open.is_(True),
-            )
-        ).scalars().one()
-        episode_id = origin_episode.episode_id
-        fingerprint = origin_episode.instance_fingerprint
-        # Registered, not promoted: the candidate on disk changed, which a
-        # shadow evaluation runs without a promotion. A promotion resolves
-        # the episode instead (owner decision D2e, tests above).
-        register(session, new, now=NOW + timedelta(minutes=2))
-
-    outcome = run_evaluation(
-        session_scope,
-        alert_input=second_true,
-        current=new.ruleset,
-        archived={old.ruleset.rules_sha256: old.ruleset},
-        mode="shadow",
-        now=NOW + timedelta(minutes=3),
-    )
+    still_true, at = _still_true_next_day()
+    outcome = run_evaluation(session_scope, alert_input=still_true,
+                             current=new.ruleset, mode="shadow", now=at)
     assert outcome.status == EvaluationRunStatus.COMMITTED
 
     with session_scope() as session:
-        open_rows = session.execute(
-            select(AlertEpisode).where(
-                AlertEpisode.instance_fingerprint == fingerprint,
-                AlertEpisode.is_open.is_(True),
-            )
-        ).scalars().all()
-        current_state = session.get(
-            AlertRuleState,
-            ("shadow", "default", new.ruleset.rules_sha256, fingerprint),
-        )
-    assert [episode.episode_id for episode in open_rows] == [episode_id]
-    assert current_state is not None
-    assert current_state.current_episode_id is None
-    assert current_state.inherited_open_episode_id == episode_id
+        events = session.execute(select(AlertEvent).where(
+            AlertEvent.causation_type == CausationType.RULESET)).scalars().all()
+        assert sorted(event.episode_id for event in events) == shadow
+        for event in events:
+            assert (event.action, event.causation_id, event.actor_type,
+                    event.actor_id_redacted, event.rules_sha256) == (
+                "episode_resolved", new.ruleset.rules_sha256, ActorType.SYSTEM,
+                None, old.ruleset.rules_sha256)
+        for episode_id in shadow:
+            episode = session.get(AlertEpisode, episode_id)
+            assert (episode.episode_status, episode.is_open,
+                    episode.resolution_reason, _utc(episode.resolved_at)) == (
+                EpisodeStatus.RESOLVED, False, SuppressionReason.RULESET_REPLACED, at)
+        still_open = session.execute(select(AlertEpisode).where(
+            AlertEpisode.is_open.is_(True))).scalars().all()
+    assert sorted(e.episode_id for e in still_open if e.mode == "live") == live
+    assert [(e.origin_rules_sha256, e.rule_id, e.episode_status)
+            for e in still_open if e.mode == "shadow"] == [
+        (new.ruleset.rules_sha256, "tripwire.rf4_persistent", EpisodeStatus.PENDING)]
 
-    # The origin owns the close as well.  During that atomic batch the current
-    # projection still points at the episode that was open at claim time; on
-    # the next batch the absence of that origin resets the observational
-    # memory and clears the inherited reference.
-    closed = run_evaluation(
-        session_scope,
-        alert_input=first_false,
-        current=new.ruleset,
-        archived={old.ruleset.rules_sha256: old.ruleset},
-        mode="shadow",
-        now=NOW + timedelta(minutes=4),
-    )
-    assert closed.status == EvaluationRunStatus.COMMITTED
-    with session_scope() as session:
-        origin_episode = session.get(AlertEpisode, episode_id)
-        current_state = session.get(
-            AlertRuleState,
-            ("shadow", "default", new.ruleset.rules_sha256, fingerprint),
-        )
-    assert origin_episode.is_open is False
-    assert current_state.inherited_open_episode_id == episode_id
 
-    reset = run_evaluation(
-        session_scope,
-        alert_input=second_false,
-        current=new.ruleset,
-        mode="shadow",
-        now=NOW + timedelta(minutes=5),
-    )
-    assert reset.status == EvaluationRunStatus.COMMITTED
+def test_an_evaluation_covers_exactly_the_current_ruleset(
+        isolated_db, tmp_path, monkeypatch):
+    """The service evaluates the ruleset it loaded and no other, even while
+    another ruleset's episodes are open: one CURRENT row, that hash alone in
+    the evaluated set, and every event and rule state the evaluation writes
+    under it."""
+    from app.alerts.canonical import sorted_hash_set
+    from app.alerts.enums import RulesetItemStatus, RulesetRole
+    from app.alerts.models import AlertEvaluationRuleset, AlertEvent, AlertRuleState
+    from app.config import get_settings
+    from app.services.alert_integration import evaluate_input
+
+    old = _artifacts(stage=3, tmp_path=tmp_path / "old")
+    new = _artifacts(stage=4, tmp_path=tmp_path / "new")
+    _fire_under(old)
+    monkeypatch.setenv("ALERTS_RULES_PATH", str(tmp_path / "new" / "rules.yaml"))
+    get_settings.cache_clear()
+
+    still_true, at = _still_true_next_day()
+    outcome = evaluate_input(still_true.input_identity, mode="shadow", now=at)
+    get_settings.cache_clear()
+    assert outcome.status == EvaluationRunStatus.COMMITTED
+
+    current = new.ruleset.rules_sha256
+    active = len(new.ruleset.active_rules(new.ruleset.document.meta.active_stage))
     with session_scope() as session:
-        current_state = session.get(
-            AlertRuleState,
-            ("shadow", "default", new.ruleset.rules_sha256, fingerprint),
-        )
-    assert current_state.current_episode_id is None
-    assert current_state.inherited_open_episode_id is None
+        evaluation = session.get(AlertEvaluation, outcome.evaluation_id)
+        covered = [(item.rules_sha256, item.role, item.status, item.instances_evaluated)
+                   for item in session.execute(select(AlertEvaluationRuleset).where(
+                       AlertEvaluationRuleset.evaluation_id == outcome.evaluation_id)
+                   ).scalars()]
+        decided = {event.rules_sha256 for event in session.execute(select(AlertEvent).where(
+            AlertEvent.evaluation_id == outcome.evaluation_id)).scalars()}
+        written = {state.rules_sha256 for state in session.execute(select(AlertRuleState).where(
+            AlertRuleState.last_known_input_identity == still_true.input_identity)).scalars()}
+        assert (evaluation.current_rules_sha256, evaluation.evaluated_ruleset_hashes,
+                evaluation.evaluation_set_sha256, evaluation.rules_evaluated) == (
+            current, [current], sorted_hash_set([current]), active)
+    assert covered == [(current, RulesetRole.CURRENT, RulesetItemStatus.EVALUATED, active)]
+    assert decided == written == {current}
 
 
 def test_cooldown_memory_survives_a_promotion(isolated_db, tmp_path):

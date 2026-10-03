@@ -43,9 +43,14 @@ and "sent" in different pointers.
 
 **Everything is content-addressed and replayable.** Rules, phrases and the
 input sidecar are immutable artifacts identified by SHA-256. Every episode
-names the ruleset that opened it, and that ruleset keeps being evaluated until
-the episode closes. A replay reads persisted sidecars and archived bytes — it
-never asks a provider what the world looks like now.
+names the ruleset that opened it, and only the current ruleset decides
+episodes (owner decision D2e): an episode another ruleset opened is resolved
+as `RULESET_REPLACED`, at the promotion that replaces its rules or at the first
+evaluation under a new candidate
+(tests/test_alert_recovery.py::test_a_new_candidate_resolves_the_episodes_of_the_ruleset_it_replaces,
+::test_an_evaluation_covers_exactly_the_current_ruleset). A replay reads
+persisted sidecars and archived bytes — it never asks a provider what the world
+looks like now.
 
 ---
 
