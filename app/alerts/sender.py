@@ -3,18 +3,32 @@
 The legacy `SmsResult(ok: bool)` collapses two outcomes that must never be
 collapsed: "the provider definitely did not accept this" and "the request may
 or may not have reached the provider". Treating the second as the first
-produces duplicate SMS; treating it as success loses alerts. So this sender
-returns four outcomes and the dispatcher treats each differently:
+produces duplicate SMS; treating it as success loses alerts. So a sender
+returns one of five outcomes and the dispatcher treats each differently:
 
-    CONFIRMED_SUCCESS               2xx. Delivered as far as we can know.
+    CONFIRMED_SUCCESS               The contract's success: iMessage 202 with
+                                    a SendOperation (replayed too), sipgate
+                                    204. SENT.
     DEFINITE_TRANSIENT_NOT_ACCEPTED The request provably never landed
-                                    (connect failure, 429, clear 5xx). Retry.
-    DEFINITE_PERMANENT_REJECTION    Validation/auth/config. Never retry.
+                                    (connect failure, 429). RETRY_DUE.
+    DEFINITE_PERMANENT_REJECTION    Validation/auth/config, or a failure the
+                                    proxy stored for this key and replays.
+                                    DEAD_PERMANENT, never retried.
+    AMBIGUOUS_RETRY_SAME_KEY        The bytes may have reached the proxy, which
+                                    deduplicates the Idempotency-Key: a lost
+                                    answer, a redirect, a 5xx nobody stored,
+                                    request-in-progress. RETRY_DUE under the
+                                    same key; a repeat returns the proxy's
+                                    stored verdict instead of sending again.
     AMBIGUOUS_AFTER_TRANSMISSION    The bytes may have reached the provider and
-                                    the response was lost. NEVER auto-retried.
+                                    no stored verdict can say: the proxy's own
+                                    send-ambiguous or idempotency-conflict, and
+                                    every ambiguity on sipgate, which takes no
+                                    key. UNKNOWN, never retried.
 
 Exactly-once delivery is not promised, and this file does not pretend
-otherwise. It makes the uncertainty visible instead.
+otherwise. It repeats a request only where the repeat cannot be a second
+message (owner decision D2f) and makes the rest of the uncertainty visible.
 
 The legacy daily digest keeps using `app/notify/sipgate.py` until the Stage 4
 cutover; this is the alert dispatcher's sender.
@@ -22,8 +36,7 @@ cutover; this is the alert dispatcher's sender.
 
 from __future__ import annotations
 
-import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 
@@ -45,6 +58,14 @@ TIMEOUT = httpx.Timeout(connect=5.0, read=25.0, write=10.0, pool=5.0)
 #: Status codes that are the provider telling us the request is wrong. Retrying
 #: one of these forever would be the loudest possible way to achieve nothing.
 _PERMANENT = frozenset({400, 401, 402, 403, 404, 405, 409, 410, 413, 415, 422})
+
+#: The proxy's answers about an idempotency key (mglaeser/imessage-proxy, read
+#: 2026-10-03): RFC 9457 problem types, and the header on an answer replayed
+#: from its store. tests/test_alert_imessage_sender.py pins them literally.
+_SEND_AMBIGUOUS = "https://github.com/mglaeser/imessage-proxy/problems/send-ambiguous"
+_IDEMPOTENCY_CONFLICT = "https://github.com/mglaeser/imessage-proxy/problems/idempotency-conflict"
+_REQUEST_IN_PROGRESS = "https://github.com/mglaeser/imessage-proxy/problems/request-in-progress"
+_REPLAYED_HEADER = "Idempotent-Replayed"
 
 #: Legacy labels for the DEFAULT profile only. They exist because rows queued
 #: before refs carried the run's own profile say "default" or "primary".
@@ -86,13 +107,21 @@ class SendResult:
 
     @property
     def may_retry_automatically(self) -> bool:
-        """Only a DEFINITE non-acceptance is safe to retry without a human."""
-        return self.outcome == SenderOutcome.DEFINITE_TRANSIENT_NOT_ACCEPTED
+        """Safe to repeat without a human: a DEFINITE non-acceptance, or an
+        ambiguity the provider deduplicates under the same key."""
+        return self.outcome in (SenderOutcome.DEFINITE_TRANSIENT_NOT_ACCEPTED,
+                                SenderOutcome.AMBIGUOUS_RETRY_SAME_KEY)
 
 
 class Sender(Protocol):
+    #: Whether a repeat under the same idempotency key returns the provider's
+    #: stored verdict instead of sending again. The lease sweep asks it: an
+    #: attempt that may have landed is retried where it is True and becomes
+    #: UNKNOWN where it is False (owner decision D2f).
+    idempotent: bool
+
     def send(self, message: str, *, recipient_ref: str,
-             idempotency_key: str | None = None) -> SendResult: ...
+             idempotency_key: str) -> SendResult: ...
 
 
 class NullSender:
@@ -102,11 +131,13 @@ class NullSender:
     accidentally construct a real one.
     """
 
+    idempotent = False
+
     def __init__(self) -> None:
         self.sent: list[tuple[str, str]] = []
 
     def send(self, message: str, *, recipient_ref: str,
-             idempotency_key: str | None = None) -> SendResult:
+             idempotency_key: str) -> SendResult:
         self.sent.append((recipient_ref, message))
         log.info("alert_null_send", chars=len(message), recipient_ref=recipient_ref)
         return SendResult(outcome=SenderOutcome.CONFIRMED_SUCCESS, http_status=204)
@@ -164,8 +195,9 @@ def classify_response(status_code: int, body: str) -> SendResult:
       as delivered while it went nowhere. Permanent, because the same request
       to the same wrong place keeps "succeeding" at nothing.
     * A 3xx or 5xx follows a fully transmitted POST, so the message may
-      already have been accepted. AMBIGUOUS — auto-retrying it is the
-      duplicate the four-outcome contract exists to prevent.
+      already have been accepted. AMBIGUOUS — sipgate takes no idempotency
+      key, so auto-retrying it is the duplicate the typed-outcome contract
+      exists to prevent.
     * A definite 4xx decline stays retryable only where the provider said
       "not now" (429); the `_PERMANENT` set stays permanent.
     """
@@ -209,13 +241,19 @@ def classify_response(status_code: int, body: str) -> SendResult:
 
 
 class SipgateSender:
-    """The real transport. Never raises — it classifies."""
+    """The real transport. Never raises — it classifies.
+
+    sipgate takes no idempotency key, so a repeat of a request that may have
+    landed could be a second SMS: its ambiguity stays UNKNOWN.
+    """
+
+    idempotent = False
 
     def __init__(self, client: httpx.Client | None = None) -> None:
         self._client = client
 
     def send(self, message: str, *, recipient_ref: str,
-             idempotency_key: str | None = None) -> SendResult:
+             idempotency_key: str) -> SendResult:
         settings = get_settings()
         if not (settings.sipgate_token_id and settings.sipgate_token):
             return SendResult(
@@ -323,8 +361,10 @@ class UnconfiguredSender:
     it is visible on the delivery row, and it names what is wrong.
     """
 
+    idempotent = False
+
     def send(self, message: str, *, recipient_ref: str,
-             idempotency_key: str | None = None) -> SendResult:
+             idempotency_key: str) -> SendResult:
         log.error("alert_no_live_transport")
         return SendResult(
             outcome=SenderOutcome.DEFINITE_PERMANENT_REJECTION,
@@ -351,11 +391,15 @@ class ImessageSender:
     `SendResult`, and the audit calls the old contract out by name.
     """
 
+    #: The proxy stores its verdict under each Idempotency-Key and answers a
+    #: repeat with it.
+    idempotent = True
+
     def __init__(self, client: httpx.Client | None = None) -> None:
         self._client = client
 
     def send(self, message: str, *, recipient_ref: str,
-             idempotency_key: str | None = None) -> SendResult:
+             idempotency_key: str) -> SendResult:
         from app.notify.imessage import (
             SEND_PATH,
             _accepted_operation_id,
@@ -406,36 +450,15 @@ class ImessageSender:
             )
 
         body = {"recipient": recipient, "text": text, "service": "imessage"}
-        # The idempotency key must be STABLE across retries of the same
-        # message, which is the entire reason a proxy offers one. A fresh
-        # uuid4 per call — the obvious thing to write — makes every retry a
-        # new message to the proxy, so its deduplication can never fire and a
-        # transient failure followed by a retry delivers the alert twice.
-        #
-        # The outbox already owns exactly this identity: `dedupe_key` is stable
-        # for one logical message and CHANGES when a reminder generation or an
-        # operator's manual retry means a second send is intended. It is hashed
-        # rather than sent verbatim because it carries rule ids, which are ours
-        # and not the proxy's business.
-        #
-        # With no key supplied, fall back to per-call randomness: an unkeyed
-        # send is not made worse by being unkeyed, and silently reusing some
-        # other request's key would be.
-        # Passed through unchanged. The caller supplies the delivery id — a
-        # ULID, already opaque and already stable across the retries of one
-        # message — so there is nothing here to hash and no secret to keep.
-        #
-        # The earlier version hashed the outbox DEDUPE KEY, which spells out
-        # mode, profile and rule id and therefore could not go on the wire.
-        # Protecting it needed an HMAC, the HMAC needed a secret, and the
-        # secret had to outlive credential rotation or a retry crossing one
-        # would deliver the alert twice. All of that was work to conceal a
-        # value we were free not to send.
-        stable = idempotency_key or uuid.uuid4().hex
+        # The delivery id, passed through unchanged: a ULID, opaque and stable
+        # across every attempt of one delivery. The proxy stores its verdict
+        # under it, which is what makes repeating an attempt that may have
+        # landed safe - so there is no per-call fallback, because a fresh key
+        # would make the repeat a second message (owner decision D2f).
         headers = {
             "Authorization": f"Bearer {settings.imessage_api_key}",
             "Content-Type": "application/json",
-            "Idempotency-Key": stable,
+            "Idempotency-Key": idempotency_key,
         }
         # See app/notify/imessage.py: over plain HTTP an ambient proxy would
         # route the bearer header and the body to a third host, which is the
@@ -457,6 +480,10 @@ class ImessageSender:
                     client.close()
         except Exception as exc:
             result = _classify_exception(exc, request_started=request_started)
+            if result.is_ambiguous:
+                # The bytes may have reached the proxy, which then stored its
+                # verdict under this key: the repeat under it asks for that.
+                result = replace(result, outcome=SenderOutcome.AMBIGUOUS_RETRY_SAME_KEY)
             log.warning("alert_imessage_failed", outcome=result.outcome,
                         error_code=result.error_code)
             return result
@@ -467,15 +494,29 @@ class ImessageSender:
         return result
 
 
+def _problem_type(response: httpx.Response) -> str | None:
+    """The RFC 9457 `type` of an answer, or None when it carries none."""
+    try:
+        payload = response.json()
+    except Exception:
+        return None
+    kind = payload.get("type") if isinstance(payload, dict) else None
+    return kind if isinstance(kind, str) else None
+
+
 def _classify_imessage_response(response: httpx.Response, accepted_id: Any) -> SendResult:
     """The proxy's contract is ONE success status, and a body to match.
 
-    202 with an accepted SendOperation is the only confirmed success. Any other
-    2xx means something that is not the proxy's send route answered — a wrong
-    base URL, a captive portal, a load balancer health page — and reporting
-    that as delivered is how an alert silently goes nowhere. It is a permanent
-    rejection, not a retry: the same request to the same wrong place will keep
-    succeeding at nothing.
+    202 with an accepted SendOperation is the only confirmed success, replayed
+    from the proxy's store or not. Any other 2xx means something that is not
+    the proxy's send route answered — a wrong base URL, a captive portal, a
+    load balancer health page — and reporting that as delivered is how an
+    alert silently goes nowhere. It is a permanent rejection, not a retry: the
+    same request to the same wrong place will keep succeeding at nothing.
+
+    Every other answer is read for the proxy's verdict on the idempotency key
+    before its status (owner decision D2f): its problem type, then whether it
+    was replayed from the store.
     """
     status = response.status_code
     if status == 202:
@@ -511,16 +552,40 @@ def _classify_imessage_response(response: httpx.Response, accepted_id: Any) -> S
 
     detail = sanitize(response.text[:500])
 
+    # The proxy itself cannot say whether the message went out, and it stored
+    # that answer: a repeat under the key only replays it, and a new key would
+    # be a second message. A conflict - the key already names a different
+    # request - leaves the same question open. Terminal, whatever the status.
+    problem = _problem_type(response)
+    if problem in (_SEND_AMBIGUOUS, _IDEMPOTENCY_CONFLICT):
+        return SendResult(outcome=SenderOutcome.AMBIGUOUS_AFTER_TRANSMISSION,
+                          http_status=status,
+                          error_code=("SEND_AMBIGUOUS" if problem == _SEND_AMBIGUOUS
+                                      else "IDEMPOTENCY_CONFLICT"),
+                          error_message_redacted=detail, request_started=True)
+    # The first request under this key is still executing: ask again later.
+    if problem == _REQUEST_IN_PROGRESS:
+        return SendResult(outcome=SenderOutcome.AMBIGUOUS_RETRY_SAME_KEY,
+                          http_status=status, error_code="REQUEST_IN_PROGRESS",
+                          error_message_redacted=detail, request_started=True)
+    # Any other answer replayed from the store is the failure the proxy
+    # recorded for this key (a stored success returned above), and every
+    # repeat would replay it again: permanent, even a 5xx.
+    if response.headers.get(_REPLAYED_HEADER) == "true":
+        return SendResult(outcome=SenderOutcome.DEFINITE_PERMANENT_REJECTION,
+                          http_status=status, error_code=f"REPLAYED_HTTP_{status}",
+                          error_message_redacted=detail, request_started=True)
+
     # A 3xx follows a POST that was fully transmitted, so the proxy may already
     # have accepted and sent it — and the redirect target is not necessarily
-    # the send route. Falling through to the transient branch made this the one
-    # transmitted-request status the outbox would repeat unattended.
+    # the send route. It is never a definite non-acceptance.
     #
     # Ambiguous rather than permanent: it IS a misconfiguration (the send route
     # should not redirect), but "the request definitely did nothing" is exactly
-    # what cannot be claimed here.
+    # what cannot be claimed here. The repeat goes under the same key, so a
+    # send that landed is answered from the proxy's store, not sent twice.
     if 300 <= status < 400:
-        return SendResult(outcome=SenderOutcome.AMBIGUOUS_AFTER_TRANSMISSION,
+        return SendResult(outcome=SenderOutcome.AMBIGUOUS_RETRY_SAME_KEY,
                           http_status=status, error_code=f"HTTP_{status}",
                           error_message_redacted=(
                               f"{status} redirect on the send route; the "
@@ -533,15 +598,14 @@ def _classify_imessage_response(response: httpx.Response, accepted_id: Any) -> S
                           http_status=status, error_code=f"HTTP_{status}",
                           error_message_redacted=detail, request_started=True)
 
-    # A 5xx is NOT a definite non-acceptance, and that difference decides
-    # whether the outbox may retry without a human. The proxy hands the message
-    # to iMessage and then answers; a 502 or 504 raised by anything in front of
-    # it is entirely consistent with the message having been accepted and
-    # already delivered. Auto-retrying that sends the alert twice, which is the
-    # exact failure the four-outcome contract exists to prevent. Only a status
-    # where the proxy itself answered and declined is safe to repeat.
+    # A 5xx is NOT a definite non-acceptance. The proxy hands the message to
+    # iMessage and then answers; a 502 or 504 raised by anything in front of it
+    # is entirely consistent with the message having been accepted and already
+    # delivered, and a fresh request would send the alert twice. A repeat under
+    # the SAME key cannot: the proxy answers it from what it stored for the
+    # key. Its own readiness 503 stores nothing, so the repeat just asks again.
     if status >= 500:
-        return SendResult(outcome=SenderOutcome.AMBIGUOUS_AFTER_TRANSMISSION,
+        return SendResult(outcome=SenderOutcome.AMBIGUOUS_RETRY_SAME_KEY,
                           http_status=status, error_code=f"HTTP_{status}",
                           error_message_redacted=detail, request_started=True)
 

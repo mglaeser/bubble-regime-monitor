@@ -640,7 +640,8 @@ def test_a_connect_failure_is_transient_not_ambiguous(sipgate_configured):
         raise httpx.ConnectError("connection refused")
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    result = SipgateSender(client=client).send("x", recipient_ref="default")
+    result = SipgateSender(client=client).send("x", recipient_ref="default",
+                                               idempotency_key="01M0DELIVERY0000000000000A")
     assert result.outcome == SenderOutcome.DEFINITE_TRANSIENT_NOT_ACCEPTED
     assert result.request_started is False
 
@@ -651,14 +652,16 @@ def test_a_lost_response_after_transmission_is_ambiguous(sipgate_configured):
         raise httpx.ReadTimeout("no answer")
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    result = SipgateSender(client=client).send("x", recipient_ref="default")
+    result = SipgateSender(client=client).send("x", recipient_ref="default",
+                                               idempotency_key="01M0DELIVERY0000000000000A")
     assert result.outcome == SenderOutcome.AMBIGUOUS_AFTER_TRANSMISSION
     assert result.may_retry_automatically is False
     assert result.is_ambiguous is True
 
 
 def test_unconfigured_credentials_are_a_permanent_rejection(isolated_db):
-    result = SipgateSender().send("x", recipient_ref="default")
+    result = SipgateSender().send("x", recipient_ref="default",
+                                  idempotency_key="01M0DELIVERY0000000000000A")
     assert result.outcome == SenderOutcome.DEFINITE_PERMANENT_REJECTION
     assert result.error_code == "NOT_CONFIGURED"
 
@@ -671,7 +674,8 @@ def test_error_messages_are_sanitized_before_they_can_be_stored():
 
 def test_null_sender_records_without_sending():
     sender = NullSender()
-    result = sender.send("hallo", recipient_ref="default")
+    result = sender.send("hallo", recipient_ref="default",
+                         idempotency_key="01M0DELIVERY0000000000000A")
     assert result.is_success
     assert sender.sent == [("default", "hallo")]
 
@@ -832,19 +836,19 @@ def _seed_delivery(delivery_id: str = "D1", *, priority: int = 2,
 # ---------------------------------------------------------------------------
 
 
-def test_stale_sending_becomes_unknown(isolated_db):
-    """A crash mid-send may have reached the provider; only UNKNOWN is honest."""
-    from datetime import UTC, datetime, timedelta
+STALE_AT = datetime(2026, 8, 24, 12, 0, tzinfo=UTC)
 
+
+def _stale_sending_delivery() -> str:
+    """A TEST delivery whose worker died after its request had started."""
     from app.alerts.artifacts import load_active, register
     from app.alerts.canonical import new_ulid
     from app.alerts.enums import DeliveryKind, PlanningState, TransportStatus
     from app.alerts.models import AlertDelivery
-    from app.alerts.outbox import recover_leases
     from app.alerts.repository import utc_ms
     from app.db import session_scope
 
-    now = datetime(2026, 8, 24, 12, 0, tzinfo=UTC)
+    now = STALE_AT
     with session_scope() as session:
         artifacts = load_active(session)
         register(session, artifacts)
@@ -864,10 +868,63 @@ def test_stale_sending_becomes_unknown(isolated_db):
             lease_until=now - timedelta(minutes=10),
             request_started_at=now - timedelta(minutes=11),
             duplicate_risk_acknowledged=False, recipient_ref="default"))
-        session.flush()
-        recover_leases(session, now=now)
-        assert session.get(AlertDelivery, delivery_id).transport_status \
-            == TransportStatus.UNKNOWN
+    return delivery_id
+
+
+@pytest.mark.parametrize(("idempotent", "status", "recovered"), [
+    (True, "RETRY_DUE", {"retry_due": 1, "unknown": 0}),
+    (False, "UNKNOWN", {"retry_due": 0, "unknown": 1}),
+])
+def test_stale_sending_is_retried_only_where_the_transport_deduplicates(
+        isolated_db, idempotent, status, recovered):
+    """A crash mid-send may have reached the provider.
+
+    Where the provider deduplicates the delivery's key (iMessage) the retry
+    under that key is answered with its stored verdict, so the row returns to
+    RETRY_DUE (owner decision D2f). Where it cannot (sipgate) only UNKNOWN is
+    honest.
+    """
+    from sqlalchemy import select
+
+    from app.alerts.models import AlertDelivery, AlertEvent
+    from app.alerts.outbox import recover_leases
+    from app.db import session_scope
+
+    delivery_id = _stale_sending_delivery()
+    with session_scope() as session:
+        assert recover_leases(session, now=STALE_AT, idempotent=idempotent) == recovered
+    with session_scope() as session:
+        assert session.get(AlertDelivery, delivery_id).transport_status == status
+        recoveries = session.execute(
+            select(AlertEvent.detail_redacted).where(
+                AlertEvent.delivery_id == delivery_id,
+                AlertEvent.action == "delivery_lease_recovered")
+        ).scalars().all()
+    assert recoveries == (
+        ["expired in flight; retried under the same idempotency key"] if idempotent else [])
+
+
+@pytest.mark.parametrize(("mode", "status"), [("live", "RETRY_DUE"), ("shadow", "UNKNOWN")])
+def test_the_recover_leases_command_asks_the_transport_the_dispatcher_uses(
+        isolated_db, monkeypatch, mode, status):
+    """Live runs over the iMessage proxy, which deduplicates the key; shadow
+    runs the NullSender, which promises nothing (owner decision D2f)."""
+    from app.alerts.cli import main
+    from app.alerts.models import AlertDelivery
+    from app.config import get_settings
+    from app.db import session_scope
+
+    monkeypatch.setenv("ALERTS_MODE", mode)
+    monkeypatch.setenv("IMESSAGE_ENABLED", "true")
+    monkeypatch.setenv("IMESSAGE_API_BASE_URL", "https://messages.example.com")
+    monkeypatch.setenv("IMESSAGE_API_KEY", "imp_notarealkey")  # pragma: allowlist secret
+    monkeypatch.setenv("IMESSAGE_RECIPIENT", "+4915100000000")
+    get_settings.cache_clear()
+    delivery_id = _stale_sending_delivery()
+
+    assert main(["recover-leases", "--once"]) == 0
+    with session_scope() as session:
+        assert session.get(AlertDelivery, delivery_id).transport_status == status
 
 
 def test_automatic_retry_preserves_append_only_attempt_timestamps(isolated_db):
@@ -927,6 +984,7 @@ def test_automatic_retry_preserves_append_only_attempt_timestamps(isolated_db):
         recovered = recover_leases(
             session,
             now=retry_claimed + timedelta(seconds=1),
+            idempotent=False,
         )
         assert recovered == {"retry_due": 1, "unknown": 0}
 

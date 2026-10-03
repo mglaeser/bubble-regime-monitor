@@ -369,14 +369,20 @@ def cmd_recover(_args: argparse.Namespace) -> int:
 
 
 def cmd_recover_leases(_args: argparse.Namespace) -> int:
-    """Sweep delivery leases once; ambiguous wire crossings become UNKNOWN."""
+    """Sweep delivery leases once. A wire crossing is retried under its key
+    where the transport the dispatcher uses deduplicates it, and becomes
+    UNKNOWN otherwise (owner decision D2f)."""
     from datetime import UTC, datetime
 
+    from app.alerts.dispatcher import is_live
     from app.alerts.outbox import recover_leases
+    from app.alerts.sender import default_sender
+    from app.config import get_settings
     from app.db import session_scope
 
+    idempotent = default_sender(live=is_live(get_settings().alerts_mode)).idempotent
     with session_scope() as session:
-        report = recover_leases(session, now=datetime.now(UTC))
+        report = recover_leases(session, now=datetime.now(UTC), idempotent=idempotent)
     _print(report)
     return 0
 

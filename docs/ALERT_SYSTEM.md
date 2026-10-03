@@ -409,11 +409,46 @@ next transition (tests/test_alert_recovery.py::test_promotion_resolves_the_repla
 | lease expired, `plan_applied=0` | died before applying anything | `ABANDONED`; safe to retry under the same logical identity |
 | lease expired, `plan_applied=1` | applied a plan but never recorded finishing | **never auto-repaired** — needs a human |
 
-`recover-leases --once` is the separate delivery-lease sweep. An expired
-`LEASED` row with no `request_started_at` is definitely pre-wire and returns to
-`RETRY_DUE`; an expired `SENDING` row, or any row whose request had started,
-becomes `UNKNOWN` because the provider may have accepted it. The latter is
-never auto-retried under the same generation.
+`recover-leases --once` is the separate delivery-lease sweep; every dispatch
+pass runs it first. An expired `LEASED` row with no `request_started_at` is
+definitely pre-wire and returns to `RETRY_DUE`. For an expired `SENDING` row,
+or any row whose request had started, the transport the dispatcher uses
+decides (owner decision D2f): over iMessage it returns to `RETRY_DUE`, because
+the retry repeats the delivery id as the proxy's `Idempotency-Key` and the
+proxy answers a request it already has with the verdict it stored; over
+sipgate, which takes no key, it becomes `UNKNOWN` because the provider may
+have accepted it, and `UNKNOWN` is never auto-retried.
+
+The same rule holds for a lost answer. An iMessage attempt that may have
+landed - a read or write failure, a redirect, a 5xx the proxy did not store,
+its `request-in-progress` - is retried under the same key with the outbox's
+backoff (`min(300, 30 x attempts)` seconds, no attempt cap): a repeat is
+either the first request the proxy sees under that key or answered from its
+store, never a second message, so the loop ends at the proxy's first definite
+answer. A replayed 202 is `SENT`; any other answer marked
+`Idempotent-Replayed: true` is the failure the proxy stored and ends
+`DEAD_PERMANENT`. The proxy's own `send-ambiguous` and `idempotency-conflict`
+problems, and every ambiguity on sipgate, stay `UNKNOWN`. A delivery waiting
+for the proxy's verdict is `RETRY_DUE`, so the gates that withdraw queued
+work (a member that resolved or was silenced, a superseding rule) can record
+`CANCELLED` for an attempt that did arrive; a cancelled digest's items turn
+`FAILED`. Four operator caveats follow from the proxy
+(mglaeser/imessage-proxy, read 2026-10-03):
+
+* **Key rotation.** The proxy keeps its idempotency records per API key, so a
+  retry that spans an `IMESSAGE_API_KEY` rotation is a new request there and
+  can deliver the alert a second time. Rotate with no delivery `RETRY_DUE`,
+  `LEASED` or `SENDING`.
+* **Transport switch.** The key is the proxy's; sipgate has none. A delivery
+  retried after the transport changed can arrive once per channel: an
+  iMessage attempt retried as SMS, or an SMS attempt in flight retried over
+  iMessage. Switch with no delivery `RETRY_DUE`, `LEASED` or `SENDING`.
+* **Store cap.** The proxy never deletes idempotency records; at its
+  100000-row cap a new key is refused with an untyped 409, which ends
+  `DEAD_PERMANENT` on the delivery.
+* **The replay header.** A front proxy that strips `Idempotent-Replayed`
+  turns a stored 5xx failure into a retry every five minutes. The header and
+  the problem-type URIs are pinned in tests/test_alert_imessage_sender.py.
 
 `reconcile-sidecars` lists committed snapshots with no sidecar. A gap is
 reported, never quietly filled: a sidecar reconstructed after the fact is
@@ -911,8 +946,10 @@ the noun ("keine Wahrscheinlichkeit", "not a probability") is the one honest
 use of it and passes; the same stem anywhere else does not. A model may only
 select reviewed codes.
 
-Exactly-once SMS delivery is not promised. Ambiguous delivery outcomes are made
-visible and handled conservatively rather than retried into duplicates.
+Exactly-once delivery is not promised. An ambiguous iMessage attempt is
+retried under the same idempotency key, which the proxy deduplicates; an
+ambiguous SMS attempt, and the proxy's own verdict that a send may have
+happened, are made visible as `UNKNOWN` rather than retried into duplicates.
 
 The SMS budgets and priority classes are project **judgments** validated
 through replay, not scientifically derived constants. Alarm-fatigue and

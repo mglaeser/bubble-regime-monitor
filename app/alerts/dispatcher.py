@@ -14,7 +14,7 @@ Order matters, and every step can still stop the send:
     4  render: reusing the existing render on a retry, never re-rendering
     5  revalidate at wire time; re-check quiet hours
     6  send
-    7  classify the outcome into one of four typed states
+    7  classify the outcome into one of five typed states
 
 A retry of the same intent reuses the same delivery row, the same render and
 the same dedupe key. Re-rendering would let a retry say something the first
@@ -507,7 +507,9 @@ def dispatch_once(
         sender = default_sender(live=live)
 
     with session_factory() as session:
-        report.recovered = recover_leases(session, now=now)
+        # A sender that does not say it deduplicates is taken not to.
+        report.recovered = recover_leases(
+            session, now=now, idempotent=getattr(sender, "idempotent", False))
 
     with session_factory() as session:
         report.released = release_due_holds(

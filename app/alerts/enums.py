@@ -284,16 +284,25 @@ class ConfirmationRole(StrEnum):
 
 
 class SenderOutcome(StrEnum):
-    """The four transport outcomes that must be distinguished (mandate 16.7).
+    """The transport outcomes that must be distinguished (mandate 16.7).
 
-    The legacy `SmsResult(ok: bool)` collapses the last two, which is precisely
-    the collapse that produces duplicate SMS.
+    The legacy `SmsResult(ok: bool)` collapses a definite failure with an
+    ambiguous one, which is precisely the collapse that produces duplicate SMS.
+    The two ambiguous outcomes differ in whether a repeat could be a second
+    message (owner decision D2f):
+
+    AMBIGUOUS_AFTER_TRANSMISSION: the request may have landed and nothing can
+        say whether it did - terminal, never retried.
+    AMBIGUOUS_RETRY_SAME_KEY: the request may have landed, and the provider
+        deduplicates its idempotency key, so a repeat under the same key
+        returns the stored verdict instead of sending again.
     """
 
     CONFIRMED_SUCCESS = "CONFIRMED_SUCCESS"
     DEFINITE_TRANSIENT_NOT_ACCEPTED = "DEFINITE_TRANSIENT_NOT_ACCEPTED"
     DEFINITE_PERMANENT_REJECTION = "DEFINITE_PERMANENT_REJECTION"
     AMBIGUOUS_AFTER_TRANSMISSION = "AMBIGUOUS_AFTER_TRANSMISSION"
+    AMBIGUOUS_RETRY_SAME_KEY = "AMBIGUOUS_RETRY_SAME_KEY"
 
 
 class RenderSource(StrEnum):

@@ -9,7 +9,8 @@ to say it". Three things it has to get right:
   * **an expired lease recovers differently depending on how far it got.**
     Expired with no `request_started_at` means nothing was written — retry.
     Expired while `SENDING` means the request may have reached the provider —
-    that becomes `UNKNOWN`, never a retry;
+    retried under the same idempotency key where the transport deduplicates it
+    (iMessage), and `UNKNOWN`, never a retry, where it cannot (sipgate);
   * **members are revalidated immediately before sending.** An episode that
     resolved while the message sat in the queue is dropped, and a delivery with
     no live members left is cancelled rather than sent.
@@ -456,12 +457,17 @@ def release(session: Session, delivery: AlertDelivery, *, now: datetime) -> None
     delivery.updated_at = now
 
 
-def recover_leases(session: Session, *, now: datetime) -> dict[str, int]:
+def recover_leases(session: Session, *, now: datetime,
+                   idempotent: bool) -> dict[str, int]:
     """Sweep expired leases (mandate 16.6).
 
-    The two cases are NOT the same:
+    The cases are NOT the same, and for a request that started the transport
+    decides (`idempotent`, the sender's flag; owner decision D2f):
       LEASED with no request_started_at -> nothing was written -> RETRY_DUE
-      stale SENDING                     -> the request may have landed -> UNKNOWN
+      stale SENDING, idempotent         -> RETRY_DUE: the retry repeats the
+                                           delivery's key, and the provider
+                                           answers with its stored verdict
+      stale SENDING, otherwise          -> the request may have landed -> UNKNOWN
     """
     retried = 0
     unknown = 0
@@ -475,14 +481,18 @@ def recover_leases(session: Session, *, now: datetime) -> dict[str, int]:
     for row in rows:
         if (_aware(row.lease_until) or now) > now:
             continue
-        if row.transport_status == TransportStatus.LEASED and row.request_started_at is None:
+        pre_wire = (row.transport_status == TransportStatus.LEASED
+                    and row.request_started_at is None)
+        if pre_wire or idempotent:
             row.transport_status = TransportStatus.RETRY_DUE
             row.lease_owner = None
             row.lease_until = None
             row.updated_at = now
             retried += 1
             _event(session, now, action="delivery_lease_recovered",
-                   delivery_id=row.delivery_id, detail="expired before transmission")
+                   delivery_id=row.delivery_id,
+                   detail=("expired before transmission" if pre_wire else
+                           "expired in flight; retried under the same idempotency key"))
         else:
             mark_unknown(session, row, now=now,
                          reason="lease expired while the request was in flight")
