@@ -6,10 +6,10 @@ A machine-readable CycloneDX SBOM should be generated per build in CI (Wave 2). 
 
 | Component | Kind | Version / id | Provenance | Notes |
 |---|---|---|---|---|
-| Operator-configured OpenAI-compatible gateway | hosted inference route | host-only `LLM_MODEL` value | direct HTTPS/SSE through existing `httpx`; no provider SDK | **Opaque floating route → B-13.** The requested route is not proof of which underlying provider/model served it, and gateway-side failover is not observable here. Runtime consumers are the ≤300-char judgment and ≤160-char digest. The non-P1 fragment-code selector is a dormant future Stage-7/A-B component not invoked by the dispatcher. |
+| Operator-configured OpenAI-compatible gateway | hosted inference route | host-only `LLM_MODEL` value | direct HTTPS/SSE through existing `httpx`; no provider SDK | **Opaque floating route → B-13.** The requested route is not proof of which underlying provider/model served it, and gateway-side failover is not observable here. Runtime consumers are the ≤300-char judgment and ≤160-char digest. |
 | Fine-tuned / custom weights | — | none | — | No fine-tuning, no adapters, no local weights (C-21 N/A). |
 | Embedding model / vector store | — | none | — | No RAG/embeddings (C-32/C-22/B-33 N/A). |
-| Prompt templates | prompt artifact | `app/engine/judgment.py:PROMPT_TEMPLATE`, `app/message_engine/composer.py:prompt_for` (library `config/message_prompts.v1.json`), `app/alerts/llm_selector.py:SYSTEM_PROMPT` | version-controlled in git | Judgment/digest are runtime templates. The selector template is dormant Stage-7/A-B work. Inputs are computed numbers/enums, a bounded prior LLM judgment in the digest, and preapproved codes; no user, scraped, or other external free text. |
+| Prompt templates | prompt artifact | `app/engine/judgment.py:PROMPT_TEMPLATE`, `app/message_engine/composer.py:prompt_for` (library `config/message_prompts.v1.json`) | version-controlled in git | Judgment/digest are runtime templates. Inputs are computed numbers/enums and a bounded prior LLM judgment in the digest; no user, scraped, or other external free text. |
 | Training/tuning datasets | — | none | — | Nothing is trained/tuned (C-21 N/A). |
 | Evaluation datasets | golden fixtures | `tests/test_golden_fixture.py`, `tests/conftest.py` | version-controlled | Deterministic-score regression, frozen seed 20260711. |
 
