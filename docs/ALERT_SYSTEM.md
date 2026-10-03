@@ -583,8 +583,17 @@ refuses the pass before any sender exists
 (tests/test_alert_promotion.py::test_the_live_dispatch_job_refuses_an_unpromoted_candidate),
 while queued work goes out whichever registered ruleset planned it
 (tests/test_alert_holds.py::test_live_dispatch_sends_work_planned_under_an_unpromoted_ruleset).
-No code writes a REVOKED ruleset (production holds none), and production held
-no queued delivery when the gate went (read-only, 2026-10-03).
+Every live row is planned under the ruleset promoted at that moment:
+evaluation, the weekly digest and the admin send-test load through
+`load_active_for_mode`, so in live mode a ruleset that was never promoted
+plans nothing (tests/test_alert_api.py::test_a_live_send_test_is_planned_under_the_promoted_ruleset_only,
+tests/test_alert_digest.py::test_the_live_weekly_digest_is_planned_under_the_promoted_ruleset_only);
+a row planned under a ruleset since superseded was authorized when it was
+planned. A PROMOTED row authorizes live work whatever its evidence stamp:
+leaf's one PROMOTED row (rules v3.2.3, phrase set v3.5) was evidence-checked on
+2026-09-20, before the gate went. No code writes a REVOKED ruleset (production
+holds none), and production held no queued delivery when the gate went
+(read-only, 2026-10-03).
 
 ## 11b. The former Stage 2 blocker, resolved by named operator decisions
 

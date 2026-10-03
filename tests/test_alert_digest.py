@@ -1098,12 +1098,16 @@ def test_the_catch_up_does_not_look_into_another_namespace(monkeypatch):
     had live activity, learn something happened in them, and plan empty digests
     that consume the window keys the live job needs.
     """
+    from app.alerts.artifacts import load_active
     from app.jobs import alert_digest
+    from tests.conftest import register_promoted
 
     with session_scope() as session:
         rules_sha = _registered(session)
         _pending_item(session, rules_sha=rules_sha,
                       rule_id="regime.band_to_derisk", window="2026-W02")
+        # live mode plans under the promoted ruleset only (owner decision D2d)
+        register_promoted(session, load_active(session))
 
     # the item above belongs to a shadow episode; run the job as LIVE
     monkeypatch.setenv("ALERTS_MODE", "live")
@@ -1985,3 +1989,21 @@ def test_definitely_failed_digest_item_is_replanned_in_the_next_window():
         assert item.status == DigestItemStatus.PLANNED
         assert item.delivery_id == later.delivery_id
         assert item.last_error_code is None
+
+
+def test_the_live_weekly_digest_is_planned_under_the_promoted_ruleset_only(isolated_db, monkeypatch):
+    """#153 round 2, SOTA-A: the weekly digest job planned under the mode-blind
+    load_active, so in live mode an unpromoted candidate could plan live work.
+    It loads through load_active_for_mode: in live mode with nothing promoted
+    it refuses before planning (the job's wrapper heartbeats critical)."""
+    from app.alerts.errors import AlertingUnavailable
+    from app.config import get_settings
+    from app.jobs import alert_digest
+
+    monkeypatch.setenv("ALERTS_MODE", "live")
+    get_settings.cache_clear()
+    try:
+        with pytest.raises(AlertingUnavailable, match="PROMOTED"):
+            alert_digest.run_once(now=NOW)
+    finally:
+        get_settings.cache_clear()

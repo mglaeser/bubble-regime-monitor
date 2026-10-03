@@ -356,7 +356,7 @@ def admin_preview_render(response: Response,
 
 @router.post("/admin/alerts/send-test", summary="Queue an audited TEST delivery")
 def send_test(response: Response,
-              _: None = Depends(require_admin_key)) -> dict[str, Any]:
+              _: None = Depends(require_admin_key)) -> Any:
     """Create a TEST delivery for the dispatcher to send.
 
     TEST is the one delivery kind allowed zero members: it is about the
@@ -370,7 +370,7 @@ def send_test(response: Response,
     admission, same classification. A test that bypassed the pipeline would
     prove something other than the thing the operator needs proven.
     """
-    from app.alerts.artifacts import load_active, register
+    from app.alerts.artifacts import load_active_for_mode, register
     from app.alerts.enums import (
         DeliveryKind,
         PlanningState,
@@ -384,8 +384,15 @@ def send_test(response: Response,
     settings = get_settings()
     now = datetime.now(UTC)
 
+    from app.alerts.errors import AlertingUnavailable
+
     with session_scope() as session:
-        artifacts = load_active(session)
+        # In live mode only the promoted ruleset plans live work (owner decision
+        # D2d): an unpromoted candidate is refused before anything is written.
+        try:
+            artifacts = load_active_for_mode(session, mode=settings.alerts_mode)
+        except AlertingUnavailable as exc:
+            return problem(503, "Live delivery unavailable", exc.redacted())
         # registered, because the delivery row references the ruleset by hash
         # and a foreign key is the wrong place to discover it was never stored
         register(session, artifacts, now=now, registered_by="admin-api")

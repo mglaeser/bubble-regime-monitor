@@ -528,9 +528,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Send Test Api V1 Admin Alerts Send Test Post",
-                  "type": "object"
+                  "title": "Response Send Test Api V1 Admin Alerts Send Test Post"
                 }
               }
             },
