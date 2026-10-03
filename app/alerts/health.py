@@ -21,7 +21,6 @@ from app.alerts.dto import AlertInput
 from app.alerts.enums import (
     PLANNING_STATE_PRECEDENCE,
     ConditionState,
-    DigestItemStatus,
     EpisodeStatus,
     EvaluationRunStatus,
     PlanningState,
@@ -505,8 +504,6 @@ _RECOVERY_MAX_SILENCE_S = 90 * 60
 #: Retention is daily; allow one missed-hour window without masking a missed
 #: day. The scheduler's own misfire grace is six hours.
 _RETENTION_MAX_SILENCE_S = 36 * 60 * 60
-#: Digest is weekly; health detects a missed week.
-_DIGEST_MAX_SILENCE_S = 8 * 24 * 60 * 60
 #: Recompute runs every four hours.  Ten hours permits two missed slots, the
 #: watchdog's 90-minute grace and ordinary timer jitter without allowing a
 #: dead evaluator to hide behind healthy dispatcher/watchdog heartbeats.
@@ -517,8 +514,8 @@ _CLOCK_SKEW_TOLERANCE_S = 60
 
 #: The schema this build expects. Health reports a FAULT when the live
 #: database is on any other revision, so this moves in the same PR as a
-#: migration - 0023 drops the manual retry and the replanning block (D2f).
-_ALERT_SCHEMA_REVISION = "0023"
+#: migration - 0024 drops the weekly digest's storage (D2a).
+_ALERT_SCHEMA_REVISION = "0024"
 _REQUIRED_PARTIAL_INDEXES = frozenset({
     "uq_alert_input_snapshot_id",
     "uq_alert_episode_open",
@@ -577,7 +574,6 @@ def health_projection(
         AlertDelivery.mode == mode,
         AlertDelivery.live_profile == profile,
     )
-    scoped_episode_ids = select(AlertEpisode.episode_id).where(*episode_scope)
 
     sqlite_info: dict[str, Any] = {}
     from sqlalchemy import text as _text
@@ -652,7 +648,7 @@ def health_projection(
     missing_required_unique_indexes = sorted(
         _REQUIRED_UNIQUE_INDEXES - unique_index_names)
 
-    from app.alerts.models import AlertComponentHeartbeat, AlertDigestItem
+    from app.alerts.models import AlertComponentHeartbeat
 
     heartbeats: dict[str, dict[str, Any]] = {
         row.component: {"last_heartbeat_at": iso(row.last_heartbeat_at),
@@ -675,7 +671,6 @@ def health_projection(
             _DISPATCHER_MIN_MAX_SILENCE_S,
             3 * max(1, int(settings.alerts_dispatch_poll_s)),
         ),
-        "digest": _DIGEST_MAX_SILENCE_S,
         "recovery": _RECOVERY_MAX_SILENCE_S,
         "sidecar_reconciliation": _RECOVERY_MAX_SILENCE_S,
         "retention": _RETENTION_MAX_SILENCE_S,
@@ -1078,14 +1073,6 @@ def health_projection(
                               AlertDelivery.transport_status == TransportStatus.UNKNOWN),
             "p1_enqueue_to_attempt_p95_ms": p1_latency_p95,
         },
-        "digest": {
-            "pending": _count(AlertDigestItem,
-                              AlertDigestItem.episode_id.in_(scoped_episode_ids),
-                              AlertDigestItem.status == DigestItemStatus.PENDING),
-            "unknown": _count(AlertDigestItem,
-                              AlertDigestItem.episode_id.in_(scoped_episode_ids),
-                              AlertDigestItem.status == DigestItemStatus.UNKNOWN),
-        },
         "inputs": {
             "captured": _count(AlertInputSnapshot),
             "reconstructed": _count(AlertInputSnapshot,
@@ -1102,7 +1089,6 @@ def health_projection(
             "sent_24h": current_budget_usage.sent_24h,
             "sent_168h": current_budget_usage.sent_168h,
             "queued_reservations": current_budget_usage.reserved,
-            "digest_168h": current_budget_usage.digest_168h,
         },
         "heartbeats": heartbeats,
         "sqlite": sqlite_info,

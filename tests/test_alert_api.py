@@ -112,7 +112,7 @@ def test_health_reports_mode_artifacts_and_sqlite(client):
     assert str(payload["sqlite"]["journal_mode"]).lower() == "wal"
     assert payload["sqlite"]["returning"]["insert"] is True
     assert payload["sqlite"]["returning"]["update"] is True
-    assert payload["schema"]["revision"] == "0023"
+    assert payload["schema"]["revision"] == "0024"
     assert payload["schema"]["quick_check"] == "ok"
     assert payload["schema"]["foreign_key_violations"] == 0
     assert payload["schema"]["missing_required_triggers"] == []
@@ -169,9 +169,9 @@ def test_health_names_a_retired_setting(client, monkeypatch):
 def test_a_live_send_test_is_planned_under_the_promoted_ruleset_only(client, monkeypatch):
     """#153 round 2, SOTA-A: with the planning-ruleset admission gone (owner
     decision D2d), live work must never be planned under a ruleset that was
-    not promoted. Evaluation, the weekly digest and the send-test all load
-    through load_active_for_mode: in live mode with nothing promoted the
-    send-test is refused - 503, nothing written."""
+    not promoted. Evaluation and the send-test both load through
+    load_active_for_mode: in live mode with nothing promoted the send-test is
+    refused - 503, nothing written."""
     from sqlalchemy import func, select
 
     from app.alerts.models import AlertDelivery
@@ -315,7 +315,6 @@ def test_health_scores_every_mandated_component(client):
     expected = {
         "dispatcher",
         "watchdog",
-        "digest",
         "recovery",
         "sidecar_reconciliation",
         "retention",
@@ -326,6 +325,33 @@ def test_health_scores_every_mandated_component(client):
         assert "present" in payload["components"][component]
         assert "healthy" in payload["components"][component]
         assert "reason" in payload["components"][component]
+
+
+def test_health_expects_no_weekly_digest(client):
+    """Owner decision D2a: the weekly digest job is deleted, and its heartbeat
+    expectation goes with it - else health turns critical eight days after the
+    deploy. The job's last heartbeat row, which the database keeps until the
+    table goes, is scored as nothing, and no digest count or digest budget is
+    projected."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.alerts.models import AlertComponentHeartbeat
+    from app.db import session_scope
+
+    with session_scope() as session:
+        session.add(AlertComponentHeartbeat(
+            component="digest",
+            last_heartbeat_at=datetime.now(UTC) - timedelta(days=9),
+            status="ok",
+            detail_json={"mode": "disabled", "live_profile": "default"},
+        ))
+
+    payload = client.get(
+        "/api/v1/alerts/health", headers={"X-API-Key": READ_KEY}).json()
+    assert "digest" not in payload["components"]
+    assert not any(condition.startswith("digest") for condition in payload["conditions"])
+    assert "digest" not in payload
+    assert "digest_168h" not in payload["budgets"]
 
 
 def test_health_fails_closed_when_an_active_evaluator_has_never_committed(
@@ -521,7 +547,6 @@ def test_health_counts_a_terminal_unknown_without_degrading(client, monkeypatch)
     components = (
         "dispatcher",
         "watchdog",
-        "digest",
         "recovery",
         "sidecar_reconciliation",
         "retention",

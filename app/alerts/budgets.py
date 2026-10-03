@@ -10,9 +10,6 @@ Two counts, deliberately different:
     concurrent workers from spending the same final slot without making every
     queued row wait on every other queued row.
 
-The weekly digest is reported in user load but does not consume the caps — it
-is one scheduled message the user opted into, not an interruption.
-
 **P1 is exempt from all of it.** `check_budget` refuses to even evaluate a P1,
 rather than evaluating one and happening to return True.
 """
@@ -27,7 +24,7 @@ from app.alerts.enums import DeliveryKind, TransportStatus
 WINDOW_24H = timedelta(hours=24)
 WINDOW_168H = timedelta(hours=168)
 
-#: Kinds that consume the non-P1 budget. DIGEST and TEST do not.
+#: Kinds that consume the non-P1 budget. TEST does not.
 BUDGETED_KINDS: frozenset[str] = frozenset({
     DeliveryKind.INITIAL, DeliveryKind.REMINDER, DeliveryKind.BUNDLE, DeliveryKind.STORM,
     DeliveryKind.WATCHDOG,
@@ -72,7 +69,6 @@ class BudgetUsage:
     sent_24h: int
     sent_168h: int
     reserved: int
-    digest_168h: int
 
     def with_reservation(self) -> tuple[int, int]:
         """Counts including in-flight reservations."""
@@ -93,7 +89,6 @@ class BudgetDecision:
             "sent_24h": self.usage.sent_24h,
             "sent_168h": self.usage.sent_168h,
             "reserved": self.usage.reserved,
-            "digest_168h": self.usage.digest_168h,
             "cap_24h": self.limits.cap_24h,
             "cap_168h": self.limits.cap_168h,
             "target_168h": self.limits.target_168h,

@@ -10,8 +10,8 @@ controls are implemented, and the committed ruleset is at Stage 3** (operator
 decision 2026-08-27; its replay evidence passes in CI, section 12).
 Sidecar capture is on (`ALERT_INPUT_CAPTURE`
 defaults true — it records evidence and nothing else) while `ALERTS_MODE`
-defaults `disabled`. Deterministic delivery, reminders, bundles, the weekly
-digest, watchdog/recovery and retention
+defaults `disabled`. Deterministic delivery, reminders, bundles,
+watchdog/recovery and retention
 are implemented and tested. They are not permission to send: a deployment
 delivers only with `ALERTS_MODE=live`, and live mode runs only the promoted
 artifact (section 11a2). The separate daily digest sends through its
@@ -227,7 +227,7 @@ currently ask for, and should not be added without deciding that it should.
 |---|---|---|---|---|
 | P1 | immediate SMS | **ignored** | **exempt** | 48h |
 | P2 | bundled SMS | `[07:00, 22:00)` Europe/Berlin | non-P1 caps | 24h |
-| P3 | weekly digest | n/a | digest channel | n/a |
+| P3 | API / log only (weekly digest deleted, D2a) | n/a | none | n/a |
 | P4 | API / log only | n/a | none | n/a |
 
 Quiet hours use IANA rules, so the release time moves with DST; exactly 22:00
@@ -358,7 +358,6 @@ bubblegauge alerts recover-leases --once
 bubblegauge alerts reconcile-sidecars
 bubblegauge alerts watchdog --once             # exit 2 = outage detected
 bubblegauge alerts dispatch --once             # one outbox pass
-bubblegauge alerts digest --window 2026-W33 --dry-run
 
 bubblegauge export snapshots --all --format parquet --out snapshots.parquet
 bubblegauge stats deltas --economic-observations --out deltas.json
@@ -377,12 +376,6 @@ divergence, rf3/rf4 and Faber transitions, non-fresh evidence, sidecar gaps,
 evaluation conflicts/timeouts, and UNKNOWN deliveries. Parquet export uses
 pyarrow, a regular dependency since 2026-09-28.
 
-`digest --dry-run` exercises artifact registration and the real digest planner
-inside one explicit transaction, then rolls back **all** registry, event,
-item, member, and delivery mutations. It never constructs a sender. Omitting
-`--dry-run` is an operator action against the configured alert namespace; an
-open ISO week is refused before its dedupe key can be consumed.
-
 `--promote` is the only way to promote from the CLI, and
 `POST /api/v1/admin/alerts/promote` the only way over HTTP. Nothing promotes as
 a side effect of a boot, a deploy or a validation run, and **promotion does not
@@ -394,8 +387,8 @@ In the same transaction, promotion resolves every open episode a different
 ruleset opened, in every mode (owner decision D2e): the episode becomes
 RESOLVED with the reason `RULESET_REPLACED`, and its `episode_resolved` event
 names the promoted ruleset as the cause (causation `RULESET`). Promotion plans
-no message. An alert still queued for such an episode is withdrawn at dispatch,
-and the weekly digest still counts the episodes that fired. A condition that is
+no message. An alert still queued for such an episode is withdrawn at dispatch.
+A condition that is
 still true opens a new episode at the next evaluation, under the promoted rules
 and from the start - a rule that needs two confirmations counts them again - and
 a repeat within the cooldown of an alert already sent stays suppressed, because
@@ -509,17 +502,14 @@ refuses to use it in production.
 | 0 | typed snapshot contract | **implemented and regression-gated** |
 | 1 | schema, sidecar capture, pure evaluation, CAS, read API, replay | **implemented** |
 | 2 | `[PIN]` calibration, replay budgets, mandatory-event fixtures | gate machinery is implemented; real calibration/mandatory-event artifacts remain operator evidence and are not invented |
-| 3 | deterministic P1/P2 delivery and weekly digest | planner, outbox, renderer, typed sender, dispatcher, reminders and digest are implemented; **this is the committed active stage** (operator decision 2026-08-27, section 11b), and its replay evidence passes |
+| 3 | deterministic P1/P2 delivery and weekly digest | planner, outbox, renderer, typed sender, dispatcher and reminders are implemented; the weekly digest is deleted (owner decision D2a, 2026-10-03, section 11c); **this is the committed active stage** (operator decision 2026-08-27, section 11b), and its replay evidence passes |
 | 4 | legacy daily-digest cutover | deleted with its switch (owner decision D2c, 2026-10-02): the daily digest is the message engine's product and is not retired. The gate's CLI never checked the switch - `alerts cutover apply` recorded the operator's intent and printed "set DAILY_SMS_ENABLED=false in the deployment environment", its one importer was that CLI, and the production database holds no cutover event (read-only, 2026-10-02) - and the `DAILY_SMS_ENABLED` alias, the cutover's one purpose, is gone (unset on the production host). The digest's transports decide; `/api/v1/alerts/health` names a digest without one |
 | 5 | constellations and bundled P2 | evaluators, dominance and atomic multi-member bundling are implemented and stage-gated |
 | 6 | EWMA / CUSUM | intentionally absent until immutable calibration and out-of-sample evidence exist |
-| 7 | P3 enrichment and LLM A/B review | the dormant code-only selector and the actionability evidence trail are deleted (owner decision D2b, 2026-10-02): the dispatcher never called the selector, and neither table ever held a row |
+| 7 | P3 enrichment and LLM A/B review | the dormant code-only selector and the actionability evidence trail are deleted (owner decision D2b, 2026-10-02): the dispatcher never called the selector, and neither table ever held a row. P3 itself is API and log only since the weekly digest went (owner decision D2a, 2026-10-03) |
 
-The weekly digest is a real scheduler job, with quiet-week liveness recorded by
-its durable component heartbeat,
-missed-window recovery and digest-item outcome reconciliation. Stage-5
-bundling is exercised by the
-planner, renderer and concurrency tests. Watchdog, dispatcher, digest,
+Stage-5 bundling is exercised by the
+planner, renderer and concurrency tests. Watchdog, dispatcher,
 recovery, sidecar reconciliation and retention each expose a scored component
 heartbeat with a cadence-appropriate freshness limit. The evaluator is scored
 separately from its durable evaluation rows: in shadow or live mode the latest
@@ -530,7 +520,7 @@ reports the evaluator as not required.
 The health projection also reports the latest and p95 evaluation duration, P1
 enqueue-to-provider-attempt p95, rolling LLM cap/call/fallback evidence,
 missing typed sidecars, overdue or malformed outbox holds, the UNKNOWN
-deliveries and digest items, SQLite WAL/foreign-key/busy-timeout/RETURNING
+deliveries, SQLite WAL/foreign-key/busy-timeout/RETURNING
 capabilities, the Alembic revision, required partial indexes and immutability
 triggers, and live artifact/promotion agreement. Missing scheduler components
 or required schema objects are critical; sidecar gaps, overdue holds and P1
@@ -638,10 +628,9 @@ ruleset revoked after the listing is not claimed
 already claimed goes out. To stop live sends, set ALERTS_MODE to anything but
 `live`, or add a silence.
 Live work is also planned under the ruleset promoted at that moment:
-evaluation, the weekly digest and the admin send-test load through
+evaluation and the admin send-test load through
 `load_active_for_mode`, so in live mode a ruleset that was never promoted
-plans nothing (tests/test_alert_api.py::test_a_live_send_test_is_planned_under_the_promoted_ruleset_only,
-tests/test_alert_digest.py::test_the_live_weekly_digest_is_planned_under_the_promoted_ruleset_only);
+plans nothing (tests/test_alert_api.py::test_a_live_send_test_is_planned_under_the_promoted_ruleset_only);
 a row planned under a ruleset since superseded was authorized when it was
 planned. Every promoted ruleset was promoted through the service: migration
 0021 withdrew any promotion made before promotion checked evidence - it
@@ -683,57 +672,31 @@ takes over now"):
 Superseded by owner decision D2d (2026-10-03): neither promotion nor the
 runtime reads the evidence or compares the caps with it. The CI replay gate is
 the evidence, replayed under the default caps. And by owner decision D2f
-(2026-10-03): an UNKNOWN delivery blocks nothing (section 11d).
+(2026-10-03): an UNKNOWN delivery blocks nothing (section 11d). And by owner
+decision D2a (2026-10-03): the weekly digest, its liveness event with it, is
+deleted (section 11c).
 
-## 11c. The weekly digest
+## 11c. The weekly digest, deleted
 
-The product this replaces sent one message every day at 10:00 whether or not
-anything had happened. The replacement is event alerts **plus** a weekly
-digest — and the digest half matters more than it looks, because the Stage 4
-cutover switches the daily message off.
-
-It runs Monday 08:30 Europe/Berlin and digests the window that has **closed**,
-never the one in progress. One delivery per window, identified by the window
-key itself, so a retried job, a restarted scheduler and a manual run all
-converge on the same single message rather than three.
-
-**A quiet week records liveness evidence, not a provider intent.** The
-scheduler must still distinguish a genuinely quiet week from a digest job that
-died, but the mandate also makes `TEST` the only delivery kind allowed zero
-members. The `digest` component heartbeat is the current proof-of-life and
-health turns a stale/missing heartbeat critical; an append-only
-`digest_window_observed_quiet` scheduler event preserves the exact closed
-window in the audit trail. No empty `DIGEST` row is fabricated, no quiet event
-can count as one of Stage 4's successfully sent weekly digests, and an event
-arriving late can still use that window because no delivery dedupe key was
-burned. The reviewed `DIGEST_QUIET` template remains deterministically
-validated, but it is not authority to bypass the member invariant.
-
-Two consequences worth knowing:
-
-* Every digest that reaches the provider has at least one represented episode
-  member. A resolved episode remains valid retrospective evidence; a silenced
-  member does not. Resolved members therefore remain eligible for silence
-  checks until the provider intent is terminal, and the wire-time gate compares
-  this exact represented set rather than only episodes still firing. The
-  dispatcher and the `alert_delivery_requires_member` trigger independently
-  enforce the transition-time member guard; the
-  `alert_delivery_insert_requires_member` trigger closes the direct-insert
-  bypass, while only `TEST` may carry zero rows.
-* A pending DIGEST's represented member set and its attached digest-item ledger
-  are one-to-one. Every represented or resolved member has exactly one
-  `PLANNED` item; every silenced member has exactly one `CANCELLED` item; and no
-  attached item may lack a member. Revalidation checks the complete graph
-  before mutating it. Any missing, duplicate or mismatched binding cancels the
-  provider intent as `DIGEST_MEMBER_ITEM_UNBOUND`, before rendering or sending,
-  rather than deriving a count from whichever side still happens to exist.
-* The digest reports a **count**, not a sample. One SMS is 160 septets and a
-  week of events does not fit; a message quietly containing the first three of
-  twelve would be lying about the other nine. The episodes are on record as
-  delivery members for anyone who needs to know which ones.
-
-Per mandate 9.2 the digest is reported in user load but does **not** consume
-the non-P1 budget: it is a scheduled summary, not an interruption.
+Owner decision D2a (2026-10-03) deleted the weekly P3 digest. It could never
+send: all 17 P3 rules (14 rules and 3 constellations) are disabled in every
+committed revision of the ruleset and gated to Stage 7 (`override.first_flag`
+to Stages 5-7), so no P3 episode could activate and no digest item could be
+written. Its scheduler job, its `alerts digest` command and the `digest`
+component heartbeat went with it, so health no longer expects that heartbeat.
+A P3 activation is API and log only, like a P4 (section 6): the planner notes
+it and plans nothing. `DIGEST` remains stored delivery-kind vocabulary
+(`ck_alert_delivery_kind` admits it). Migration 0024 drops the
+`alert_digest_item` table and the `digest` heartbeat row, and takes the
+digest's branch out of the member trigger: a member dropped before the send
+(resolved, say) no longer represents a `DIGEST` row, which, like every kind but
+TEST, needs a member that was not dropped (section 7). It first cancels every
+`DIGEST` delivery that has not gone out (queued, due for a retry or leased) as
+`WEEKLY_DIGEST_REMOVED`, so none reaches the wire, and ends one in flight
+`UNKNOWN`, so no `DIGEST` row is left that could move to `SENDING` or `SENT`
+(tests/test_migrations.py::test_0024_cancels_a_weekly_digest_still_queued), and
+it refuses while the table holds a row. The daily digest is a different
+message and is unchanged.
 
 ## 11d. The audited admin surface
 
@@ -781,9 +744,9 @@ the notification memory, so its delay counts from the instance's last
 confirmed send, and when that send is older than the delay, an episode whose
 first alert ended UNKNOWN is reminded at the next evaluation (while the
 instance has a reminder left). An UNKNOWN body and its events expire on the
-normal horizons (section 11a). Health counts UNKNOWN deliveries and digest
-items, and a dispatch pass whose send ends UNKNOWN reports its heartbeat
-critical; nothing awaits an operator. Production held no UNKNOWN delivery, no
+normal horizons (section 11a). Health counts UNKNOWN deliveries, and a
+dispatch pass whose send ends UNKNOWN reports its heartbeat critical; nothing
+awaits an operator. Production held no UNKNOWN delivery, no
 manual retry and no replanning block when they went (read-only, 2026-10-03).
 
 ## 11e. Render-time truth (mandate 17.5)
@@ -886,6 +849,9 @@ Owner decision D2f (2026-10-03) bumps replay-summary schema `2 -> 3`: the
 summary's `unknown_blocks` and `p1_bypasses_of_unknown` went with the
 replanning block they counted. Both were 0 in every run, and no other number
 moved.
+
+Owner decision D2a (2026-10-03) removes the summary's `digest_items` with the
+weekly digest. It was 0 in every run, and no other number moved.
 
 `tests/fixtures/alert_replay_history.json` declares the **arc** — twenty
 recompute slots through hold → trim → de-risk → recovery, with two blind slots

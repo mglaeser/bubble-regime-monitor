@@ -38,7 +38,6 @@
       "deliveries_planned": 0,
       "deliveries_sent": 0,
       "detection_times_slots": {},
-      "digest_items": 0,
       "episodes_activated": 2,
       "episodes_by_bucket": {
         "ops": 2
@@ -87,7 +86,7 @@
       "notification_planning_ran": false,
       "p1_total": 0,
       "passed": true,
-      "schema_version": 3,
+      "schema_version": 4,
       "suppressions_by_reason": {},
       "transient_one_snapshot_band_p1": 1,
       "window_first": "2026-07-10T02:00:00+00:00",
@@ -114,7 +113,6 @@
         "cov-faber-out-high-risk": 8,
         "cov-rf4-persistent": 12
       },
-      "digest_items": 0,
       "episodes_activated": 19,
       "episodes_by_bucket": {
         "constellation": 2,
@@ -177,7 +175,7 @@
       "notification_planning_ran": true,
       "p1_total": 5,
       "passed": true,
-      "schema_version": 3,
+      "schema_version": 4,
       "suppressions_by_reason": {
         "DATA_QUALITY_GUARD": 5,
         "SUPERSEDED": 4
@@ -207,7 +205,6 @@
         "cov-faber-out-high-risk": 8,
         "cov-rf4-persistent": 12
       },
-      "digest_items": 0,
       "episodes_activated": 19,
       "episodes_by_bucket": {
         "constellation": 2,
@@ -272,7 +269,7 @@
       "notification_planning_ran": true,
       "p1_total": 5,
       "passed": true,
-      "schema_version": 3,
+      "schema_version": 4,
       "suppressions_by_reason": {
         "DATA_QUALITY_GUARD": 5,
         "SUPERSEDED": 4

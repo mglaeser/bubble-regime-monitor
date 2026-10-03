@@ -298,33 +298,3 @@ def test_dispatch_does_not_reserve_for_a_later_ready_delivery():
 
     assert (usage.sent_24h, usage.reserved) == (2, 0)
     assert check_budget(2, usage, LIMITS).allowed is True
-
-
-def test_the_digest_is_counted_apart_from_the_market_cap():
-    from app.alerts.outbox import planner_budget_usage
-
-    episode_id = _prepare_graph()
-    with session_scope() as session:
-        episode = session.get(AlertEpisode, episode_id)
-        assert episode is not None
-        _add_delivery(
-            session,
-            episode,
-            status=TransportStatus.SENT,
-            planning_state=PlanningState.NONE,
-            sent_at=NOW - timedelta(hours=1),
-        )
-        _add_delivery(
-            session,
-            episode,
-            status=TransportStatus.SENT,
-            planning_state=PlanningState.NONE,
-            kind=DeliveryKind.DIGEST,
-            sent_at=NOW - timedelta(hours=1),
-        )
-        session.flush()
-        usage = planner_budget_usage(
-            session, mode="shadow", live_profile="default", now=NOW)
-
-    assert usage.sent_168h == 1
-    assert usage.digest_168h == 1

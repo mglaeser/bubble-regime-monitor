@@ -8,8 +8,7 @@ the deployment beyond one worker remains a concurrency-review boundary.
 Order matters, and every step can still stop the send:
 
     1  claim (conditional UPDATE — exclusive without a table lock)
-    2  revalidate members: withdraw resolved live alerts and silenced members;
-       retain resolved digest members as retrospective evidence
+    2  revalidate members: withdraw resolved and silenced members
     3  budget recheck: the AUTHORITATIVE count, immediately before sending
     4  render: reusing the existing render on a retry, never re-rendering
     5  revalidate at wire time; re-check quiet hours
@@ -29,19 +28,18 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.alerts.artifacts import load_by_hash
 from app.alerts.budgets import BUDGETED_KINDS, LIMITS, check_budget
 from app.alerts.canonical import new_ulid
-from app.alerts.digest import render_digest_body
 from app.alerts.enums import (
     DeliveryKind,
     Priority,
     RenderSource,
 )
-from app.alerts.errors import DigestBindingError, RenderRejected, sanitize
+from app.alerts.errors import RenderRejected, sanitize
 from app.alerts.models import (
     AlertDelivery,
     AlertDeliveryMember,
@@ -348,8 +346,7 @@ def planning_phrase_set(session: Any, delivery: AlertDelivery,
         .order_by(AlertDeliveryMember.included_at)
     ).all()
     if not rows:
-        # TEST is the sole memberless provider intent; quiet digest runs retain
-        # heartbeat/event evidence and create no delivery.  A TEST still has
+        # TEST is the sole memberless provider intent. A TEST still has
         # planned text: the RULESET it was planned under names the exact phrase
         # set whose reviewed bytes must be used. Falling back to the running set
         # would permit a transport probe queued before a deploy to be silently
@@ -357,11 +354,9 @@ def planning_phrase_set(session: Any, delivery: AlertDelivery,
         return _phrase_set_of_ruleset(session, delivery.planning_rules_sha256,
                                       fallback)
 
-    # A digest's reviewed body comes from the ruleset that planned the weekly
-    # provider intent, but its members are historical evidence and each keeps
-    # its own episode-origin artifact. Mixed *valid* origins are therefore
-    # expected in one retrospective. Validate every pair independently before
-    # resolving the delivery-level digest wording.
+    # Each member keeps the phrase artifact of the ruleset its episode was
+    # planned under. Validate every pair against that origin before resolving
+    # the delivery's wording.
     for member_version, member_digest, rules_sha in rows:
         origin = load_by_hash(session, rules_sha)
         if origin is None \
@@ -371,9 +366,6 @@ def planning_phrase_set(session: Any, delivery: AlertDelivery,
                       delivery_id=delivery.delivery_id,
                       rules_sha256=str(rules_sha)[:12])
             return None
-    if delivery.delivery_kind == DeliveryKind.DIGEST:
-        return _phrase_set_of_ruleset(
-            session, delivery.planning_rules_sha256, fallback)
 
     phrase_pairs = {(str(version), str(digest)) for version, digest, _rules in rows}
     if len(phrase_pairs) != 1:
@@ -406,25 +398,6 @@ def planning_phrase_set(session: Any, delivery: AlertDelivery,
     return validate_phrase_set(registered.canonical_json)
 
 
-def _digest_represented_member_ids(
-    session: Session,
-    delivery_id: str,
-) -> list[str]:
-    """Episode ids represented by a digest count, in stable order.
-
-    Resolved episodes remain part of a retrospective.  A silence is different:
-    even reporting the aggregate count discloses suppressed activity, so those
-    members are excluded.
-    """
-    return list(session.execute(
-        select(AlertDeliveryMember.episode_id).where(
-            AlertDeliveryMember.delivery_id == delivery_id,
-            func.coalesce(AlertDeliveryMember.drop_reason, "")
-            != "SILENCED_BEFORE_SEND",
-        ).order_by(AlertDeliveryMember.episode_id)
-    ).scalars().all())
-
-
 def _frozen_render_membership_changed(
     session: Session,
     delivery: AlertDelivery,
@@ -433,11 +406,9 @@ def _frozen_render_membership_changed(
     """Whether immutable prose no longer matches this provider intent.
 
     Revalidation runs on every attempt, but a final render never changes.  A
-    real-time member being added, resolved, or silenced changes its represented
-    set; for a retrospective DIGEST, addition or silence changes it while
-    resolution does not.  Either way the represented-member ledger is exact,
-    not advisory; missing or malformed evidence fails closed for every
-    non-TEST delivery.
+    member being added, resolved, or silenced changes its represented set.
+    The represented-member ledger is exact, not advisory; missing or
+    malformed evidence fails closed for every non-TEST delivery.
     """
     if delivery.delivery_kind == DeliveryKind.TEST:
         return False
@@ -447,18 +418,11 @@ def _frozen_render_membership_changed(
             AlertDeliveryMember.delivery_id == delivery.delivery_id,
         )
     ).scalars().all()
-    if delivery.delivery_kind == DeliveryKind.DIGEST:
-        expected = {
-            member.episode_id
-            for member in members
-            if member.drop_reason != "SILENCED_BEFORE_SEND"
-        }
-    else:
-        expected = {
-            member.episode_id
-            for member in members
-            if member.dropped_at is None
-        }
+    expected = {
+        member.episode_id
+        for member in members
+        if member.dropped_at is None
+    }
 
     raw = (render.validation_results or {}).get("represented_member_ids")
     if not isinstance(raw, list) or not all(isinstance(value, str) for value in raw):
@@ -543,30 +507,12 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
             return
 
         # -- 2: revalidate ------------------------------------------------
-        try:
-            members = revalidate_members(session, delivery, now=now)
-        except DigestBindingError:
-            cancel(
-                session,
-                delivery,
-                now=now,
-                reason=DigestBindingError.code,
-            )
-            report.cancelled += 1
-            return
-        represented_member_ids = (
-            _digest_represented_member_ids(session, delivery_id)
-            if delivery.delivery_kind == DeliveryKind.DIGEST
-            else []
-        )
-        rendered_member_ids = (
-            frozenset(represented_member_ids)
-            if delivery.delivery_kind == DeliveryKind.DIGEST
-            else frozenset(member.episode_id for member in members)
-        )
+        members = revalidate_members(session, delivery, now=now)
+        rendered_member_ids = frozenset(member.episode_id for member in members)
         # Mandate 21.3: TEST is the ONLY memberless delivery kind.  This check
-        # also retires invalid DIGEST rows queued before the database trigger
-        # was corrected; no legacy provider intent bypasses the runtime guard.
+        # also retires a memberless row of a kind no longer planned (DIGEST,
+        # queued before the database trigger was corrected); no legacy provider
+        # intent bypasses the runtime guard.
         if not rendered_member_ids and delivery.delivery_kind != DeliveryKind.TEST:
             cancel(session, delivery, now=now, reason="ALL_MEMBERS_RESOLVED")
             report.cancelled += 1
@@ -620,10 +566,9 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
             # under, resolved from the registry. That is why the registry
             # stores the bytes: a delivery queued before a deploy must render
             # with the phrases it was planned against, not with whatever this
-            # process happens to hold. Resolving it for digests only — which is
-            # where I started — left the market path building a body from one
-            # phrase set and recording another beside it, so the record could
-            # not explain its own text.
+            # process happens to hold. Resolving it for one kind only left the
+            # market path building a body from one phrase set and recording
+            # another beside it, so the record could not explain its own text.
             render_phrases = planning_phrase_set(session, delivery, phrase_set)
             if render_phrases is None:
                 # The reviewed text this message was planned against cannot be
@@ -648,28 +593,6 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
                     report.render_failed += 1
                     return
                 context = RenderContext(members=[])
-            elif delivery.delivery_kind == DeliveryKind.DIGEST:
-                context = RenderContext(members=[])
-                # NOT len(members), and not every planned member either.
-                #
-                # Revalidation drops members for two different reasons, and the
-                # digest treats them differently because they mean opposite
-                # things. RESOLVED_BEFORE_SEND means it happened and then
-                # cleared — a weekly retrospective counts that, or a week where
-                # everything fired and resolved would read as quiet. SILENCED
-                # means the operator asked not to be told, and a count is still
-                # telling: "3 Ereignisse" when two were silenced discloses
-                # exactly what the silence was for.
-                #
-                # So: everything planned, less what was deliberately suppressed.
-                try:
-                    result = render_digest_body(render_phrases,
-                                                item_count=len(represented_member_ids))
-                except RenderRejected as exc:
-                    mark_render_failed(session, delivery, now=now,
-                                       reason=exc.redacted())
-                    report.render_failed += 1
-                    return
             else:
                 try:
                     context, origin_rules = _build_context(
@@ -705,15 +628,6 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
                     report.render_failed += 1
                     return
             validation_results = dict(result.validation)
-            if delivery.delivery_kind == DeliveryKind.DIGEST:
-                # A count-based body still needs an exact membership ledger.
-                # Without it a retry cannot prove that late items or silences
-                # did not change what the frozen number represents.
-                validation_results.update({
-                    "all_members_represented": True,
-                    "represented_member_ids": represented_member_ids,
-                    "digest_item_count": len(represented_member_ids),
-                })
             pending_render = AlertRender(
                 render_id=new_ulid(utc_ms(now)),
                 delivery_id=delivery_id,
@@ -746,27 +660,13 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
         # active.
         membership_now = _utc_clock_value(clock)
         attempt_now = max(attempt_now, membership_now)
-        try:
-            wire_members = revalidate_members(
-                session,
-                delivery,
-                now=membership_now,
-                recorded_at=attempt_now,
-            )
-        except DigestBindingError:
-            cancel(
-                session,
-                delivery,
-                now=attempt_now,
-                reason=DigestBindingError.code,
-            )
-            report.cancelled += 1
-            return
-        wire_member_ids = (
-            frozenset(_digest_represented_member_ids(session, delivery_id))
-            if delivery.delivery_kind == DeliveryKind.DIGEST
-            else frozenset(member.episode_id for member in wire_members)
+        wire_members = revalidate_members(
+            session,
+            delivery,
+            now=membership_now,
+            recorded_at=attempt_now,
         )
+        wire_member_ids = frozenset(member.episode_id for member in wire_members)
         if wire_member_ids != rendered_member_ids:
             if rendered_member_ids and not wire_member_ids:
                 cancel(
@@ -799,8 +699,6 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
                         "before the wire"
                     )
                     return
-                # A frozen digest still truthfully counts a member that
-                # resolved during rendering; only silence changes disclosure.
             else:
                 # The render is not in the session yet.  Returning the lease to
                 # READY discards it and lets the next pass rebuild from the

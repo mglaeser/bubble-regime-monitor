@@ -14,7 +14,7 @@ Layering (enforced by tests, not convention):
               -> no Session, no datetime.now(), no sipgate, no LLM gateway
 
   impure      repository, input_builder, dispatcher, sender, watchdog,
-              digest, recovery, health
+              recovery, health
 
 Nothing here is wired into scoring. Nothing here sends anything until an
 operator promotes artifacts and flips ALERTS_MODE by hand.
