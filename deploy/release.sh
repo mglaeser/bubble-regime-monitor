@@ -42,6 +42,12 @@ trap 'die "release failed at line $LINENO"' ERR
 running() {
   podman container inspect -f "{{if .State.Running}}{{index .Config.Labels \"$LABEL\"}}{{end}}" "$CONTAINER" 2>/dev/null || true
 }
+# The commit the LAST container carried, running or exited: what a deploy
+# replaces, for the deploy note (#150 round 10: with the service down, the
+# running commit is empty, and a stand-in base understated the change).
+last() {
+  podman container inspect -f "{{index .Config.Labels \"$LABEL\"}}" "$CONTAINER" 2>/dev/null || true
+}
 
 # Only as the unit's main process: systemd runs one instance of a oneshot at a
 # time, and stopping it stops the build with it (MainPID is
@@ -74,6 +80,33 @@ git merge --ff-only --no-overwrite-ignore -q "$REMOTE"
 # directory is systemd's, created with the unit and removed when it ends.
 mkdir -p "$RUNTIME_DIRECTORY/src"
 git archive "$TARGET" | tar -x -C "$RUNTIME_DIRECTORY/src"
+# The deploy note (app/services/deploy_note.py) travels in the image: what this
+# release changes - from the commit the last container carried, running or
+# exited, to main's: the changed paths and the commits' titles and
+# descriptions - written into the build context, which the Containerfile
+# copies whole, so each image carries its own note. When the release cannot
+# name that commit - no container at all, or one off main's history - the
+# image carries no note: a guessed range could understate the change, and a
+# message may be missing, never wrong (#150 round 10). Nothing of the note
+# passes through data/, the container's volume: a host write there could
+# follow a link the container planted (#150 round 2), and a note handed over
+# there could be deleted under a newer one (#150 round 3). Whatever the commit
+# itself put under the note's name - git exports a tracked symlink as a
+# symlink - goes first, so no write follows it. The paths and the commits are
+# git's own -z output, each ended or separated by a NUL, the one byte neither
+# a path nor a commit message can hold (#150 round 4). A rename is listed as
+# its old path and its new one: git names a detected rename by the new path
+# alone, and the likelihood matches the listed scoring files exactly (#150
+# round 7).
+base="$(last)"
+note="$RUNTIME_DIRECTORY/src/deploy-note"
+rm -rf "$note"
+if [[ -n "$base" && "$base" != "$TARGET" ]] && git merge-base --is-ancestor "$base" "$TARGET" 2>/dev/null; then
+  mkdir "$note"
+  printf '%s %s %s\n' "$base" "$TARGET" "$(git rev-list --count "$base..$TARGET")" > "$note/range"
+  git diff --name-only --no-renames -z "$base" "$TARGET" > "$note/files"
+  git log -z --format='%H%n%s%n%b' "$base..$TARGET" > "$note/log"
+fi
 podman build --label "$LABEL=$TARGET" -t "$IMAGE:$TARGET" \
   -f "$RUNTIME_DIRECTORY/src/Containerfile" "$RUNTIME_DIRECTORY/src"
 
@@ -134,6 +167,17 @@ until c=$(curl -q -fsS --noproxy '*' --max-time 5 -o /dev/null -w '%{http_code}'
 done
 [[ "$(running)" == "$TARGET" ]] \
   || die "$SERVICE answers but runs $(running | cut -c1-7), not ${TARGET:0:7}: fix forward"
+
+# The deploy note (app/services/deploy_note.py), announced once per release:
+# the release is the one thing that knows a deploy happened. Inside a
+# container a first run, a restart and a hand rollback look alike, and every
+# record of runs had a window (#150 rounds 6-11); a restart, a reboot or a
+# hand rollback never runs this script, so none of them announces anything.
+# Run inside the new container, which carries its own note, after the service
+# answers on the new commit. Best effort: a note that is not sent fails no
+# release.
+timeout 300 podman exec "$CONTAINER" python -m app.services.deploy_note \
+  || printf '==> deploy note not sent\n' >&2
 
 # The five newest commit tags stay, for a hand rollback (the docs); older ones
 # go by name and without -f, so an image a container uses is never removed
