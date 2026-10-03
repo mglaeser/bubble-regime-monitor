@@ -350,9 +350,10 @@ def run_evaluation(
             # check sees it) or waits for this transaction (#159 round 2).
             if session.bind is not None and session.bind.dialect.name == "sqlite":
                 session.execute(text("BEGIN IMMEDIATE"))
-            # The lock may have waited: an apply past the run's budget writes
-            # nothing (#159 round 5).
-            deadline.check("apply")
+            # The budget bounds the evaluation above, not this apply: it commits
+            # what the evaluation decided, as one transaction under the write
+            # lock, and the state compare-and-set and the live check below keep
+            # it correct whatever the clock says (#159 rounds 5 and 6).
             # A live evaluation applies only while its ruleset is still the
             # promoted one: a promotion that committed after this run loaded
             # its rules supersedes them, and nothing is applied (#159 round 1).
@@ -449,14 +450,6 @@ def run_evaluation(
             ).scalars().all():
                 item.status = RulesetItemStatus.EVALUATED
                 item.instances_evaluated = len(planned)
-    except EvaluationDeadlineExceeded as exc:
-        # Checked before the first write: NOTHING was applied.
-        _finish(session_factory, evaluation_id, EvaluationRunStatus.TIMED_OUT, now,
-                started, error=exc)
-        return EvaluationOutcome(evaluation_id=evaluation_id,
-                                 status=EvaluationRunStatus.TIMED_OUT,
-                                 input_identity=alert_input.input_identity,
-                                 error_code=exc.code, error_message=sanitize(exc.message))
     except EvaluationConflict as exc:
         # The transaction has already rolled back: NOTHING was applied.
         _finish(session_factory, evaluation_id, EvaluationRunStatus.CONFLICT, now,
