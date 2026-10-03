@@ -17,7 +17,7 @@ import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query, Request, Response
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import and_, exists, or_, select
 
@@ -43,14 +43,31 @@ from app.config import get_settings
 from app.db import session_scope
 from app.security import READ_RATE_LIMIT, limiter, require_admin_key
 
-
-def _no_store(response: Response) -> None:
-    """Every alert response is the operator's and current, so nothing caches
-    it: with the ETags gone (owner decision D3c), each answer says so."""
-    response.headers["Cache-Control"] = "no-store"
+router = APIRouter(prefix="/api/v1/alerts", tags=["alerts"])
 
 
-router = APIRouter(prefix="/api/v1/alerts", tags=["alerts"], dependencies=[Depends(_no_store)])
+class NoStore:
+    """Every answer under /api/v1/alerts - data or error - is the operator's
+    and current, so nothing caches it (owner decision D3c). An ASGI
+    middleware, because a dependency's headers never reach the response an
+    exception or a validation error produces (#165 round 1)."""
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] != "http" or not scope["path"].startswith(router.prefix):
+            await self.app(scope, receive, send)
+            return
+
+        async def send_no_store(message: Any) -> None:
+            if message["type"] == "http.response.start":
+                headers = [(k, v) for k, v in message.get("headers", [])
+                           if k.lower() != b"cache-control"]
+                message = {**message, "headers": [*headers, (b"cache-control", b"no-store")]}
+            await send(message)
+
+        await self.app(scope, receive, send_no_store)
 
 MAX_PAGE = 500
 CURSOR_VERSION = "v2"
