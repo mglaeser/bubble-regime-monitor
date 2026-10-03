@@ -675,11 +675,11 @@ class TestTransportSelection:
 
     def test_explicit_stage4_toggle_disables_imessage_legacy_digest_too(
             self, isolated_db, monkeypatch):
-        """DAILY_SMS_ENABLED is the legacy-digest master cutover switch.
+        """DAILY_SMS_ENABLED is the daily digest's master switch.
 
         The old implementation applied ``false`` only to sipgate, so a fully
         configured iMessage digest remained scheduled after an operator had
-        performed the documented Stage-4 cutover.
+        switched the daily digest off.
         """
         monkeypatch.setenv("DAILY_SMS_ENABLED", "false")
         monkeypatch.setenv("IMESSAGE_ENABLED", "true")
