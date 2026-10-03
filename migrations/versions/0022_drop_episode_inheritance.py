@@ -43,6 +43,29 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # Live episodes the deleted continuation kept open under a ruleset that is
+    # no longer the promoted one end as a promotion would end them (#159
+    # round 2): their owners' rule state back to NORMAL, then the episode
+    # RESOLVED as RULESET_REPLACED, so the dispatcher withdraws their queued
+    # alerts. No event row is written; the episode carries the reason.
+    # Shadow episodes are left to the next shadow evaluation, which knows the
+    # current candidate. Production held none (read-only, 2026-10-03).
+    op.execute(
+        "UPDATE alert_rule_state SET condition_state = 'NORMAL', "
+        "last_known_condition_state = 'NORMAL', current_episode_id = NULL, "
+        "consecutive_true = 0, candidate_from_state = NULL, candidate_target_state = NULL, "
+        "candidate_started_input = NULL, candidate_expires_at = NULL, "
+        "candidate_ttl_policy = NULL, candidate_ttl_basis = NULL, "
+        "state_version = state_version + 1 WHERE current_episode_id IN ("
+        "SELECT episode_id FROM alert_episode WHERE is_open = 1 AND mode = 'live' "
+        "AND origin_rules_sha256 NOT IN "
+        "(SELECT rules_sha256 FROM alert_ruleset_registry WHERE status = 'PROMOTED'))")
+    op.execute(
+        "UPDATE alert_episode SET episode_status = 'RESOLVED', is_open = 0, "
+        "resolved_at = strftime('%Y-%m-%d %H:%M:%f', 'now'), "
+        "resolution_reason = 'RULESET_REPLACED' WHERE is_open = 1 AND mode = 'live' "
+        "AND origin_rules_sha256 NOT IN "
+        "(SELECT rules_sha256 FROM alert_ruleset_registry WHERE status = 'PROMOTED')")
     op.execute(
         "UPDATE alert_rule_state SET condition_state = 'NORMAL', "
         "last_known_condition_state = 'NORMAL', consecutive_true = 0, "

@@ -570,6 +570,109 @@ def _alert_episode_shape(db: str) -> dict[str, object]:
         connection.close()
 
 
+def test_0022_resolves_live_episodes_left_under_a_ruleset_no_longer_promoted(tmp_path):
+    """#159 round 2, SOTA-A: the continuation kept a live episode open under a
+    ruleset since superseded; deleting the continuation left it open, and its
+    queued alert sendable. 0022 ends such episodes as a promotion would: the
+    owner's rule state back to NORMAL (version + 1), the episode RESOLVED as
+    RULESET_REPLACED. A live episode of the promoted ruleset and a shadow
+    episode stay as they were. Production held none (read-only, 2026-10-03)."""
+    db = str(tmp_path / "left-open.db")
+    phrases = hashlib.sha256(b"the phrase set").hexdigest()
+    superseded = hashlib.sha256(b"the ruleset promoted before").hexdigest()
+    promoted = hashlib.sha256(b"the ruleset promoted now").hexdigest()
+    alert_input = hashlib.sha256(b"the input").hexdigest()
+    evaluation = "01M0EVALUATIONBEFORETHEJUMP"[:26]
+    at = "2026-10-01 10:00:00.000000"
+    cases = {  # episode id: (mode, origin, fingerprint)
+        "01M0LIVELEFTUNDERSUPERSEDED": ("live", superseded, hashlib.sha256(b"m1").hexdigest()),
+        "01M0LIVEOFTHEPROMOTEDRULES0": ("live", promoted, hashlib.sha256(b"m2").hexdigest()),
+        "01M0SHADOWUNDERSUPERSEDED00": ("shadow", superseded, hashlib.sha256(b"m3").hexdigest()),
+    }
+
+    def _read(sql: str) -> list[tuple]:
+        connection = sqlite3.connect(db)
+        try:
+            return connection.execute(sql).fetchall()
+        finally:
+            connection.close()
+
+    def _cycle():
+        from alembic import command
+
+        from app.db_migrate import _alembic_config
+
+        cfg = _alembic_config()
+        command.upgrade(cfg, "0021")
+        connection = sqlite3.connect(db)
+        connection.execute(
+            "insert into alert_phrase_set_registry (phrase_set_version, phrase_set_sha256, "
+            "canonical_json, validator_version, validated_at, worst_case_test_sha256) "
+            "values ('v9.9', ?, '{}', '1', ?, ?)", (phrases, at, phrases))
+        for rules, status in ((superseded, "SUPERSEDED"), (promoted, "PROMOTED")):
+            connection.execute(
+                "insert into alert_ruleset_registry (rules_sha256, rule_version, "
+                "canonical_yaml, phrase_set_version, phrase_set_sha256, "
+                "alert_input_schema_version, methodology_version, "
+                "methodology_manifest_sha256, min_service_version, max_service_version, "
+                "validated_at, promoted_at, status) values (?, ?, 'meta: {}', 'v9.9', ?, 1, "
+                "'m', ?, '3.8.0', '3.99.99', ?, ?, ?)",
+                (rules, rules[:8], phrases, phrases, at, at, status))
+        connection.execute(
+            "insert into alert_input_snapshot (input_identity, origin, built_at, "
+            "alert_input_schema_version, reconstructed, evaluation_eligibility, "
+            "ineligibility_reasons, payload, payload_sha256) values "
+            "(?, 'RECOMPUTE', ?, 1, 0, 'EVALUABLE', '[]', '{}', ?)",
+            (alert_input, at, alert_input))
+        connection.execute(
+            "insert into alert_evaluation (evaluation_id, idempotency_key, input_identity, "
+            "mode, live_profile, current_rules_sha256, evaluation_set_sha256, "
+            "evaluated_ruleset_hashes, evaluator_version, status, attempt_count, "
+            "started_at, plan_applied) values (?, ?, ?, 'live', 'default', ?, ?, ?, '1', "
+            "'COMMITTED', 1, ?, 1)",
+            (evaluation, superseded, alert_input, superseded, superseded,
+             f'["{superseded}"]', at))
+        for episode, (mode, origin, fingerprint) in cases.items():
+            connection.execute(
+                "insert into alert_episode (episode_id, mode, live_profile, origin_rules_sha256, "
+                "instance_fingerprint, rule_id, labels, priority, episode_status, is_open, "
+                "suppression_reasons, opened_at, activated_at, trigger_input_identity, "
+                "created_evaluation_id, last_evaluation_id) values (?, ?, 'default', ?, "
+                "?, 'tripwire.rf4_persistent', '{}', 2, 'FIRING', 1, '[]', ?, ?, ?, ?, ?)",
+                (episode, mode, origin, fingerprint, at, at, alert_input, evaluation, evaluation))
+            connection.execute(
+                "insert into alert_rule_state (mode, live_profile, instance_fingerprint, rule_id, "
+                "bucket, priority, policy_status, runtime_readiness, activation_status, "
+                "flap_projection, rules_sha256, condition_state, last_known_condition_state, "
+                "current_episode_id, consecutive_true, state_version, evaluation_status, "
+                "last_known_input_identity, updated_at) values (?, 'default', ?, "
+                "'tripwire.rf4_persistent', 'tripwire', 2, 'APPROVED', 'READY', 'ACTIVE', '{}', "
+                "?, 'FIRING', 'FIRING', ?, 2, 5, 'OK', ?, ?)",
+                (mode, fingerprint, origin, episode, alert_input, at))
+        connection.commit()
+        connection.close()
+
+        command.upgrade(cfg, "0022")
+
+        episodes = {row[0]: row[1:] for row in _read(
+            "select episode_id, episode_status, is_open, resolution_reason, "
+            "resolved_at is not null from alert_episode")}
+        states = {row[0]: row[1:] for row in _read(
+            "select current_episode_id, condition_state, state_version from alert_rule_state "
+            "where current_episode_id is not null")}
+        left, kept, shadow = cases
+        assert episodes[left] == ("RESOLVED", 0, "RULESET_REPLACED", 1)
+        assert episodes[kept] == ("FIRING", 1, None, 0)
+        assert episodes[shadow] == ("FIRING", 1, None, 0)
+        assert left not in states, "the owner no longer points at the resolved episode"
+        assert states[kept] == ("FIRING", 5) and states[shadow] == ("FIRING", 5)
+        reset = _read("select condition_state, consecutive_true, state_version "
+                      "from alert_rule_state where current_episode_id is null")
+        assert reset == [("NORMAL", 0, 6)]
+
+    _run_with_db(db, _cycle)
+
+
 def test_the_inheritance_drop_resets_inherited_state_and_round_trips(tmp_path):
     """Owner decision D2e: only the current ruleset decides episodes, so 0022
     drops inherited_open_episode_id from alert_rule_state and alert_episode.

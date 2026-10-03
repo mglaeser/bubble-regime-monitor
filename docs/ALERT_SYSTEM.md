@@ -51,7 +51,11 @@ evaluation under a new candidate
 ::test_an_evaluation_covers_exactly_the_current_ruleset). A live evaluation
 applies only while its ruleset is still the promoted one: a promotion that
 commits while it runs ends it CONFLICT with nothing applied
-(::test_a_live_evaluation_applies_nothing_once_a_promotion_superseded_its_rules). A replay reads
+(::test_a_live_evaluation_applies_nothing_once_a_promotion_superseded_its_rules);
+its apply transaction takes the write lock before that check. Migration 0022
+ended any live episode the deleted continuation had kept open under a ruleset
+no longer promoted, as a promotion would
+(tests/test_migrations.py::test_0022_resolves_live_episodes_left_under_a_ruleset_no_longer_promoted). A replay reads
 persisted sidecars and archived bytes — it never asks a provider what the world
 looks like now.
 

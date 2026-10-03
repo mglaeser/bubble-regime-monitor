@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from app.alerts.budgets import LIMITS
@@ -280,6 +280,17 @@ def run_evaluation(
         already_committed = row.status == EvaluationRunStatus.COMMITTED
 
     if already_committed:
+        if mode != Mode.LIVE:
+            # The run is done, but a shadow candidate may have changed back
+            # since (A -> B -> A on one input): only the current ruleset owns
+            # open episodes (#159 round 2). Live mode needs no such step - a
+            # live candidate changes only by a promotion, which resolves - and
+            # a late retry of an old live run must not touch the promoted
+            # ruleset's episodes.
+            with session_factory() as session:
+                resolve_replaced_episodes(
+                    session, replacing_rules_sha256=current.rules_sha256, now=now,
+                    actor_type=ActorType.SYSTEM, mode=mode, live_profile=live_profile)
         return EvaluationOutcome(evaluation_id=evaluation_id,
                                  status=EvaluationRunStatus.COMMITTED,
                                  input_identity=alert_input.input_identity)
@@ -339,11 +350,14 @@ def run_evaluation(
     # ---- P2: one atomic apply --------------------------------------------
     try:
         with session_factory() as session:
+            # The write lock comes first, so the check below and the apply
+            # judge one state: a promotion either committed before (and the
+            # check sees it) or waits for this transaction (#159 round 2).
+            if session.bind is not None and session.bind.dialect.name == "sqlite":
+                session.execute(text("BEGIN IMMEDIATE"))
             # A live evaluation applies only while its ruleset is still the
             # promoted one: a promotion that committed after this run loaded
             # its rules supersedes them, and nothing is applied (#159 round 1).
-            # Checked inside the apply transaction, which SQLite serialises
-            # with the promotion's.
             if mode == Mode.LIVE:
                 registered = session.get(AlertRulesetRegistry, current.rules_sha256)
                 if registered is None or registered.status != RulesetStatus.PROMOTED:
