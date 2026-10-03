@@ -7,6 +7,8 @@ and the assertion is on the exact bytes that would have gone to the proxy.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from app.config import Settings, near_miss_env_keys
@@ -694,6 +696,37 @@ class TestTransportSelection:
         assert settings.effective_daily_sms_enabled is False
         assert settings.daily_digest_transport == "none"
         get_settings.cache_clear()
+
+    @pytest.mark.parametrize("alerts_mode", ["disabled", "shadow", "live"])
+    def test_the_daily_digest_switch_is_the_environment_alone(
+            self, isolated_db, monkeypatch, alerts_mode):
+        """DAILY_SMS_ENABLED=false turns the daily digest off whatever
+        ALERTS_MODE says - alerts disabled included: it is the operator's
+        switch, set in the environment, and it never had a runtime gate. The
+        Stage-4 cutover CLI that owner decision D2c deleted (2026-10-02)
+        recorded an operator's intent and printed "set DAILY_SMS_ENABLED=false
+        in the deployment environment"; nothing at runtime read its records.
+        """
+        monkeypatch.setenv("ALERTS_MODE", alerts_mode)
+        monkeypatch.setenv("DAILY_SMS_ENABLED", "false")
+        monkeypatch.setenv("IMESSAGE_ENABLED", "true")
+        monkeypatch.setenv("IMESSAGE_API_BASE_URL", "http://127.0.0.1:12345")
+        monkeypatch.setenv("IMESSAGE_API_KEY", "configured-test-key-123456789")  # pragma: allowlist secret
+        monkeypatch.setenv("IMESSAGE_RECIPIENT", "+491510000000")
+        from app.config import get_settings
+
+        get_settings.cache_clear()
+        assert get_settings().daily_digest_transport == "none"
+        get_settings.cache_clear()
+
+    def test_nothing_in_the_application_reads_a_cutover_record(self):
+        """The deleted gate wrote audit records (cutover_apply_requested and
+        its kin); no module of the application reads one, so the environment
+        switch above is the only control over the daily digest."""
+        app_dir = Path(__file__).resolve().parents[1] / "app"
+        readers = [str(p.relative_to(app_dir.parent)) for p in sorted(app_dir.rglob("*.py"))
+                   if "cutover_" in p.read_text(encoding="utf-8")]
+        assert readers == []
 
     def test_digest_sends_over_imessage_and_not_sipgate(
             self, isolated_db, imessage_env, monkeypatch):

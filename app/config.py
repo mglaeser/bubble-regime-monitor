@@ -225,9 +225,9 @@ class Settings(BaseSettings):
     alerts_llm_timeout_s: int = 6
     alerts_llm_render_cap_24h: int = 12
 
-    # Migration-friendly alias for the legacy `sms_enabled`. Until the Stage 4
-    # cutover the daily digest keeps running: ALERTS_MODE=live must NOT
-    # implicitly disable it. See `effective_daily_sms_enabled`.
+    # Migration-friendly alias for the legacy `sms_enabled`, and the daily
+    # digest's master switch: ALERTS_MODE=live must NOT implicitly disable the
+    # digest. See `effective_daily_sms_enabled`.
     daily_sms_enabled: bool | None = None
 
     # Runtime. mc_samples / mc_seed DEFAULT to the canonical frozen artifact
@@ -311,9 +311,9 @@ class Settings(BaseSettings):
         """Whether the LEGACY daily digest runs.
 
         DAILY_SMS_ENABLED wins when explicitly set; otherwise the legacy
-        SMS_ENABLED still governs. The alert system never touches this — the
-        Stage 4 cutover is an explicit operator action, not a side effect of
-        turning alerts on."""
+        SMS_ENABLED still governs. The alert system never touches this:
+        switching the daily digest off is an explicit operator action, not a
+        side effect of turning alerts on."""
         if self.daily_sms_enabled is not None:
             return self.daily_sms_enabled
         return self.sms_enabled
@@ -336,17 +336,21 @@ class Settings(BaseSettings):
     def daily_digest_transport(self) -> Literal["imessage", "sipgate", "none"]:
         """Which transport carries the daily digest.
 
-        ``DAILY_SMS_ENABLED=false`` is the documented Stage-4 MASTER cutover
-        for the legacy daily digest, regardless of whether that digest was
-        carried by sipgate or iMessage. Without this first check an iMessage
-        deployment kept scheduling the legacy message after the operator had
-        performed the documented cutover.
+        ``DAILY_SMS_ENABLED=false`` is the operator's MASTER switch for the
+        daily digest, whichever transport carries it - sipgate or iMessage.
+        Without this first check an iMessage deployment kept scheduling the
+        digest after the operator had switched it off. The switch is the
+        environment alone and never had a runtime gate: the Stage-4 cutover
+        CLI that owner decision D2c deleted (2026-10-02) recorded an
+        operator's intent and printed "set DAILY_SMS_ENABLED=false in the
+        deployment environment"; its one importer was that CLI, nothing at
+        runtime read its records, and the production database holds none.
 
-        In the absence of that explicit Stage-4 value, iMessage wins when both
+        In the absence of that explicit value, iMessage wins when both
         transport switches are on — see the IMESSAGE_* block. Legacy
         ``SMS_ENABLED=false`` plus ``IMESSAGE_ENABLED=true`` still means "send
-        my digest over iMessage"; only the explicit migration alias is the
-        cross-transport cutover authority.
+        my digest over iMessage"; only the explicit alias switches the digest
+        off on every transport.
 
         REQUIRES `imessage_configured`, not merely the switch. Selecting on the
         switch alone meant that adding IMESSAGE_ENABLED=true to a WORKING SMS

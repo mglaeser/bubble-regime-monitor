@@ -172,8 +172,8 @@ def start() -> BackgroundScheduler:
         # Gated on the selected TRANSPORT. With DAILY_SMS_ENABLED unset, a
         # legacy SMS_ENABLED=false plus IMESSAGE_ENABLED=true still selects
         # iMessage. Explicit DAILY_SMS_ENABLED=false is different: it is the
-        # documented Stage-4 master cutover and selects no legacy transport at
-        # all. Turning the alert system on still never changes that switch.
+        # operator's master switch for the daily digest and selects no
+        # transport at all. Turning the alert system on never changes it.
         digest_transport = settings.daily_digest_transport
         if settings.imessage_enabled_but_unconfigured:
             # Loud at boot, whatever the digest ends up doing: the switch is on
