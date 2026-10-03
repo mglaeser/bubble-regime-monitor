@@ -59,9 +59,9 @@ def extract_alert_schema(schema: dict[str, Any]) -> dict[str, Any]:
             "version": schema.get("info", {}).get("version"),
             "description": (
                 "Alert-system subset of the bubblegauge OpenAPI document, generated "
-                "from the running application. Reads use ALERTS_READ_API_KEY, writes "
-                "use ALERTS_WRITE_API_KEY; neither falls back to the admin key. "
-                "Research, not advice."
+                "from the running application. Reads and the admin actions use "
+                "ADMIN_API_KEY (the reads are operator-only); silences use "
+                "ALERTS_WRITE_API_KEY. Research, not advice."
             ),
         },
         "paths": dict(sorted(paths.items())),

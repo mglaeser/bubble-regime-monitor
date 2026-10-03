@@ -311,16 +311,19 @@ stop capture: the sidecars are exactly what an operator needs to diagnose the
 ruleset that failed, and a lost sidecar can never be backfilled.
 
 ```bash
-ALERTS_READ_API_KEY=          # alert reads (or ALERTS_PUBLIC_READ=true)
-ALERTS_READ_API_KEY_PREVIOUS= # rotation overlap; clear it to retire the old key
-ALERTS_WRITE_API_KEY=         # silences and operator actions
-ADMIN_API_KEY=                # promotion, evaluation, recovery, render text
-ALERTS_READ_TOKEN_IS_PUBLIC=true   # the read key is browser-visible (H-05)
+ALERTS_WRITE_API_KEY=         # silences
+ADMIN_API_KEY=                # alert reads (render text included), promotion, evaluation, recovery
 ```
 
-Three separate scopes. **Alert reads do not fall back to the admin key** —
-unlike the scoring API, which does. That fallback is exactly what would put an
-admin credential in a browser.
+Two scopes. **The alert reads are operator-only** (owner decision D3a,
+2026-10-03): they take `ADMIN_API_KEY` and nothing else, and fail closed (503)
+while it is empty or the placeholder, as the admin routes do. Silences take
+`ALERTS_WRITE_API_KEY` alone. The separate read key, its rotation slot, the
+public-read switch, the browser-token posture switch and the public-read rate
+limit are retired settings (`ALERTS_READ_API_KEY`,
+`ALERTS_READ_API_KEY_PREVIOUS`, `ALERTS_PUBLIC_READ`,
+`ALERTS_READ_TOKEN_IS_PUBLIC`, `ALERTS_PUBLIC_READ_RATE_LIMIT`): one left in an
+environment opens nothing and is named, as `DAILY_SMS_ENABLED` is below.
 
 The daily digest is governed by its transport switches alone:
 `IMESSAGE_ENABLED` selects iMessage when it is configured, and iMessage wins
@@ -419,9 +422,9 @@ marked `RECONSTRUCTED` and never counts as successful mandatory-event recall.
 
 ## 10. The API
 
-Read (`ALERTS_READ_API_KEY`), write (`ALERTS_WRITE_API_KEY`), admin
-(`ADMIN_API_KEY`). Errors are RFC 9457 `application/problem+json`. Reads carry
-an `ETag`; mutations are `Cache-Control: no-store`.
+Reads and the admin actions take `ADMIN_API_KEY`; silences take
+`ALERTS_WRITE_API_KEY`. Errors are RFC 9457 `application/problem+json`. Reads
+carry an `ETag`; mutations are `Cache-Control: no-store`.
 
 ```
 GET  /api/v1/alerts/overview          one screen: states, open episodes, pointers
@@ -432,7 +435,7 @@ GET  /api/v1/alerts/episodes[/{id}]   {id} includes its event trail
 GET  /api/v1/alerts/events            cursor-paginated, stable ordering
 GET  /api/v1/alerts/latest            fired and sent as SEPARATE pointers
 GET  /api/v1/alerts/deliveries[/{id}] redacted
-GET  /api/v1/alerts/renders/{id}
+GET  /api/v1/alerts/renders/{id}     with its message text, no-store
 GET  /api/v1/alerts/ruleset
 GET  /api/v1/alerts/health
 GET  /api/v1/alerts/silences
@@ -442,7 +445,6 @@ POST /api/v1/admin/alerts/evaluate    one sidecar, shadow by default
 POST /api/v1/admin/alerts/promote
 POST /api/v1/admin/alerts/recover
 POST /api/v1/admin/alerts/render      validate reviewed TEST bytes; never persist/send
-GET  /api/v1/admin/alerts/renders/{id} operator-only message text
 POST /api/v1/admin/alerts/send-test   queue an audited TEST delivery
 ```
 
@@ -454,37 +456,15 @@ to be able to see that a rule exists and why it is dark.
 (`python -m scripts.export_alert_openapi`) and CI fails on drift. The
 application's own `/openapi.json` remains the source of truth.
 
-### Browser topology — decided: browser-visible scoped token
+### Operator-only reads (owner decision D3a, 2026-10-03)
 
-```
-browser (ALERTS_READ_API_KEY) -> bubblegauge alerts API   [redacted projection]
-operator (ADMIN_API_KEY)      -> /api/v1/admin/alerts/*   [message text, no-store]
-```
-
-H-05 offered two architectures. The chosen one is the **browser-visible scoped
-token**, declared in config as `ALERTS_READ_TOKEN_IS_PUBLIC=true` so it is a
-stated posture rather than an assumption — the server-side-proxy alternative is
-still available by setting it false, which asserts the read key never reaches a
-browser.
-
-A static key in browser JavaScript is extractable, so it is treated as a
-**public capability, not a secret**, and the four conditions the review attaches
-to that choice are enforced rather than intended:
-
-| condition | how |
-|---|---|
-| redacted projection only | no recipient, no provider correlation id, no raw provider error, no raw model output — **and no rendered message text** |
-| rate-limited | every alert read route carries a limit; `ALERTS_PUBLIC_READ_RATE_LIMIT` (30/min) is the public ceiling, tighter than the operator read limit |
-| rotates independently | `ALERTS_READ_API_KEY_PREVIOUS` keeps the outgoing key valid during overlap, so rotation needs no synchronized dashboard deploy; clearing it is its own edit |
-| no silence / render / admin | the scopes deliberately do **not** nest — the write key cannot read, the admin key is not a read key, and message text is not on the read surface at all |
-
-That last row is why `GET /api/v1/alerts/renders/{id}` returns
-`final_message: null` with a stated reason. Since no caller can present a
-stronger scope to the read surface (there is one `X-API-Key` header), the text
-lives at `GET /api/v1/admin/alerts/renders/{id}` behind the admin key, served
-`no-store`. The dashboard still gets what it actually needs from a render: the
-reviewed phrase codes chosen, the phrase-set provenance, the septet count, and
-whether it fell back.
+H-05 chose a browser-visible read token (2026-08-16); D3a replaced it: the
+alert reads take `ADMIN_API_KEY`, per handler, as the admin routes do. The
+render read returns the message text, `no-store`, so its admin twin
+`GET /api/v1/admin/alerts/renders/{id}` went; like every alert read it is scoped
+to the active mode and profile. Every alert read keeps its 60/min limit; the
+public-read limit `ALERTS_PUBLIC_READ_RATE_LIMIT`, which nothing applied, went
+too (D3e).
 
 The app's CORS posture is GET-only, so the write routes are not browser-reachable
 cross-origin without a separate, deliberate security review.
@@ -709,8 +689,9 @@ The HTTP operator actions are admin-scoped and `no-store`:
 * **`POST /api/v1/admin/alerts/render`** — resolves the active reviewed
   `TEST_MESSAGE` and runs the exact TEST renderer, returning phrase-set
   provenance and validation. It creates no delivery/render row and cannot call
-  a sender. **`GET /api/v1/admin/alerts/renders/{id}`** retrieves the immutable
-  body of a render that really was persisted.
+  a sender. The immutable body of a render that really was persisted is read
+  at **`GET /api/v1/alerts/renders/{id}`**, under the same admin key (owner
+  decision D3a).
 
 * **`POST /api/v1/admin/alerts/send-test`** — queues a memberless TEST delivery. TEST
   is the one kind allowed zero members (it is about the transport, not any

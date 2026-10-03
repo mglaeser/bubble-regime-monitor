@@ -10,7 +10,7 @@ This is a single-maintainer, self-hosted research service. Report security issue
 
 - **All secrets live in `.env` on the host only.** `.env` is gitignored and has **never** been committed (verified: full-history scan for every known credential fragment returns zero hits).
 - **The admin API key fails closed.** The service refuses to authenticate (HTTP 503) while `ADMIN_API_KEY` is empty or equals the shipped placeholder `change-me-to-a-long-random-string` (`app/security.py`). Set a strong random value: `python -c "import secrets;print(secrets.token_urlsafe(32))"`.
-- **Reads are public; only writes are keyed.** `POST /api/v1/admin/*` require `X-API-Key` (constant-time compare). Reads (`GET /api/v1/*`, `/`, `/healthz`) are public and rate-limited (60/min/IP).
+- **The scoring reads are public; the alert reads and the writes are keyed.** `POST /api/v1/admin/*` require `X-API-Key` (constant-time compare), and so does every alert read, `GET /api/v1/alerts/*`: operator-only, under `ADMIN_API_KEY` and its fail-closed guard (owner decision D3a). The other reads (`GET /api/v1/*`, `/`, `/healthz`) are public and rate-limited (60/min/IP).
 
 ### Credential rotation (REQUIRED — audit B-06)
 

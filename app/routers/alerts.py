@@ -1,8 +1,9 @@
 """GET /api/v1/alerts/* — the read surface.
 
-Read scope only. Every response is redacted: no recipient, no raw provider
-error, no raw model output, no secret-shaped configuration. Errors use RFC 9457
-`application/problem+json`.
+Operator-only: every route takes the admin key, per handler, and nothing else
+(owner decision D3a, 2026-10-03). Every response is redacted: no recipient, no
+raw provider error, no raw model output, no secret-shaped configuration. Errors
+use RFC 9457 `application/problem+json`.
 
 Delivery and render endpoints project their real namespace-scoped tables even
 when the committed Stage-1 rollout leaves them empty. An operator checking
@@ -41,12 +42,7 @@ from app.alerts.models import (
 from app.alerts.registry import ruleset_summary, unresolved_pins
 from app.config import get_settings
 from app.db import session_scope
-from app.security import (
-    READ_RATE_LIMIT,
-    alerts_message_text_permitted,
-    limiter,
-    require_alerts_read,
-)
+from app.security import READ_RATE_LIMIT, limiter, require_admin_key
 
 router = APIRouter(prefix="/api/v1/alerts", tags=["alerts"])
 
@@ -242,7 +238,7 @@ def _load() -> LoadedArtifacts | None:
 @router.get("/health", summary="Alert-system health")
 @limiter.limit(READ_RATE_LIMIT)
 def get_health(request: Request, response: Response,
-               _: None = Depends(require_alerts_read)) -> Any:
+               _: None = Depends(require_admin_key)) -> Any:
     settings = get_settings()
     artifacts = _load()
     with session_scope() as session:
@@ -263,7 +259,7 @@ def get_health(request: Request, response: Response,
 @router.get("/overview", summary="One-screen alert overview")
 @limiter.limit(READ_RATE_LIMIT)
 def get_overview(request: Request, response: Response,
-                 _: None = Depends(require_alerts_read)) -> Any:
+                 _: None = Depends(require_admin_key)) -> Any:
     artifacts = _load()
     if artifacts is None:
         return problem(503, "Alerting unavailable",
@@ -306,7 +302,7 @@ def get_overview(request: Request, response: Response,
 @limiter.limit(READ_RATE_LIMIT)
 def get_mechanisms(request: Request, response: Response,
                    bucket: str | None = Query(default=None),
-                   _: None = Depends(require_alerts_read)) -> Any:
+                   _: None = Depends(require_admin_key)) -> Any:
     artifacts = _load()
     if artifacts is None:
         return problem(503, "Alerting unavailable", "no valid ruleset is loadable")
@@ -326,7 +322,7 @@ def get_mechanisms(request: Request, response: Response,
 @router.get("/mechanisms/{instance_fingerprint}", summary="One mechanism in detail")
 @limiter.limit(READ_RATE_LIMIT)
 def get_mechanism(request: Request, instance_fingerprint: str, response: Response,
-                  _: None = Depends(require_alerts_read)) -> Any:
+                  _: None = Depends(require_admin_key)) -> Any:
     artifacts = _load()
     if artifacts is None:
         return problem(503, "Alerting unavailable", "no valid ruleset is loadable")
@@ -347,7 +343,7 @@ def get_mechanism(request: Request, instance_fingerprint: str, response: Respons
 @router.get("/rules/{rule_id}/instances", summary="Instances of one rule")
 @limiter.limit(READ_RATE_LIMIT)
 def get_rule_instances(request: Request, rule_id: str, response: Response,
-                       _: None = Depends(require_alerts_read)) -> Any:
+                       _: None = Depends(require_admin_key)) -> Any:
     artifacts = _load()
     if artifacts is None:
         return problem(503, "Alerting unavailable", "no valid ruleset is loadable")
@@ -370,7 +366,7 @@ def get_episodes(request: Request, response: Response,
                  open_only: bool = Query(default=False),
                  limit: int = Query(default=100, ge=1, le=MAX_PAGE),
                  cursor: str | None = Query(default=None),
-                 _: None = Depends(require_alerts_read)) -> Any:
+                 _: None = Depends(require_admin_key)) -> Any:
     mode, profile = _mode()
     conditions = [AlertEpisode.mode == mode, AlertEpisode.live_profile == profile]
     if open_only:
@@ -409,7 +405,7 @@ def get_episodes(request: Request, response: Response,
 @router.get("/episodes/{episode_id}", summary="One episode")
 @limiter.limit(READ_RATE_LIMIT)
 def get_episode(request: Request, episode_id: str, response: Response,
-                _: None = Depends(require_alerts_read)) -> Any:
+                _: None = Depends(require_admin_key)) -> Any:
     mode, profile = _mode()
     with session_scope() as session:
         row = session.execute(
@@ -488,7 +484,7 @@ def _event_namespace(mode: str, live_profile: str) -> Any:
 def get_events(request: Request, response: Response,
                limit: int = Query(default=100, ge=1, le=MAX_PAGE),
                cursor: str | None = Query(default=None),
-               _: None = Depends(require_alerts_read)) -> Any:
+               _: None = Depends(require_admin_key)) -> Any:
     mode, profile = _mode()
     conditions = [_event_namespace(mode, profile)]
     if cursor:
@@ -522,7 +518,7 @@ def get_events(request: Request, response: Response,
 @router.get("/latest", summary="Latest pointers — fired and sent kept apart")
 @limiter.limit(READ_RATE_LIMIT)
 def get_latest(request: Request, response: Response,
-               _: None = Depends(require_alerts_read)) -> Any:
+               _: None = Depends(require_admin_key)) -> Any:
     mode, profile = _mode()
     with session_scope() as session:
         payload = latest_pointers(session, mode=mode, live_profile=profile)
@@ -537,7 +533,7 @@ def get_latest(request: Request, response: Response,
 def get_deliveries(request: Request, response: Response,
                    limit: int = Query(default=100, ge=1, le=MAX_PAGE),
                    cursor: str | None = Query(default=None),
-                   _: None = Depends(require_alerts_read)) -> Any:
+                   _: None = Depends(require_admin_key)) -> Any:
     mode, profile = _mode()
     conditions = [
         AlertDelivery.mode == mode,
@@ -621,7 +617,7 @@ def _delivery_projection(row: AlertDelivery,
 @router.get("/deliveries/{delivery_id}", summary="One delivery (redacted)")
 @limiter.limit(READ_RATE_LIMIT)
 def get_delivery(request: Request, delivery_id: str, response: Response,
-                 _: None = Depends(require_alerts_read)) -> Any:
+                 _: None = Depends(require_admin_key)) -> Any:
     mode, profile = _mode()
     with session_scope() as session:
         row = session.execute(
@@ -647,19 +643,16 @@ def get_delivery(request: Request, delivery_id: str, response: Response,
     return payload
 
 
-@router.get("/renders/{render_id}", summary="One render (redacted)")
+@router.get("/renders/{render_id}", summary="One render, including its text")
 @limiter.limit(READ_RATE_LIMIT)
 def get_render(request: Request, render_id: str, response: Response,
-               _: None = Depends(require_alerts_read),
-               may_read_text: bool = Depends(alerts_message_text_permitted),
-               ) -> Any:
-    """Render provenance for any read scope; the SENTENCE only for write/admin.
+               _: None = Depends(require_admin_key)) -> Any:
+    """The render's provenance and its message text, `no-store`.
 
-    The frontend architecture is a browser-visible scoped token (H-05), so the
-    read key is a public capability and grants no render-text right. What a
-    dashboard actually needs — which phrase codes were chosen, from which
-    reviewed phrase set, how long the message was, whether it fell back — is
-    all here regardless.
+    The alert reads are operator-only (owner decision D3a), so the text is
+    returned with the phrase codes chosen, the reviewed phrase set they came
+    from, the length and whether it fell back. `no-store` keeps the text out of
+    any intermediary cache.
     """
     mode, profile = _mode()
     with session_scope() as session:
@@ -685,17 +678,10 @@ def get_render(request: Request, render_id: str, response: Response,
             "selected_phrase_codes": list(row.selected_phrase_codes or []),
             "selected_fact_ids": list(row.selected_fact_ids or []),
             "gsm7_septets": row.gsm7_septets,
+            "final_message": row.final_message,
             "body_redacted_at": iso(row.body_redacted_at),
             "created_at": iso(row.created_at),
         }
-        if may_read_text:
-            payload["final_message"] = row.final_message
-        else:
-            payload["final_message"] = None
-            payload["final_message_withheld_reason"] = (
-                "the alert read token is a browser-visible public capability "
-                "and does not grant message text; use "
-                "GET /api/v1/admin/alerts/renders/{render_id}")
     _no_store(response)
     return payload
 
@@ -703,7 +689,7 @@ def get_render(request: Request, render_id: str, response: Response,
 @router.get("/ruleset", summary="The active ruleset summary")
 @limiter.limit(READ_RATE_LIMIT)
 def get_ruleset(request: Request, response: Response,
-                _: None = Depends(require_alerts_read)) -> Any:
+                _: None = Depends(require_admin_key)) -> Any:
     artifacts = _load()
     if artifacts is None:
         return problem(503, "Alerting unavailable", "no valid ruleset is loadable")
@@ -719,7 +705,7 @@ def get_ruleset(request: Request, response: Response,
 @router.get("/silences", summary="Active and scheduled silences")
 @limiter.limit(READ_RATE_LIMIT)
 def get_silences(request: Request, response: Response,
-                 _: None = Depends(require_alerts_read)) -> Any:
+                 _: None = Depends(require_admin_key)) -> Any:
     now = datetime.now(UTC)
     with session_scope() as session:
         rows = session.execute(
