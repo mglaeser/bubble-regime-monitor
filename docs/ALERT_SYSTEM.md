@@ -562,7 +562,13 @@ artifact: the dispatch job raises before it constructs a sender, and its
 heartbeat turns health critical.
 
 There is no runtime stage floor and no runtime evidence check (owner decision
-D2d, 2026-10-03): the CI replay gate is the evidence. Stages 1 and 2 enable
+D2d, 2026-10-03): the CI replay gate is the evidence - `python -m
+scripts.export_alert_stage1_gate --check`, a blocking step of
+`.github/workflows/ci.yml` (pinned in tests/test_alert_replay.py), so bytes
+whose replay no longer matches the committed evidence cannot merge. On leaf
+(read-only, 2026-10-03) the promoted ruleset - rules v3.2.3, phrase set v3.5 -
+is byte-identical to the committed artifact that gate checks, and no delivery
+is queued. Stages 1 and 2 enable
 only the P4 ops rules, and the planner maps P4 to "API and log only", creating
 no delivery. Separately, the dispatcher has no LLM path at any stage.
 

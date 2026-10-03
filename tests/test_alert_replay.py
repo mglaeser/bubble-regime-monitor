@@ -934,3 +934,21 @@ def test_the_artifact_carries_evidence_for_the_stage_the_cutover_targets():
     stage4 = payload["runs"]["stage_4"]
     assert stage4["evaluated_at_stage"] == 4
     assert stage4["passed"] is (stage4["failures"] == [])
+
+
+def test_the_ci_replay_gate_is_the_evidence_and_it_blocks():
+    """Owner decision D2d (2026-10-03): at runtime only load_active_for_mode
+    remains; the evidence is CI's replay gate. Pinned: ci.yml runs it as a
+    blocking step - no continue-on-error, no `|| true` - so bytes whose replay
+    no longer matches the committed evidence cannot merge."""
+    from pathlib import Path
+
+    ci = (Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    start = ci.index("- name: Alert Stage 1 gate")
+    end = ci.index("\n      - name:", start + 1)
+    step = ci[start:end]
+    assert "run: python -m scripts.export_alert_stage1_gate --check" in step
+    assert "continue-on-error" not in step and "|| true" not in step
+    job_header = ci[:start]
+    assert "continue-on-error: true" not in job_header
+
