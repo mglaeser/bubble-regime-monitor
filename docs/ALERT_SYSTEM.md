@@ -424,7 +424,8 @@ marked `RECONSTRUCTED` and never counts as successful mandatory-event recall.
 
 Reads and the admin actions take `ADMIN_API_KEY`; silences take
 `ALERTS_WRITE_API_KEY`. Errors are RFC 9457 `application/problem+json`. Reads
-carry an `ETag`; mutations are `Cache-Control: no-store`.
+set no `ETag` and answer no conditional request (owner decision D3c,
+2026-10-03); the render read and the mutations are `Cache-Control: no-store`.
 
 ```
 GET  /api/v1/alerts/overview          one screen: states, open episodes, pointers

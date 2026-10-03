@@ -22,7 +22,6 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import and_, exists, or_, select
 
 from app.alerts.artifacts import LoadedArtifacts, load_active
-from app.alerts.canonical import sha256_hex
 from app.alerts.errors import AlertingUnavailable
 from app.alerts.health import (
     episode_projection,
@@ -156,50 +155,9 @@ def _decode_cursor(
     return payload
 
 
-def _etag(
-    request: Request,
-    response: Response,
-    payload: Any,
-    *,
-    max_age: int,
-) -> Response | None:
-    etag_payload = payload
-    if isinstance(payload, dict) and "next_cursor" in payload:
-        # Cursor issuance carries a real-time TTL timestamp. It is transport
-        # metadata, not resource state: hashing the opaque bytes makes an
-        # otherwise unchanged full page produce a new ETag on every request,
-        # so conditional GET can never return 304. Presence still participates
-        # in the hash because gaining or losing a next page is a real change.
-        has_next = payload["next_cursor"] is not None
-        etag_payload = {
-            **payload,
-            "next_cursor": {
-                "present": has_next,
-                # Force a periodic 200 so a client that conditionally refreshes
-                # forever receives a fresh 24-hour cursor before its previous
-                # one expires. Within the hour, issue-time microseconds do not
-                # defeat 304 responses.
-                "refresh_hour": (
-                    datetime.now(UTC).strftime("%Y-%m-%dT%H") if has_next else None
-                ),
-            },
-        }
-    tag = '"' + sha256_hex(json.dumps(
-        etag_payload, sort_keys=True, default=str))[:32] + '"'
-    headers = {
-        "ETag": tag,
-        "Cache-Control": f"private, max-age={max_age}",
-        "Vary": "X-API-Key",
-    }
-    response.headers.update(headers)
-    candidates = {
-        item.strip().removeprefix("W/")
-        for item in request.headers.get("if-none-match", "").split(",")
-        if item.strip()
-    }
-    if "*" in candidates or tag in candidates:
-        return Response(status_code=304, headers=headers)
-    return None
+def _cache(response: Response, *, max_age: int) -> None:
+    response.headers["Cache-Control"] = f"private, max-age={max_age}"
+    response.headers["Vary"] = "X-API-Key"
 
 
 def _no_store(response: Response) -> None:
@@ -250,9 +208,7 @@ def get_health(request: Request, response: Response,
             fallback_reason=artifacts.fallback_reason if artifacts else
             "no valid ruleset is loadable",
         )
-    not_modified = _etag(request, response, payload, max_age=30)
-    if not_modified is not None:
-        return not_modified
+    _cache(response, max_age=30)
     return payload
 
 
@@ -292,9 +248,7 @@ def get_overview(request: Request, response: Response,
         "latest": pointers,
         "unresolved_pins": unresolved_pins(artifacts.ruleset),
     }
-    not_modified = _etag(request, response, payload, max_age=30)
-    if not_modified is not None:
-        return not_modified
+    _cache(response, max_age=30)
     return payload
 
 
@@ -313,9 +267,7 @@ def get_mechanisms(request: Request, response: Response,
     if bucket:
         items = [i for i in items if i["bucket"] == bucket]
     payload = {"items": items[:MAX_PAGE], "total": len(items)}
-    not_modified = _etag(request, response, payload, max_age=60)
-    if not_modified is not None:
-        return not_modified
+    _cache(response, max_age=60)
     return payload
 
 
@@ -332,9 +284,7 @@ def get_mechanism(request: Request, instance_fingerprint: str, response: Respons
                                      live_profile=profile)
     for item in items:
         if item["instance_fingerprint"] == instance_fingerprint:
-            not_modified = _etag(request, response, item, max_age=60)
-            if not_modified is not None:
-                return not_modified
+            _cache(response, max_age=60)
             return item
     return problem(404, "Unknown mechanism",
                    "no rule instance with that fingerprint in the active ruleset")
@@ -354,9 +304,7 @@ def get_rule_instances(request: Request, rule_id: str, response: Response,
     if not items:
         return problem(404, "Unknown rule", f"no rule {rule_id!r} in the active ruleset")
     payload = {"rule_id": rule_id, "items": items}
-    not_modified = _etag(request, response, payload, max_age=60)
-    if not_modified is not None:
-        return not_modified
+    _cache(response, max_age=60)
     return payload
 
 
@@ -396,9 +344,7 @@ def get_episodes(request: Request, response: Response,
         })
         if len(rows) == limit else None,
     }
-    not_modified = _etag(request, response, payload, max_age=30)
-    if not_modified is not None:
-        return not_modified
+    _cache(response, max_age=30)
     return payload
 
 
@@ -423,9 +369,7 @@ def get_episode(request: Request, episode_id: str, response: Response,
         ).scalars().all()
         payload = episode_projection(row)
         payload["events"] = [_event_projection(e) for e in events]
-    not_modified = _etag(request, response, payload, max_age=30)
-    if not_modified is not None:
-        return not_modified
+    _cache(response, max_age=30)
     return payload
 
 
@@ -509,9 +453,7 @@ def get_events(request: Request, response: Response,
         })
         if len(rows) == limit else None,
     }
-    not_modified = _etag(request, response, payload, max_age=30)
-    if not_modified is not None:
-        return not_modified
+    _cache(response, max_age=30)
     return payload
 
 
@@ -522,9 +464,7 @@ def get_latest(request: Request, response: Response,
     mode, profile = _mode()
     with session_scope() as session:
         payload = latest_pointers(session, mode=mode, live_profile=profile)
-    not_modified = _etag(request, response, payload, max_age=30)
-    if not_modified is not None:
-        return not_modified
+    _cache(response, max_age=30)
     return payload
 
 
@@ -560,9 +500,7 @@ def get_deliveries(request: Request, response: Response,
             "sort_at": iso(rows[-1].created_at), "sort_id": rows[-1].delivery_id,
         }) if len(rows) == limit else None,
     }
-    not_modified = _etag(request, response, payload, max_age=30)
-    if not_modified is not None:
-        return not_modified
+    _cache(response, max_age=30)
     return payload
 
 
@@ -637,9 +575,7 @@ def get_delivery(request: Request, delivery_id: str, response: Response,
             .order_by(AlertDeliveryMember.included_at.asc())
         ).scalars().all()
         payload = _delivery_projection(row, members=list(members))
-    not_modified = _etag(request, response, payload, max_age=30)
-    if not_modified is not None:
-        return not_modified
+    _cache(response, max_age=30)
     return payload
 
 
@@ -696,9 +632,7 @@ def get_ruleset(request: Request, response: Response,
     payload = ruleset_summary(artifacts.ruleset)
     payload["source"] = artifacts.source
     payload["fallback_reason"] = artifacts.fallback_reason
-    not_modified = _etag(request, response, payload, max_age=60)
-    if not_modified is not None:
-        return not_modified
+    _cache(response, max_age=60)
     return payload
 
 
@@ -722,7 +656,5 @@ def get_silences(request: Request, response: Response,
             "active": row.starts_at.replace(tzinfo=UTC) <= now
             if row.starts_at.tzinfo is None else row.starts_at <= now,
         } for row in rows]}
-    not_modified = _etag(request, response, payload, max_age=30)
-    if not_modified is not None:
-        return not_modified
+    _cache(response, max_age=30)
     return payload
