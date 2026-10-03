@@ -580,10 +580,11 @@ at the next dispatch pass, at most one pass later (the job runs at least every
 the dispatch job's own check before every pass - a candidate that is not the
 promoted artifact refuses the pass before any sender exists
 (tests/test_alert_promotion.py::test_the_live_dispatch_job_refuses_an_unpromoted_candidate);
-and the claim, which judges the ruleset that planned the work by identity,
-never by evidence: in live mode it takes only work planned under a ruleset
-that was promoted and is not revoked, however and whenever the work was
-queued, and a ruleset superseded since still finishes what it planned
+and the claim, which judges the ruleset that planned the work by how it was
+promoted, never by re-reading evidence: in live mode it takes only work
+planned under a ruleset promoted through the evidence-gated service and not
+revoked since, however and whenever the work was queued, and a ruleset
+superseded since still finishes what it planned
 (tests/test_alert_promotion.py::test_live_dispatch_sends_no_work_planned_under_rules_nobody_promoted,
 ::test_live_dispatch_sends_work_planned_under_a_promoted_ruleset).
 Live work is also planned under the ruleset promoted at that moment:
@@ -592,9 +593,9 @@ evaluation, the weekly digest and the admin send-test load through
 plans nothing (tests/test_alert_api.py::test_a_live_send_test_is_planned_under_the_promoted_ruleset_only,
 tests/test_alert_digest.py::test_the_live_weekly_digest_is_planned_under_the_promoted_ruleset_only);
 a row planned under a ruleset since superseded was authorized when it was
-planned. A PROMOTED row authorizes live work whatever its evidence stamp:
-leaf's one PROMOTED row (rules v3.2.3, phrase set v3.5) was evidence-checked on
-2026-09-20, before the gate went. No code writes a REVOKED ruleset (production
+planned. On leaf (read-only, 2026-10-03) both registry rows - the PROMOTED one
+(rules v3.2.3, phrase set v3.5) and the SUPERSEDED v3.2.2 - were promoted
+through the evidence-gated service. No code writes a REVOKED ruleset (production
 holds none), and production held no queued delivery when the gate went
 (read-only, 2026-10-03).
 

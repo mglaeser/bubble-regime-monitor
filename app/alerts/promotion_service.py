@@ -4,9 +4,11 @@ Promotion checks the committed replay evidence before it writes any promotion
 metadata, and a refusal changes nothing. `register` carries no authority and
 never promotes, so the state mutation lives here, behind the check.
 
-Since owner decision D2d nothing at runtime reads the evidence or the
-`evidence_checked_at` stamp: live mode requires only that the loaded bytes be
-the promoted ones (`app.alerts.artifacts.load_active_for_mode`).
+Since owner decision D2d nothing at runtime reads the evidence: live mode
+requires that the loaded bytes be the promoted ones
+(`app.alerts.artifacts.load_active_for_mode`), and the live claim takes only
+work planned under a ruleset this service promoted - it reads the
+`evidence_checked_at` stamp written here (`app.alerts.outbox.claimable`).
 """
 
 from __future__ import annotations

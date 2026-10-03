@@ -115,8 +115,9 @@ class AlertRulesetRegistry(Base):
     validated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     promoted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     promoted_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    #: Stamped ONLY by the evidence-gated promotion service. Nothing reads it
-    #: since owner decision D2d removed the runtime evidence checks.
+    #: Stamped ONLY by the evidence-gated promotion service. The live claim
+    #: reads it (`outbox.claimable`): work planned under a ruleset promoted
+    #: before promotion checked evidence is never sent.
     evidence_checked_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True)
     superseded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

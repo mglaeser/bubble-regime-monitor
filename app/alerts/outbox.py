@@ -361,11 +361,12 @@ def claimable(session: Session, *, mode: str, live_profile: str, now: datetime,
               limit: int = 10) -> list[AlertDelivery]:
     """READY rows whose `not_before` has passed. P1 first, then oldest.
 
-    In live mode, only work planned under a ruleset that was promoted and is
-    not revoked: the ruleset that planned a message is judged by identity,
-    never by evidence (owner decision D2d). Work queued under rules nobody
-    promoted - however and whenever it was planned - is never claimed, and a
-    ruleset superseded since still finishes what it planned (#153 round 3).
+    In live mode, only work planned under a ruleset promoted through the
+    evidence-gated service and not revoked since: the ruleset that planned a
+    message is judged by how it was promoted, never by re-reading evidence
+    (owner decision D2d). Work queued under rules nobody promoted that way -
+    however and whenever it was planned - is never claimed, and a ruleset
+    superseded since still finishes what it planned (#153 rounds 3 and 4).
     """
     query = select(AlertDelivery).where(
         AlertDelivery.mode == mode,
@@ -379,6 +380,7 @@ def claimable(session: Session, *, mode: str, live_profile: str, now: datetime,
         query = query.where(AlertDelivery.planning_rules_sha256.in_(
             select(AlertRulesetRegistry.rules_sha256).where(
                 AlertRulesetRegistry.promoted_at.is_not(None),
+                AlertRulesetRegistry.evidence_checked_at.is_not(None),
                 AlertRulesetRegistry.status != RulesetStatus.REVOKED)))
     return list(session.execute(
         query
