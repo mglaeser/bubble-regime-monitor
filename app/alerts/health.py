@@ -1022,10 +1022,11 @@ def health_projection(
             for blocker in live_admission_blockers
         )
 
-    # The one check of the deleted Stage-4 cutover gate that protected
-    # anything (owner decision D2c, 2026-10-02): with the daily digest off and
-    # alerts not live, nothing at all goes out to the owner. Health says so;
-    # the operator's switches decide, as they always did.
+    # With the daily digest's transports switched off and alerts not live,
+    # nothing at all goes out to the owner. DAILY_SMS_ENABLED=false cannot
+    # cause it - it is held until alerts are live (Settings.daily_digest_
+    # transport, owner decision D2c) - but transports switched off by hand can,
+    # and health says so.
     no_outbound_path = settings.daily_digest_transport == "none" and mode != "live"
     if no_outbound_path:
         conditions.append("no outbound message path: the daily digest is off and "

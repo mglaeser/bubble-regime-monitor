@@ -171,9 +171,9 @@ def start() -> BackgroundScheduler:
         digest_schedule = "disabled"
         # Gated on the selected TRANSPORT. With DAILY_SMS_ENABLED unset, a
         # legacy SMS_ENABLED=false plus IMESSAGE_ENABLED=true still selects
-        # iMessage. Explicit DAILY_SMS_ENABLED=false is different: it is the
-        # operator's master switch for the daily digest and selects no
-        # transport at all. Turning the alert system on never changes it.
+        # iMessage. Explicit DAILY_SMS_ENABLED=false is different: it retires
+        # the daily digest on every transport, but only while alerts are live
+        # (Settings.daily_digest_transport). Turning alerts on never changes it.
         digest_transport = settings.daily_digest_transport
         if settings.imessage_enabled_but_unconfigured:
             # Loud at boot, whatever the digest ends up doing: the switch is on

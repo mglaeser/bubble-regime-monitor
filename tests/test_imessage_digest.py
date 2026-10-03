@@ -677,12 +677,14 @@ class TestTransportSelection:
 
     def test_explicit_stage4_toggle_disables_imessage_legacy_digest_too(
             self, isolated_db, monkeypatch):
-        """DAILY_SMS_ENABLED is the daily digest's master switch.
+        """DAILY_SMS_ENABLED=false retires the daily digest on every transport
+        while alerts are live.
 
         The old implementation applied ``false`` only to sipgate, so a fully
         configured iMessage digest remained scheduled after an operator had
         switched the daily digest off.
         """
+        monkeypatch.setenv("ALERTS_MODE", "live")
         monkeypatch.setenv("DAILY_SMS_ENABLED", "false")
         monkeypatch.setenv("IMESSAGE_ENABLED", "true")
         monkeypatch.setenv("IMESSAGE_API_BASE_URL", "http://127.0.0.1:12345")
@@ -697,15 +699,17 @@ class TestTransportSelection:
         assert settings.daily_digest_transport == "none"
         get_settings.cache_clear()
 
-    @pytest.mark.parametrize("alerts_mode", ["disabled", "shadow", "live"])
-    def test_the_daily_digest_switch_is_the_environment_alone(
-            self, isolated_db, monkeypatch, alerts_mode):
-        """DAILY_SMS_ENABLED=false turns the daily digest off whatever
-        ALERTS_MODE says - alerts disabled included: it is the operator's
-        switch, set in the environment, and it never had a runtime gate. The
-        Stage-4 cutover CLI that owner decision D2c deleted (2026-10-02)
-        recorded an operator's intent and printed "set DAILY_SMS_ENABLED=false
-        in the deployment environment"; nothing at runtime read its records.
+    @pytest.mark.parametrize("alerts_mode, transport", [
+        ("live", "none"), ("shadow", "imessage"), ("disabled", "imessage")])
+    def test_retiring_the_daily_digest_needs_live_alerts(
+            self, isolated_db, monkeypatch, alerts_mode, transport):
+        """#151, SOTA-A: the deleted Stage-4 cutover gate's one property is
+        enforced where the switch is read. DAILY_SMS_ENABLED=false retires the
+        daily digest only while alerts are live; with alerts disabled or in
+        shadow the switch is held and the digest keeps its transport, so the
+        owner is never left with nothing at all. (The gate's CLI only recorded
+        an operator's intent and printed "set DAILY_SMS_ENABLED=false in the
+        deployment environment" - nothing at runtime checked the switch.)
         """
         monkeypatch.setenv("ALERTS_MODE", alerts_mode)
         monkeypatch.setenv("DAILY_SMS_ENABLED", "false")
@@ -716,7 +720,23 @@ class TestTransportSelection:
         from app.config import get_settings
 
         get_settings.cache_clear()
-        assert get_settings().daily_digest_transport == "none"
+        assert get_settings().daily_digest_transport == transport
+        get_settings.cache_clear()
+
+    def test_a_held_retirement_keeps_sipgate_too(self, isolated_db, monkeypatch):
+        """The hold covers every transport: an SMS digest keeps sending."""
+        monkeypatch.setenv("ALERTS_MODE", "disabled")
+        monkeypatch.setenv("DAILY_SMS_ENABLED", "false")
+        monkeypatch.setenv("IMESSAGE_ENABLED", "false")
+        monkeypatch.setenv("SMS_ENABLED", "true")
+        monkeypatch.setenv("SIPGATE_TOKEN_ID", "token-id-123")
+        monkeypatch.setenv("SIPGATE_TOKEN", "sipgate-token-123456789")  # pragma: allowlist secret
+        monkeypatch.setenv("SIPGATE_RECIPIENT", "+491510000000")
+        from app.config import get_settings
+
+        get_settings.cache_clear()
+        settings = get_settings()
+        assert settings.effective_daily_sms_enabled is True and settings.daily_digest_transport == "sipgate"
         get_settings.cache_clear()
 
     def test_nothing_in_the_application_reads_a_cutover_record(self):
