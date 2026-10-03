@@ -565,34 +565,49 @@ def test_a_live_evaluation_applies_nothing_once_a_promotion_superseded_its_rules
             AlertDelivery.planning_rules_sha256 == old.ruleset.rules_sha256)).scalars().all() == []
 
 
-def test_a_shadow_candidate_changed_back_owns_the_open_episodes_again(isolated_db, tmp_path):
-    """#159 round 2, SOTA-A: on one input, shadow evaluations under A, then a
-    candidate B, then A again: the third run found its evaluation already
-    committed and returned before resolving B's episodes, so B kept open
-    episodes while A was the candidate. The committed fast path resolves them
-    too, in shadow - live mode changes candidate only by a promotion."""
+def test_a_shadow_candidate_changed_back_converges_at_the_next_input(isolated_db, tmp_path):
+    """#159 rounds 2 and 3, SOTA-A: on one input, shadow evaluations under A,
+    then a candidate B, then A again. The third run finds its evaluation
+    committed and returns without writing - a committed evaluation is never
+    applied again - so the episodes stay as B's run left them. The next input
+    converges: its apply resolves B's episodes and opens A's. Shadow mode
+    sends nothing; a live candidate changes only by a promotion, which
+    resolves at once."""
     from app.alerts.artifacts import register
     from app.alerts.engine import run_evaluation
     from app.alerts.models import AlertEpisode
 
     a = _artifacts(stage=3, tmp_path=tmp_path / "a")
     b = _artifacts(stage=4, tmp_path=tmp_path / "b")
-    fired = make_input(identity="a-b-a", effective="de-risk", rf4=True,
-                       rf4_period="2026-08-15", breadth_period="2026-08-15",
-                       computed_at="2026-08-15T10:00:00+00:00")
-    _store_input(fired, NOW)
+    first, second = (make_input(identity=identity, effective="de-risk", rf4=True,
+                                rf4_period="2026-08-15", breadth_period="2026-08-15",
+                                computed_at=computed)
+                     for identity, computed in (("a-b-a", "2026-08-15T10:00:00+00:00"),
+                                                ("next", "2026-08-15T14:00:00+00:00")))
+    _store_input(first, NOW)
+    _store_input(second, NOW + timedelta(hours=4))
     with session_scope() as session:
         register(session, a, now=NOW)
         register(session, b, now=NOW)
-    for ruleset, at in ((a, NOW), (b, NOW + timedelta(minutes=1)), (a, NOW + timedelta(minutes=2))):
-        outcome = run_evaluation(session_scope, alert_input=fired, current=ruleset.ruleset,
-                                 mode="shadow", now=at)
-        assert outcome.status == EvaluationRunStatus.COMMITTED
 
-    with session_scope() as session:
-        owners = {e.origin_rules_sha256 for e in session.execute(select(AlertEpisode).where(
-            AlertEpisode.is_open.is_(True), AlertEpisode.mode == "shadow")).scalars()}
-    assert b.ruleset.rules_sha256 not in owners
+    def owners() -> set[str]:
+        with session_scope() as session:
+            return {e.origin_rules_sha256 for e in session.execute(select(AlertEpisode).where(
+                AlertEpisode.is_open.is_(True), AlertEpisode.mode == "shadow")).scalars()}
+
+    for ruleset, at in ((a, NOW), (b, NOW + timedelta(minutes=1))):
+        assert run_evaluation(session_scope, alert_input=first, current=ruleset.ruleset,
+                              mode="shadow", now=at).status == EvaluationRunStatus.COMMITTED
+    assert owners() == {b.ruleset.rules_sha256}
+
+    again = run_evaluation(session_scope, alert_input=first, current=a.ruleset,
+                           mode="shadow", now=NOW + timedelta(minutes=2))
+    assert again.status == EvaluationRunStatus.COMMITTED
+    assert owners() == {b.ruleset.rules_sha256}, "a committed evaluation writes nothing"
+
+    assert run_evaluation(session_scope, alert_input=second, current=a.ruleset, mode="shadow",
+                          now=NOW + timedelta(hours=4)).status == EvaluationRunStatus.COMMITTED
+    assert owners() == {a.ruleset.rules_sha256}
 
 
 def test_the_apply_transaction_takes_the_write_lock_first(isolated_db, tmp_path):

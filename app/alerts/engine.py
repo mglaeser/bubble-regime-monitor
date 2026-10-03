@@ -280,17 +280,12 @@ def run_evaluation(
         already_committed = row.status == EvaluationRunStatus.COMMITTED
 
     if already_committed:
-        if mode != Mode.LIVE:
-            # The run is done, but a shadow candidate may have changed back
-            # since (A -> B -> A on one input): only the current ruleset owns
-            # open episodes (#159 round 2). Live mode needs no such step - a
-            # live candidate changes only by a promotion, which resolves - and
-            # a late retry of an old live run must not touch the promoted
-            # ruleset's episodes.
-            with session_factory() as session:
-                resolve_replaced_episodes(
-                    session, replacing_rules_sha256=current.rules_sha256, now=now,
-                    actor_type=ActorType.SYSTEM, mode=mode, live_profile=live_profile)
+        # A committed evaluation is never applied again, and returning writes
+        # nothing. A shadow candidate changed back on one input (A -> B -> A)
+        # leaves the episodes as B's run left them until the next input, whose
+        # apply resolves them and opens A's; shadow mode sends nothing. A live
+        # candidate changes only by a promotion, which resolves at once (#159
+        # rounds 2 and 3).
         return EvaluationOutcome(evaluation_id=evaluation_id,
                                  status=EvaluationRunStatus.COMMITTED,
                                  input_identity=alert_input.input_identity)
