@@ -95,8 +95,9 @@ class AlertPhraseSetRegistry(Base):
 class AlertRulesetRegistry(Base):
     """Validated/promoted rulesets, addressed by content hash.
 
-    Archived rows are NOT garbage: every open episode names the ruleset that
-    opened it, and that ruleset keeps being evaluated until the episode closes.
+    Superseded rows are NOT garbage: every episode and every queued delivery
+    member names the ruleset that produced it, and the dispatcher renders from
+    those bytes.
     """
 
     __tablename__ = "alert_ruleset_registry"
@@ -181,11 +182,9 @@ class AlertInputSnapshot(Base):
 
 
 class AlertEvaluation(Base):
-    """One logical evaluation batch.
-
-    A batch may span the CURRENT ruleset plus every archived ruleset that still
-    owns an open episode, so the identity covers the whole evaluated set — not
-    just the current hash.
+    """One logical evaluation batch, of the current ruleset alone (owner
+    decision D2e). The identity still covers the evaluated set, which is that
+    one hash.
     """
 
     __tablename__ = "alert_evaluation"
@@ -223,10 +222,8 @@ class AlertEvaluation(Base):
 
 
 class AlertEvaluationRuleset(Base):
-    """Which rulesets an evaluation actually covered, and in which role.
-
-    Makes multi-ruleset continuation auditable instead of implied by a JSON
-    list nobody can query.
+    """Which ruleset an evaluation covered, and in which role: one CURRENT
+    row since owner decision D2e; older rows may name an ORIGIN_CONTINUATION.
     """
 
     __tablename__ = "alert_evaluation_ruleset"
@@ -281,7 +278,6 @@ class AlertRuleState(Base):
     last_known_condition_state: Mapped[str | None] = mapped_column(String(16), nullable=True)
     last_known_input_identity: Mapped[str | None] = mapped_column(String(SHA_LEN), nullable=True)
     current_episode_id: Mapped[str | None] = mapped_column(String(ULID_LEN), nullable=True)
-    inherited_open_episode_id: Mapped[str | None] = mapped_column(String(ULID_LEN), nullable=True)
     consecutive_true: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     candidate_from_state: Mapped[str | None] = mapped_column(String(16), nullable=True)
     candidate_target_state: Mapped[str | None] = mapped_column(String(16), nullable=True)
@@ -404,8 +400,6 @@ class AlertEpisode(Base):
     candidate_expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True)
     escalation_of_episode_id: Mapped[str | None] = mapped_column(
-        ForeignKey("alert_episode.episode_id"), nullable=True)
-    inherited_open_episode_id: Mapped[str | None] = mapped_column(
         ForeignKey("alert_episode.episode_id"), nullable=True)
     created_evaluation_id: Mapped[str] = mapped_column(
         ForeignKey("alert_evaluation.evaluation_id"), nullable=False)

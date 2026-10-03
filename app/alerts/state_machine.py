@@ -58,7 +58,6 @@ class InstanceMemory:
     candidate_expires_at: datetime | None = None
     candidate_ttl_policy: str | None = None
     current_episode_id: str | None = None
-    inherited_open_episode_id: str | None = None
     #: economic observation keys already counted toward the OPEN candidate,
     #: keyed by confirmation source id.
     confirmed_keys: dict[str, frozenset[str]] = field(default_factory=dict)
@@ -97,7 +96,6 @@ class StateDecision:
     resolve_episode: bool = False
     cancel_episode: str | None = None            # CANCELLED_* reason
     episode_id: str | None = None
-    inherited_open_episode_id: str | None = None
 
     consecutive_true: int = 0
     candidate_started_input: str | None = None
@@ -233,7 +231,6 @@ def evaluate_state(
         candidate_expires_at=memory.candidate_expires_at,
         candidate_ttl_policy=memory.candidate_ttl_policy,
         episode_id=memory.current_episode_id,
-        inherited_open_episode_id=memory.inherited_open_episode_id,
         reasons=list(outcome.reasons),
         evidence=dict(outcome.evidence),
     )

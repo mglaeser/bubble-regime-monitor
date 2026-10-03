@@ -186,11 +186,11 @@ def load_promoted(session: Session, *,
 
 def load_by_hash(session: Session, rules_sha256: str, *,
                  service_version: str | None = None) -> LoadedArtifacts | None:
-    """Rebuild an archived ruleset from its stored canonical bytes.
+    """Rebuild a registered ruleset from its stored canonical bytes.
 
-    This is how an open episode keeps being evaluated under the ruleset that
-    opened it after a promotion — the bytes are in the database, so the file on
-    disk having moved on is irrelevant.
+    The promoted fallback is rebuilt this way, and queued work and digests
+    render from the bytes they were planned with: those are in the database,
+    so the file on disk having moved on is irrelevant.
     """
     row = session.get(AlertRulesetRegistry, rules_sha256)
     if row is None:
@@ -321,16 +321,3 @@ def promote(session: Session, artifacts: LoadedArtifacts, *, actor: str,
              stage=ruleset.document.meta.active_stage, actor=actor,
              episodes_replaced=len(replaced))
     return rules_sha256
-
-
-def archived_rulesets(session: Session, hashes: list[str], *,
-                      service_version: str | None = None) -> dict[str, ValidatedRuleset]:
-    """Rebuild every archived ruleset that still owns an open episode."""
-    out: dict[str, ValidatedRuleset] = {}
-    for rules_sha in hashes:
-        loaded = load_by_hash(session, rules_sha, service_version=service_version)
-        if loaded is not None:
-            out[rules_sha] = loaded.ruleset
-        else:
-            log.error("alert_archived_ruleset_missing", rules_sha256=rules_sha)
-    return out

@@ -133,9 +133,9 @@ def make_golden_raw_inputs():
 def register_promoted(session, artifacts, *, now=None, actor="tests"):
     """Register artifacts and mark them PROMOTED through `artifacts.promote`.
 
-    Most tests want a promoted ruleset as a FIXTURE - something to continue
-    from, supersede, or resolve bytes against - not to exercise promotion
-    itself, which tests/test_alert_promotion.py does.
+    Most tests want a promoted ruleset as a FIXTURE - something to evaluate,
+    supersede, or resolve bytes against - not to exercise promotion itself,
+    which tests/test_alert_promotion.py does.
     """
     from app.alerts.artifacts import promote
 
