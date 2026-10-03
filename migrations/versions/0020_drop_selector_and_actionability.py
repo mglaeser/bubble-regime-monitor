@@ -7,7 +7,8 @@ Create Date: 2026-10-02
 Owner decision D2b (2026-10-02): the dormant Stage-7/A-B LLM selector and its
 actionability review endpoint are deleted. The dispatcher never called the
 selector, and the production database holds no row in either table (read-only
-query on leaf, 2026-10-02): nothing is lost.
+query on leaf, 2026-10-02): nothing is lost - and a table that does hold rows
+is not dropped: the upgrade refuses (#152 round 1).
 """
 
 from __future__ import annotations
@@ -21,7 +22,27 @@ branch_labels = None
 depends_on = None
 
 
+#: Each table the upgrade drops, and how it is counted first.
+_DROPPED = (
+    ("alert_llm_attempt", "SELECT COUNT(*) FROM alert_llm_attempt"),
+    ("alert_actionability_review", "SELECT COUNT(*) FROM alert_actionability_review"),
+)
+
+
 def upgrade() -> None:
+    # Fail closed on data (#152 round 1), as 0015 refuses to lose evidence: a
+    # table is dropped only when it is empty. Production held no row in either
+    # (read-only, 2026-10-02). A host that holds rows keeps them: the upgrade
+    # raises, the one upgrade transaction rolls back (migrations/env.py), the
+    # new image does not come up, and the operator exports and empties the
+    # table before the upgrade can pass.
+    bind = op.get_bind()
+    for table, count in _DROPPED:
+        rows = bind.execute(sa.text(count)).scalar_one()
+        if rows:
+            raise RuntimeError(
+                f"0020 refuses to drop {table}: it holds {rows} row(s). Export them, "
+                f"empty the table, then upgrade again (owner decision D2b deletes it).")
     # Indexes go with their tables.
     op.drop_table("alert_llm_attempt")
     op.drop_table("alert_actionability_review")

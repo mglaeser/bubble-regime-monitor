@@ -541,7 +541,9 @@ def test_actionability_migration_preserves_rows_through_both_directions(tmp_path
         ).fetchone() == ("YES",)
         connection.close()
 
-        command.upgrade(cfg, "head")
+        # Up to the last revision that keeps the table: 0020 drops it, and
+        # refuses while it holds the row (test_the_selector_migration_refuses_to_drop_rows).
+        command.upgrade(cfg, "0019")
 
     _run_with_db(db, _cycle)
 
@@ -582,6 +584,47 @@ def test_actionability_migration_refuses_duplicate_delivery_evidence(tmp_path):
             "select version_num from alembic_version").fetchone() == ("0014",)
         assert connection.execute(
             "select count(*) from alert_actionability_review").fetchone() == (2,)
+        connection.close()
+
+    _run_with_db(db, _seed_and_refuse)
+
+
+@pytest.mark.parametrize("table, insert", [
+    ("alert_actionability_review",
+     "INSERT INTO alert_actionability_review (review_id, episode_id, delivery_id, actionable, "
+     "reviewed_at) VALUES ('01M0REVIEWKEPT000000000000', 'episode-kept', 'delivery-kept', 'YES', "
+     "'2026-10-01 00:00:00+00:00')"),
+    ("alert_llm_attempt",
+     "INSERT INTO alert_llm_attempt (attempt_id, delivery_id, attempted_at, model, status, "
+     "context_hash) VALUES ('01M0ATTEMPTKEPT00000000000', 'delivery-kept', "
+     "'2026-10-01 00:00:00+00:00', 'm', 'OK', 'h')"),
+])
+def test_the_selector_migration_refuses_to_drop_rows(tmp_path, table, insert):
+    """#152 round 1, SOTA-A: 0020 dropped the selector's attempts and the
+    actionability reviews unconditionally, so a review accepted under 0019
+    would be erased by the upgrade. It drops a table only when it is empty -
+    production held no row - and otherwise refuses: the upgrade rolls back,
+    the database stays at 0019 and the row stays."""
+    db = str(tmp_path / f"selector-{table}.db")
+
+    def _seed_and_refuse():
+        from alembic import command
+
+        from app.db_migrate import _alembic_config
+
+        cfg = _alembic_config()
+        command.upgrade(cfg, "0019")
+        connection = sqlite3.connect(db)
+        connection.execute(insert)
+        connection.commit()
+        connection.close()
+
+        with pytest.raises(RuntimeError, match=f"0020 refuses to drop {table}"):
+            command.upgrade(cfg, "0020")
+
+        connection = sqlite3.connect(db)
+        assert connection.execute("select version_num from alembic_version").fetchone() == ("0019",)
+        assert connection.execute(f"select count(*) from {table}").fetchone() == (1,)  # noqa: S608
         connection.close()
 
     _run_with_db(db, _seed_and_refuse)
