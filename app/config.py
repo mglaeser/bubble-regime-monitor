@@ -218,14 +218,6 @@ class Settings(BaseSettings):
     alerts_message_retention_days: int = 400
     alerts_busy_timeout_ms: int = 5000
 
-    # Reserved for the dormant future Stage-7/A-B selector. The dispatcher does
-    # not import or call it today, so changing these flags cannot activate alert
-    # phrasing. If later wired, the model may SELECT reviewed codes only; it may
-    # never write prose or a number, and P1 must skip it entirely.
-    alerts_llm_enabled: bool = True
-    alerts_llm_timeout_s: int = 6
-    alerts_llm_render_cap_24h: int = 12
-
     # Runtime. mc_samples / mc_seed DEFAULT to the canonical frozen artifact
     # (F-01/L-07) so the runtime MC seed is causally the frozen value; env vars
     # may still override for operational runs.
@@ -255,10 +247,8 @@ class Settings(BaseSettings):
     service_version: str = "3.9.0"
 
     # --- MESSAGE ENGINE (Phase C) -------------------------------------------
-    # The LLM WRITES the operator message here, unlike app/alerts/llm_selector
-    # where the model only selects codes and never writes a digit. The two
-    # coexist deliberately (ruling Q41: llm_selector untouched); see
-    # docs/MESSAGE_ENGINE.md for why, and for the P1 exemption.
+    # The LLM WRITES the operator message here; see docs/MESSAGE_ENGINE.md for
+    # why, and for the P1 exemption.
     #
     # Inert by default: with the flag off, every trigger renders its
     # deterministic/evergreen text and no gateway call is ever made, so

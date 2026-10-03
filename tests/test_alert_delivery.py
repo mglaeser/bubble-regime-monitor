@@ -827,221 +827,6 @@ def _seed_delivery(delivery_id: str = "D1", *, priority: int = 2,
     return delivery_id
 
 
-def test_p1_never_calls_the_llm(isolated_db, phrase_set):
-    from app.alerts.llm_selector import select_codes
-    from app.db import session_scope
-
-    context = _context(phrase_set)
-    with session_scope() as session:
-        result = select_codes(session, delivery_id="D1", priority=1, context=context,
-                              phrase_set=phrase_set, now=NOW)
-    assert result.selection is None
-    assert result.fallback_reason == "P1_DETERMINISTIC"
-
-    from sqlalchemy import func
-    from sqlalchemy import select as sa_select
-
-    from app.alerts.models import AlertLlmAttempt
-
-    with session_scope() as session:
-        attempts = session.execute(
-            sa_select(func.count()).select_from(AlertLlmAttempt)).scalar_one()
-    assert attempts == 0        # not even a recorded skip: it never got that far
-
-
-def test_llm_budget_exhaustion_falls_back_without_delaying(isolated_db, phrase_set,
-                                                           monkeypatch):
-    from app.alerts.llm_selector import select_codes
-    from app.db import session_scope
-
-    monkeypatch.setenv("LLM_API_BASE_URL", "https://gateway.example.test/v1")
-    monkeypatch.setenv("LLM_API_KEY", "test-key")   # pragma: allowlist secret
-    monkeypatch.setenv("LLM_MODEL", "provider/model")
-    monkeypatch.setenv("LLM_AUTH_HEADER", "X-Gateway-Key")
-    monkeypatch.setenv("ALERTS_LLM_RENDER_CAP_24H", "0")
-    from app.config import get_settings
-
-    get_settings.cache_clear()
-    _seed_delivery()
-    context = _context(phrase_set)
-    with session_scope() as session:
-        result = select_codes(session, delivery_id="D1", priority=2, context=context,
-                              phrase_set=phrase_set, now=NOW)
-    assert result.selection is None
-    assert result.fallback_reason == "LLM_BUDGET_EXHAUSTED"
-    assert result.render_source == "template_full"
-    get_settings.cache_clear()
-
-
-def test_every_llm_attempt_is_recorded_including_failures(isolated_db, phrase_set,
-                                                          monkeypatch):
-    from app.alerts.llm_selector import select_codes
-    from app.db import session_scope
-
-    monkeypatch.setenv("LLM_API_BASE_URL", "https://gateway.example.test/v1")
-    monkeypatch.setenv("LLM_API_KEY", "test-key")   # pragma: allowlist secret
-    monkeypatch.setenv("LLM_MODEL", "provider/model")
-    monkeypatch.setenv("LLM_AUTH_HEADER", "X-Gateway-Key")
-    from app.config import get_settings
-
-    get_settings.cache_clear()
-
-    class BoomClient:
-        def select(self, *, system, user):
-            raise TimeoutError("model did not answer")
-
-    _seed_delivery()
-    context = _context(phrase_set)
-    with session_scope() as session:
-        result = select_codes(session, delivery_id="D1", priority=2, context=context,
-                              phrase_set=phrase_set, now=NOW, client=BoomClient())
-    assert result.status == "TIMEOUT"
-
-    from sqlalchemy import select as sa_select
-
-    from app.alerts.models import AlertLlmAttempt
-
-    with session_scope() as session:
-        row = session.execute(sa_select(AlertLlmAttempt)).scalars().one()
-    assert row.status == "TIMEOUT"
-    assert row.error_code == "TimeoutError"
-    get_settings.cache_clear()
-
-
-def test_alert_selector_uses_gateway_with_its_own_cap_and_deadline(
-        isolated_db, phrase_set, monkeypatch):
-    import json
-
-    from sqlalchemy import select as sa_select
-
-    import app.llm_gateway as gateway
-    from app.alerts.llm_selector import SELECTION_OUTPUT_KEYS, SYSTEM_PROMPT, select_codes
-    from app.alerts.models import AlertLlmAttempt
-    from app.config import get_settings
-    from app.db import session_scope
-    from app.llm_gateway import Completion
-
-    monkeypatch.setenv("LLM_API_BASE_URL", "https://gateway.example.test/v1")
-    monkeypatch.setenv("LLM_API_KEY", "test-key")   # pragma: allowlist secret
-    monkeypatch.setenv("LLM_MODEL", "provider/model")
-    monkeypatch.setenv("LLM_AUTH_HEADER", "X-Gateway-Key")
-    get_settings.cache_clear()
-    captured = {}
-
-    def fake_complete(**kwargs):
-        captured.update(kwargs)
-        return Completion(text=json.dumps({
-            "headline_code": "BAND_TO_DERISK",
-            "phrase_codes": [],
-            "fact_ids": [],
-            "next_check_code": None,
-            "caveat_codes": [],
-        }), request_id="gateway-request")
-
-    monkeypatch.setattr(gateway, "complete", fake_complete)
-    _seed_delivery()
-    context = _context(phrase_set)
-    with session_scope() as session:
-        result = select_codes(session, delivery_id="D1", priority=2, context=context,
-                              phrase_set=phrase_set, now=NOW)
-
-    assert result.status == "SUCCESS"
-    assert captured["system"] == SYSTEM_PROMPT
-    assert captured["max_tokens"] == 400
-    assert captured["deadline_s"] == 6.0
-    assert captured["json_output_keys"] == SELECTION_OUTPUT_KEYS
-    with session_scope() as session:
-        row = session.execute(sa_select(AlertLlmAttempt)).scalars().one()
-    assert row.model == "provider/model"
-    assert row.request_id == "gateway-request"
-    get_settings.cache_clear()
-
-
-def test_an_unauthorized_code_from_the_model_is_rejected(phrase_set):
-    from app.alerts.llm_selector import validate_selection
-
-    context = _context(phrase_set, codes=("BAND_TO_DERISK",))
-    with pytest.raises(ValueError, match="not authorized"):
-        validate_selection({"headline_code": "OVERRIDE_FIRES", "phrase_codes": [],
-                            "fact_ids": [], "caveat_codes": []}, context, phrase_set)
-
-
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("next_check_code", "NEXT_RECOMPUTE"),
-        ("caveat_codes", ["DATA_DEGRADED"]),
-    ],
-)
-def test_model_cannot_select_an_unauthorized_next_check_or_caveat(
-        phrase_set, field, value):
-    import json
-
-    from app.alerts.llm_selector import build_prompt, validate_selection
-
-    context = _context(phrase_set, codes=("BAND_TO_DERISK",))
-    raw = {"headline_code": "BAND_TO_DERISK", "phrase_codes": [],
-           "fact_ids": [], "caveat_codes": []}
-    raw[field] = value
-    with pytest.raises(ValueError, match="not authorized"):
-        validate_selection(raw, context, phrase_set)
-
-    prompt = json.loads(build_prompt(context, phrase_set))
-    assert "NEXT_RECOMPUTE" not in prompt["allowed_next_check_codes"]
-    assert "DATA_DEGRADED" not in prompt["allowed_caveat_codes"]
-
-
-def test_budget_skip_rows_do_not_keep_the_llm_cap_exhausted_forever(
-        isolated_db):
-    from app.alerts.canonical import new_ulid
-    from app.alerts.enums import LlmAttemptStatus
-    from app.alerts.llm_selector import _budget_used
-    from app.alerts.models import AlertLlmAttempt
-    from app.alerts.repository import utc_ms
-    from app.db import session_scope
-
-    _seed_delivery()
-    with session_scope() as session:
-        for offset in range(12):
-            session.add(AlertLlmAttempt(
-                attempt_id=new_ulid(utc_ms(NOW) + offset),
-                delivery_id="D1",
-                attempted_at=NOW,
-                model="test-model",
-                status=LlmAttemptStatus.BUDGET_SKIPPED,
-                duration_ms=0,
-                context_hash="c" * 64,
-            ))
-    with session_scope() as session:
-        assert _budget_used(session, now=NOW, hours=24) == 0
-
-
-def test_a_foreign_fact_id_from_the_model_is_rejected(phrase_set):
-    from app.alerts.llm_selector import validate_selection
-
-    context = _context(phrase_set, codes=("BAND_TO_DERISK",))
-    with pytest.raises(ValueError, match="not authorized for this member"):
-        validate_selection({"headline_code": "BAND_TO_DERISK", "phrase_codes": [],
-                            "fact_ids": ["F_TOP10"], "caveat_codes": []},
-                           context, phrase_set)
-
-
-def test_the_model_prompt_contains_only_codes_numbers_and_enums(phrase_set):
-    """No scraped free text reaches the model — the A-10 containment."""
-    import json
-
-    from app.alerts.llm_selector import build_prompt
-
-    payload = json.loads(build_prompt(_context(phrase_set), phrase_set))
-    assert set(payload) == {
-        "allowed_headline_codes", "allowed_phrase_codes", "allowed_next_check_codes",
-        "allowed_caveat_codes", "required_caveat_codes", "available_fact_ids",
-        "facts", "condition_status", "priority", "bundle_size",
-    }
-    for value in payload["facts"].values():
-        assert isinstance(value, str) and len(value) <= 12
-
-
 # ---------------------------------------------------------------------------
 # named mandate properties (§27.8 / §21.3)
 # ---------------------------------------------------------------------------
@@ -1538,3 +1323,20 @@ def test_a_test_probe_is_not_parked_by_quiet_hours(isolated_db):
     with session_scope() as session:
         assert session.get(AlertDelivery, delivery_id).transport_status \
             == TransportStatus.SENT
+
+
+def test_the_alert_system_has_no_model_path():
+    """AGENTS.md rule 1 for the alert system. Owner decision D2b (2026-10-02)
+    deleted the dormant LLM selector - the alert system's only model prompt,
+    which the dispatcher never called and whose tables never held a row - and
+    its prompt test with it. What remains is pinned here: no module of the
+    alert system imports the model gateway or a selector, so no alert text
+    reaches a model and no model writes an alert."""
+    import re
+    from pathlib import Path
+
+    alerts = Path(__file__).resolve().parents[1] / "app" / "alerts"
+    model_path = re.compile(r"\bllm_gateway\b|\bllm_selector\b|\bopenai\b|\banthropic\b")
+    readers = sorted(p.name for p in alerts.rglob("*.py") if model_path.search(p.read_text(encoding="utf-8")))
+    assert readers == []
+

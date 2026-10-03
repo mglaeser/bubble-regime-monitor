@@ -73,7 +73,7 @@ jobs:
           # app/services/replay.py is gone (the holidays library replaced both).
           # 146 -> 145: the Twelve Data breadth sweep went (breadth is Polygon-only).
           # 145 -> 134: the unscored S4 and S5 shadows went (owner decision D4).
-          MYPY_CEILING: "133"
+          MYPY_CEILING: "119"
           # The floor constrains REACH, not DEPTH: it proves mypy READ the tree.
           # It does NOT make a low count mean "little is wrong" -- an earlier
           # version of this comment claimed that, and it is false. Measured:

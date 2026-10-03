@@ -6,7 +6,7 @@ what the repository knows about the indicators behind the trigger; it writes
 the message; a few basic checks decide whether the text can go out on its
 channel; the owner's template, with the current numbers in it, goes out
 otherwise. It is its own subsystem in the `MESSAGE_ENGINE_*` settings
-namespace (ruling Q42); `app/alerts/llm_selector.py` is left untouched (Q41).
+namespace (ruling Q42).
 
 ## Decision 24 — the model writes; basic checks; the reader interprets
 
@@ -136,15 +136,15 @@ converge, and 57 review rounds on #121 and 20 on #124 showed it.
   an entry the model writes without a written TASK - sends the bare event
   and is never coerced into a text (#126 rounds 17 and 20).
 
-## Why this is not llm_selector
+## Why the model writes here
 
-`llm_selector` implements a deliberate containment: the model selects CODES,
-never writes a digit, and the renderer interpolates every fact. The program
-asks for the opposite — the model writes the sentence. Ruling Q25 anticipated
-the conflict and directs that the no-LLM claim in `docs/ALERT_SYSTEM.md` be
-consciously amended rather than quietly contradicted, with "P1-style
-exemptions to define". Both paths therefore coexist: nothing about the
-existing alert render path changes.
+The alert path renders reviewed templates and calls no model; the dormant
+selector that would have let a model pick fragment codes is deleted (owner
+decision D2b, 2026-10-02). The program asks the model to write the
+sentence. Ruling Q25 anticipated the conflict with the no-LLM claim in
+`docs/ALERT_SYSTEM.md` and directs that it be consciously amended rather
+than quietly contradicted, with "P1-style exemptions to define". Nothing
+about the alert render path changes.
 
 ## Decision 1 — compose BEFORE the delivery is queued
 

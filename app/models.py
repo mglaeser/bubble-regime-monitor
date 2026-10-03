@@ -257,8 +257,7 @@ class MessageEngineAttempt(Base):
     second place that can disagree with them: the pacing floor reads the last
     attempt's timestamp, the breaker counts the trailing run of technical
     errors, and the daily budget counts today's rows. A dropped row would
-    silently hand a failing model more attempts (the same reasoning as
-    app/alerts/llm_selector.py, which counts rejections against its budget).
+    silently hand a failing model more attempts.
 
     Deliberately NOT app/alerts/models.py:AlertRender: that table's
     `gsm7_septets` is NOT NULL under CHECK (0..160) and septets() raises on

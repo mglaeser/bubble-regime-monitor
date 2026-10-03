@@ -9,7 +9,7 @@ never as the literal string "<PIN>" in a numeric field.
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from math import ceil
 from typing import Any
 
@@ -33,8 +33,6 @@ from app.alerts.models import (
     AlertEpisode,
     AlertEvaluation,
     AlertInputSnapshot,
-    AlertLlmAttempt,
-    AlertRender,
     AlertRulesetRegistry,
     AlertRuleState,
 )
@@ -522,14 +520,13 @@ _CLOCK_SKEW_TOLERANCE_S = 60
 
 #: The schema this build expects. Health reports a FAULT when the live
 #: database is on any other revision, so this moves in the same PR as a
-#: migration — 0019 drops breadth_symbol_cache (breadth is Polygon-only, D9).
-_ALERT_SCHEMA_REVISION = "0019"
+#: migration — 0020 drops the dormant selector's attempts and the actionability
+#: reviews (D2b).
+_ALERT_SCHEMA_REVISION = "0020"
 _REQUIRED_PARTIAL_INDEXES = frozenset({
     "uq_alert_input_snapshot_id",
     "uq_alert_episode_open",
     "uq_alert_delivery_manual_retry_root_sequence",
-    "uq_alert_actionability_delivery",
-    "uq_alert_actionability_episode_memberless",
 })
 _REQUIRED_UNIQUE_INDEXES = frozenset({
     "uq_alert_render_delivery",
@@ -927,36 +924,6 @@ def health_projection(
         Snapshot.id.not_in(captured_snapshot_ids),
     )
 
-    llm_since = health_now - timedelta(hours=24)
-    llm_by_status = {
-        str(status): int(count)
-        for status, count in session.execute(
-            select(AlertLlmAttempt.status, func.count())
-            .join(AlertDelivery,
-                  AlertDelivery.delivery_id == AlertLlmAttempt.delivery_id)
-            .where(
-                *delivery_scope,
-                AlertLlmAttempt.attempted_at >= llm_since,
-            )
-            .group_by(AlertLlmAttempt.status)
-        ).all()
-    }
-    fallback_counts = {
-        str(reason): int(count)
-        for reason, count in session.execute(
-            select(AlertRender.fallback_reason, func.count())
-            .join(AlertDelivery,
-                  AlertDelivery.delivery_id == AlertRender.delivery_id)
-            .where(
-                *delivery_scope,
-                AlertRender.created_at >= llm_since,
-                AlertRender.fallback_reason.is_not(None),
-            )
-            .group_by(AlertRender.fallback_reason)
-        ).all()
-        if reason is not None
-    }
-
     schema_faults: list[str] = []
     if quick_check != "ok":
         schema_faults.append(f"quick_check returned {quick_check!s}")
@@ -1198,17 +1165,6 @@ def health_projection(
             "required_unique_indexes": sorted(_REQUIRED_UNIQUE_INDEXES),
             "missing_required_unique_indexes": missing_required_unique_indexes,
             "alert_schema_integrity": "critical" if schema_fault else "ok",
-        },
-        "llm": {
-            "enabled": bool(settings.alerts_llm_enabled),
-            "cap_24h": settings.alerts_llm_render_cap_24h,
-            "attempts_24h": sum(llm_by_status.values()),
-            "provider_calls_24h": sum(
-                count for status, count in llm_by_status.items()
-                if status != "BUDGET_SKIPPED"
-            ),
-            "by_status_24h": llm_by_status,
-            "fallbacks_24h": fallback_counts,
         },
         # `_enabled` reports whether the digest is SCHEDULED, on any transport
         # — not whether it can actually send. Reading the SMS switch alone
