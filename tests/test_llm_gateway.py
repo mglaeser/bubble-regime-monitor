@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import json
 import os
 import re
@@ -715,6 +716,22 @@ class TestResponsesStreaming:
 
 
 class TestFailureSafety:
+    @pytest.fixture(autouse=True)
+    def _no_garbage_collection_while_timed(self):
+        """These tests time the gateway's hard deadline to a tenth of a second.
+        Late in the suite a full garbage collection takes about half a second
+        (656,000 live objects; measured 2026-10-03 on main and on #150), so one
+        landing in that window failed CI on a change that touches no gateway
+        code, three runs out of three: the client never connected before its
+        0.1 s deadline. Collect first and hold the collector off while the test
+        runs - the deadline under test is the gateway's, not the interpreter's."""
+        gc.collect()
+        gc.disable()
+        try:
+            yield
+        finally:
+            gc.enable()
+
     @pytest.mark.parametrize("deadline", [
         True,
         "1",
