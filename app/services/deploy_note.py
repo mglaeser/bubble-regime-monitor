@@ -20,17 +20,19 @@ note that is not sent is not sent later, and the next release's note begins at
 the commit its release found in the last container, so a deploy can go
 unannounced. A message never describes the wrong change; it can be missing.
 
-The model writes the summary from repository-authored text only: the commits'
-titles and descriptions and the changed paths. That is the one place a model
-prompt carries text that is not a number or an enum, allowed by AGENTS.md rule
-1 for this note alone: the text is this repository's reviewed history, and the
-note goes only to the owner's own iMessage recipient. The likelihood line is
-the code's, never the model's: a class computed from which files changed, so
-nothing the commits say can talk it down. It is also the only text in the
-note that speaks of the score (SCORE_TALK), so the note never carries two
-estimates. When the model fails, or its summary fails the checks, the bare
-deploy goes out - the commit and how many commits it carries - with the code's
-line; raw commit text never goes out (#150 round 14).
+The model reads repository-authored text only - the commits' titles and
+descriptions and the changed paths - the one place a model prompt carries text
+that is not a number or an enum, allowed by AGENTS.md rule 1 for this note
+alone: the text is this repository's reviewed history, and the note goes only
+to the owner's own iMessage recipient. The model answers with area codes from a
+closed list (AREAS) and nothing else; the note renders the areas' fixed
+phrases. No word the model writes reaches the message, so nothing it writes
+can contradict the likelihood line (#150 rounds 1-15: free text beside a
+computed line could always say the opposite in other words). The likelihood
+line is the code's: a class computed from which files changed, so nothing the
+commits say can talk it down, and the only text in the note about the score.
+A reply that is not codes only, or a model that fails, sends the bare deploy -
+the commit and how many commits it carries - with the code's line.
 """
 
 from __future__ import annotations
@@ -59,9 +61,6 @@ DATA_INPUTS = ("app/sources/",)
 #: The pinned reference score: when it moves, the score changed on purpose.
 GOLDEN = ("tests/test_golden_fixture.py", "tests/conftest.py")
 
-#: The whole note, and the model's summary within it.
-MAX_CHARS = 800
-SUMMARY_CHARS = 560
 _COMMIT_BODY_CHARS = 700
 _PROMPT_COMMITS = 20
 _PROMPT_FILES = 80
@@ -72,24 +71,30 @@ _PROMPT_FILES = 80
 _RANGE_BYTES = 4096
 _LOG_BYTES = 1 << 20
 
-#: The words that speak of the score or of a likelihood. The code's line is the
-#: only text in the note that may use them: a summary or a title that does is
-#: not sent, so the note never carries a second estimate. The words are the
-#: contract (tests/test_deploy_note.py), matched anywhere in a word - rescoring,
-#: unlikely, improbable carry them too (#150 round 12); a false hit (underscore)
-#: only sends less text. An estimate implied in other words is beyond this
-#: check - the system prompt forbids it.
-SCORE_TALK = re.compile(r"scor|likel|probab|chance|percent|%", re.IGNORECASE)
+#: The areas a deploy can change, as the model may name them, and the fixed
+#: phrase the note renders for each. None speaks of the score: the computed
+#: line does that, alone.
+AREAS: dict[str, str] = {
+    "alerts": "the alerts and their delivery",
+    "messages": "the messages and the daily digest",
+    "data": "the data sources",
+    "feed": "the dashboard feed and the content API",
+    "api": "the API",
+    "deploy": "deploy and operations",
+    "security": "security and access",
+    "docs": "the documentation",
+    "tests": "the tests",
+    "deps": "the dependencies",
+}
+_AREAS = 3
 
 SYSTEM = (
-    "You write a short deploy note for the owner of bubblegauge, a research service that "
-    "publishes a 0-100 AI-bubble regime score. Plain text only: no markdown, no links, no "
-    "phone numbers, no file names or paths (describe changes in words), plain ASCII "
-    f"punctuation (a '-', never a long dash). At most {SUMMARY_CHARS} characters, in two to "
-    "four sentences: what this deploy changes for the owner and the service; not a "
-    "changelog. Say nothing about the score or how likely anything is: never use the words "
-    "score, scoring, likely, probable, chance or percent, nor a percent sign - a line about "
-    "the score is added after your summary, and a summary that uses them is not sent."
+    "You classify a deploy of bubblegauge, a research service that publishes a 0-100 "
+    "AI-bubble regime score, for its owner. From the commits and the changed paths, name "
+    "the areas the deploy changes, using only these codes: "
+    + ", ".join(f"{code} ({phrase})" for code, phrase in AREAS.items())
+    + f". Answer with at most {_AREAS} codes, most important first, separated by commas, "
+    "and nothing else - no other word. Leave the score out: a computed line covers it."
 )
 
 
@@ -190,33 +195,32 @@ def prompt(note: Note) -> str:
     return "\n".join(lines)
 
 
-def _sendable(text: str, line: str) -> bool:
-    """No word about the score but the code's line, and the message engine's
-    basic checks on the whole note: something visible, the message alphabet,
-    no link or phone number, the length."""
-    from app.message_engine.checks import Channel, basic_check
-
-    return (SCORE_TALK.search(text) is None
-            and basic_check(text + line, channel=Channel.IMESSAGE, max_chars=MAX_CHARS) is None)
-
-
 def _bare(note: Note) -> str:
     return f"bubblegauge deployed {note.target[:7]} ({note.count} commit(s))."
 
 
+def areas(reply: str) -> list[str] | None:
+    """The area codes of a reply that is codes and nothing else - in its order,
+    without repeats, at most _AREAS - or None."""
+    tokens = [token for token in re.split(r"[\s,;.]+", reply.strip().lower()) if token]
+    if not tokens or any(token not in AREAS for token in tokens):
+        return None
+    return list(dict.fromkeys(tokens))[:_AREAS]
+
+
 def compose(note: Note) -> tuple[str, str]:
-    """(text, source): the model's summary when it passes the checks, else the
-    bare deploy - each with the code's score line. Raw commit text never goes
-    out: titles are not governed by the system prompt, and one that implies an
-    estimate in other words would sit beside the code's line (#150 round 14)."""
+    """(text, source): the areas the model names, rendered as fixed phrases,
+    else the bare deploy - each with the code's score line."""
     line = "\n" + note.score_line()
     try:
         from app.llm_gateway import complete
 
-        summary = complete(system=SYSTEM, user=prompt(note), deadline_s=120).text.strip()
-        if len(summary) <= SUMMARY_CHARS and _sendable(summary, line):
-            return summary + line, "generated"
-        log.warning("deploy_note_rejected", chars=len(summary))
+        chosen = areas(complete(system=SYSTEM, user=prompt(note), deadline_s=120).text)
+        if chosen:
+            listed = "; ".join(AREAS[code] for code in chosen)
+            head = f"bubblegauge deployed {note.target[:7]} ({note.count} commit(s)): changes to {listed}."
+            return head + line, "generated"
+        log.warning("deploy_note_reply_not_codes")
     except Exception as exc:  # noqa: BLE001 - the bare deploy is the promise
         log.warning("deploy_note_model_failed", error=sanitize(exc, limit=200))
     return _bare(note) + line, "template"

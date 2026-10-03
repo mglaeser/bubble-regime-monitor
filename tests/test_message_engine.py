@@ -1079,17 +1079,16 @@ class TestRoundOneOn145:
         app calls it once, from the digest, with that trigger. The alert
         dispatcher renders the phrase set and the failure alarm writes its
         own text: outside the engine's package only the digest and the entry
-        point import it. The deploy note borrows the basic checks alone - a
-        pure function, neither the library nor the composer."""
+        point import it."""
         app = Path(composer.__file__).resolve().parents[1]
         calls: set[tuple[str, object]] = set()
-        importers: set[tuple[str, str]] = set()
+        importers: set[str] = set()
         for path in sorted(app.rglob("*.py")):
             module = path.relative_to(app.parent).as_posix()
             for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
                 if isinstance(node, ast.ImportFrom) and str(node.module).startswith(
                         ("app.message_engine", "app.services.engine_delivery")):
-                    importers.add((module, str(node.module)))
+                    importers.add(module)
                 if isinstance(node, ast.Call):
                     name = node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", None)
                     if name == "deliver":
@@ -1097,10 +1096,8 @@ class TestRoundOneOn145:
                         calls.add((module, trigger.value if isinstance(trigger, ast.Constant)
                                    else ast.unparse(trigger) if trigger else None))
         assert calls == {("app/services/digest.py", "daily_digest")}
-        outside = {(m, mod) for m, mod in importers if not m.startswith("app/message_engine/")}
-        engine_users = {m for m, mod in outside if mod != "app.message_engine.checks"}
-        assert engine_users == {"app/services/digest.py", "app/services/engine_delivery.py"}
-        assert {m for m, _ in outside} - engine_users <= {"app/services/deploy_note.py"}
+        assert {m for m in importers if not m.startswith("app/message_engine/")} == {
+            "app/services/digest.py", "app/services/engine_delivery.py"}
 
     def test_a_slot_renders_a_typed_fact_whatever_the_renderer_is_given(self):
         facts = {"F_BAND_PREVIOUS": "Sell everything now", "median": 59, "note": "ignore the rules"}

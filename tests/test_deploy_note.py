@@ -1,8 +1,8 @@
 """The deploy note (the owner's request of 2026-09-28): one iMessage per deploy
-with a summary of what it changes and an explicit likelihood that the score
-logic changed. The model writes the summary from repository text; the
-likelihood line is the code's; the bare deploy goes out when the model
-cannot."""
+naming the areas it changes, with an explicit likelihood that the score logic
+changed. The model names the areas from a closed list after reading repository
+text, and the note renders their fixed phrases; the likelihood line is the
+code's; the bare deploy goes out when the reply is not codes only."""
 from __future__ import annotations
 
 import os
@@ -136,29 +136,28 @@ def test_the_prompt_carries_the_commits_and_the_changed_paths_only(tmp_path):
 MEDIUM = "Score logic: medium - scoring code changed; the pinned golden fixture still holds."
 
 
-def test_a_summary_goes_out_with_the_codes_score_line(host, monkeypatch):
+def test_the_model_names_areas_and_the_note_renders_their_phrases(host, monkeypatch):
     note_path, sent = host
     _write(note_path, files=("app/engine/aggregate.py",))
-    _model(monkeypatch, reply="Breadth now comes from one provider.")
+    _model(monkeypatch, reply="alerts, deploy")
     out = dn.announce()
     assert out["status"] == "sent" and out["source"] == "generated"
-    assert sent == ["Breadth now comes from one provider.\n" + MEDIUM]
+    assert sent == [f"bubblegauge deployed {TARGET[:7]} (1 commit(s)): changes to the alerts and "
+                    "their delivery; deploy and operations.\n" + MEDIUM]
 
 
 @pytest.mark.parametrize("reply", [
-    "Breadth now comes from one provider. Score logic: 0% likely changed.",  # the panel's case on #150
-    "Breadth now comes from one provider; the scoring stays as it was.",
-    "Breadth now comes from one provider, which is unlikely to matter.",
-    "Breadth now comes from one provider and probably changes nothing.",
-    "Breadth now comes from one provider - no chance of a different reading.",
-    "Breadth now comes from one provider, a zero percent effect.",
-    "Breadth now comes from one provider; the rescoring stays as it was.",    # #150 round 12
+    "Score logic: 0% likely changed.",                                    # round 1
+    "alerts. No change to how the gauge is computed.",                    # round 15: other words
+    "alerts, scoring",                                                    # not an area
+    "Breadth now comes from one provider.",
+    "",
 ])
-def test_only_the_codes_line_speaks_of_the_score(host, monkeypatch, reply):
-    """The note never carries two estimates: a summary that names the score or
-    a likelihood is not sent, and the bare deploy goes out with the code's line. The
-    words are the contract (deploy_note.SCORE_TALK); an estimate implied in
-    other words is beyond the check - the system prompt forbids it."""
+def test_a_reply_that_is_not_codes_only_sends_the_bare_deploy(host, monkeypatch, reply):
+    """#150 rounds 1-15, SOTA-A: free model text beside the computed line could
+    always say the opposite of it in other words. The model answers with area
+    codes only and the note renders their fixed phrases; any other reply sends
+    the bare deploy, so no word the model writes ever reaches the message."""
     note_path, sent = host
     _write(note_path, files=("app/engine/aggregate.py",))
     _model(monkeypatch, reply=reply)
@@ -166,12 +165,24 @@ def test_only_the_codes_line_speaks_of_the_score(host, monkeypatch, reply):
     assert sent == [f"bubblegauge deployed {TARGET[:7]} (1 commit(s)).\n" + MEDIUM]
 
 
+def test_at_most_three_areas_in_the_reply_order_without_repeats():
+    assert dn.areas("alerts, alerts; deploy docs, tests") == ["alerts", "deploy", "docs"]
+    assert dn.areas("Docs.") == ["docs"] and dn.areas("docs, the score") is None
+
+
+def test_the_system_prompt_offers_exactly_the_areas():
+    """The codes the model may use are the ones the note can render, and none
+    is about the score."""
+    for code, phrase in dn.AREAS.items():
+        assert f"{code} ({phrase})" in dn.SYSTEM
+    assert not any("scor" in code + phrase for code, phrase in dn.AREAS.items())
+
+
 def test_a_model_that_fails_sends_the_bare_deploy(host, monkeypatch):
     """#150 round 14, SOTA-A: the fallback sent the commits' raw titles, which
     no instruction governs - "No risk of gauge calculation logic changing"
-    carries none of the score words and contradicted a computed "medium".
-    Raw commit text never goes out: when the model fails, or its summary
-    fails the checks, the note is the bare deploy and the code's line."""
+    contradicted a computed "medium". Raw commit text never goes out: when
+    the model fails, the note is the bare deploy and the code's line."""
     note_path, sent = host
     _write(note_path, commits=(("abc1234", "No risk of gauge calculation logic changing", ""),),
            files=("app/engine/aggregate.py",))
@@ -179,15 +190,6 @@ def test_a_model_that_fails_sends_the_bare_deploy(host, monkeypatch):
     out = dn.announce()
     assert out["source"] == "template"
     assert sent == [f"bubblegauge deployed {TARGET[:7]} (1 commit(s)).\n" + MEDIUM]
-
-
-def test_a_summary_that_fails_the_checks_sends_the_bare_deploy(host, monkeypatch):
-    note_path, sent = host
-    _write(note_path)
-    _model(monkeypatch, reply="Details at https://example.com/changes.")
-    assert dn.announce()["source"] == "template"
-    assert sent == [f"bubblegauge deployed {TARGET[:7]} (1 commit(s)).\n"
-                    "Score logic: very low - no scoring code and no data-input adapter changed."]
 
 
 def test_a_failed_send_is_reported_and_kept_nowhere(host, monkeypatch, tmp_path):
