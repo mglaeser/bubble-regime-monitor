@@ -608,8 +608,6 @@ def _run_the_live_dispatch_job(monkeypatch, planning: str):
                 row.evidence_checked_at = then
             if planning == "a ruleset promoted, then superseded":
                 row.status, row.superseded_at = RulesetStatus.SUPERSEDED, then
-            if planning == "a ruleset promoted, then revoked":
-                row.status = RulesetStatus.REVOKED
         delivery_id = _queued_live_test_delivery(session, sha)
 
     result = alert_dispatch.run_once()
@@ -619,7 +617,7 @@ def _run_the_live_dispatch_job(monkeypatch, planning: str):
 
 
 @pytest.mark.usefixtures("isolated_db")
-@pytest.mark.parametrize("planning", ["a ruleset never promoted", "a ruleset promoted, then revoked",
+@pytest.mark.parametrize("planning", ["a ruleset never promoted",
                                       "a ruleset promoted before promotion checked evidence"])
 def test_live_dispatch_sends_no_work_planned_under_rules_nobody_promoted(monkeypatch, planning):
     """#153 round 3: with the admission gone, live work queued under rules
@@ -627,8 +625,8 @@ def test_live_dispatch_sends_no_work_planned_under_rules_nobody_promoted(monkeyp
     artifact was promoted and the job's load passed. Round 4: so did work
     planned under a ruleset promoted before promotion checked evidence. The
     claim judges the ruleset that planned the work by how it was promoted,
-    never by re-reading evidence: promoted through the evidence-gated service,
-    and not revoked. The work stays queued; nothing is sent."""
+    never by re-reading evidence: promoted through the evidence-gated service.
+    The work stays queued; nothing is sent."""
     from app.alerts.enums import TransportStatus
 
     result, sender, status = _run_the_live_dispatch_job(monkeypatch, planning)
@@ -637,6 +635,38 @@ def test_live_dispatch_sends_no_work_planned_under_rules_nobody_promoted(monkeyp
     assert result["claimed"] == 0
     assert sender.sent == []
     assert status == TransportStatus.PENDING
+
+
+def test_what_the_live_claim_admits_stays_admitted():
+    """#153 round 5, SOTA-A: the claim's condition is read while listing
+    candidates, so a ruleset revoked between the listing and the claim would
+    still have its work sent. Nothing can withdraw what the claim admits: the
+    promotion stamps are written once, by the promotion service, and never
+    cleared, and no code writes a REVOKED ruleset - REVOKED is stored
+    vocabulary, as D2b left RenderSource.LLM_SELECTION. A condition that only
+    turns true has nothing to race. To stop live sends: ALERTS_MODE other than
+    live, or a silence."""
+    import ast
+    from pathlib import Path
+
+    stamps = {"promoted_at", "evidence_checked_at"}
+    writes, revoked, keywords = [], [], []
+    for path in sorted((Path(__file__).resolve().parents[1] / "app").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Attribute) and target.attr in stamps:
+                        writes.append((path.name, target.attr, ast.unparse(node.value)))
+            if isinstance(node, ast.keyword) and node.arg in stamps:
+                keywords.append((path.name, node.arg))
+            if path.name != "enums.py" and (
+                    (isinstance(node, ast.Attribute) and node.attr == "REVOKED")
+                    or (isinstance(node, ast.Constant) and node.value == "REVOKED")):
+                revoked.append(path.name)
+    assert sorted(writes) == [("promotion_service.py", "evidence_checked_at", "now"),
+                              ("promotion_service.py", "promoted_at", "now")]
+    assert keywords == [] and revoked == []
 
 
 @pytest.mark.usefixtures("isolated_db")

@@ -231,6 +231,8 @@ class RulesetStatus(StrEnum):
     VALIDATED = "VALIDATED"
     PROMOTED = "PROMOTED"
     SUPERSEDED = "SUPERSEDED"
+    #: Stored vocabulary only: no code writes it (owner decision D2d; pinned by
+    #: tests/test_alert_promotion.py::test_what_the_live_claim_admits_stays_admitted).
     REVOKED = "REVOKED"
 
 

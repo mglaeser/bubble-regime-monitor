@@ -43,7 +43,6 @@ from app.alerts.enums import (
     EpisodeStatus,
     MemberRole,
     PlanningState,
-    RulesetStatus,
     SuppressionReason,
     TransportStatus,
 )
@@ -362,11 +361,14 @@ def claimable(session: Session, *, mode: str, live_profile: str, now: datetime,
     """READY rows whose `not_before` has passed. P1 first, then oldest.
 
     In live mode, only work planned under a ruleset promoted through the
-    evidence-gated service and not revoked since: the ruleset that planned a
-    message is judged by how it was promoted, never by re-reading evidence
-    (owner decision D2d). Work queued under rules nobody promoted that way -
-    however and whenever it was planned - is never claimed, and a ruleset
-    superseded since still finishes what it planned (#153 rounds 3 and 4).
+    evidence-gated service: the ruleset that planned a message is judged by
+    how it was promoted, never by re-reading evidence (owner decision D2d).
+    Work queued under rules nobody promoted that way - however and whenever it
+    was planned - is never claimed, and a ruleset superseded since still
+    finishes what it planned (#153 rounds 3 and 4). The condition only turns
+    true: the promotion stamps are written once and never cleared, and no code
+    revokes a ruleset, so there is nothing to withdraw between this listing
+    and the claim (#153 round 5).
     """
     query = select(AlertDelivery).where(
         AlertDelivery.mode == mode,
@@ -380,8 +382,7 @@ def claimable(session: Session, *, mode: str, live_profile: str, now: datetime,
         query = query.where(AlertDelivery.planning_rules_sha256.in_(
             select(AlertRulesetRegistry.rules_sha256).where(
                 AlertRulesetRegistry.promoted_at.is_not(None),
-                AlertRulesetRegistry.evidence_checked_at.is_not(None),
-                AlertRulesetRegistry.status != RulesetStatus.REVOKED)))
+                AlertRulesetRegistry.evidence_checked_at.is_not(None))))
     return list(session.execute(
         query
         .order_by(
