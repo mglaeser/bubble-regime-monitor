@@ -188,9 +188,9 @@ def load_by_hash(session: Session, rules_sha256: str, *,
                  service_version: str | None = None) -> LoadedArtifacts | None:
     """Rebuild a registered ruleset from its stored canonical bytes.
 
-    The promoted fallback is rebuilt this way, and queued work and digests
-    render from the bytes they were planned with: those are in the database,
-    so the file on disk having moved on is irrelevant.
+    The promoted fallback is rebuilt this way, and queued work renders from
+    the bytes it was planned with: those are in the database, so the file on
+    disk having moved on is irrelevant.
     """
     row = session.get(AlertRulesetRegistry, rules_sha256)
     if row is None:

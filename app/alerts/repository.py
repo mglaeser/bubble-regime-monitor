@@ -386,9 +386,9 @@ def resolve_replaced_episodes(
     event caused by the replacing ruleset, and the rule-state row that owns it
     goes back to NORMAL with its version bumped, so an evaluation of the
     replaced rules still in flight fails its compare-and-set. Nothing is
-    planned, and deliveries, digest items and notification memory are left
-    alone: the dispatcher withdraws a queued alert whose episode resolved, a
-    digest still counts it, and a cooldown survives. Returns the episode ids.
+    planned, and deliveries and notification memory are left alone: the
+    dispatcher withdraws a queued alert whose episode resolved, and a cooldown
+    survives. Returns the episode ids.
     """
     scope = [AlertEpisode.is_open.is_(True),
              AlertEpisode.origin_rules_sha256 != replacing_rules_sha256]

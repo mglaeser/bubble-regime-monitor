@@ -55,26 +55,21 @@ LIMITS = BudgetLimits(target_168h=2, cap_24h=3, cap_168h=6)
 
 
 def test_p1_is_never_blocked_by_budget():
-    exhausted = BudgetUsage(sent_24h=99, sent_168h=99, reserved=9, digest_168h=1)
+    exhausted = BudgetUsage(sent_24h=99, sent_168h=99, reserved=9)
     decision = check_budget(1, exhausted, LIMITS)
     assert decision.allowed is True
     assert decision.reason == "p1_exempt"
 
 
 def test_non_p1_respects_both_caps():
-    assert check_budget(2, BudgetUsage(2, 2, 0, 0), LIMITS).allowed is True
-    assert check_budget(2, BudgetUsage(3, 3, 0, 0), LIMITS).reason == "cap_24h"
-    assert check_budget(2, BudgetUsage(0, 6, 0, 0), LIMITS).reason == "cap_168h"
+    assert check_budget(2, BudgetUsage(2, 2, 0), LIMITS).allowed is True
+    assert check_budget(2, BudgetUsage(3, 3, 0), LIMITS).reason == "cap_24h"
+    assert check_budget(2, BudgetUsage(0, 6, 0), LIMITS).reason == "cap_168h"
 
 
 def test_reservations_count_against_the_budget():
     """Two messages already in flight must not be spent twice."""
-    assert check_budget(2, BudgetUsage(2, 2, 1, 0), LIMITS).reason == "cap_24h"
-
-
-def test_the_digest_does_not_consume_the_caps():
-    usage = BudgetUsage(sent_24h=2, sent_168h=5, reserved=0, digest_168h=1)
-    assert check_budget(2, usage, LIMITS).allowed is True
+    assert check_budget(2, BudgetUsage(2, 2, 1), LIMITS).reason == "cap_24h"
 
 
 def test_p1_is_never_held_by_quiet_hours():
@@ -141,14 +136,6 @@ def test_persisted_dedupe_keys_do_not_move():
         "scheduled_window_key": None,
         "manual_retry_sequence": 0,
     })
-
-
-def test_a_new_digest_window_changes_the_dedupe_key():
-    first = dedupe_key(delivery_kind=DeliveryKind.DIGEST, members=[_member()],
-                       scheduled_window_key="2026-W33")
-    second = dedupe_key(delivery_kind=DeliveryKind.DIGEST, members=[_member()],
-                        scheduled_window_key="2026-W34")
-    assert first != second
 
 
 def test_member_order_does_not_change_the_dedupe_key():
@@ -229,7 +216,7 @@ def _p2(rule_id="p2.rule", group="regime"):
 
 def test_p1_is_ready_immediately_even_at_night_and_out_of_budget():
     result = plan(_inputs([_p1()], now=NIGHT,
-                          budget_usage=BudgetUsage(99, 99, 9, 0)))
+                          budget_usage=BudgetUsage(99, 99, 9)))
     assert len(result.deliveries) == 1
     delivery = result.deliveries[0]
     assert delivery.priority == 1
@@ -246,7 +233,7 @@ def test_p2_is_held_at_night_with_a_release_time():
 
 
 def test_p2_is_held_by_budget_during_the_day():
-    result = plan(_inputs([_p2()], budget_usage=BudgetUsage(3, 3, 0, 0)))
+    result = plan(_inputs([_p2()], budget_usage=BudgetUsage(3, 3, 0)))
     delivery = result.deliveries[0]
     assert delivery.planning_state == PlanningState.HELD_BUDGET
     assert delivery.hold_reason_code == "cap_24h"
@@ -256,7 +243,7 @@ def test_one_plan_reserves_each_p2_group_before_planning_the_next():
     first = _p2(rule_id="p2.first", group="a")
     second = _p2(rule_id="p2.second", group="b")
     result = plan(_inputs(
-        [first, second], budget_usage=BudgetUsage(2, 2, 0, 0)))
+        [first, second], budget_usage=BudgetUsage(2, 2, 0)))
     assert [delivery.planning_state for delivery in result.deliveries] == [
         PlanningState.READY,
         PlanningState.HELD_BUDGET,
@@ -270,18 +257,21 @@ def test_p2_bundles_by_group_key():
     assert kinds == {DeliveryKind.BUNDLE: 2, DeliveryKind.INITIAL: 1}
 
 
-def test_p3_creates_a_digest_item_not_a_delivery():
+def test_a_p3_activation_is_never_enqueued():
+    """Owner decision D2a: the weekly digest is deleted, so a P3 is API and
+    log only, like a P4 - no delivery, no digest item, and a note says why."""
     p3 = _rule(rule_id="p3.rule", priority=3)
     result = plan(_inputs([p3]))
     assert result.deliveries == []
-    assert len(result.digest_items) == 1
-    assert result.digest_items[0].digest_window_key.startswith("2026-W")
+    assert not hasattr(result, "digest_items")
+    assert result.notes == ["p3.rule: P3 - API and log only"]
 
 
-def test_p4_produces_neither():
+def test_p4_produces_no_delivery():
     p4 = _rule(rule_id="p4.rule", priority=4)
     result = plan(_inputs([p4]))
-    assert result.deliveries == [] and result.digest_items == []
+    assert result.deliveries == []
+    assert result.notes == ["p4.rule: P4 - API and log only"]
 
 
 def test_a_silenced_rule_is_suppressed_not_delivered():

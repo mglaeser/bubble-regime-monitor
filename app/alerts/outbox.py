@@ -38,7 +38,6 @@ from app.alerts.enums import (
     ActorType,
     CausationType,
     DeliveryKind,
-    DigestItemStatus,
     EpisodeStatus,
     MemberRole,
     PlanningState,
@@ -46,11 +45,9 @@ from app.alerts.enums import (
     SuppressionReason,
     TransportStatus,
 )
-from app.alerts.errors import DigestBindingError
 from app.alerts.models import (
     AlertDelivery,
     AlertDeliveryMember,
-    AlertDigestItem,
     AlertEpisode,
     AlertEvent,
     AlertInstanceNotificationState,
@@ -58,7 +55,7 @@ from app.alerts.models import (
     AlertRulesetRegistry,
     AlertRuleState,
 )
-from app.alerts.planner import DeliveryIntent, DigestIntent, PlanResult
+from app.alerts.planner import DeliveryIntent, PlanResult
 from app.alerts.quiet_hours import release_time_for
 from app.alerts.repository import load_active_silences, utc_ms
 from app.alerts.silences import ActiveSilences, matches_silence
@@ -92,7 +89,7 @@ def persist_plan(
     recipient_ref: str,
     now: datetime,
 ) -> list[str]:
-    """Write delivery, member and digest rows. Runs inside the P2 transaction.
+    """Write delivery and member rows. Runs inside the P2 transaction.
 
     Returns the delivery ids created. A dedupe-key collision is a NO-OP, not an
     error: it means this exact intent already exists, which is precisely what
@@ -139,9 +136,6 @@ def persist_plan(
                                        planning_rules_sha256=planning_rules_sha256,
                                        recipient_ref=recipient_ref, now=now)
         created.append(delivery_id)
-
-    for item in result.digest_items:
-        _insert_digest_item(session, item, now=now)
 
     if result.cancel_unsent_for:
         cancel_unsent_for_rules(session, result.cancel_unsent_for, mode=mode,
@@ -197,26 +191,6 @@ def _insert_delivery(session: Session, intent: DeliveryIntent, *, mode: str,
     return delivery_id
 
 
-def _insert_digest_item(session: Session, item: DigestIntent, *, now: datetime) -> None:
-    existing = session.execute(
-        select(AlertDigestItem).where(
-            AlertDigestItem.episode_id == item.episode_id,
-            AlertDigestItem.digest_window_key == item.digest_window_key,
-            AlertDigestItem.still_active_summary.is_(False),
-        )
-    ).scalars().first()
-    if existing is not None:
-        return
-    session.add(AlertDigestItem(
-        digest_item_id=new_ulid(utc_ms(now)),
-        episode_id=item.episode_id,
-        digest_window_key=item.digest_window_key,
-        status="PENDING",
-        pending_at=now,
-        still_active_summary=False,
-    ))
-
-
 def cancel_unsent_for_rules(session: Session, rule_ids: frozenset[str], *, mode: str,
                             live_profile: str, now: datetime) -> int:
     """Cancel queued deliveries whose only members were superseded.
@@ -232,10 +206,8 @@ def cancel_unsent_for_rules(session: Session, rule_ids: frozenset[str], *, mode:
         .where(
             AlertDelivery.mode == mode,
             AlertDelivery.live_profile == live_profile,
-            # Dominance is a real-time notification rule.  A DIGEST is a
-            # retrospective of events that already happened; matching its
-            # historical member by rule_id must not erase that event from the
-            # weekly record. TEST is transport-only and has no market member.
+            # Dominance is a real-time notification rule over the market
+            # kinds. TEST is transport-only and has no market member.
             AlertDelivery.delivery_kind.in_(sorted(BUDGETED_KINDS)),
             AlertDelivery.transport_status.in_(
                 [TransportStatus.PENDING, TransportStatus.RETRY_DUE]),
@@ -490,65 +462,6 @@ def recover_leases(session: Session, *, now: datetime) -> dict[str, int]:
 # ---------------------------------------------------------------------------
 
 
-def validate_digest_binding(
-    session: Session,
-    delivery: AlertDelivery,
-) -> None:
-    """Require one exact item-ledger row for every queued DIGEST member.
-
-    A digest body exposes an aggregate member count while ``AlertDigestItem``
-    owns the corresponding lifecycle.  Selecting from only one side when the
-    graph is malformed can therefore send a number its durable evidence does
-    not support.  Fail closed before revalidation mutates either side.
-    """
-    if delivery.delivery_kind != DeliveryKind.DIGEST or (
-        delivery.transport_status not in {
-            TransportStatus.PENDING,
-            TransportStatus.RETRY_DUE,
-            TransportStatus.LEASED,
-        }
-    ):
-        return
-
-    members = session.execute(
-        select(AlertDeliveryMember).where(
-            AlertDeliveryMember.delivery_id == delivery.delivery_id
-        )
-    ).scalars().all()
-    items = session.execute(
-        select(AlertDigestItem).where(
-            AlertDigestItem.delivery_id == delivery.delivery_id
-        )
-    ).scalars().all()
-
-    members_by_episode = {member.episode_id: member for member in members}
-    if len(members_by_episode) != len(members):
-        raise DigestBindingError(
-            "digest contains duplicate member evidence for one episode")
-
-    items_by_episode: dict[str, list[AlertDigestItem]] = {}
-    for item in items:
-        items_by_episode.setdefault(item.episode_id, []).append(item)
-
-    for member in members:
-        bound = items_by_episode.get(member.episode_id, [])
-        expected_status = (
-            DigestItemStatus.CANCELLED
-            if member.drop_reason == "SILENCED_BEFORE_SEND"
-            else DigestItemStatus.PLANNED
-        )
-        if len(bound) != 1 or bound[0].status != expected_status:
-            raise DigestBindingError(
-                "digest member/item binding is missing, duplicated, or has "
-                f"the wrong lifecycle state for episode {member.episode_id}")
-
-    unattached_members = sorted(set(items_by_episode) - set(members_by_episode))
-    if unattached_members:
-        raise DigestBindingError(
-            "digest item is attached to a delivery without a corresponding "
-            f"member for episode {unattached_members[0]}")
-
-
 def revalidate_members(
     session: Session,
     delivery: AlertDelivery,
@@ -558,30 +471,14 @@ def revalidate_members(
 ) -> list[AlertDeliveryMember]:
     """Apply current resolution and silence state to queued members.
 
-    A real-time alert drops when its condition clears.  A DIGEST retains that
-    resolved event as retrospective evidence, but still revisits it for a
-    silence that may begin after resolution; aggregate disclosure is still
-    disclosure.
+    A member drops when its condition clears or a silence covers it.
     """
-    validate_digest_binding(session, delivery)
     evidence_at = recorded_at or now
-    member_conditions = [
-        AlertDeliveryMember.delivery_id == delivery.delivery_id,
-    ]
-    if delivery.delivery_kind == DeliveryKind.DIGEST:
-        # A resolved digest member is still represented retrospectively, so it
-        # must continue to participate in silence checks on every pass.  The
-        # old live-only query stopped seeing it after RESOLVED_BEFORE_SEND; a
-        # silence beginning later could therefore leave its event disclosed in
-        # the aggregate count.  A member already silenced stays withdrawn.
-        member_conditions.append(
-            func.coalesce(AlertDeliveryMember.drop_reason, "")
-            != "SILENCED_BEFORE_SEND"
-        )
-    else:
-        member_conditions.append(AlertDeliveryMember.dropped_at.is_(None))
     members = session.execute(
-        select(AlertDeliveryMember).where(*member_conditions)
+        select(AlertDeliveryMember).where(
+            AlertDeliveryMember.delivery_id == delivery.delivery_id,
+            AlertDeliveryMember.dropped_at.is_(None),
+        )
         # Rendering order is evidence.  All members of one plan normally share
         # ``included_at``; relying on an unordered SELECT made the primary
         # headline database-plan dependent.  Keep the declared PRIMARY first,
@@ -601,11 +498,7 @@ def revalidate_members(
             or not episode.is_open
             or episode.episode_status == EpisodeStatus.RESOLVED
         )
-        # Ordinary notifications stop at resolution immediately.  A DIGEST is
-        # different: resolution preserves retrospective representation, so a
-        # current silence must be evaluated first even when the episode has
-        # already closed.
-        if resolved and delivery.delivery_kind != DeliveryKind.DIGEST:
+        if resolved:
             member.dropped_at = evidence_at
             member.drop_reason = "RESOLVED_BEFORE_SEND"
             continue
@@ -630,39 +523,8 @@ def revalidate_members(
                 detail=f"episode_id={member.episode_id}",
             )
             continue
-        if resolved:
-            # Preserve the first observed resolution timestamp.  Digest rows
-            # are deliberately revisited for silence checks, not rewritten on
-            # every dispatcher pass.
-            if member.drop_reason != "RESOLVED_BEFORE_SEND":
-                member.dropped_at = evidence_at
-                member.drop_reason = "RESOLVED_BEFORE_SEND"
-            continue
         live.append(member)
     return live
-
-
-def _cancel_digest_item_for_member(
-    session: Session,
-    delivery: AlertDelivery,
-    member: AlertDeliveryMember,
-) -> None:
-    if delivery.delivery_kind != DeliveryKind.DIGEST:
-        return
-    items = session.execute(
-        select(AlertDigestItem).where(
-            AlertDigestItem.delivery_id == delivery.delivery_id,
-            AlertDigestItem.episode_id == member.episode_id,
-            AlertDigestItem.status == DigestItemStatus.PLANNED,
-        )
-    ).scalars().all()
-    if len(items) != 1:
-        raise DigestBindingError(
-            "silenced digest member has no unique PLANNED item binding for "
-            f"episode {member.episode_id}")
-    item = items[0]
-    item.status = DigestItemStatus.CANCELLED
-    item.last_error_code = "SILENCED"
 
 
 def _record_member_silenced(
@@ -675,10 +537,6 @@ def _record_member_silenced(
     episode: AlertEpisode | None = None,
 ) -> None:
     """Persist both delivery withdrawal and Stage-4 suppression evidence."""
-    # Change the item first: a malformed binding must not leave the member
-    # looking successfully silenced if its lifecycle row could not be moved in
-    # lockstep.
-    _cancel_digest_item_for_member(session, delivery, member)
     member.dropped_at = now
     member.drop_reason = "SILENCED_BEFORE_SEND"
     episode = episode or session.get(AlertEpisode, member.episode_id)
@@ -700,29 +558,6 @@ def _record_member_silenced(
         suppression_reasons=[SuppressionReason.SILENCED],
         rules_sha256=member.origin_rules_sha256,
     )
-
-
-def _set_digest_item_outcome(
-    session: Session,
-    delivery: AlertDelivery,
-    *,
-    status: str,
-    now: datetime,
-    error_code: str | None = None,
-) -> None:
-    """Advance every still-planned item with its provider intent outcome."""
-    if delivery.delivery_kind != DeliveryKind.DIGEST:
-        return
-    items = session.execute(
-        select(AlertDigestItem).where(
-            AlertDigestItem.delivery_id == delivery.delivery_id,
-            AlertDigestItem.status == DigestItemStatus.PLANNED,
-        )
-    ).scalars().all()
-    for item in items:
-        item.status = status
-        item.delivered_at = now if status == DigestItemStatus.DELIVERED else None
-        item.last_error_code = error_code
 
 
 def apply_silences_to_unsent(
@@ -753,20 +588,11 @@ def apply_silences_to_unsent(
     result = {"members_dropped": 0, "deliveries_cancelled": 0, "in_flight": 0}
 
     for delivery in deliveries:
-        member_conditions = [
-            AlertDeliveryMember.delivery_id == delivery.delivery_id,
-        ]
-        if delivery.delivery_kind == DeliveryKind.DIGEST:
-            # Resolved digest members remain represented and therefore remain
-            # silenceable until this provider intent is terminal.
-            member_conditions.append(
-                func.coalesce(AlertDeliveryMember.drop_reason, "")
-                != "SILENCED_BEFORE_SEND"
-            )
-        else:
-            member_conditions.append(AlertDeliveryMember.dropped_at.is_(None))
         members = session.execute(
-            select(AlertDeliveryMember).where(*member_conditions)
+            select(AlertDeliveryMember).where(
+                AlertDeliveryMember.delivery_id == delivery.delivery_id,
+                AlertDeliveryMember.dropped_at.is_(None),
+            )
         ).scalars().all()
         matched: list[AlertDeliveryMember] = []
         for member in members:
@@ -796,19 +622,6 @@ def apply_silences_to_unsent(
             result["in_flight"] += 1
             continue
 
-        if delivery.delivery_kind == DeliveryKind.DIGEST:
-            try:
-                validate_digest_binding(session, delivery)
-            except DigestBindingError:
-                cancel(
-                    session,
-                    delivery,
-                    now=now,
-                    reason=DigestBindingError.code,
-                )
-                result["deliveries_cancelled"] += 1
-                continue
-
         for member in matched:
             _record_member_silenced(
                 session,
@@ -826,8 +639,7 @@ def apply_silences_to_unsent(
                 AlertDeliveryMember.dropped_at.is_(None),
             )
         ).scalar_one()
-        if remaining == 0 and delivery.delivery_kind not in (
-                DeliveryKind.DIGEST, DeliveryKind.TEST):
+        if remaining == 0 and delivery.delivery_kind != DeliveryKind.TEST:
             cancel(session, delivery, now=now, reason="ALL_MEMBERS_SILENCED")
             result["deliveries_cancelled"] += 1
 
@@ -874,21 +686,10 @@ def _budget_usage(
         select(func.count()).select_from(AlertDelivery).where(*reservation_conditions)
     ).scalar_one())
 
-    digest = int(session.execute(
-        select(func.count()).select_from(AlertDelivery).where(
-            AlertDelivery.mode == mode,
-            AlertDelivery.live_profile == live_profile,
-            AlertDelivery.delivery_kind == DeliveryKind.DIGEST,
-            AlertDelivery.transport_status == TransportStatus.SENT,
-            AlertDelivery.sent_at >= window_start(now, WINDOW_168H),
-        )
-    ).scalar_one())
-
     return BudgetUsage(
         sent_24h=_sent(window_start(now, WINDOW_24H)),
         sent_168h=_sent(window_start(now, WINDOW_168H)),
         reserved=reserved,
-        digest_168h=digest,
     )
 
 
@@ -967,7 +768,6 @@ def dispatch_budget_usage(
         sent_24h=usage.sent_24h,
         sent_168h=usage.sent_168h,
         reserved=usage.reserved + earlier_ready,
-        digest_168h=usage.digest_168h,
     )
 
 
@@ -1063,9 +863,7 @@ def validated_represented_member_ids(
     """The member ids immutable render evidence actually represents.
 
     Never trust ids that are absent from the delivery, and never infer member
-    representation from transport success.  A DIGEST is count-based, but the
-    frozen count still needs an explicit member ledger or membership changes
-    cannot be detected on retry.
+    representation from transport success.
     """
     existing = frozenset(str(value) for value in member_ids)
     if str(delivery_kind) == DeliveryKind.TEST and not existing:
@@ -1161,8 +959,6 @@ def mark_sent(session: Session, delivery: AlertDelivery, *, now: datetime,
             represented=len(represented),
             surviving=len(members),
         )
-    _set_digest_item_outcome(
-        session, delivery, status=DigestItemStatus.DELIVERED, now=now)
     _event(session, now, action="delivery_sent", delivery_id=delivery.delivery_id,
            detail=f"members={len(members)} represented={len(represented)}")
 
@@ -1199,9 +995,6 @@ def mark_permanent(session: Session, delivery: AlertDelivery, *, now: datetime,
     delivery.lease_owner = None
     delivery.lease_until = None
     delivery.updated_at = now
-    _set_digest_item_outcome(
-        session, delivery, status=DigestItemStatus.FAILED, now=now,
-        error_code=error_code or "PERMANENT_REJECTION")
     _event(session, now, action="delivery_dead", delivery_id=delivery.delivery_id,
            detail=error_code or "permanent rejection")
 
@@ -1223,9 +1016,6 @@ def mark_unknown(session: Session, delivery: AlertDelivery, *, now: datetime,
     delivery.lease_owner = None
     delivery.lease_until = None
     delivery.updated_at = now
-    _set_digest_item_outcome(
-        session, delivery, status=DigestItemStatus.UNKNOWN, now=now,
-        error_code=error_code or "AMBIGUOUS")
     _event(session, now, action="delivery_unknown", delivery_id=delivery.delivery_id,
            detail=reason)
 
@@ -1239,28 +1029,12 @@ def mark_render_failed(session: Session, delivery: AlertDelivery, *, now: dateti
     delivery.lease_owner = None
     delivery.lease_until = None
     delivery.updated_at = now
-    _set_digest_item_outcome(
-        session, delivery, status=DigestItemStatus.FAILED, now=now,
-        error_code="RENDER_REJECTED")
     _event(session, now, action="delivery_render_failed",
            delivery_id=delivery.delivery_id, detail=reason)
 
 
 def cancel(session: Session, delivery: AlertDelivery, *, now: datetime,
            reason: str) -> None:
-    # A cancelled digest provider intent definitely did not complete.  Keep a
-    # silenced item's more specific CANCELLED evidence, but move every
-    # unaffected PLANNED survivor to FAILED so plan_digest can carry it into a
-    # later window.  Leaving those rows PLANNED and attached to a terminal
-    # delivery strands them forever: neither the old intent nor the candidate
-    # query can advance them.
-    _set_digest_item_outcome(
-        session,
-        delivery,
-        status=DigestItemStatus.FAILED,
-        now=now,
-        error_code=reason,
-    )
     delivery.transport_status = TransportStatus.CANCELLED
     delivery.planning_state = PlanningState.NONE
     delivery.cancel_reason = reason

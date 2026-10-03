@@ -507,21 +507,6 @@ def test_delivery_carries_planning_provenance_and_members_carry_origin():
             "origin_phrase_set_sha256"} <= member_columns
 
 
-def test_digest_can_contain_members_from_multiple_rulesets():
-    """Members are per-row provenance, so a mixed digest is representable."""
-    members = [_member(episode="E1", origin="sha-old"),
-               _member(episode="E2", origin="sha-new", role=MemberRole.BUNDLED)]
-    assert {m.origin_rules_sha256 for m in members} == {"sha-old", "sha-new"}
-    key = dedupe_key(delivery_kind=DeliveryKind.DIGEST, members=members,
-                     scheduled_window_key="2026-W33")
-    assert key
-
-
-def test_digest_members_keep_origin_ruleset_and_phrase_provenance():
-    """The reviewer's second name — asserted on the persisted shape."""
-    test_delivery_carries_planning_provenance_and_members_carry_origin()
-
-
 def test_each_member_uses_origin_phrase_set(isolated_db):
     """Rendering resolves per member, not once per delivery."""
     import inspect

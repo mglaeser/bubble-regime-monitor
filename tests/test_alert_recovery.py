@@ -208,9 +208,9 @@ def test_promotion_resolves_the_replaced_rulesets_open_episodes(isolated_db, tmp
     """Owner decision D2e: a promotion ends every open episode a different
     ruleset opened, in every mode, in the promoting transaction - RESOLVED as
     RULESET_REPLACED, one event caused by the promoted ruleset, the owner's
-    rule state back to NORMAL. It plans nothing and leaves the outbox, the
-    digest items and the notification memory alone: the dispatcher withdraws
-    the queued alerts (next test) and the cooldowns survive."""
+    rule state back to NORMAL. It plans nothing and leaves the outbox and the
+    notification memory alone: the dispatcher withdraws the queued alerts
+    (next test) and the cooldowns survive."""
     from sqlalchemy import func
 
     from app.alerts.artifacts import promote
@@ -224,7 +224,6 @@ def test_promotion_resolves_the_replaced_rulesets_open_episodes(isolated_db, tmp
     from app.alerts.models import (
         AlertDelivery,
         AlertDeliveryMember,
-        AlertDigestItem,
         AlertEpisode,
         AlertEvent,
         AlertInstanceNotificationState,
@@ -243,7 +242,6 @@ def test_promotion_resolves_the_replaced_rulesets_open_episodes(isolated_db, tmp
                    for d in session.execute(select(AlertDelivery)).scalars()),
             sorted((m.delivery_id, m.episode_id, m.dropped_at)
                    for m in session.execute(select(AlertDeliveryMember)).scalars()),
-            session.scalar(select(func.count()).select_from(AlertDigestItem)),
             session.scalar(select(func.count()).select_from(AlertRender)),
             sorted((n.instance_fingerprint, n.last_sent_at,
                     n.next_notification_generation, n.updated_at)
@@ -932,10 +930,9 @@ def test_recovery_job_records_a_heartbeat(isolated_db, monkeypatch):
     get_settings.cache_clear()
 
 
-def test_disabled_dispatcher_and_digest_still_heartbeat(isolated_db, monkeypatch):
+def test_a_disabled_dispatcher_still_heartbeats(isolated_db, monkeypatch):
     """Intentional no-op proves the scheduler ran; silence proves nothing."""
     from app.alerts.models import AlertComponentHeartbeat
-    from app.jobs.alert_digest import run_once as run_digest
     from app.jobs.alert_dispatch import job as run_dispatch_job
 
     monkeypatch.setenv("ALERTS_MODE", "disabled")
@@ -943,15 +940,11 @@ def test_disabled_dispatcher_and_digest_still_heartbeat(isolated_db, monkeypatch
 
     get_settings.cache_clear()
     run_dispatch_job()
-    assert run_digest()["status"] == "skipped"
 
     with session_scope() as session:
         dispatcher = session.get(AlertComponentHeartbeat, "dispatcher")
-        digest = session.get(AlertComponentHeartbeat, "digest")
     assert dispatcher is not None and dispatcher.status == "ok"
     assert dispatcher.detail_json["skipped"] is True
-    assert digest is not None and digest.status == "ok"
-    assert digest.detail_json["skipped"] is True
     get_settings.cache_clear()
 
 
@@ -1019,8 +1012,14 @@ def test_recovery_job_skips_when_everything_is_off(isolated_db, monkeypatch):
     get_settings.cache_clear()
 
 
-def test_scheduler_registers_every_alert_maintenance_job(isolated_db, monkeypatch):
+def test_no_weekly_digest_job_is_scheduled_and_the_daily_digest_still_is(
+        isolated_db, monkeypatch):
+    """Owner decision D2a: the weekly P3 alert digest job is deleted, so the
+    alert jobs are exactly the dispatcher, recovery, the watchdog and
+    retention. The daily digest - the message engine's delivery, a different
+    thing - still registers on its transport."""
     from app import scheduler
+    from app.config import get_settings
 
     class _FakeScheduler:
         def __init__(self, **_kwargs):
@@ -1032,19 +1031,23 @@ def test_scheduler_registers_every_alert_maintenance_job(isolated_db, monkeypatc
         def start(self):
             return None
 
+    monkeypatch.setenv("SMS_ENABLED", "true")
+    monkeypatch.setenv("IMESSAGE_ENABLED", "false")
+    get_settings.cache_clear()
     fake = _FakeScheduler()
     monkeypatch.setattr(scheduler, "BackgroundScheduler", lambda **_kw: fake)
     monkeypatch.setattr(scheduler, "_scheduler", None)
 
     scheduler.start()
+    get_settings.cache_clear()
 
-    assert {
+    assert {job for job in fake.jobs if job.startswith("alert_")} == {
         "alert_dispatch",
         "alert_recovery",
         "alert_watchdog",
-        "alert_digest",
         "alert_retention",
-    } <= set(fake.jobs)
+    }
+    assert "daily_sms" in fake.jobs
     scheduler._scheduler = None
 
 

@@ -135,7 +135,7 @@ def test_new_budget_hold_persists_a_bounded_next_check():
     sink = Sink()
     planning_decision = check_budget(
         2,
-        BudgetUsage(sent_24h=3, sent_168h=3, reserved=0, digest_168h=0),
+        BudgetUsage(sent_24h=3, sent_168h=3, reserved=0),
         BudgetLimits(target_168h=2, cap_24h=3, cap_168h=6),
     )
     _insert_delivery(
@@ -196,7 +196,7 @@ def test_budget_hold_rechecks_and_reholds_when_cap_remains_full(monkeypatch):
         "dispatch_budget_usage",
         # saturated at the caps as raised by the 2026-08-27 operator
         # decision (5/24h, 8/168h)
-        lambda *args, **kwargs: BudgetUsage(5, 8, 0, 0),
+        lambda *args, **kwargs: BudgetUsage(5, 8, 0),
     )
     report = dispatch_once(
         session_scope,
@@ -236,10 +236,9 @@ def _ready_market_delivery() -> tuple[str, object]:
 
     The quiet-boundary tests used a memberless TEST vehicle for convenience.
     TEST is now quiet-exempt by design (the operator's own transport probe is
-    not parked until morning) and a memberless DIGEST is retired at
-    revalidation — so the machinery under test needs the vehicle quiet hours
-    actually govern: an ordinary market delivery whose member can actually
-    reach the render stage, predecessor and all.
+    not parked until morning) — so the machinery under test needs the vehicle
+    quiet hours actually govern: an ordinary market delivery whose member can
+    actually reach the render stage, predecessor and all.
     """
     import json as _json
 
@@ -344,55 +343,7 @@ def _memberless_delivery(kind: DeliveryKind) -> tuple[str, object]:
 
 
 def _budget_check_must_not_run(*args, **kwargs):
-    raise AssertionError("DIGEST and TEST are outside the market-alert budget")
-
-
-def test_digest_bypasses_non_p1_market_cap(monkeypatch):
-    import app.alerts.dispatcher as dispatcher_module
-    from app.alerts.digest import plan_digest
-    from app.alerts.dispatcher import dispatch_once
-    from tests.test_alert_digest import (
-        WINDOW,
-        _pending_item,
-        _provenance,
-        _registered,
-    )
-
-    with session_scope() as session:
-        rules_sha = _registered(session)
-        _pending_item(
-            session,
-            rules_sha=rules_sha,
-            rule_id="regime.band_to_derisk",
-        )
-        plan = plan_digest(
-            session,
-            mode="shadow",
-            live_profile="default",
-            planning_rules_sha256=rules_sha,
-            phrase_set_version=_provenance()[0],
-            phrase_set_sha256=_provenance()[1],
-            window_key=WINDOW,
-            now=NOW,
-        )
-        delivery_id = plan.delivery_id
-        from app.alerts.artifacts import load_active
-
-        phrase_set = load_active(session).phrase_set
-    monkeypatch.setattr(dispatcher_module, "check_budget", _budget_check_must_not_run)
-    sender = NullSender()
-    report = dispatch_once(
-        session_scope,
-        phrase_set=phrase_set,
-        mode="shadow",
-        live_profile="default",
-        sender=sender,
-        now=NOW,
-    )
-    assert report.sent == 1 and sender.sent
-    with session_scope() as session:
-        assert session.get(AlertDelivery, delivery_id).transport_status \
-            == TransportStatus.SENT
+    raise AssertionError("TEST is outside the market-alert budget")
 
 
 def test_send_test_bypasses_non_p1_market_cap(monkeypatch):

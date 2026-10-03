@@ -173,6 +173,9 @@ class DeliveryKind(StrEnum):
     REMINDER = "REMINDER"
     BUNDLE = "BUNDLE"
     STORM = "STORM"
+    #: Stored vocabulary only: nothing plans it since the weekly digest went
+    #: (owner decision D2a); ck_alert_delivery_kind still admits it and an
+    #: older alert_delivery row may carry it.
     DIGEST = "DIGEST"
     WATCHDOG = "WATCHDOG"
     TEST = "TEST"
@@ -182,7 +185,6 @@ class MemberRole(StrEnum):
     PRIMARY = "PRIMARY"
     BUNDLED = "BUNDLED"
     ESCALATION = "ESCALATION"
-    SUMMARY = "SUMMARY"
 
 
 class DigestItemStatus(StrEnum):
