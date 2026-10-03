@@ -345,6 +345,9 @@ class Settings(BaseSettings):
         operator's intent and printed "set DAILY_SMS_ENABLED=false in the
         deployment environment"; its one importer was that CLI, nothing at
         runtime read its records, and the production database holds none.
+        The one check of it that protected anything is a health condition: the
+        digest off with alerts not live is "no outbound message path"
+        (app/alerts/health.py).
 
         In the absence of that explicit value, iMessage wins when both
         transport switches are on — see the IMESSAGE_* block. Legacy

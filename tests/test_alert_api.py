@@ -131,6 +131,31 @@ def test_health_reports_mode_artifacts_and_sqlite(client):
     assert payload["legacy_daily_digest_enabled"] is False
 
 
+def test_health_names_the_configuration_that_sends_nothing(client, monkeypatch):
+    """The one check of the deleted Stage-4 cutover gate that protected
+    anything (owner decision D2c, 2026-10-02): the daily digest off and alerts
+    not live means nothing at all goes out to the owner. Health says so -
+    degraded, the condition named - and the operator's switches still decide:
+    a digest transport clears it."""
+    from app.config import get_settings
+
+    condition = "no outbound message path: the daily digest is off and alerts are not live"
+    payload = client.get("/api/v1/alerts/health", headers={"X-API-Key": READ_KEY}).json()
+    assert payload["alerts_mode"] == "disabled" and payload["legacy_daily_digest_enabled"] is False
+    assert condition in payload["conditions"] and payload["status"] in ("degraded", "critical")
+
+    monkeypatch.setenv("IMESSAGE_ENABLED", "true")
+    monkeypatch.setenv("IMESSAGE_API_BASE_URL", "http://127.0.0.1:12345")
+    monkeypatch.setenv("IMESSAGE_API_KEY", "configured-test-key-123456789")  # pragma: allowlist secret
+    monkeypatch.setenv("IMESSAGE_RECIPIENT", "+491510000000")
+    get_settings.cache_clear()
+    try:
+        payload = client.get("/api/v1/alerts/health", headers={"X-API-Key": READ_KEY}).json()
+        assert payload["legacy_daily_digest_enabled"] is True and condition not in payload["conditions"]
+    finally:
+        get_settings.cache_clear()
+
+
 def test_health_projects_every_quick_check_error_without_crashing(
     client, monkeypatch,
 ):

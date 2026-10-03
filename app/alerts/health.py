@@ -1022,6 +1022,14 @@ def health_projection(
             for blocker in live_admission_blockers
         )
 
+    # The one check of the deleted Stage-4 cutover gate that protected
+    # anything (owner decision D2c, 2026-10-02): with the daily digest off and
+    # alerts not live, nothing at all goes out to the owner. Health says so;
+    # the operator's switches decide, as they always did.
+    no_outbound_path = settings.daily_digest_transport == "none" and mode != "live"
+    if no_outbound_path:
+        conditions.append("no outbound message path: the daily digest is off and "
+                          "alerts are not live")
     critical = (
         ruleset is None
         or schema_fault
@@ -1049,7 +1057,7 @@ def health_projection(
     return {
         "status": (
             "critical" if critical
-            else "degraded" if fallback_reason or queue_degraded
+            else "degraded" if fallback_reason or queue_degraded or no_outbound_path
             else "ok"
         ),
         "components": components,
