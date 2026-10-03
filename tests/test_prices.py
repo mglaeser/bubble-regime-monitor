@@ -173,6 +173,41 @@ class TestTheChainIsThreeProvidersAndTheCache:
         assert result.value == stale
         assert result.provenance.fallback_used is True
 
+    @pytest.mark.parametrize("fresh", [True, False])
+    def test_a_cached_native_index_is_never_served(self, isolated_db, monkeypatch, fresh):
+        """#155 round 2, SOTA-A: a host that once read native NDX/SPX (the paid
+        Twelve Data path, yfinance) keeps that series in the cache under the
+        canonical symbol, and the cache served it - at once while fresh, and
+        when every provider failed. The cache answers only for the instrument
+        the chain reads now: a row cached from another one is passed over, and
+        the next fetch replaces it. Production's cache holds the proxies only
+        (read-only, 2026-10-03: NDX is tiingo:QQQ)."""
+        from datetime import UTC, datetime, timedelta
+
+        last = datetime.now(UTC).date() if fresh else datetime(2020, 1, 28, tzinfo=UTC).date()
+        native = [((last - timedelta(days=27 - i)).isoformat(), 20_000.0 + i) for i in range(28)]
+        proxy = [(day, close / 40) for day, close in native]
+        prices._cache_put("NDX", native, "twelvedata:NDX")
+
+        def failing(name):
+            def fetch(canonical):
+                raise prices.ProviderNotConfigured(f"{name}: no key")
+            return fetch
+
+        monkeypatch.setattr(prices, "_fetcher", failing)
+        with pytest.raises(prices.SourceError):
+            prices.get_daily_closes("NDX")
+
+        def answering(name):
+            def fetch(canonical):
+                return proxy, "QQQ", True
+            return fetch
+
+        monkeypatch.setattr(prices, "_fetcher", answering)
+        result = prices.get_daily_closes("NDX")
+        assert result.value == proxy and result.provenance.source == "tiingo:QQQ"
+        assert prices._cache_get("NDX")[2] == "tiingo:QQQ"
+
     def test_settings_have_no_switch_for_a_deleted_tier(self):
         from app.config import Settings
 

@@ -381,9 +381,14 @@ def get_daily_closes(canonical: str) -> SourceResult:
 
     Cache within CACHE_SLA_DAYS short-circuits the network. Every failure
     feeds the provider health scorer; total failure serves the stale cache
-    (flagged) or raises SourceError."""
+    (flagged) or raises SourceError. The cache answers only for the
+    instrument the chain reads now: a row cached from another one - a native
+    NDX/SPX from before the proxies were the only path - is passed over, and
+    the next fetch replaces it (#155 round 2)."""
     canonical = canonical.upper()
     cached = _cache_get(canonical)
+    if cached and cached[2].rsplit(":", 1)[-1] != resolve_symbol(canonical)[0]:
+        cached = None
     if cached:
         rows, as_of, source = cached
         age = (datetime.now(UTC).date() - date.fromisoformat(as_of)).days
