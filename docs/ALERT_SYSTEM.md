@@ -311,9 +311,12 @@ The daily digest is governed by its transport switches alone:
 when both configured transports are on; otherwise `SMS_ENABLED` selects
 sipgate; there is no send-failure fallback. It has no retirement switch: the
 `DAILY_SMS_ENABLED` migration alias went with the Stage-4 cutover it served
-(owner decision D2c). Turning the alert system on never changes the digest's
-transport, and a digest without one is named by the alert health projection
-("the daily digest has no transport").
+(owner decision D2c). A `DAILY_SMS_ENABLED` left in an environment changes
+nothing, and never in silence: the boot logs `retired_setting_present`, the
+alerts preflight fails `no_retired_settings`, and the alert health projection
+names it. Turning the alert system on never changes the digest's transport,
+and a digest without one is named by the alert health projection ("the daily
+digest has no transport").
 
 Volume, lease, retention and LLM settings live in `app/config.py`; each has a
 safe default. The `ALERTS_LLM_*` settings reserve the dormant Stage-7/A-B

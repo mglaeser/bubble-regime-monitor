@@ -368,6 +368,23 @@ _TYPO_PRONE = (
 )
 
 
+#: Settings that were removed. An old value in an environment changes nothing,
+#: and that is said loudly - at boot, in the alerts preflight, in health - so
+#: it is never dropped in silence the way `extra="ignore"` would drop it.
+RETIRED_ENV_KEYS: dict[str, str] = {
+    "DAILY_SMS_ENABLED": (
+        "removed with the Stage-4 cutover (owner decision D2c, 2026-10-02): the daily "
+        "digest follows its transports, so switch IMESSAGE_ENABLED and SMS_ENABLED off "
+        "to stop it, and remove this key"),
+}
+
+
+def retired_env_keys(environ: Mapping[str, str]) -> list[tuple[str, str]]:
+    """(key, why) for every retired setting the environment still holds."""
+    present = {key.upper() for key in environ}
+    return [(key, why) for key, why in RETIRED_ENV_KEYS.items() if key in present]
+
+
 def near_miss_env_keys(environ: Mapping[str, str]) -> list[tuple[str, str]]:
     """Environment keys that look like a misspelling of a known setting.
 

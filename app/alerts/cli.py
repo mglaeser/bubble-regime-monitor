@@ -80,7 +80,7 @@ def cmd_preflight(_args: argparse.Namespace) -> int:
     """Everything that must be true before a stage is advanced."""
     from app.alerts.artifacts import validate_from_disk
     from app.alerts.errors import AlertError
-    from app.config import get_settings, near_miss_env_keys
+    from app.config import get_settings, near_miss_env_keys, retired_env_keys
     from app.db import session_scope
     from app.models import Snapshot
 
@@ -132,6 +132,9 @@ def cmd_preflight(_args: argparse.Namespace) -> int:
     check("no_misspelt_settings", not near,
           "; ".join(f"{actual} looks like {intended}" for actual, intended in near)
           or "no near-miss environment keys")
+    retired = retired_env_keys(os.environ)
+    check("no_retired_settings", not retired,
+          "; ".join(f"{key}: {why}" for key, why in retired) or "no retired settings")
     check("imessage_switch_matches_config", not settings.imessage_enabled_but_unconfigured,
           "IMESSAGE_ENABLED is on but URL/key/recipient are not all set — the digest "
           "is NOT going over iMessage" if settings.imessage_enabled_but_unconfigured

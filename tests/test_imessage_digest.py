@@ -699,6 +699,55 @@ class TestTransportSelection:
         assert "daily_sms_enabled" not in Settings.model_fields
         get_settings.cache_clear()
 
+    def test_a_retired_setting_is_said_loudly(self, isolated_db, monkeypatch, capsys):
+        """#151 round 5, SOTA-A: removing DAILY_SMS_ENABLED dropped an old
+        "false" in silence - pydantic ignores unknown keys - so after an upgrade
+        the digest would follow its transports without a word. The removal
+        stands (owner decision D2c; no backward compatibility, ruling of
+        2026-09-20); it is never silent: the retired key is named at boot,
+        fails the alerts preflight, and health names it (tests/test_alert_api.py).
+        """
+        import json
+        from types import SimpleNamespace
+
+        from app import scheduler
+        from app.alerts.cli import cmd_preflight
+        from app.config import get_settings, retired_env_keys
+
+        assert [key for key, _ in retired_env_keys({"daily_sms_enabled": "false"})] == ["DAILY_SMS_ENABLED"]
+        assert retired_env_keys({"SMS_ENABLED": "true", "IMESSAGE_ENABLED": "true"}) == []
+
+        monkeypatch.setenv("DAILY_SMS_ENABLED", "false")
+        get_settings.cache_clear()
+        logged: list[tuple[str, dict]] = []
+        monkeypatch.setattr(scheduler.log, "error", lambda event, **kw: logged.append((event, kw)))
+
+        class _FakeScheduler:
+            def __init__(self, **_kwargs):
+                pass
+
+            def add_job(self, *_args, **_kwargs):
+                return None
+
+            def start(self):
+                return None
+
+        monkeypatch.setattr(scheduler, "BackgroundScheduler", lambda **_kw: _FakeScheduler())
+        monkeypatch.setattr(scheduler, "_scheduler", None)
+        try:
+            scheduler.start()
+        finally:
+            scheduler._scheduler = None
+        assert [kw["key"] for event, kw in logged if event == "retired_setting_present"] == ["DAILY_SMS_ENABLED"]
+
+        cmd_preflight(SimpleNamespace())
+        out = capsys.readouterr().out
+        report = json.loads(out[out.index('{\n  "checks"'):] if '{\n  "checks"' in out else out[out.rindex("{"):])
+        checks = report["checks"]
+        retired = [c for c in checks if c["check"] == "no_retired_settings"]
+        assert retired and retired[0]["ok"] is False and "DAILY_SMS_ENABLED" in retired[0]["detail"]
+        get_settings.cache_clear()
+
     def test_nothing_in_the_application_reads_a_cutover_record(self):
         """The deleted gate wrote audit records (cutover_apply_requested and
         its kin); no module of the application reads one, so the environment

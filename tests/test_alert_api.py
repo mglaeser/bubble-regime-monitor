@@ -160,6 +160,17 @@ def test_health_names_a_daily_digest_without_transport(client, monkeypatch, aler
         get_settings.cache_clear()
 
 
+def test_health_names_a_retired_setting(client, monkeypatch):
+    """A removed setting's old value changes nothing, and health says so -
+    degraded, the key named (DAILY_SMS_ENABLED, removed with the Stage-4
+    cutover by owner decision D2c)."""
+    monkeypatch.setenv("DAILY_SMS_ENABLED", "false")
+    payload = client.get("/api/v1/alerts/health", headers={"X-API-Key": READ_KEY}).json()
+    assert any(c.startswith("retired setting DAILY_SMS_ENABLED is set and changes nothing")
+               for c in payload["conditions"])
+    assert payload["status"] in ("degraded", "critical")
+
+
 def test_health_projects_every_quick_check_error_without_crashing(
     client, monkeypatch,
 ):
