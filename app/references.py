@@ -179,7 +179,7 @@ REGISTRY: dict[str, Methodology] = {
         ),
         how=(
             "runup_pp = TotalReturn_2yr(SMH) - TotalReturn_2yr(SPY), in percentage points, from "
-            "Stooq adjusted closes (SOXX as SMH fallback). Mapping: runup >= 150 pp -> "
+            "the price layer's closes (SOXX as SMH fallback). Mapping: runup >= 150 pp -> "
             "sub_score ~ Beta(32,8) (mean 0.80); 100 <= runup < 150 pp -> sub_score ~ Beta(21,19) "
             "(mean 0.525); runup < 100 pp -> deterministic sub_score = clip(0.30*runup/100, 0, 0.30)."
         ),
@@ -1091,13 +1091,12 @@ SOURCE_REGISTRY: list[SourceSpec] = [
                "State Street (SPY issuer) official daily holdings file.", 3,
                "https://www.ssga.com", "Top-10 is the sum of individual HOLDING weights, not a "
                "sector-table figure.", ("ssga_spy_xlsx",)),
-    SourceSpec("prices", "Price layer (Tiingo->TwelveData->AlphaVantage->yfinance->cache)",
+    SourceSpec("prices", "Price layer (Tiingo->TwelveData->AlphaVantage->cache)",
                "S3, D4, GSADF, trend, VRP",
                "Commercial market-data vendors; adjusted close. No free tier serves raw index "
                "levels, so NDX/SPX use QQQ/SPY ETF proxies.", 3,
                "https://www.tiingo.com",
-               "Stooq (former keyless primary) now behind a JS proof-of-work gate; index proxies "
-               "in use; Alpha Vantage free tier is unadjusted.",
+               "Index proxies in use; Alpha Vantage free tier is unadjusted.",
                ("price_SPY", "price_QQQ", "price_SMH", "price_SOXX", "price_NDX")),
     # v3.7.2: the S5 PRIMARY source (Fed EBP, v3.3.1) and the 0.5-quality proxy
     # were tracked per-recompute but wired to NO registry row, so the status
@@ -1176,8 +1175,7 @@ KNOWN_ISSUES: list[dict[str, str]] = [
     {"id": "index-proxy", "severity": "info", "category": "data-substitution",
      "title": "Stock indices served via ETF proxies",
      "detail": "No free data tier serves raw index levels, so Nasdaq-100 uses QQQ and S&P 500 "
-     "uses SPY. GSADF and LPPLS therefore run on the QQQ proxy. Enable TWELVE_DATA_INDICES on "
-     "the Grow plan for raw GSPC/NDX.", "ref": "sources.prices"},
+     "uses SPY. GSADF and LPPLS therefore run on the QQQ proxy.", "ref": "sources.prices"},
     {"id": "d1-anchor-deviation", "severity": "info", "category": "documented-deviation",
      "title": "Breadth anchors deviate from the original spec text",
      "detail": "The original spec anchored d1 at (35,75), but hi=75 clipped normal bull-market "
@@ -1191,10 +1189,6 @@ KNOWN_ISSUES: list[dict[str, str]] = [
      "detail": "FRED truncated BAMLH0A0HYM2 to a rolling 3-year window (Apr 2026); the S5 "
      "percentile deepens over time as the service persists its own daily history.",
      "ref": "indicator s5"},
-    {"id": "stooq-pow", "severity": "info", "category": "source-degraded",
-     "title": "Stooq disabled (JS proof-of-work anti-bot gate)",
-     "detail": "Stooq's CSV endpoint now serves a SHA-256 proof-of-work challenge; it is off by "
-     "default and the price layer requires Tiingo/Twelve Data keys.", "ref": "sources.stooq"},
     {"id": "n4-calibration", "severity": "info", "category": "epistemic",
      "title": "Uncalibratable by construction (n ~= 4)",
      "detail": "The reference class of comparable US equity manias is ~4 events "

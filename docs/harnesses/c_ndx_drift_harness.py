@@ -1,14 +1,15 @@
 """PIN-C drift harness (ANALYSIS ONLY — run on the production host).
 
-Builds the four candidate NDX source-identity policies and reports the drift
+Builds the three candidate NDX source-identity policies and reports the drift
 between them. Read-only: no DB writes, no cache mutation, no scored path is
 altered. Prints ONE JSON document to stdout for operator review.
 
     C0_CURRENT_CHAIN   whatever get_daily_closes("NDX") serves today
     C1_QQQ_ADJUSTED    Tiingo QQQ adjClose
     C2_QQQ_UNADJUSTED  Twelve Data QQQ close (free tier is unadjusted)
-    C3_NATIVE_NDX      native index if any configured path serves it
-                       (Twelve Data Grow NDX / yfinance ^NDX / stooq ^ndx)
+
+C3_NATIVE_NDX went with the price layer's native-index tiers (Twelve Data
+Grow, yfinance, Stooq) on 2026-10-03: no configured path serves native NDX.
 
 Per-policy-pair stats over overlapping dates: price-level correlation, daily &
 monthly log-return correlation and mean|diff|, max tracking divergence (of
@@ -52,16 +53,6 @@ def _collect_policies() -> dict[str, list[tuple[str, float]]]:
         out["C2_QQQ_UNADJUSTED"] = rows
     except Exception as exc:
         out["_c2_error"] = str(exc)[:200]  # type: ignore[assignment]
-    for label, fn in (("twelvedata_native", lambda: prices.fetch_twelvedata("NDX")),
-                      ("yfinance_native", lambda: prices.fetch_yfinance("NDX"))):
-        try:
-            rows, vendor, proxy = fn()
-            if not proxy:                       # only accept a genuinely native series
-                out["C3_NATIVE_NDX"] = rows
-                out["_c3_vendor"] = {"path": label, "vendor": vendor}  # type: ignore[assignment]
-                break
-        except Exception:  # noqa: S112 -- best-effort native-path discovery; absence is a valid result
-            continue
     return out
 
 

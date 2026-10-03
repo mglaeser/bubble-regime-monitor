@@ -28,7 +28,7 @@ Repository: [`mglaeser/bubble-regime-monitor`](https://github.com/mglaeser/bubbl
 git clone https://github.com/mglaeser/bubble-regime-monitor.git && cd bubble-regime-monitor && cp .env.example .env && podman-compose up -d
 ```
 
-> **API keys (v3.1).** As of v3.1, bubblegauge's price layer requires two free API keys. Stooq — previously our keyless price source — now fronts its CSV endpoint with a JavaScript proof-of-work anti-bot challenge that a headless service cannot pass, so it is disabled by default. Sign up (free, ~1 minute each) at **https://www.tiingo.com** (`TIINGO_API_KEY`) and **https://twelvedata.com** (`TWELVE_DATA_API_KEY`) and place both in your `.env`. Tiingo is the primary source for ETF/equity prices; Twelve Data is the backup. Neither free tier serves raw stock-index levels, so the S&P 500 and Nasdaq-100 are represented by their ETF proxies (SPY and QQQ) unless you upgrade Twelve Data to the Grow plan ($29/mo) and set `TWELVE_DATA_INDICES=true`. **For the Nasdaq-100 specifically that upgrade is unnecessary:** FRED serves the native index level free on the `FRED_API_KEY` this service already requires — `NASDAQ100`, 10,239 non-missing daily observations from 1986-01-02, against QQQ's start of 1999-03 (measured 2026-08-22). FRED's `SP500` is a rolling 10-year window and is the wrong instrument for the S&P proxy. Note the licence: FRED marks the Nasdaq OMX series copyright, personal use, redistribution by permission. The service does not read it since the S4 real-index shadow went (2026-09-28). An optional Alpha Vantage key (`ALPHAVANTAGE_API_KEY`, 25 requests/day) adds a thin emergency fallback for the four core tickers only. A further optional tier, **yfinance** (documented-unreliable, ToS-gray; it was described here as "the one free source of raw index levels", which FRED's `NASDAQ100` disproves), is off unless you install the extra: `pip install '.[yfinance]'` — when absent the chain simply skips it.
+> **API keys (v3.1).** As of v3.1, bubblegauge's price layer requires two free API keys. Sign up (free, ~1 minute each) at **https://www.tiingo.com** (`TIINGO_API_KEY`) and **https://twelvedata.com** (`TWELVE_DATA_API_KEY`) and place both in your `.env`. Tiingo is the primary source for ETF/equity prices; Twelve Data is the backup. Neither free tier serves raw stock-index levels, so the S&P 500 and Nasdaq-100 are represented by their ETF proxies (SPY and QQQ). For the Nasdaq-100, FRED serves the native index level free on the `FRED_API_KEY` this service already requires — `NASDAQ100`, 10,239 non-missing daily observations from 1986-01-02, against QQQ's start of 1999-03 (measured 2026-08-22). FRED's `SP500` is a rolling 10-year window and is the wrong instrument for the S&P proxy. Note the licence: FRED marks the Nasdaq OMX series copyright, personal use, redistribution by permission. The service does not read it since the S4 real-index shadow went (2026-09-28). An optional Alpha Vantage key (`ALPHAVANTAGE_API_KEY`, 25 requests/day) adds a thin emergency fallback for the four core tickers only.
 
 Rootless Podman notes: the `:Z` suffix on the `./data:/data` bind mount applies the SELinux label (required on Fedora/RHEL rootless Podman). For boot persistence: `podman generate systemd --new --name bubblegauge` (or a Quadlet `.container` file in `~/.config/containers/systemd/`) and `systemctl --user enable --now`.
 
@@ -39,7 +39,7 @@ Rootless Podman notes: the `:Z` suffix on the `./data:/data` bind mount applies 
                           │                 LEG 1 — STRATEGIC GAUGE          │
                           │            (headline = Monte Carlo MEDIAN)       │
                           │                                                  │
-  FRED / SSGA / Stooq     │  BLOCK S — Structural Fragility                  │
+  FRED / SSGA / Tiingo    │  BLOCK S — Structural Fragility                  │
   EDGAR / FINRA / CBOE ──▶│   S1 Valuation (0.33)  S2 Concentration (0.27)   │
   multpl / shillerdata    │   S3 Semis GSY (0.20)  S4 GSADF (0.07, CONTESTED)│
   Wikipedia constituents  │   S5 Credit (0.13)                               │
@@ -99,7 +99,7 @@ Red-flag count 0 → override not fired. **Deterministic point score 52.43; MC m
 | CAPE (S1) | multpl scrape | shillerdata `ie_data.xls` | 35d |
 | Real 10-yr (S1) | FRED `DFII10` | none (FRED core) | 3d |
 | Concentration (S2) | SSGA SPY holdings XLSX (top-10 **holdings** sum, not a sector weight) | Slickcharts → JPMAM cross-check | 3d |
-| Semis run-up (S3) | Stooq `smh.us`/`spy.us` | SOXX substitute | 3d |
+| Semis run-up (S3) | Tiingo `SMH`/`SPY` | Twelve Data -> Alpha Vantage -> cache; SOXX substitute for SMH | 3d |
 | GSADF (S4) | `Rscript r/gsadf.R` (exuber) | floor 0.05 + provenance note | 35d |
 | HY OAS (S5) | FRED `BAMLH0A0HYM2` (**truncated to rolling 3 yr since Apr 2026** — own `hy_oas_history` table, seeded on first boot, appended daily) | persisted history | 3d |
 | Breadth (D1) | S&P 500 constituents (SSGA) + Polygon grouped-daily closes, 200-DMA on read | none: D1 is dropped and its block renormalized | 3d |

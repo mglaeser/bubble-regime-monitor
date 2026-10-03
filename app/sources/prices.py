@@ -1,11 +1,11 @@
-"""v3.1 price layer: Tiingo -> Twelve Data -> Alpha Vantage -> yfinance ->
-SQLite cache, with centralized symbol mapping and persistent provider health.
+"""v3.1 price layer: Tiingo -> Twelve Data -> Alpha Vantage -> SQLite cache,
+with centralized symbol mapping and persistent provider health.
 
 WHY THIS EXISTS. Stooq — previously the keyless PRIMARY — now fronts its CSV
 endpoint with a JavaScript SHA-256 proof-of-work anti-bot challenge
 (Anubis-style) that a JS-less HTTP client can never satisfy, so it always
-receives the HTML challenge instead of data. Stooq is demoted to an optional
-experimental provider behind STOOQ_ENABLED=false (see app.sources.stooq).
+receives the HTML challenge instead of data. The service no longer reads
+Stooq.
 
 Chain (spec v3.1 section 2):
 - PRIMARY   Tiingo free tier (TIINGO_API_KEY): 50 req/hr, 1000/day, 500
@@ -13,15 +13,10 @@ Chain (spec v3.1 section 2):
   never lands in logs/URLs. Field: adjClose. Serves NO raw indices.
 - SECONDARY Twelve Data free Basic (TWELVE_DATA_API_KEY): 8 req/min, 800
   credits/day, resets 00:00 UTC. The free plan does NOT include index data
-  (indices are on the $29/mo Grow plan) — set TWELVE_DATA_INDICES=true only
-  on Grow.
+  (indices are on the $29/mo Grow plan).
 - TERTIARY  Alpha Vantage (ALPHAVANTAGE_API_KEY, 25 req/day): CORE tickers
   ONLY (SPY/QQQ/SMH/SOXX); never for the constituent sweep. Free tier is
   UNADJUSTED daily — acceptable for short-window ETF math, flagged.
-- QUATERNARY yfinance (documented-unreliable, ToS-gray): OPTIONAL dependency
-  (install the `.[yfinance]` extra to activate). When absent the tier is
-  skipped as ProviderNotConfigured (no health penalty). Last automated
-  attempt; short timeout. The one free place raw indices may appear.
 - TERMINAL  SQLite cache: last good series per canonical symbol served with
   stale flags on total provider failure. Never a 500.
 
@@ -50,12 +45,6 @@ log = get_logger(__name__)
 CORE_TICKERS = ("SPY", "QQQ", "SMH", "SOXX")
 INDEX_PROXIES = {"NDX": "QQQ", "SPX": "SPY"}  # free tiers serve no raw indices
 
-# Paid-tier Twelve Data index symbols (bare tickers, no ^) — used ONLY when
-# TWELVE_DATA_INDICES=true (Grow plan). ^GSPC/.INX/SPX/GSPC vary by vendor;
-# this module is the single place vendor spellings live.
-TWELVE_DATA_INDEX_SYMBOLS = {"NDX": "NDX", "SPX": "GSPC"}
-YFINANCE_INDEX_SYMBOLS = {"NDX": "^NDX", "SPX": "^GSPC"}
-
 FAIL_THRESHOLD = 3
 COOLDOWN = timedelta(hours=6)
 CACHE_SLA_DAYS = 3
@@ -71,7 +60,7 @@ class ProviderError(SourceError):
 
 class ProviderNotConfigured(ProviderError):
     """The provider is not usable by configuration, not by ill-health: no API
-    key, disabled by flag, or the symbol is outside the provider's budget.
+    key, or the symbol is outside the provider's budget.
 
     These must NOT count against provider health — checked with isinstance
     rather than by sniffing the error message (which was fragile)."""
@@ -79,7 +68,7 @@ class ProviderNotConfigured(ProviderError):
 
 class NotOnPlan(ProviderError):
     """Symbol exists but is not available on the configured plan (e.g. an
-    index on Twelve Data free Basic -> 403). Fall through to proxy/next."""
+    index on Twelve Data free Basic -> 403). Fall through to the next provider."""
 
 
 class RateLimited(ProviderError):
@@ -90,15 +79,11 @@ class RateLimited(ProviderError):
 # symbol mapping — the ONE place vendor spellings and proxies are decided
 # ---------------------------------------------------------------------------
 
-def resolve_symbol(canonical: str, provider: str) -> tuple[str, bool]:
-    """(vendor_symbol, is_proxy) for a canonical symbol on a provider."""
+def resolve_symbol(canonical: str) -> tuple[str, bool]:
+    """(vendor_symbol, is_proxy) for a canonical symbol, the same on every
+    provider: NDX and SPX are always their ETF proxies."""
     canonical = canonical.upper()
-    settings = get_settings()
     if canonical in INDEX_PROXIES:
-        if provider == "twelvedata" and settings.twelve_data_indices:
-            return TWELVE_DATA_INDEX_SYMBOLS[canonical], False
-        if provider == "yfinance":
-            return YFINANCE_INDEX_SYMBOLS[canonical], False  # raw index if it works
         return INDEX_PROXIES[canonical], True
     return canonical, False
 
@@ -260,7 +245,7 @@ def fetch_tiingo(canonical: str) -> tuple[list[tuple[str, float]], str, bool]:
     settings = get_settings()
     if not settings.tiingo_api_key:
         raise ProviderNotConfigured("tiingo: no TIINGO_API_KEY configured")
-    vendor, proxy = resolve_symbol(canonical, "tiingo")
+    vendor, proxy = resolve_symbol(canonical)
     start = (datetime.now(UTC).date() - timedelta(days=HISTORY_DAYS)).isoformat()
     with httpx.Client(timeout=TIMEOUT) as client:
         resp = client.get(
@@ -286,7 +271,7 @@ def fetch_twelvedata(canonical: str, outputsize: int = 800) -> tuple[list[tuple[
     settings = get_settings()
     if not settings.twelve_data_api_key:
         raise ProviderNotConfigured("twelvedata: no TWELVE_DATA_API_KEY configured")
-    vendor, proxy = resolve_symbol(canonical, "twelvedata")
+    vendor, proxy = resolve_symbol(canonical)
     _td_throttle()
     with httpx.Client(timeout=TIMEOUT) as client:
         resp = client.get(
@@ -297,23 +282,7 @@ def fetch_twelvedata(canonical: str, outputsize: int = 800) -> tuple[list[tuple[
     credits_left = resp.headers.get("api-credits-left")
     if credits_left is not None:
         log.debug("twelvedata_credits", left=credits_left)
-    try:
-        rows = parse_twelvedata(resp.json(), vendor)
-    except NotOnPlan:
-        # e.g. raw index on free Basic: retry once via the ETF proxy
-        if not proxy and canonical in INDEX_PROXIES:
-            vendor = INDEX_PROXIES[canonical]
-            _td_throttle()
-            with httpx.Client(timeout=TIMEOUT) as client:
-                resp = client.get(
-                    "https://api.twelvedata.com/time_series",
-                    params={"symbol": vendor, "interval": "1day",
-                            "outputsize": str(outputsize),
-                            "apikey": settings.twelve_data_api_key},
-                )
-            return parse_twelvedata(resp.json(), vendor), vendor, True
-        raise
-    return rows, vendor, proxy
+    return parse_twelvedata(resp.json(), vendor), vendor, proxy
 
 
 def fetch_twelvedata_series(symbol: str, interval: str = "1day",
@@ -341,7 +310,7 @@ def fetch_alphavantage(canonical: str) -> tuple[list[tuple[str, float]], str, bo
     settings = get_settings()
     if not settings.alphavantage_api_key:
         raise ProviderNotConfigured("alphavantage: no ALPHAVANTAGE_API_KEY configured")
-    vendor, proxy = resolve_symbol(canonical, "alphavantage")
+    vendor, proxy = resolve_symbol(canonical)
     if vendor not in CORE_TICKERS:
         # 25 req/day budget: strictly core symbols, never the breadth sweep
         raise ProviderNotConfigured(f"alphavantage: {vendor} outside CORE ticker budget")
@@ -353,57 +322,6 @@ def fetch_alphavantage(canonical: str) -> tuple[list[tuple[str, float]], str, bo
         )
     resp.raise_for_status()
     return parse_alphavantage(resp.json(), vendor), vendor, proxy
-
-
-def fetch_yfinance(canonical: str) -> tuple[list[tuple[str, float]], str, bool]:
-    """yfinance: documented-unreliable (scrapes unofficial Yahoo endpoints,
-    ToS-gray, breaks often). Optional dependency — install the `.[yfinance]`
-    extra to activate this tier; when absent it is skipped (not a failure).
-    Last automated attempt only; short timeout. It is the one free place raw
-    index levels (^GSPC/^NDX) may appear."""
-    try:
-        import yfinance as yf
-    except ImportError as exc:
-        # Not installed -> a configuration state, not provider ill-health.
-        raise ProviderNotConfigured(
-            "yfinance: not installed (pip install '.[yfinance]' to enable)") from exc
-
-    vendor, proxy = resolve_symbol(canonical, "yfinance")
-
-    def _history(sym: str) -> list[tuple[str, float]]:
-        df = yf.Ticker(sym).history(period="4y", interval="1d",
-                                    auto_adjust=True, timeout=20)
-        return sorted((idx.date().isoformat(), float(close))
-                      for idx, close in df["Close"].items())
-
-    try:
-        rows = _history(vendor)
-    except Exception as exc:
-        # raw index failed: one shot at the ETF proxy before giving up
-        if not proxy and canonical in INDEX_PROXIES:
-            try:
-                proxy_vendor = INDEX_PROXIES[canonical]
-                rows = _history(proxy_vendor)
-                if len(rows) >= 50:
-                    return rows, proxy_vendor, True
-            except Exception:  # noqa: S110 -- proxy fallback is best-effort; the original error is re-raised below (A-26)
-                pass
-        raise ProviderError(f"yfinance {vendor}: {exc}") from exc
-    if len(rows) < 50:
-        raise ProviderError(f"yfinance {vendor}: only {len(rows)} rows")
-    return rows, vendor, proxy
-
-
-def fetch_stooq(canonical: str) -> tuple[list[tuple[str, float]], str, bool]:
-    """Optional experimental Stooq path (STOOQ_ENABLED=true only)."""
-    settings = get_settings()
-    if not settings.stooq_enabled:
-        raise ProviderNotConfigured("stooq: disabled (STOOQ_ENABLED=false)")
-    from app.sources import stooq
-
-    vendor = {"NDX": "^ndx", "SPX": "^spx"}.get(canonical, f"{canonical.lower()}.us")
-    rows = stooq.fetch_with_pow(vendor)
-    return rows, vendor, False
 
 
 # ---------------------------------------------------------------------------
@@ -450,7 +368,7 @@ def _cache_put(canonical: str, rows: list[tuple[str, float]], source: str) -> No
 # _fetcher) rather than frozen into this list as function objects, so that
 # monkeypatching `prices.fetch_<name>` in tests — and any runtime swap of a
 # provider — actually takes effect.
-PROVIDER_ORDER = ["tiingo", "twelvedata", "alphavantage", "yfinance", "stooq"]
+PROVIDER_ORDER = ["tiingo", "twelvedata", "alphavantage"]
 
 
 def _fetcher(name: str) -> Callable[[str], tuple[list[tuple[str, float]], str, bool]]:
@@ -481,7 +399,7 @@ def get_daily_closes(canonical: str) -> SourceResult:
         try:
             rows, vendor, proxy = _fetcher(name)(canonical)
         except ProviderNotConfigured as exc:
-            # Not a provider failure — a configuration state (no key, disabled,
+            # Not a provider failure - a configuration state (no key,
             # out-of-budget). Never counts against provider health.
             errors.append(str(exc)[:160])
             continue
@@ -525,7 +443,7 @@ def fetch_tiingo_monthly(canonical: str, start_date: str = "1999-01-01",
     settings = get_settings()
     if not settings.tiingo_api_key:
         raise ProviderNotConfigured("tiingo: no TIINGO_API_KEY configured")
-    vendor, _ = resolve_symbol(canonical, "tiingo")
+    vendor, _ = resolve_symbol(canonical)
     with httpx.Client(timeout=TIMEOUT) as client:
         resp = client.get(
             f"https://api.tiingo.com/tiingo/daily/{vendor}/prices",
@@ -599,9 +517,8 @@ def fetch_polygon_grouped(date_iso: str) -> dict[str, float]:
 def total_return_pct(closes: list[tuple[str, float]], trading_days: int, smooth: int = 1) -> float:
     """Total return over the trailing `trading_days`, in percent.
 
-    Pure math on an already-fetched (date, close) series — provider-agnostic
-    (lives here, not in the disabled `stooq` module, so price indicators never
-    import Stooq). Uses adjusted closes when the caller passed them.
+    Pure math on an already-fetched (date, close) series - provider-agnostic.
+    Uses adjusted closes when the caller passed them.
 
     `smooth` (S4/S5 audit, D5): average the two endpoints over `smooth` trading
     days instead of using single closes. A 2-year structural run-up must not

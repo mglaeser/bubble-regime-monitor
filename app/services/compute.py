@@ -503,8 +503,8 @@ def gather_inputs() -> RawInputs:
         raw.top10_as_of = r.provenance.as_of or today  # holdings file is daily
 
     # Prices via the v3.1 provider chain (Tiingo -> Twelve Data -> Alpha
-    # Vantage -> yfinance -> cache). Index levels use ETF proxies on free
-    # tiers (NDX->QQQ, SPX->SPY); proxy substitutions are flagged in the note.
+    # Vantage -> cache). Index levels use ETF proxies (NDX->QQQ,
+    # SPX->SPY); proxy substitutions are flagged in the note.
     from app.sources import prices as price_src
 
     def _closes(canonical: str):
