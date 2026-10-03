@@ -1323,3 +1323,20 @@ def test_a_test_probe_is_not_parked_by_quiet_hours(isolated_db):
     with session_scope() as session:
         assert session.get(AlertDelivery, delivery_id).transport_status \
             == TransportStatus.SENT
+
+
+def test_the_alert_system_has_no_model_path():
+    """AGENTS.md rule 1 for the alert system. Owner decision D2b (2026-10-02)
+    deleted the dormant LLM selector - the alert system's only model prompt,
+    which the dispatcher never called and whose tables never held a row - and
+    its prompt test with it. What remains is pinned here: no module of the
+    alert system imports the model gateway or a selector, so no alert text
+    reaches a model and no model writes an alert."""
+    import re
+    from pathlib import Path
+
+    alerts = Path(__file__).resolve().parents[1] / "app" / "alerts"
+    model_path = re.compile(r"\bllm_gateway\b|\bllm_selector\b|\bopenai\b|\banthropic\b")
+    readers = sorted(p.name for p in alerts.rglob("*.py") if model_path.search(p.read_text(encoding="utf-8")))
+    assert readers == []
+
