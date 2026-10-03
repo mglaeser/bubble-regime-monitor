@@ -5,9 +5,8 @@ the production red flag is NOT touched. Prints ONE JSON document to stdout.
 
     F0  current basis: max of the ADJUSTED SPY closes in the provider cache
         window (<= 900 rows) — what compute.py:478 actually evaluates today
-    F1  native S&P 500 price index with a long-history seed (stooq ^spx when
-        STOOQ_ENABLED=true; otherwise supply a CSV via --spx-csv PATH with
-        rows date,close)
+    F1  native S&P 500 price index with a long-history seed (supply a CSV
+        via --spx-csv PATH with rows date,close)
     F2  unadjusted SPY long history (Twelve Data close / Alpha Vantage
         TIME_SERIES_DAILY are unadjusted on the tiers this service uses)
 
@@ -62,8 +61,7 @@ def _f1_native_spx(csv_path: str | None) -> list[tuple[str, float]]:
         with open(csv_path) as fh:
             return sorted((row["date"][:10], float(row["close"]))
                           for row in csv.DictReader(fh))
-    from app.sources import stooq
-    return sorted(stooq.fetch_with_pow("^spx"))   # requires STOOQ_ENABLED path working
+    raise ValueError("F1 needs --spx-csv PATH (rows date,close)")
 
 
 def _f2_spy_unadjusted() -> list[tuple[str, float]]:

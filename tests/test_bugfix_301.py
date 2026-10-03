@@ -160,11 +160,3 @@ class TestJudgmentDegradation:
                         "IN", "IN", {}, last_successful="previous judgment")
         assert call.text == "previous judgment"
         assert call.stale is True
-
-
-class TestStooqUnavailableTyped:
-    def test_html_captcha_detected(self):
-        from app.sources.stooq import SourceUnavailable, _parse_csv
-
-        with pytest.raises(SourceUnavailable):
-            _parse_csv("<html><body>captcha</body></html>", "spy.us")

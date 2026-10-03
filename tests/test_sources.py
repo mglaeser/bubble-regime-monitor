@@ -8,7 +8,6 @@ import pytest
 
 from app.sources import SourceError
 from app.sources.edgar import Fact, annual_yoy, duration_facts, ttm
-from app.sources.stooq import StooqLimitError, _parse_csv
 
 
 def _fact(start: str, end: str, val: float) -> Fact:
@@ -68,37 +67,6 @@ class TestEdgarTTM:
 
     def test_annual_yoy_insufficient(self):
         assert annual_yoy([_fact("2024-01-01", "2024-12-31", 100.0)]) is None
-
-
-class TestStooqParser:
-    CSV = "Date,Open,High,Low,Close,Volume\n" + "\n".join(
-        f"2026-01-{d:02d},1,1,1,{100 + d},10" for d in range(1, 29)
-    ) + "\n" + "\n".join(
-        f"2026-02-{d:02d},1,1,1,{130 + d},10" for d in range(1, 29)
-    )
-
-    def test_parses_standard_csv(self):
-        rows = _parse_csv(self.CSV, "spy.us")
-        assert len(rows) == 56
-        assert rows[-1] == ("2026-02-28", 158.0)
-
-    def test_case_insensitive_headers(self):
-        text = self.CSV.replace("Date,Open,High,Low,Close,Volume", "DATE,OPEN,HIGH,LOW,CLOSE,VOLUME")
-        assert len(_parse_csv(text, "spy.us")) == 56
-
-    def test_daily_limit_detected(self):
-        with pytest.raises(StooqLimitError):
-            _parse_csv("Exceeded the daily hits limit", "spy.us")
-        with pytest.raises(StooqLimitError):
-            _parse_csv("Przekroczono dzienny limit wywolan", "spy.us")
-
-    def test_no_data_detected(self):
-        with pytest.raises(SourceError, match="no data"):
-            _parse_csv("No data", "zzzz.us")
-
-    def test_garbage_body_reported_with_snippet(self):
-        with pytest.raises(SourceError, match="body starts"):
-            _parse_csv("<html>login wall</html>", "spy.us")
 
 
 class TestStaleness:

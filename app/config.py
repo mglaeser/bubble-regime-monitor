@@ -34,15 +34,12 @@ class Settings(BaseSettings):
     # FRED
     fred_api_key: str = ""
 
-    # Price layer (v3.1): Stooq's CSV endpoint now fronts a JS proof-of-work
-    # anti-bot gate, so a functioning price layer REQUIRES at least one of
+    # Price layer (v3.1): a functioning price layer REQUIRES at least one of
     # the two free keys below.
     tiingo_api_key: str = ""        # PRIMARY  (50 req/hr, 1000/day, 500 symbols/mo)
     twelve_data_api_key: str = ""   # SECONDARY (8 req/min, 800 credits/day)
     alphavantage_api_key: str = ""  # TERTIARY, CORE tickers only (25 req/day)
     polygon_api_key: str = ""       # PRIMARY breadth (grouped-daily: 1 call/day, whole US market)
-    stooq_enabled: bool = False     # experimental PoW-solver path; see ToS caveat
-    twelve_data_indices: bool = False  # true ONLY on Twelve Data Grow ($29/mo)
 
     # Admin / security
     admin_api_key: str = "change-me-to-a-long-random-string"
@@ -381,6 +378,14 @@ RETIRED_ENV_KEYS: dict[str, str] = {
              "so a host cannot change it; remove this key")
        for key in ("ALERTS_NON_P1_TARGET_168H", "ALERTS_NON_P1_CAP_24H",
                    "ALERTS_NON_P1_CAP_168H")},
+    "TWELVE_DATA_INDICES": (
+        "removed with the paid Twelve Data index path (2026-10-03, AGENTS.md: delete before "
+        "you add; no deployment enabled it): NDX and SPX are always read as the ETF proxies "
+        "QQQ and SPY, so remove this key"),
+    "STOOQ_ENABLED": (
+        "removed with the Stooq price tier (2026-10-03; its endpoint answers a proof-of-work "
+        "challenge, and no deployment enabled it): the chain is Tiingo, Twelve Data, Alpha "
+        "Vantage, then the cache, so remove this key"),
 }
 
 

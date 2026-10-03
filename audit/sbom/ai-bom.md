@@ -21,7 +21,7 @@ FRED · Tiingo · Twelve Data · Alpha Vantage · Polygon/Massive · SSGA (SPDR 
 
 ## Software dependency inventory (from `pyproject.toml`)
 
-Runtime: fastapi, uvicorn[standard], pydantic, pydantic-settings, SQLAlchemy, alembic, httpx, tenacity, APScheduler(<4), structlog, slowapi, numpy(<2.3), pandas(<3.0), openpyxl, xlrd, lxml, **lppls==0.6.24**, PyYAML, pyarrow, holidays, linkify-it-py, phonenumberslite. Optional: yfinance (`.[yfinance]`). Exact versions: requirements.lock (image) and requirements-dev.lock (CI). Native: R `exuber` 1.1.0 (CRAN) via subprocess. Dev: pytest, ruff, mypy.
+Runtime: fastapi, uvicorn[standard], pydantic, pydantic-settings, SQLAlchemy, alembic, httpx, tenacity, APScheduler(<4), structlog, slowapi, numpy(<2.3), pandas(<3.0), openpyxl, xlrd, lxml, **lppls==0.6.24**, PyYAML, pyarrow, holidays, linkify-it-py, phonenumberslite. Exact versions: requirements.lock (image) and requirements-dev.lock (CI). Native: R `exuber` 1.1.0 (CRAN) via subprocess. Dev: pytest, ruff, mypy.
 
 **Existence verification (finding B-04/C-03):** every package above was resolved to a real registry entry during this engagement; **no hallucinated or newly-registered/typo-adjacent dependency was found.** The gap is that this verification is manual and one-off — there is no lockfile/hash pinning and no pre-install existence gate.
 

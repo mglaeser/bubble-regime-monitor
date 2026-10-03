@@ -1,4 +1,4 @@
-"""v3.1 price-layer tests: PoW detection, provider parsers, symbol mapping."""
+"""v3.1 price-layer tests: provider parsers, symbol mapping."""
 
 from __future__ import annotations
 
@@ -14,35 +14,6 @@ from app.sources.prices import (
     parse_twelvedata,
     resolve_symbol,
 )
-from app.sources.stooq import StooqPoWChallenge, detect_pow, solve_pow
-
-# The operator's verbatim 796-byte-style challenge body (abridged shape).
-STOOQ_POW_BODY = (
-    '<!DOCTYPE html><html><head></head><body>'
-    '<noscript>This site requires JavaScript to verify your browser...</noscript>'
-    '<script nonce="x">(async()=>{const c="AAAAAGpSuLcEAnbV8FVT4wjT5XZmTwe_",'
-    'd=4,t="0".repeat(d);let n=0;while(1){/* ... */}'
-    'const r=await fetch("/__verify",{method:"POST"});})();</script></body></html>'
-)
-
-
-class TestStooqPoW:
-    def test_detects_doctype_and_verify(self):
-        assert detect_pow(STOOQ_POW_BODY) is True
-        assert detect_pow("Date,Open,High,Low,Close,Volume\n2026-01-02,1,1,1,2,3") is False
-
-    def test_parse_raises_pow_challenge(self):
-        from app.sources.stooq import _parse_csv
-
-        with pytest.raises(StooqPoWChallenge):
-            _parse_csv(STOOQ_POW_BODY, "spy.us")
-
-    def test_solver_finds_valid_nonce(self):
-        import hashlib
-
-        n = solve_pow("testchallenge", difficulty=2)
-        assert n is not None
-        assert hashlib.sha256(f"testchallenge{n}".encode()).hexdigest().startswith("00")
 
 
 class TestTiingoParser:
@@ -98,43 +69,21 @@ class TestAlphaVantageParser:
 
 
 class TestSymbolMapping:
-    def test_free_tier_uses_etf_proxies(self, monkeypatch):
-        from app.config import get_settings
-
-        get_settings.cache_clear()
-        monkeypatch.setenv("TWELVE_DATA_INDICES", "false")
-        get_settings.cache_clear()
-        assert resolve_symbol("NDX", "tiingo") == ("QQQ", True)
-        assert resolve_symbol("SPX", "tiingo") == ("SPY", True)
-        assert resolve_symbol("NDX", "twelvedata") == ("QQQ", True)
-        assert resolve_symbol("SPY", "tiingo") == ("SPY", False)
-        get_settings.cache_clear()
-
-    def test_grow_plan_uses_raw_index(self, monkeypatch):
-        from app.config import get_settings
-
-        get_settings.cache_clear()
-        monkeypatch.setenv("TWELVE_DATA_INDICES", "true")
-        get_settings.cache_clear()
-        assert resolve_symbol("SPX", "twelvedata") == ("GSPC", False)
-        assert resolve_symbol("NDX", "twelvedata") == ("NDX", False)
-        get_settings.cache_clear()
-
-    def test_yfinance_raw_index_symbols(self):
-        assert resolve_symbol("NDX", "yfinance") == ("^NDX", False)
-        assert resolve_symbol("SPX", "yfinance") == ("^GSPC", False)
+    def test_indices_use_etf_proxies(self):
+        assert resolve_symbol("NDX") == ("QQQ", True)
+        assert resolve_symbol("SPX") == ("SPY", True)
+        assert resolve_symbol("SPY") == ("SPY", False)
 
 
 class TestProviderChainNever500:
     def test_all_providers_missing_keys_serves_cache_or_raises(self, isolated_db, monkeypatch):
         for var in ("TIINGO_API_KEY", "TWELVE_DATA_API_KEY", "ALPHAVANTAGE_API_KEY"):
             monkeypatch.setenv(var, "")
-        monkeypatch.setenv("STOOQ_ENABLED", "false")
         from app.config import get_settings
 
         get_settings.cache_clear()
-        # No cache, no keys, yfinance absent -> SourceError (caught by the
-        # compute layer's _track, never a 500).
+        # No cache, no keys -> SourceError (caught by the compute layer's
+        # _track, never a 500).
         from app.sources import SourceError
 
         with pytest.raises(SourceError):
@@ -148,7 +97,6 @@ class TestProviderHealthScoring:
         # should be put on cooldown (it's a config state, not ill-health).
         for var in ("TIINGO_API_KEY", "TWELVE_DATA_API_KEY", "ALPHAVANTAGE_API_KEY"):
             monkeypatch.setenv(var, "")
-        monkeypatch.setenv("STOOQ_ENABLED", "false")
         from app.config import get_settings
 
         get_settings.cache_clear()
@@ -178,7 +126,6 @@ class TestProviderHealthScoring:
         # keep the rest unconfigured so the chain exhausts
         for var in ("TWELVE_DATA_API_KEY", "ALPHAVANTAGE_API_KEY"):
             monkeypatch.setenv(var, "")
-        monkeypatch.setenv("STOOQ_ENABLED", "false")
         get_settings.cache_clear()
 
         from sqlalchemy import select
@@ -198,13 +145,100 @@ class TestProviderHealthScoring:
         assert row.cooldown_until is not None  # on cooldown after 3 real failures
         get_settings.cache_clear()
 
-    def test_yfinance_absent_is_not_configured(self, monkeypatch):
-        # yfinance isn't installed in the test venv -> ProviderNotConfigured,
-        # not a ProviderError (so it never dings health).
-        from app.sources.prices import ProviderNotConfigured, fetch_yfinance
 
-        with pytest.raises(ProviderNotConfigured):
-            fetch_yfinance("SPY")
+class TestTheChainIsThreeProvidersAndTheCache:
+    """The price chain is Tiingo -> Twelve Data -> Alpha Vantage -> SQLite cache.
+
+    Stooq (the proof-of-work path), yfinance (an optional extra) and the Twelve
+    Data Grow-plan index symbols went on 2026-10-03 under AGENTS.md's "delete
+    before you add": on leaf, the only deployment, STOOQ_ENABLED and
+    TWELVE_DATA_INDICES were false and yfinance is in neither lock, so none of
+    the three ever ran. NDX and SPX stay the ETF proxies QQQ and SPY that
+    production reads today, so no input changes."""
+
+    def test_the_chain_asks_three_providers_then_serves_the_cache(self, isolated_db, monkeypatch):
+        asked: list[str] = []
+
+        def fetcher(name):
+            def fetch(canonical):
+                asked.append(name)
+                raise prices.ProviderNotConfigured(f"{name}: no key")
+            return fetch
+
+        monkeypatch.setattr(prices, "_fetcher", fetcher)
+        stale = [(f"2020-01-{d:02d}", 100.0 + d) for d in range(1, 29)]
+        prices._cache_put("SPY", stale, "tiingo:SPY")
+        result = prices.get_daily_closes("SPY")
+        assert asked == ["tiingo", "twelvedata", "alphavantage"]
+        assert result.value == stale
+        assert result.provenance.fallback_used is True
+
+    @pytest.mark.parametrize("fresh", [True, False])
+    def test_a_cached_native_index_is_never_served(self, isolated_db, monkeypatch, fresh):
+        """#155 round 2, SOTA-A: a host that once read native NDX/SPX (the paid
+        Twelve Data path, yfinance) keeps that series in the cache under the
+        canonical symbol, and the cache served it - at once while fresh, and
+        when every provider failed. The cache answers only for the instrument
+        the chain reads now: a row cached from another one is passed over, and
+        the next fetch replaces it. Production's cache holds the proxies only
+        (read-only, 2026-10-03: NDX is tiingo:QQQ)."""
+        from datetime import UTC, datetime, timedelta
+
+        last = datetime.now(UTC).date() if fresh else datetime(2020, 1, 28, tzinfo=UTC).date()
+        native = [((last - timedelta(days=27 - i)).isoformat(), 20_000.0 + i) for i in range(28)]
+        proxy = [(day, close / 40) for day, close in native]
+        prices._cache_put("NDX", native, "twelvedata:NDX")
+
+        def failing(name):
+            def fetch(canonical):
+                raise prices.ProviderNotConfigured(f"{name}: no key")
+            return fetch
+
+        monkeypatch.setattr(prices, "_fetcher", failing)
+        with pytest.raises(prices.SourceError):
+            prices.get_daily_closes("NDX")
+
+        def answering(name):
+            def fetch(canonical):
+                return proxy, "QQQ", True
+            return fetch
+
+        monkeypatch.setattr(prices, "_fetcher", answering)
+        result = prices.get_daily_closes("NDX")
+        assert result.value == proxy and result.provenance.source == "tiingo:QQQ"
+        assert prices._cache_get("NDX")[2] == "tiingo:QQQ"
+
+    def test_settings_have_no_switch_for_a_deleted_tier(self):
+        from app.config import Settings
+
+        assert {"stooq_enabled", "twelve_data_indices"}.isdisjoint(Settings.model_fields)
+
+    def test_an_old_env_line_for_a_deleted_tier_changes_nothing(self, monkeypatch):
+        from app.config import get_settings, near_miss_env_keys
+
+        old = {"STOOQ_ENABLED": "true", "TWELVE_DATA_INDICES": "true"}
+        for key, value in old.items():
+            monkeypatch.setenv(key, value)
+        get_settings.cache_clear()
+        try:
+            assert resolve_symbol("NDX") == ("QQQ", True)
+            assert resolve_symbol("SPX") == ("SPY", True)
+            assert near_miss_env_keys(old) == []
+        finally:
+            get_settings.cache_clear()
+
+    def test_the_deleted_tiers_leave_no_code(self):
+        import importlib.util
+        import tomllib
+        from pathlib import Path
+
+        assert importlib.util.find_spec("app.sources.stooq") is None
+        for name in ("fetch_stooq", "fetch_yfinance",
+                     "TWELVE_DATA_INDEX_SYMBOLS", "YFINANCE_INDEX_SYMBOLS"):
+            assert not hasattr(prices, name), name
+        pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+        project = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]
+        assert "yfinance" not in project["optional-dependencies"]
 
 
 class TestCoverageGate:
@@ -229,3 +263,16 @@ class TestCoverageGate:
         data = compute_snapshot(raw, mc_samples=2_000, mc_seed=1)
         assert data.coverage["S"]["degraded"] is False
         assert data.coverage["D"]["degraded"] is False
+
+
+def test_a_host_that_still_sets_a_removed_price_setting_is_told():
+    """#155 round 1, SOTA-A: a host still setting TWELVE_DATA_INDICES=true would
+    have it ignored without a word and read the ETF proxies. The two removed
+    settings are retired keys (app/config.py RETIRED_ENV_KEYS, as D2c retired
+    DAILY_SMS_ENABLED): named at boot, in the alerts preflight and in alert
+    health, with what the service reads instead."""
+    from app.config import retired_env_keys
+
+    named = dict(retired_env_keys({"TWELVE_DATA_INDICES": "true", "stooq_enabled": "true"}))
+    assert set(named) == {"TWELVE_DATA_INDICES", "STOOQ_ENABLED"}
+    assert "QQQ" in named["TWELVE_DATA_INDICES"] and "SPY" in named["TWELVE_DATA_INDICES"]
