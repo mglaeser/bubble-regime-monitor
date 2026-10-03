@@ -38,12 +38,13 @@ def client(isolated_db, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _alert_reads(client) -> list[str]:
+def _alert_reads(client, ids: dict[str, str] | None = None) -> list[str]:
     """Every GET route under /api/v1/alerts, enumerated from the app's own
     OpenAPI document rather than from a list kept here (FastAPI nests included
     routers, so app.routes holds no flat route list), each path parameter
-    filled with an id that does not exist."""
-    reads = [re.sub(r"\{[^}]+\}", "no-such-id", path)
+    filled from `ids`, else with an id that does not exist."""
+    fill = ids or {}
+    reads = [re.sub(r"\{([^}]+)\}", lambda match: fill.get(match[1], "no-such-id"), path)
              for path, operations in client.app.openapi()["paths"].items()
              if path.startswith("/api/v1/alerts/") and "get" in operations]
     assert reads, "no alert read route found"
@@ -945,21 +946,40 @@ def test_cursor_is_bound_to_its_resource_namespace_and_filters(
     assert response.headers["content-type"].startswith("application/problem+json")
 
 
-def test_read_responses_carry_an_etag(client):
-    response = client.get("/api/v1/alerts/health", headers={"X-API-Key": TEST_ADMIN_KEY})
-    assert response.headers["ETag"]
-    assert "max-age=30" in response.headers["Cache-Control"]
-    assert "private" in response.headers["Cache-Control"]
-    assert "public" not in response.headers["Cache-Control"]
+def test_no_alert_read_sets_an_etag_or_answers_304(client, monkeypatch):
+    """Owner decision D3c (2026-10-03): the alert reads set no ETag and answer
+    no conditional request. `If-None-Match: *` matches any current
+    representation, so a read that honoured it would answer 304; every alert
+    GET, each path parameter a real id, answers the full 200 instead, with no
+    ETag."""
+    from sqlalchemy import select
 
-    unchanged = client.get(
-        "/api/v1/alerts/health",
-        headers={"X-API-Key": TEST_ADMIN_KEY,
-                 "If-None-Match": response.headers["ETag"]},
-    )
-    assert unchanged.status_code == 304
-    assert unchanged.content == b""
-    assert unchanged.headers["ETag"] == response.headers["ETag"]
+    from app.alerts.models import AlertDelivery, AlertEpisode
+    from app.config import get_settings
+    from app.db import session_scope
+    from tests.test_alert_addendum_support import NOW, seed_render
+
+    monkeypatch.setenv("ALERTS_MODE", "shadow")  # the namespace the seed writes
+    get_settings.cache_clear()
+    try:
+        render_id = seed_render(created_at=NOW)
+        with session_scope() as session:
+            episode_id = session.scalars(select(AlertEpisode.episode_id)).one()
+            delivery_id = session.scalars(select(AlertDelivery.delivery_id)).one()
+        mechanism = client.get("/api/v1/alerts/mechanisms",
+                               headers={"X-API-Key": TEST_ADMIN_KEY}).json()["items"][0]
+        ids = {"instance_fingerprint": mechanism["instance_fingerprint"],
+               "rule_id": mechanism["rule_id"], "episode_id": episode_id,
+               "delivery_id": delivery_id, "render_id": render_id}
+        responses = {path: client.get(path, headers={"X-API-Key": TEST_ADMIN_KEY,
+                                                     "If-None-Match": "*"})
+                     for path in _alert_reads(client, ids)}
+    finally:
+        get_settings.cache_clear()
+    assert {path: r.status_code for path, r in responses.items() if r.status_code != 200} == {}
+    assert [path for path, r in responses.items() if "etag" in r.headers] == []
+    assert {path: r.headers.get("cache-control") for path, r in responses.items()
+            if r.headers.get("cache-control") != "no-store"} == {}
 
 
 def test_event_cursor_uses_timestamp_and_id_together(client):
@@ -993,41 +1013,6 @@ def test_event_cursor_uses_timestamp_and_id_together(client):
     )
     assert second.status_code == 200, second.text
     assert [item["event_id"] for item in second.json()["items"]] == ["Z-older"]
-
-
-def test_paginated_etag_ignores_the_cursor_issue_instant(client):
-    """An opaque cursor's TTL timestamp must not defeat conditional GET."""
-    from datetime import UTC, datetime, timedelta
-
-    from app.alerts.models import AlertEvent
-    from app.db import session_scope
-
-    now = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
-    with session_scope() as session:
-        session.add_all([
-            AlertEvent(
-                event_id="etag-page-new", occurred_at=now,
-                causation_type="SCHEDULER", causation_id=None,
-                actor_type="SYSTEM", action="new", suppression_reasons=[]),
-            AlertEvent(
-                event_id="etag-page-old", occurred_at=now - timedelta(minutes=1),
-                causation_type="SCHEDULER", causation_id=None,
-                actor_type="SYSTEM", action="old", suppression_reasons=[]),
-        ])
-
-    first = client.get(
-        "/api/v1/alerts/events?limit=1", headers={"X-API-Key": TEST_ADMIN_KEY})
-    assert first.status_code == 200
-    assert first.json()["next_cursor"] is not None
-    repeated = client.get(
-        "/api/v1/alerts/events?limit=1",
-        headers={
-            "X-API-Key": TEST_ADMIN_KEY,
-            "If-None-Match": first.headers["ETag"],
-        },
-    )
-    assert repeated.status_code == 304
-    assert repeated.headers["ETag"] == first.headers["ETag"]
 
 
 def test_disabled_mode_never_projects_shadow_state(client):

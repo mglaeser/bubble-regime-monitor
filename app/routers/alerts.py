@@ -22,7 +22,6 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import and_, exists, or_, select
 
 from app.alerts.artifacts import LoadedArtifacts, load_active
-from app.alerts.canonical import sha256_hex
 from app.alerts.errors import AlertingUnavailable
 from app.alerts.health import (
     episode_projection,
@@ -44,7 +43,14 @@ from app.config import get_settings
 from app.db import session_scope
 from app.security import READ_RATE_LIMIT, limiter, require_admin_key
 
-router = APIRouter(prefix="/api/v1/alerts", tags=["alerts"])
+
+def _no_store(response: Response) -> None:
+    """Every alert response is the operator's and current, so nothing caches
+    it: with the ETags gone (owner decision D3c), each answer says so."""
+    response.headers["Cache-Control"] = "no-store"
+
+
+router = APIRouter(prefix="/api/v1/alerts", tags=["alerts"], dependencies=[Depends(_no_store)])
 
 MAX_PAGE = 500
 CURSOR_VERSION = "v2"
@@ -156,57 +162,6 @@ def _decode_cursor(
     return payload
 
 
-def _etag(
-    request: Request,
-    response: Response,
-    payload: Any,
-    *,
-    max_age: int,
-) -> Response | None:
-    etag_payload = payload
-    if isinstance(payload, dict) and "next_cursor" in payload:
-        # Cursor issuance carries a real-time TTL timestamp. It is transport
-        # metadata, not resource state: hashing the opaque bytes makes an
-        # otherwise unchanged full page produce a new ETag on every request,
-        # so conditional GET can never return 304. Presence still participates
-        # in the hash because gaining or losing a next page is a real change.
-        has_next = payload["next_cursor"] is not None
-        etag_payload = {
-            **payload,
-            "next_cursor": {
-                "present": has_next,
-                # Force a periodic 200 so a client that conditionally refreshes
-                # forever receives a fresh 24-hour cursor before its previous
-                # one expires. Within the hour, issue-time microseconds do not
-                # defeat 304 responses.
-                "refresh_hour": (
-                    datetime.now(UTC).strftime("%Y-%m-%dT%H") if has_next else None
-                ),
-            },
-        }
-    tag = '"' + sha256_hex(json.dumps(
-        etag_payload, sort_keys=True, default=str))[:32] + '"'
-    headers = {
-        "ETag": tag,
-        "Cache-Control": f"private, max-age={max_age}",
-        "Vary": "X-API-Key",
-    }
-    response.headers.update(headers)
-    candidates = {
-        item.strip().removeprefix("W/")
-        for item in request.headers.get("if-none-match", "").split(",")
-        if item.strip()
-    }
-    if "*" in candidates or tag in candidates:
-        return Response(status_code=304, headers=headers)
-    return None
-
-
-def _no_store(response: Response) -> None:
-    response.headers["Cache-Control"] = "private, no-store"
-    response.headers["Vary"] = "X-API-Key"
-
-
 def _cursor_problem(exc: CursorError) -> JSONResponse:
     return problem(exc.status, exc.title, exc.detail)
 
@@ -237,8 +192,7 @@ def _load() -> LoadedArtifacts | None:
 
 @router.get("/health", summary="Alert-system health")
 @limiter.limit(READ_RATE_LIMIT)
-def get_health(request: Request, response: Response,
-               _: None = Depends(require_admin_key)) -> Any:
+def get_health(request: Request, _: None = Depends(require_admin_key)) -> Any:
     settings = get_settings()
     artifacts = _load()
     with session_scope() as session:
@@ -250,16 +204,12 @@ def get_health(request: Request, response: Response,
             fallback_reason=artifacts.fallback_reason if artifacts else
             "no valid ruleset is loadable",
         )
-    not_modified = _etag(request, response, payload, max_age=30)
-    if not_modified is not None:
-        return not_modified
     return payload
 
 
 @router.get("/overview", summary="One-screen alert overview")
 @limiter.limit(READ_RATE_LIMIT)
-def get_overview(request: Request, response: Response,
-                 _: None = Depends(require_admin_key)) -> Any:
+def get_overview(request: Request, _: None = Depends(require_admin_key)) -> Any:
     artifacts = _load()
     if artifacts is None:
         return problem(503, "Alerting unavailable",
@@ -292,16 +242,12 @@ def get_overview(request: Request, response: Response,
         "latest": pointers,
         "unresolved_pins": unresolved_pins(artifacts.ruleset),
     }
-    not_modified = _etag(request, response, payload, max_age=30)
-    if not_modified is not None:
-        return not_modified
     return payload
 
 
 @router.get("/mechanisms", summary="Every rule instance and its state")
 @limiter.limit(READ_RATE_LIMIT)
-def get_mechanisms(request: Request, response: Response,
-                   bucket: str | None = Query(default=None),
+def get_mechanisms(request: Request, bucket: str | None = Query(default=None),
                    _: None = Depends(require_admin_key)) -> Any:
     artifacts = _load()
     if artifacts is None:
@@ -313,15 +259,12 @@ def get_mechanisms(request: Request, response: Response,
     if bucket:
         items = [i for i in items if i["bucket"] == bucket]
     payload = {"items": items[:MAX_PAGE], "total": len(items)}
-    not_modified = _etag(request, response, payload, max_age=60)
-    if not_modified is not None:
-        return not_modified
     return payload
 
 
 @router.get("/mechanisms/{instance_fingerprint}", summary="One mechanism in detail")
 @limiter.limit(READ_RATE_LIMIT)
-def get_mechanism(request: Request, instance_fingerprint: str, response: Response,
+def get_mechanism(request: Request, instance_fingerprint: str,
                   _: None = Depends(require_admin_key)) -> Any:
     artifacts = _load()
     if artifacts is None:
@@ -332,9 +275,6 @@ def get_mechanism(request: Request, instance_fingerprint: str, response: Respons
                                      live_profile=profile)
     for item in items:
         if item["instance_fingerprint"] == instance_fingerprint:
-            not_modified = _etag(request, response, item, max_age=60)
-            if not_modified is not None:
-                return not_modified
             return item
     return problem(404, "Unknown mechanism",
                    "no rule instance with that fingerprint in the active ruleset")
@@ -342,7 +282,7 @@ def get_mechanism(request: Request, instance_fingerprint: str, response: Respons
 
 @router.get("/rules/{rule_id}/instances", summary="Instances of one rule")
 @limiter.limit(READ_RATE_LIMIT)
-def get_rule_instances(request: Request, rule_id: str, response: Response,
+def get_rule_instances(request: Request, rule_id: str,
                        _: None = Depends(require_admin_key)) -> Any:
     artifacts = _load()
     if artifacts is None:
@@ -354,16 +294,12 @@ def get_rule_instances(request: Request, rule_id: str, response: Response,
     if not items:
         return problem(404, "Unknown rule", f"no rule {rule_id!r} in the active ruleset")
     payload = {"rule_id": rule_id, "items": items}
-    not_modified = _etag(request, response, payload, max_age=60)
-    if not_modified is not None:
-        return not_modified
     return payload
 
 
 @router.get("/episodes", summary="Episodes, newest first")
 @limiter.limit(READ_RATE_LIMIT)
-def get_episodes(request: Request, response: Response,
-                 open_only: bool = Query(default=False),
+def get_episodes(request: Request, open_only: bool = Query(default=False),
                  limit: int = Query(default=100, ge=1, le=MAX_PAGE),
                  cursor: str | None = Query(default=None),
                  _: None = Depends(require_admin_key)) -> Any:
@@ -396,15 +332,12 @@ def get_episodes(request: Request, response: Response,
         })
         if len(rows) == limit else None,
     }
-    not_modified = _etag(request, response, payload, max_age=30)
-    if not_modified is not None:
-        return not_modified
     return payload
 
 
 @router.get("/episodes/{episode_id}", summary="One episode")
 @limiter.limit(READ_RATE_LIMIT)
-def get_episode(request: Request, episode_id: str, response: Response,
+def get_episode(request: Request, episode_id: str,
                 _: None = Depends(require_admin_key)) -> Any:
     mode, profile = _mode()
     with session_scope() as session:
@@ -423,9 +356,6 @@ def get_episode(request: Request, episode_id: str, response: Response,
         ).scalars().all()
         payload = episode_projection(row)
         payload["events"] = [_event_projection(e) for e in events]
-    not_modified = _etag(request, response, payload, max_age=30)
-    if not_modified is not None:
-        return not_modified
     return payload
 
 
@@ -481,8 +411,7 @@ def _event_namespace(mode: str, live_profile: str) -> Any:
 
 @router.get("/events", summary="Audit events, newest first")
 @limiter.limit(READ_RATE_LIMIT)
-def get_events(request: Request, response: Response,
-               limit: int = Query(default=100, ge=1, le=MAX_PAGE),
+def get_events(request: Request, limit: int = Query(default=100, ge=1, le=MAX_PAGE),
                cursor: str | None = Query(default=None),
                _: None = Depends(require_admin_key)) -> Any:
     mode, profile = _mode()
@@ -509,29 +438,21 @@ def get_events(request: Request, response: Response,
         })
         if len(rows) == limit else None,
     }
-    not_modified = _etag(request, response, payload, max_age=30)
-    if not_modified is not None:
-        return not_modified
     return payload
 
 
 @router.get("/latest", summary="Latest pointers — fired and sent kept apart")
 @limiter.limit(READ_RATE_LIMIT)
-def get_latest(request: Request, response: Response,
-               _: None = Depends(require_admin_key)) -> Any:
+def get_latest(request: Request, _: None = Depends(require_admin_key)) -> Any:
     mode, profile = _mode()
     with session_scope() as session:
         payload = latest_pointers(session, mode=mode, live_profile=profile)
-    not_modified = _etag(request, response, payload, max_age=30)
-    if not_modified is not None:
-        return not_modified
     return payload
 
 
 @router.get("/deliveries", summary="Delivery intents (redacted)")
 @limiter.limit(READ_RATE_LIMIT)
-def get_deliveries(request: Request, response: Response,
-                   limit: int = Query(default=100, ge=1, le=MAX_PAGE),
+def get_deliveries(request: Request, limit: int = Query(default=100, ge=1, le=MAX_PAGE),
                    cursor: str | None = Query(default=None),
                    _: None = Depends(require_admin_key)) -> Any:
     mode, profile = _mode()
@@ -560,9 +481,6 @@ def get_deliveries(request: Request, response: Response,
             "sort_at": iso(rows[-1].created_at), "sort_id": rows[-1].delivery_id,
         }) if len(rows) == limit else None,
     }
-    not_modified = _etag(request, response, payload, max_age=30)
-    if not_modified is not None:
-        return not_modified
     return payload
 
 
@@ -616,7 +534,7 @@ def _delivery_projection(row: AlertDelivery,
 
 @router.get("/deliveries/{delivery_id}", summary="One delivery (redacted)")
 @limiter.limit(READ_RATE_LIMIT)
-def get_delivery(request: Request, delivery_id: str, response: Response,
+def get_delivery(request: Request, delivery_id: str,
                  _: None = Depends(require_admin_key)) -> Any:
     mode, profile = _mode()
     with session_scope() as session:
@@ -637,15 +555,12 @@ def get_delivery(request: Request, delivery_id: str, response: Response,
             .order_by(AlertDeliveryMember.included_at.asc())
         ).scalars().all()
         payload = _delivery_projection(row, members=list(members))
-    not_modified = _etag(request, response, payload, max_age=30)
-    if not_modified is not None:
-        return not_modified
     return payload
 
 
 @router.get("/renders/{render_id}", summary="One render, including its text")
 @limiter.limit(READ_RATE_LIMIT)
-def get_render(request: Request, render_id: str, response: Response,
+def get_render(request: Request, render_id: str,
                _: None = Depends(require_admin_key)) -> Any:
     """The render's provenance and its message text, `no-store`.
 
@@ -682,30 +597,24 @@ def get_render(request: Request, render_id: str, response: Response,
             "body_redacted_at": iso(row.body_redacted_at),
             "created_at": iso(row.created_at),
         }
-    _no_store(response)
     return payload
 
 
 @router.get("/ruleset", summary="The active ruleset summary")
 @limiter.limit(READ_RATE_LIMIT)
-def get_ruleset(request: Request, response: Response,
-                _: None = Depends(require_admin_key)) -> Any:
+def get_ruleset(request: Request, _: None = Depends(require_admin_key)) -> Any:
     artifacts = _load()
     if artifacts is None:
         return problem(503, "Alerting unavailable", "no valid ruleset is loadable")
     payload = ruleset_summary(artifacts.ruleset)
     payload["source"] = artifacts.source
     payload["fallback_reason"] = artifacts.fallback_reason
-    not_modified = _etag(request, response, payload, max_age=60)
-    if not_modified is not None:
-        return not_modified
     return payload
 
 
 @router.get("/silences", summary="Active and scheduled silences")
 @limiter.limit(READ_RATE_LIMIT)
-def get_silences(request: Request, response: Response,
-                 _: None = Depends(require_admin_key)) -> Any:
+def get_silences(request: Request, _: None = Depends(require_admin_key)) -> Any:
     now = datetime.now(UTC)
     with session_scope() as session:
         rows = session.execute(
@@ -722,7 +631,4 @@ def get_silences(request: Request, response: Response,
             "active": row.starts_at.replace(tzinfo=UTC) <= now
             if row.starts_at.tzinfo is None else row.starts_at <= now,
         } for row in rows]}
-    not_modified = _etag(request, response, payload, max_age=30)
-    if not_modified is not None:
-        return not_modified
     return payload
