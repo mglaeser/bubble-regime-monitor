@@ -42,6 +42,7 @@ from app.alerts.enums import (
     EpisodeStatus,
     MemberRole,
     PlanningState,
+    RulesetStatus,
     SuppressionReason,
     TransportStatus,
 )
@@ -355,19 +356,30 @@ def release_due_holds(
     return released
 
 
+def _admitted() -> Any:
+    """The live claim's condition: the ruleset that planned the work was
+    promoted through the evidence-gated service and is not revoked - REVOKED
+    outranks a past promotion. Judged by how it was promoted, never by
+    re-reading evidence (owner decision D2d); a ruleset superseded since still
+    finishes what it planned. Work queued under rules nobody promoted that way
+    - however and whenever it was planned - is never claimed (#153 rounds 3,
+    4 and 7)."""
+    return or_(
+        AlertDelivery.mode != "live",
+        AlertDelivery.planning_rules_sha256.in_(
+            select(AlertRulesetRegistry.rules_sha256).where(
+                AlertRulesetRegistry.promoted_at.is_not(None),
+                AlertRulesetRegistry.evidence_checked_at.is_not(None),
+                AlertRulesetRegistry.status != RulesetStatus.REVOKED)))
+
+
 def claimable(session: Session, *, mode: str, live_profile: str, now: datetime,
               limit: int = 10) -> list[AlertDelivery]:
     """READY rows whose `not_before` has passed. P1 first, then oldest.
 
-    In live mode, only work planned under a ruleset promoted through the
-    evidence-gated service: the ruleset that planned a message is judged by
-    how it was promoted, never by re-reading evidence (owner decision D2d).
-    Work queued under rules nobody promoted that way - however and whenever it
-    was planned - is never claimed, and a ruleset superseded since still
-    finishes what it planned (#153 rounds 3 and 4). The condition only turns
-    true: the promotion stamps are written once and never cleared, and no code
-    revokes a ruleset, so there is nothing to withdraw between this listing
-    and the claim (#153 round 5).
+    In live mode, only admitted work (`_admitted`). The claim's own
+    conditional UPDATE carries the same condition, so a ruleset revoked after
+    this listing is not claimed (#153 round 5).
     """
     query = select(AlertDelivery).where(
         AlertDelivery.mode == mode,
@@ -376,12 +388,8 @@ def claimable(session: Session, *, mode: str, live_profile: str, now: datetime,
         AlertDelivery.transport_status.in_(
             [TransportStatus.PENDING, TransportStatus.RETRY_DUE]),
         (AlertDelivery.not_before.is_(None)) | (AlertDelivery.not_before <= now),
+        _admitted(),
     )
-    if mode == "live":
-        query = query.where(AlertDelivery.planning_rules_sha256.in_(
-            select(AlertRulesetRegistry.rules_sha256).where(
-                AlertRulesetRegistry.promoted_at.is_not(None),
-                AlertRulesetRegistry.evidence_checked_at.is_not(None))))
     return list(session.execute(
         query
         .order_by(
@@ -398,7 +406,9 @@ def claim(session: Session, delivery_id: str, *, owner: str, now: datetime,
     """Take an exclusive lease with a CONDITIONAL update.
 
     The `transport_status IN (PENDING, RETRY_DUE)` predicate is what makes this
-    exclusive: a second worker's UPDATE matches zero rows.
+    exclusive: a second worker's UPDATE matches zero rows. The live condition
+    (`_admitted`) is part of the same UPDATE, so what the listing admitted is
+    judged again in the statement that takes the lease (#153 round 5).
     """
     statement = (
         update(AlertDelivery)
@@ -406,6 +416,7 @@ def claim(session: Session, delivery_id: str, *, owner: str, now: datetime,
             AlertDelivery.delivery_id == delivery_id,
             AlertDelivery.transport_status.in_(
                 [TransportStatus.PENDING, TransportStatus.RETRY_DUE]),
+            _admitted(),
         )
         .values(transport_status=TransportStatus.LEASED, lease_owner=owner,
                 lease_until=now + timedelta(seconds=lease_seconds),
