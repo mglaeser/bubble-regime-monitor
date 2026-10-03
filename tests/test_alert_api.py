@@ -229,7 +229,7 @@ def test_a_live_send_test_is_planned_under_the_promoted_ruleset_only(client, mon
         with session_scope() as session:
             before = session.scalar(select(func.count()).select_from(AlertDelivery))
         response = client.post("/api/v1/admin/alerts/send-test", headers={"X-API-Key": TEST_ADMIN_KEY})
-        assert response.status_code == 503 and "PROMOTED" in response.text
+        assert response.status_code == 503 and "PROMOTED" in response.json()["detail"]
         with session_scope() as session:
             assert session.scalar(select(func.count()).select_from(AlertDelivery)) == before
     finally:
@@ -774,7 +774,8 @@ def test_mechanism_detail_uses_fingerprint(client):
     missing = client.get("/api/v1/alerts/mechanisms/" + "0" * 64,
                          headers={"X-API-Key": TEST_ADMIN_KEY})
     assert missing.status_code == 404
-    assert missing.headers["content-type"].startswith("application/problem+json")
+    assert missing.json() == {
+        "detail": "no rule instance with that fingerprint in the active ruleset"}
 
 
 def test_latest_separates_fired_and_sent(client):
@@ -846,13 +847,85 @@ def test_redacted_projection_omits_sensitive_fields(client):
     assert "last_error_code" in source
 
 
-def test_error_responses_are_problem_json(client):
-    response = client.get("/api/v1/alerts/episodes/does-not-exist",
-                          headers={"X-API-Key": TEST_ADMIN_KEY})
-    assert response.status_code == 404
-    assert response.headers["content-type"].startswith("application/problem+json")
-    body = response.json()
-    assert {"type", "title", "status", "detail"} <= set(body)
+def test_alert_errors_use_the_one_format(client, monkeypatch, tmp_path):
+    """Owner decision D3d (2026-10-03): the alert routes answer errors in the
+    service's one format, FastAPI's `{"detail": ...}` as `application/json` -
+    what every other route, the key guard and FastAPI's own 422 answer. Every
+    error an alert route raises, each in a state that raises it: an id that
+    does not exist, a reused Idempotency-Key, evaluation with alerting
+    disabled, live mode with nothing promoted, no loadable ruleset, a phrase
+    set that is not JSON."""
+    from app.config import get_settings
+
+    admin = {"X-API-Key": TEST_ADMIN_KEY}
+    unknown_input = {"input_identity": "0" * 64}
+    silence = {"matcher_kind": "ALL", "matcher_value": "*", "duration_seconds": 3600,
+               "comment": "a"}
+    reuse = {"X-API-Key": WRITE_KEY, "Idempotency-Key": "one-format"}
+    assert client.post("/api/v1/alerts/silences", json=silence, headers=reuse).status_code == 201
+
+    errors = {f"GET {path}": (404, client.get(path, headers=admin)) for path in (
+        "/api/v1/alerts/mechanisms/" + "0" * 64, "/api/v1/alerts/rules/no-such-rule/instances",
+        "/api/v1/alerts/episodes/no-such-id", "/api/v1/alerts/deliveries/no-such-id",
+        "/api/v1/alerts/renders/no-such-id")}
+    errors |= {
+        "a cursor that names no position": (422, client.get(
+            "/api/v1/alerts/episodes", params={"cursor": "no-position"}, headers=admin)),
+        "a limit out of range": (422, client.get(
+            "/api/v1/alerts/episodes", params={"limit": 0}, headers=admin)),
+        "no key": (401, client.get("/api/v1/alerts/health")),
+        "a reused Idempotency-Key": (409, client.post(
+            "/api/v1/alerts/silences", json=dict(silence, comment="b"), headers=reuse)),
+        "an unknown silence": (404, client.delete(
+            "/api/v1/alerts/silences/no-such-id", headers={"X-API-Key": WRITE_KEY})),
+        "an unknown input": (404, client.post(
+            "/api/v1/admin/alerts/evaluate", json=unknown_input, headers=admin)),
+        "evaluation with alerting disabled": (409, client.post(
+            "/api/v1/admin/alerts/evaluate", json=dict(unknown_input, shadow=False),
+            headers=admin)),
+    }
+    broken = tmp_path / "broken.yaml"
+    broken.write_text("meta: {this: is not a ruleset}\n", encoding="utf-8")
+    not_json = tmp_path / "phrases.json"
+    not_json.write_text("{not json", encoding="utf-8")
+    try:
+        monkeypatch.setenv("ALERTS_MODE", "live")
+        get_settings.cache_clear()
+        errors["a live send-test with nothing promoted"] = (503, client.post(
+            "/api/v1/admin/alerts/send-test", headers=admin))
+        monkeypatch.delenv("ALERTS_MODE")
+        monkeypatch.setenv("ALERTS_RULES_PATH", str(broken))  # and the registry holds none
+        get_settings.cache_clear()
+        errors |= {f"GET /api/v1/alerts/{read} with no ruleset": (503, client.get(
+            f"/api/v1/alerts/{read}", headers=admin)) for read in (
+            "overview", "mechanisms", "mechanisms/" + "0" * 64, "rules/no-such-rule/instances",
+            "ruleset")}
+        errors["a promotion of an invalid ruleset"] = (422, client.post(
+            "/api/v1/admin/alerts/promote", headers=admin))
+        errors["a render preview with no ruleset"] = (503, client.post(
+            "/api/v1/admin/alerts/render", headers=admin))
+        monkeypatch.delenv("ALERTS_RULES_PATH")
+        monkeypatch.setenv("ALERTS_PHRASE_PATH", str(not_json))
+        get_settings.cache_clear()
+        errors["a render preview of an invalid phrase set"] = (422, client.post(
+            "/api/v1/admin/alerts/render", headers=admin))
+    finally:
+        get_settings.cache_clear()
+
+    assert {case: r.status_code for case, (status, r) in errors.items()
+            if r.status_code != status} == {}
+    assert {case: (r.headers["content-type"], sorted(r.json())) for case, (_, r) in errors.items()
+            if (r.headers["content-type"], set(r.json())) != ("application/json", {"detail"})} == {}
+    # D3d changes an error's body, not its headers: every error a route raises
+    # keeps the no-store problem() set. The key guard's 401 and FastAPI's own
+    # 422 never carried it.
+    assert {case: r.headers.get("cache-control") for case, (_, r) in errors.items()
+            if case not in ("no key", "a limit out of range")
+            and r.headers.get("cache-control") != "no-store"} == {}
+    # The two promotion 422s keep apart whose artifacts are invalid: the
+    # candidate's here, the image's own in test_alert_promotion.py.
+    promotion = errors["a promotion of an invalid ruleset"][1].json()["detail"]
+    assert promotion.startswith("ruleset invalid: "), promotion
 
 
 def _seed_listings(*moments) -> dict[str, list[str]]:

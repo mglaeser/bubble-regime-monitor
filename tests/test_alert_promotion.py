@@ -404,7 +404,8 @@ def test_the_admin_route_refuses_a_candidate_the_image_does_not_ship(tmp_path, m
     finally:
         get_settings.cache_clear()
     assert response.status_code == 409, response.text
-    assert "ships" in response.text
+    body = response.json()
+    assert set(body) == {"detail"} and "ships" in body["detail"], body
     with session_scope() as session:
         assert load_promoted(session) is None
 
@@ -481,10 +482,12 @@ def test_nothing_in_the_app_reads_the_replay_evidence():
 
 
 @pytest.mark.usefixtures("isolated_db")
-def test_a_broken_shipped_file_is_a_problem_answer_never_a_500(monkeypatch):
+def test_a_broken_shipped_file_is_a_422_never_a_500(monkeypatch):
     """#158 round 1 (SOTA-B): shipped_blocker validates the shipped files, and
     the route called it outside its error handling, so a broken shipped file
-    answered 500 (AGENTS.md rule 3). It answers 422 with the problem."""
+    answered 500 (AGENTS.md rule 3). It answers 422, in the one error format
+    (owner decision D3d), and says the image's own files are the invalid ones -
+    a candidate's are a 422 too."""
     from fastapi.testclient import TestClient
 
     import app.alerts.artifacts as artifacts
@@ -508,3 +511,4 @@ def test_a_broken_shipped_file_is_a_problem_answer_never_a_500(monkeypatch):
     finally:
         get_settings.cache_clear()
     assert response.status_code == 422, response.text
+    assert response.json() == {"detail": "shipped ruleset invalid: no ruleset at the shipped path"}

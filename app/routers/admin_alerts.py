@@ -13,7 +13,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from fastapi import APIRouter, Depends, Header, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Response
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.alerts.canonical import new_ulid, sha256_of
@@ -23,7 +23,7 @@ from app.alerts.repository import utc_ms
 from app.config import get_settings
 from app.db import immediate_session_scope, session_scope
 from app.logging_conf import get_logger
-from app.routers.alerts import problem
+from app.routers.alerts import ERROR_HEADERS
 from app.security import require_admin_key, require_alerts_write
 
 log = get_logger(__name__)
@@ -98,8 +98,10 @@ def create_silence(
     with immediate_session_scope() as session:
         seen, ref = _check_idempotency(session, idempotency_key, route, payload)
         if seen and ref == "CONFLICT":
-            return problem(409, "Idempotency conflict",
-                           "this Idempotency-Key was used with a different request body")
+            raise HTTPException(
+                status_code=409,
+                detail="this Idempotency-Key was used with a different request body",
+                headers=ERROR_HEADERS)
         if seen and ref:
             return {"silence_id": ref, "replayed": True}
 
@@ -148,7 +150,8 @@ def delete_silence(response: Response, silence_id: str,
     with session_scope() as session:
         row = session.get(AlertSilence, silence_id)
         if row is None:
-            return problem(404, "Unknown silence", "no silence with that id")
+            raise HTTPException(status_code=404, detail="no silence with that id",
+                                headers=ERROR_HEADERS)
         # Expire rather than delete: the audit trail of what was silenced, by
         # whom and when must survive.
         row.ends_at = max(now, row.starts_at if row.starts_at.tzinfo
@@ -180,14 +183,16 @@ def admin_evaluate(
     settings = get_settings()
     mode = "shadow" if shadow else settings.alerts_mode
     if mode == "disabled":
-        return problem(409, "Alerting disabled",
-                       "ALERTS_MODE=disabled; pass shadow=true or enable a mode")
+        raise HTTPException(status_code=409,
+                            detail="ALERTS_MODE=disabled; pass shadow=true or enable a mode",
+                            headers=ERROR_HEADERS)
 
     from app.services.alert_integration import evaluate_input
 
     outcome = evaluate_input(input_identity, mode=mode)
     if outcome is None:
-        return problem(404, "Unknown input", "no captured sidecar with that identity")
+        raise HTTPException(status_code=404, detail="no captured sidecar with that identity",
+                            headers=ERROR_HEADERS)
     return {
         "evaluation_id": outcome.evaluation_id,
         "status": outcome.status,
@@ -220,16 +225,21 @@ def admin_promote(response: Response, _: None = Depends(require_admin_key)) -> A
     try:
         artifacts = validate_from_disk()
     except AlertError as exc:
-        return problem(422, "Ruleset invalid", exc.redacted())
+        raise HTTPException(status_code=422,
+                            detail=f"ruleset invalid: {exc.redacted()}",
+                            headers=ERROR_HEADERS) from exc
 
     from app.alerts.artifacts import promote, shipped_blocker
 
     try:
         blocker = shipped_blocker(artifacts)
     except AlertError as exc:
-        return problem(422, "Shipped ruleset invalid", exc.redacted())
+        raise HTTPException(status_code=422,
+                            detail=f"shipped ruleset invalid: {exc.redacted()}",
+                            headers=ERROR_HEADERS) from exc
     if blocker:
-        return problem(409, "Promotion refused", blocker)
+        raise HTTPException(status_code=409, detail=blocker,
+                            headers=ERROR_HEADERS)
     with session_scope() as session:
         rules_sha = promote(session, artifacts, actor="admin-api")
     return {
@@ -281,9 +291,11 @@ def admin_preview_render(response: Response,
             phrase_set = load_active(session).phrase_set
             result = render_test_message(phrase_set)
     except AlertingUnavailable as exc:
-        return problem(503, "Alert rendering unavailable", exc.redacted())
+        raise HTTPException(status_code=503, detail=exc.redacted(),
+                            headers=ERROR_HEADERS) from exc
     except AlertError as exc:
-        return problem(422, "Alert render rejected", exc.redacted())
+        raise HTTPException(status_code=422, detail=exc.redacted(),
+                            headers=ERROR_HEADERS) from exc
 
     return {
         "render_source": result.render_source,
@@ -344,7 +356,8 @@ def send_test(response: Response,
         try:
             artifacts = load_active_for_mode(session, mode=settings.alerts_mode)
         except AlertingUnavailable as exc:
-            return problem(503, "Live delivery unavailable", exc.redacted())
+            raise HTTPException(status_code=503, detail=exc.redacted(),
+                                headers=ERROR_HEADERS) from exc
         # registered, because the delivery row references the ruleset by hash
         # and a foreign key is the wrong place to discover it was never stored
         register(session, artifacts, now=now, registered_by="admin-api")
