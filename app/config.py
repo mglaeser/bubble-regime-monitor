@@ -378,6 +378,14 @@ RETIRED_ENV_KEYS: dict[str, str] = {
              "so a host cannot change it; remove this key")
        for key in ("ALERTS_NON_P1_TARGET_168H", "ALERTS_NON_P1_CAP_24H",
                    "ALERTS_NON_P1_CAP_168H")},
+    "TWELVE_DATA_INDICES": (
+        "removed with the paid Twelve Data index path (2026-10-03, AGENTS.md: delete before "
+        "you add; no deployment enabled it): NDX and SPX are always read as the ETF proxies "
+        "QQQ and SPY, so remove this key"),
+    "STOOQ_ENABLED": (
+        "removed with the Stooq price tier (2026-10-03; its endpoint answers a proof-of-work "
+        "challenge, and no deployment enabled it): the chain is Tiingo, Twelve Data, Alpha "
+        "Vantage, then the cache, so remove this key"),
 }
 
 

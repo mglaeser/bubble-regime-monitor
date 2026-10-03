@@ -228,3 +228,16 @@ class TestCoverageGate:
         data = compute_snapshot(raw, mc_samples=2_000, mc_seed=1)
         assert data.coverage["S"]["degraded"] is False
         assert data.coverage["D"]["degraded"] is False
+
+
+def test_a_host_that_still_sets_a_removed_price_setting_is_told():
+    """#155 round 1, SOTA-A: a host still setting TWELVE_DATA_INDICES=true would
+    have it ignored without a word and read the ETF proxies. The two removed
+    settings are retired keys (app/config.py RETIRED_ENV_KEYS, as D2c retired
+    DAILY_SMS_ENABLED): named at boot, in the alerts preflight and in alert
+    health, with what the service reads instead."""
+    from app.config import retired_env_keys
+
+    named = dict(retired_env_keys({"TWELVE_DATA_INDICES": "true", "stooq_enabled": "true"}))
+    assert set(named) == {"TWELVE_DATA_INDICES", "STOOQ_ENABLED"}
+    assert "QQQ" in named["TWELVE_DATA_INDICES"] and "SPY" in named["TWELVE_DATA_INDICES"]
