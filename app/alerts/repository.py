@@ -316,8 +316,8 @@ def apply_decision(
                     expected_version=decision.expected_state_version, values=values)
 
     # ---- notification memory (hash-INDEPENDENT) ---------------------------
-    # Created on first sight so a cooldown and an outstanding ambiguous
-    # delivery survive a ruleset promotion.
+    # Created on first sight so a cooldown and the notification generation
+    # survive a ruleset promotion.
     key = (mode, live_profile, decision.instance_fingerprint)
     if session.get(AlertInstanceNotificationState, key) is None:
         session.add(AlertInstanceNotificationState(
@@ -476,8 +476,6 @@ def load_notification_memories(
             last_reminder_at=_aware(row.last_reminder_at),
             reminder_count=row.reminder_count,
             next_notification_generation=row.next_notification_generation,
-            open_unknown_delivery_id=row.open_unknown_delivery_id,
-            open_unknown_priority=row.open_unknown_priority,
         )
         for row in rows
     }

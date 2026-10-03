@@ -413,10 +413,10 @@ class ImessageSender:
         # transient failure followed by a retry delivers the alert twice.
         #
         # The outbox already owns exactly this identity: `dedupe_key` is stable
-        # for one logical message and CHANGES when a reminder generation or an
-        # operator's manual retry means a second send is intended. It is hashed
-        # rather than sent verbatim because it carries rule ids, which are ours
-        # and not the proxy's business.
+        # for one logical message and CHANGES when a reminder generation means
+        # a second send is intended. It is hashed rather than sent verbatim
+        # because it carries rule ids, which are ours and not the proxy's
+        # business.
         #
         # With no key supplied, fall back to per-call randomness: an unkeyed
         # send is not made worse by being unkeyed, and silently reusing some

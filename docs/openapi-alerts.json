@@ -35,27 +35,6 @@
         "title": "HTTPValidationError",
         "type": "object"
       },
-      "ManualRetryRequest": {
-        "additionalProperties": false,
-        "properties": {
-          "acknowledge_duplicate_risk": {
-            "title": "Acknowledge Duplicate Risk",
-            "type": "boolean"
-          },
-          "comment": {
-            "maxLength": 255,
-            "minLength": 1,
-            "title": "Comment",
-            "type": "string"
-          }
-        },
-        "required": [
-          "comment",
-          "acknowledge_duplicate_risk"
-        ],
-        "title": "ManualRetryRequest",
-        "type": "object"
-      },
       "SilenceRequest": {
         "additionalProperties": false,
         "properties": {
@@ -148,91 +127,6 @@
   },
   "openapi": "3.1.0",
   "paths": {
-    "/api/v1/admin/alerts/deliveries/{delivery_id}/retry": {
-      "post": {
-        "description": "A NEW delivery that admits it may duplicate the old one.\n\nAn UNKNOWN outcome means the bytes may have reached the phone, so nothing\nretries it automatically \u2014 that is the four-outcome contract's whole point.\nWhen a human decides the silence is worse than a possible duplicate, that\ndecision is recorded, not smuggled: the retry requires an Idempotency-Key,\nan operator comment, and an explicit duplicate-risk acknowledgement, and it\ncreates a NEW delivery row with `manual_retry_sequence` incremented \u2014 same\nmembers, same notification generation \u2014 linked to the original through\n`prior_unknown_delivery_id`. The dedupe key differs BECAUSE the sequence is\nin its material; the audit trail survives because nothing is overwritten.",
-        "operationId": "manual_retry_api_v1_admin_alerts_deliveries__delivery_id__retry_post",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "delivery_id",
-            "required": true,
-            "schema": {
-              "title": "Delivery Id",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "Idempotency-Key",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Idempotency-Key"
-            }
-          },
-          {
-            "in": "header",
-            "name": "x-api-key",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Api-Key"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ManualRetryRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "title": "Response Manual Retry Api V1 Admin Alerts Deliveries  Delivery Id  Retry Post"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Manually retry an UNKNOWN delivery",
-        "tags": [
-          "alerts-admin"
-        ]
-      }
-    },
     "/api/v1/admin/alerts/evaluate": {
       "post": {
         "description": "Run P0b/P1/P2 for a single sidecar without waiting for a recompute.\n\n`shadow=true` (the default) evaluates into the shadow namespace, which is\nhow a promoted ruleset is exercised before anything is allowed to send.",

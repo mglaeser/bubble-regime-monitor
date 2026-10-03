@@ -46,7 +46,6 @@ from app.alerts.enums import (
     Mode,
     PlanningState,
     Priority,
-    SuppressionReason,
     TransportStatus,
 )
 from app.alerts.registry import ValidatedRuleset
@@ -57,8 +56,10 @@ from app.logging_conf import get_logger
 log = get_logger(__name__)
 
 #: Bumped when the SHAPE of the summary changes, so a stored gate artifact can
-#: be told apart from one produced by a different harness.
-REPLAY_SCHEMA_VERSION = 2
+#: be told apart from one produced by a different harness. 3: unknown_blocks
+#: and p1_bypasses_of_unknown went with the replanning block (owner decision
+#: D2f).
+REPLAY_SCHEMA_VERSION = 3
 
 #: Rolling windows the load report uses.
 WINDOW_24H = timedelta(hours=24)
@@ -153,8 +154,6 @@ class ReplaySummary:
     held_budget: int = 0
     held_grouping: int = 0
     cancelled_superseded: int = 0
-    unknown_blocks: int = 0
-    p1_bypasses_of_unknown: int = 0
     digest_items: int = 0
 
     # -- load -------------------------------------------------------------
@@ -640,7 +639,6 @@ def _collect_episodes(session: Session, summary: ReplaySummary,
     summary.episodes_by_priority = dict(sorted(by_priority.items()))
     summary.episodes_by_bucket = dict(sorted(by_bucket.items()))
     summary.suppressions_by_reason = dict(sorted(by_reason.items()))
-    summary.unknown_blocks = by_reason.get(str(SuppressionReason.UNKNOWN_BLOCK), 0)
 
 
 def _collect_deliveries(session: Session, summary: ReplaySummary) -> None:
@@ -666,8 +664,6 @@ def _collect_deliveries(session: Session, summary: ReplaySummary) -> None:
             summary.cancelled_superseded += 1
         elif row.transport_status == TransportStatus.SENT:
             summary.deliveries_sent += 1
-        if row.duplicate_risk_acknowledged:
-            summary.p1_bypasses_of_unknown += 1
         if row.priority == Priority.P1:
             summary.p1_total += 1
         elif str(row.delivery_kind) in {str(k) for k in BUDGETED_KINDS}:

@@ -157,9 +157,6 @@ def _insert_delivery(session: Session, intent: DeliveryIntent, *, mode: str,
         delivery_id=delivery_id,
         dedupe_key=intent.dedupe_key,
         dedupe_version=1,
-        manual_retry_sequence=intent.manual_retry_sequence,
-        manual_retry_root_delivery_id=None,
-        scheduled_window_key=intent.scheduled_window_key,
         mode=mode,
         live_profile=live_profile,
         planning_rules_sha256=planning_rules_sha256,
@@ -178,8 +175,6 @@ def _insert_delivery(session: Session, intent: DeliveryIntent, *, mode: str,
         created_at=now,
         updated_at=now,
         attempts=0,
-        duplicate_risk_acknowledged=intent.duplicate_risk_acknowledged,
-        prior_unknown_delivery_id=intent.prior_unknown_delivery_id,
         recipient_ref=recipient_ref,
     ))
     for member in intent.members:
@@ -1148,8 +1143,6 @@ def mark_sent(session: Session, delivery: AlertDelivery, *, now: datetime,
             state.last_sent_at = now
             state.next_notification_generation = max(
                 state.next_notification_generation, member.notification_generation + 1)
-            state.open_unknown_delivery_id = None
-            state.open_unknown_priority = None
             state.updated_at = now
             if delivery.delivery_kind == DeliveryKind.REMINDER:
                 state.last_reminder_at = now
@@ -1215,15 +1208,16 @@ def mark_permanent(session: Session, delivery: AlertDelivery, *, now: datetime,
 
 def mark_unknown(session: Session, delivery: AlertDelivery, *, now: datetime,
                  reason: str, error_code: str | None = None) -> None:
-    """Ambiguous. NEVER auto-retried, and it blocks the same generation.
+    """Ambiguous, and terminal: the request may have landed, so nothing sends
+    it again (owner decision D2f).
 
-    A new P1 episode may still bypass this — with the duplicate risk recorded —
-    which is why the block carries the priority it was raised at.
+    It blocks nothing. The notification memory does not advance - nothing
+    was confirmed - so the same generation of the same episode, planned
+    again, carries this row's dedupe key and is this intent, not a second
+    one; a new episode is planned as usual.
     """
     delivery.transport_status = TransportStatus.UNKNOWN
     delivery.planning_state = PlanningState.NONE
-    delivery.blocks_replanning = True
-    delivery.blocks_up_to_priority = delivery.priority
     delivery.last_error_code = error_code or "AMBIGUOUS"
     delivery.last_error_message_redacted = reason
     delivery.lease_owner = None
@@ -1232,70 +1226,8 @@ def mark_unknown(session: Session, delivery: AlertDelivery, *, now: datetime,
     _set_digest_item_outcome(
         session, delivery, status=DigestItemStatus.UNKNOWN, now=now,
         error_code=error_code or "AMBIGUOUS")
-
-    members = session.execute(
-        select(AlertDeliveryMember).where(
-            AlertDeliveryMember.delivery_id == delivery.delivery_id,
-            AlertDeliveryMember.dropped_at.is_(None))
-    ).scalars().all()
-    for member in members:
-        state = session.get(
-            AlertInstanceNotificationState,
-            (delivery.mode, delivery.live_profile, member.instance_fingerprint))
-        if state is not None:
-            state.open_unknown_delivery_id = delivery.delivery_id
-            state.open_unknown_priority = delivery.priority
-            state.updated_at = now
     _event(session, now, action="delivery_unknown", delivery_id=delivery.delivery_id,
            detail=reason)
-
-
-def reconcile_unknown_for_manual_retry(
-    session: Session,
-    delivery: AlertDelivery,
-    *,
-    now: datetime,
-) -> None:
-    """Retire one UNKNOWN as an open blocker after explicit operator action.
-
-    The wire outcome remains UNKNOWN forever: exact bytes may have arrived and
-    rewriting that history would be dishonest.  The operator-authorised child
-    is nevertheless the new tip of the linear retry chain, so the ancestor is
-    no longer *unreconciled*.  While the child is pending its member generation
-    is protected by ``load_open_generations``; if the child itself becomes
-    UNKNOWN, ``mark_unknown`` installs it as the sole new blocking tip.
-
-    Notification memory is cleared conditionally.  That preserves a newer
-    ambiguity if this helper is ever called against stale state despite the
-    endpoint's transaction and linear-chain checks.
-    """
-    if delivery.transport_status != TransportStatus.UNKNOWN:
-        raise ValueError("manual retry reconciliation requires UNKNOWN")
-
-    delivery.blocks_replanning = False
-    delivery.blocks_up_to_priority = None
-    delivery.updated_at = now
-
-    states = session.execute(
-        select(AlertInstanceNotificationState).where(
-            AlertInstanceNotificationState.mode == delivery.mode,
-            AlertInstanceNotificationState.live_profile == delivery.live_profile,
-            AlertInstanceNotificationState.open_unknown_delivery_id
-            == delivery.delivery_id,
-        )
-    ).scalars().all()
-    for state in states:
-        state.open_unknown_delivery_id = None
-        state.open_unknown_priority = None
-        state.updated_at = now
-
-    _event(
-        session,
-        now,
-        action="delivery_unknown_reconciled",
-        delivery_id=delivery.delivery_id,
-        detail="operator authorised an exact-byte manual retry",
-    )
 
 
 def mark_render_failed(session: Session, delivery: AlertDelivery, *, now: datetime,

@@ -23,16 +23,9 @@ from app.alerts.enums import (
     MemberRole,
     PlanningState,
     Priority,
-    SuppressionReason,
     TransportStatus,
 )
-from app.alerts.planner import (
-    MemberIntent,
-    NotificationMemory,
-    PlanInputs,
-    dedupe_key,
-    plan,
-)
+from app.alerts.planner import MemberIntent, dedupe_key
 from tests.test_alert_evaluation import _artifacts, _rule
 
 NOW = datetime(2026, 8, 15, 10, 0, tzinfo=UTC)
@@ -401,12 +394,12 @@ def test_event_causation_required_fields_depend_on_type():
     assert columns["input_identity"].nullable is True
 
 
-def test_manual_retry_event_has_operator_causation(isolated_db):
+def test_operator_event_has_operator_causation(isolated_db):
     """An operator action is attributed to the operator, not to a run."""
     from tests.test_alert_addendum_support import write_event
 
     row = write_event(causation_type=CausationType.OPERATOR,
-                      actor_type=ActorType.OPERATOR, action="manual_retry")
+                      actor_type=ActorType.OPERATOR, action="test_delivery_queued")
     assert row.causation_type == CausationType.OPERATOR
     assert row.evaluation_id is None
     assert row.input_identity is None
@@ -445,7 +438,7 @@ def test_operator_and_delivery_events_use_correct_causation_type(isolated_db):
 
 
 # ===========================================================================
-# A-07  per-member generation, same-generation UNKNOWN blocking
+# A-07  per-member generation
 # ===========================================================================
 
 
@@ -464,25 +457,20 @@ def test_retry_preserves_notification_generation():
     """An automatic retry is the SAME message: same generation, same key."""
     member = _member(generation=3)
     first = dedupe_key(delivery_kind=DeliveryKind.INITIAL, members=[member],
-                       scheduled_window_key=None, manual_retry_sequence=0)
+                       scheduled_window_key=None)
     retry = dedupe_key(delivery_kind=DeliveryKind.INITIAL, members=[member],
-                       scheduled_window_key=None, manual_retry_sequence=0)
+                       scheduled_window_key=None)
     assert first == retry
-
-    # An OPERATOR-authorized retry is visibly a repeat, not a collision.
-    manual = dedupe_key(delivery_kind=DeliveryKind.INITIAL, members=[member],
-                        scheduled_window_key=None, manual_retry_sequence=1)
-    assert manual != first
 
 
 def test_reminder_generation_changes_dedupe_key():
     """A reminder is a new thing to say, so it must not dedupe against the first."""
     initial = dedupe_key(delivery_kind=DeliveryKind.INITIAL,
                          members=[_member(generation=1)],
-                         scheduled_window_key=None, manual_retry_sequence=0)
+                         scheduled_window_key=None)
     reminder = dedupe_key(delivery_kind=DeliveryKind.REMINDER,
                           members=[_member(generation=2)],
-                          scheduled_window_key=None, manual_retry_sequence=0)
+                          scheduled_window_key=None)
     assert initial != reminder
 
 
@@ -491,77 +479,16 @@ def test_bundle_dedupe_uses_every_members_generation():
     members = [_member(episode="E1", generation=1),
                _member(episode="E2", generation=1, role=MemberRole.BUNDLED)]
     base = dedupe_key(delivery_kind=DeliveryKind.BUNDLE, members=members,
-                      scheduled_window_key=None, manual_retry_sequence=0)
+                      scheduled_window_key=None)
     moved = [members[0],
              _member(episode="E2", generation=2, role=MemberRole.BUNDLED)]
     assert base != dedupe_key(delivery_kind=DeliveryKind.BUNDLE, members=moved,
-                              scheduled_window_key=None, manual_retry_sequence=0)
+                              scheduled_window_key=None)
 
 
 def test_bundle_dedupe_contains_per_member_generations():
     """The reviewer's second name for the same guarantee."""
     test_bundle_dedupe_uses_every_members_generation()
-
-
-def _plan_for(priority: int, memory: NotificationMemory, *, rules_sha="sha-x"):
-    from app.alerts.state_machine import StateDecision
-
-    # A P1 must declare both exemptions; the loader refuses one that does not.
-    exempt = priority == Priority.P1
-    rule = _rule(rule_id="test.rule", priority=priority,
-                 quiet_hours_exempt=exempt, budget_exempt=exempt)
-    decision = StateDecision(rule_id=rule.rule_id, instance_fingerprint="fp",
-                             evaluation_status="OK", condition_state="FIRING",
-                             previous_condition_state="NORMAL",
-                             expected_state_version=1,
-                             activate_episode=True)
-    return plan(PlanInputs(
-        now=NOW, rules={rule.rule_id: rule}, decisions=[decision],
-        episode_ids={"fp": "E1"}, memories={"fp": memory},
-        origin_rules_sha256=rules_sha, phrase_set_version="v3.2",
-        phrase_set_sha256="phrase-sha",
-    ))
-
-
-def test_unknown_blocks_same_generation_p1_replan():
-    """"P1 is never blocked" does NOT mean the same ambiguous P1 is resent.
-
-    An UNKNOWN delivery may or may not have reached the phone. Recreating the
-    same episode + generation would be a duplicate about the same fact, at any
-    priority.
-    """
-    memory = NotificationMemory(open_unknown_delivery_id="D-UNKNOWN",
-                                open_unknown_priority=Priority.P1)
-    result = _plan_for(Priority.P1, memory)
-    assert not result.deliveries
-    assert SuppressionReason.UNKNOWN_BLOCK in result.suppressions["E1"]
-
-
-def test_new_p1_escalation_generation_can_bypass_p2_unknown():
-    """A genuinely new P1 may bypass a LOWER-priority ambiguity — and says so."""
-    memory = NotificationMemory(open_unknown_delivery_id="D-UNKNOWN",
-                                open_unknown_priority=Priority.P2)
-    result = _plan_for(Priority.P1, memory)
-    assert len(result.deliveries) == 1
-    intent = result.deliveries[0]
-    assert intent.priority == Priority.P1
-    # The duplicate risk is RECORDED, never hidden.
-    assert intent.duplicate_risk_acknowledged is True
-    assert intent.prior_unknown_delivery_id == "D-UNKNOWN"
-
-
-def test_new_p1_generation_can_bypass_lower_priority_unknown():
-    """The reviewer's second name for the same rule."""
-    test_new_p1_escalation_generation_can_bypass_p2_unknown()
-
-
-def test_a_p2_never_bypasses_an_unknown():
-    """The bypass is a P1 exemption, not a general escape hatch."""
-    memory = NotificationMemory(open_unknown_delivery_id="D-UNKNOWN",
-                                open_unknown_priority=Priority.P2)
-    result = _plan_for(Priority.P2, memory)
-    assert not result.deliveries
-    assert SuppressionReason.UNKNOWN_BLOCK in result.suppressions["E1"]
 
 
 # ===========================================================================
@@ -586,7 +513,7 @@ def test_digest_can_contain_members_from_multiple_rulesets():
                _member(episode="E2", origin="sha-new", role=MemberRole.BUNDLED)]
     assert {m.origin_rules_sha256 for m in members} == {"sha-old", "sha-new"}
     key = dedupe_key(delivery_kind=DeliveryKind.DIGEST, members=members,
-                     scheduled_window_key="2026-W33", manual_retry_sequence=0)
+                     scheduled_window_key="2026-W33")
     assert key
 
 
@@ -611,17 +538,16 @@ def test_cross_ruleset_bundle_dedupe_is_stable():
     a = _member(episode="E1", origin="sha-old")
     b = _member(episode="E2", origin="sha-new", role=MemberRole.BUNDLED)
     forward = dedupe_key(delivery_kind=DeliveryKind.BUNDLE, members=[a, b],
-                         scheduled_window_key=None, manual_retry_sequence=0)
+                         scheduled_window_key=None)
     backward = dedupe_key(delivery_kind=DeliveryKind.BUNDLE, members=[b, a],
-                          scheduled_window_key=None, manual_retry_sequence=0)
+                          scheduled_window_key=None)
     assert forward == backward
 
     different_origin = _member(episode="E2", origin="sha-third",
                                role=MemberRole.BUNDLED)
     assert forward != dedupe_key(delivery_kind=DeliveryKind.BUNDLE,
                                  members=[a, different_origin],
-                                 scheduled_window_key=None,
-                                 manual_retry_sequence=0)
+                                 scheduled_window_key=None)
 
 
 def test_delivery_api_exposes_planning_and_member_provenance(isolated_db):
@@ -1097,72 +1023,34 @@ def test_retention_never_expires_a_body_a_retry_could_still_reuse(isolated_db):
         assert session.get(AlertRender, render_id).final_message
 
 
-def test_retention_redacts_reconciled_unknown_after_exact_body_is_cloned(isolated_db):
-    """UNKNOWN history stays honest without retaining old message text forever."""
+def test_an_unknown_body_and_its_events_expire_on_the_normal_horizons(isolated_db):
+    """UNKNOWN is terminal (owner decision D2f): nothing sends it again, so no
+    retry can still need its body, and no operator step awaits its trail. The
+    body is redacted at the message horizon and its events go at the metadata
+    horizon, as any settled delivery's do."""
     from sqlalchemy import select
 
-    from app.alerts.canonical import new_ulid
-    from app.alerts.models import AlertDelivery, AlertRender
+    from app.alerts.models import AlertDelivery, AlertEvent, AlertRender
     from app.alerts.retention import run_retention
     from app.config import get_settings
     from app.db import session_scope
-    from tests.test_alert_addendum_support import seed_render
+    from tests.test_alert_addendum_support import seed_render, write_event
 
-    original_render_id = seed_render(
-        created_at=NOW - timedelta(days=500),
-        transport=TransportStatus.UNKNOWN,
-    )
+    render_id = seed_render(created_at=NOW - timedelta(days=900),
+                            transport=TransportStatus.UNKNOWN)
     with session_scope() as session:
-        original = session.execute(select(AlertDelivery)).scalars().one()
-        original_render = session.get(AlertRender, original_render_id)
-        original.blocks_replanning = False
-        child_id = new_ulid(1)
-        child_render_id = new_ulid(2)
-        session.add(AlertDelivery(
-            delivery_id=child_id,
-            dedupe_key=f"dedupe-{child_id}",
-            dedupe_version=1,
-            manual_retry_sequence=1,
-            manual_retry_root_delivery_id=original.delivery_id,
-            mode=original.mode,
-            live_profile=original.live_profile,
-            planning_rules_sha256=original.planning_rules_sha256,
-            delivery_kind=original.delivery_kind,
-            priority=original.priority,
-            transport_status=TransportStatus.PENDING,
-            planning_state=PlanningState.READY,
-            not_before=NOW,
-            created_at=NOW,
-            updated_at=NOW,
-            duplicate_risk_acknowledged=True,
-            prior_unknown_delivery_id=original.delivery_id,
-            recipient_ref=original.recipient_ref,
-        ))
-        session.flush()
-        session.add(AlertRender(
-            render_id=child_render_id,
-            delivery_id=child_id,
-            render_source=original_render.render_source,
-            planning_phrase_set_version=(
-                original_render.planning_phrase_set_version),
-            planning_phrase_set_sha256=(
-                original_render.planning_phrase_set_sha256),
-            render_context_hash=original_render.render_context_hash,
-            fact_catalog_hash=original_render.fact_catalog_hash,
-            selected_fact_ids=list(original_render.selected_fact_ids),
-            selected_phrase_codes=list(original_render.selected_phrase_codes),
-            validation_results=dict(original_render.validation_results),
-            final_message=original_render.final_message,
-            gsm7_septets=original_render.gsm7_septets,
-            created_at=NOW,
-        ))
+        delivery_id = session.execute(select(AlertDelivery.delivery_id)).scalar_one()
+    event = write_event(causation_type="DELIVERY", actor_type="SYSTEM",
+                        action="delivery_unknown", delivery_id=delivery_id)
+    with session_scope() as session:
+        session.get(AlertEvent, event.event_id).occurred_at = NOW - timedelta(days=900)
 
     with session_scope() as session:
         report = run_retention(session, settings=get_settings(), now=NOW)
-    assert report.message_bodies_redacted == 1
+    assert (report.message_bodies_redacted, report.events_deleted) == (1, 1)
     with session_scope() as session:
-        assert session.get(AlertRender, original_render_id).final_message == ""
-        assert session.get(AlertRender, child_render_id).final_message
+        assert session.get(AlertRender, render_id).final_message == ""
+        assert session.get(AlertEvent, event.event_id) is None
 
 
 def test_a_render_still_cannot_be_rewritten(isolated_db):
@@ -1205,7 +1093,8 @@ def test_retention_preserves_events_of_open_episodes(isolated_db):
 
 
 def test_retention_preserves_old_events_for_an_unresolved_delivery(isolated_db):
-    """Delivery events usually have no episode link; UNKNOWN still needs its trail."""
+    """Delivery events usually have no episode link; a delivery still waiting
+    for its retry keeps its trail at any age."""
     from sqlalchemy import select
 
     from app.alerts.models import AlertDelivery, AlertEvent
@@ -1216,14 +1105,14 @@ def test_retention_preserves_old_events_for_an_unresolved_delivery(isolated_db):
 
     seed_render(
         created_at=NOW - timedelta(days=900),
-        transport=TransportStatus.UNKNOWN,
+        transport=TransportStatus.RETRY_DUE,
     )
     with session_scope() as session:
         delivery_id = session.execute(select(AlertDelivery.delivery_id)).scalar_one()
     event = write_event(
         causation_type="DELIVERY",
         actor_type="SYSTEM",
-        action="delivery_unknown",
+        action="delivery_retry_due",
         delivery_id=delivery_id,
     )
     with session_scope() as session:

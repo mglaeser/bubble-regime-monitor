@@ -110,44 +110,53 @@ def _member(episode_id="EP1", generation=1, role="PRIMARY", rules="r1"):
 def test_dedupe_key_is_stable_across_an_automatic_retry():
     """A provider retry reuses the row, so the key must not move."""
     first = dedupe_key(delivery_kind=DeliveryKind.INITIAL, members=[_member()],
-                       scheduled_window_key=None, manual_retry_sequence=0)
+                       scheduled_window_key=None)
     again = dedupe_key(delivery_kind=DeliveryKind.INITIAL, members=[_member()],
-                       scheduled_window_key=None, manual_retry_sequence=0)
+                       scheduled_window_key=None)
     assert first == again
 
 
 def test_reminder_generation_changes_the_dedupe_key():
     initial = dedupe_key(delivery_kind=DeliveryKind.INITIAL, members=[_member()],
-                         scheduled_window_key=None, manual_retry_sequence=0)
+                         scheduled_window_key=None)
     reminder = dedupe_key(delivery_kind=DeliveryKind.REMINDER,
                           members=[_member(generation=2)],
-                          scheduled_window_key=None, manual_retry_sequence=0)
+                          scheduled_window_key=None)
     assert initial != reminder
 
 
-def test_manual_retry_sequence_changes_the_dedupe_key():
-    """An operator-authorized retry must not collide with the original intent."""
-    original = dedupe_key(delivery_kind=DeliveryKind.INITIAL, members=[_member()],
-                          scheduled_window_key=None, manual_retry_sequence=0)
-    retry = dedupe_key(delivery_kind=DeliveryKind.INITIAL, members=[_member()],
-                       scheduled_window_key=None, manual_retry_sequence=1)
-    assert original != retry
+def test_persisted_dedupe_keys_do_not_move():
+    """The manual retry is gone (owner decision D2f), and its sequence stays in
+    the key material as the constant 0: an intent persisted before keeps the
+    key the same intent gets now, so a generation already planned - an UNKNOWN
+    one included - is found again, never planned as a second intent."""
+    from app.alerts.canonical import sha256_of
+
+    assert dedupe_key(delivery_kind=DeliveryKind.REMINDER, members=[_member(generation=2)],
+                      scheduled_window_key=None) == sha256_of({
+        "dedupe_version": 1,
+        "delivery_kind": "REMINDER",
+        "members": ["EP1|2|PRIMARY"],
+        "origin_rules": ["r1"],
+        "scheduled_window_key": None,
+        "manual_retry_sequence": 0,
+    })
 
 
 def test_a_new_digest_window_changes_the_dedupe_key():
     first = dedupe_key(delivery_kind=DeliveryKind.DIGEST, members=[_member()],
-                       scheduled_window_key="2026-W33", manual_retry_sequence=0)
+                       scheduled_window_key="2026-W33")
     second = dedupe_key(delivery_kind=DeliveryKind.DIGEST, members=[_member()],
-                        scheduled_window_key="2026-W34", manual_retry_sequence=0)
+                        scheduled_window_key="2026-W34")
     assert first != second
 
 
 def test_member_order_does_not_change_the_dedupe_key():
     a, b = _member("EP1"), _member("EP2")
     assert dedupe_key(delivery_kind=DeliveryKind.BUNDLE, members=[a, b],
-                      scheduled_window_key=None, manual_retry_sequence=0) == \
+                      scheduled_window_key=None) == \
         dedupe_key(delivery_kind=DeliveryKind.BUNDLE, members=[b, a],
-                   scheduled_window_key=None, manual_retry_sequence=0)
+                   scheduled_window_key=None)
 
 
 # ---------------------------------------------------------------------------
@@ -347,31 +356,6 @@ def test_an_open_reminder_generation_is_not_planned_twice():
 
     assert result.deliveries == []
     assert SuppressionReason.COOLDOWN in result.suppressions[f"EP-{rule.rule_id}"]
-
-
-def test_same_generation_unknown_blocks_replanning():
-    rule = _p2()
-    memory = NotificationMemory(open_unknown_delivery_id="D1", open_unknown_priority=2)
-    result = plan(_inputs([rule], memories={f"fp-{rule.rule_id}": memory}))
-    assert result.deliveries == []
-    assert SuppressionReason.UNKNOWN_BLOCK in result.suppressions[f"EP-{rule.rule_id}"]
-
-
-def test_a_new_p1_can_bypass_a_lower_priority_unknown_with_the_risk_recorded():
-    rule = _p1()
-    memory = NotificationMemory(open_unknown_delivery_id="D1", open_unknown_priority=2)
-    result = plan(_inputs([rule], memories={f"fp-{rule.rule_id}": memory}))
-    assert len(result.deliveries) == 1
-    delivery = result.deliveries[0]
-    assert delivery.duplicate_risk_acknowledged is True
-    assert delivery.prior_unknown_delivery_id == "D1"
-
-
-def test_a_p1_does_not_bypass_another_p1_unknown():
-    rule = _p1()
-    memory = NotificationMemory(open_unknown_delivery_id="D1", open_unknown_priority=1)
-    result = plan(_inputs([rule], memories={f"fp-{rule.rule_id}": memory}))
-    assert result.deliveries == []
 
 
 def test_an_already_open_generation_is_not_recreated():
@@ -832,26 +816,26 @@ def _seed_delivery(delivery_id: str = "D1", *, priority: int = 2,
 # ---------------------------------------------------------------------------
 
 
-def test_stale_sending_becomes_unknown(isolated_db):
-    """A crash mid-send may have reached the provider; only UNKNOWN is honest."""
-    from datetime import UTC, datetime, timedelta
+STALE_AT = datetime(2026, 8, 24, 12, 0, tzinfo=UTC)
 
+
+def _stale_sending_delivery() -> str:
+    """A TEST delivery whose worker died after its request had started."""
     from app.alerts.artifacts import load_active, register
     from app.alerts.canonical import new_ulid
     from app.alerts.enums import DeliveryKind, PlanningState, TransportStatus
     from app.alerts.models import AlertDelivery
-    from app.alerts.outbox import recover_leases
     from app.alerts.repository import utc_ms
     from app.db import session_scope
 
-    now = datetime(2026, 8, 24, 12, 0, tzinfo=UTC)
+    now = STALE_AT
     with session_scope() as session:
         artifacts = load_active(session)
         register(session, artifacts)
         delivery_id = new_ulid(utc_ms(now))
         session.add(AlertDelivery(
             delivery_id=delivery_id, dedupe_key=f"v1|X|{delivery_id}",
-            dedupe_version=1, manual_retry_sequence=0, mode="shadow",
+            dedupe_version=1, mode="shadow",
             live_profile="default",
             planning_rules_sha256=artifacts.ruleset.rules_sha256,
             delivery_kind=DeliveryKind.TEST, priority=2,
@@ -863,11 +847,47 @@ def test_stale_sending_becomes_unknown(isolated_db):
             lease_owner="dead-worker",
             lease_until=now - timedelta(minutes=10),
             request_started_at=now - timedelta(minutes=11),
-            duplicate_risk_acknowledged=False, recipient_ref="default"))
-        session.flush()
-        recover_leases(session, now=now)
+            recipient_ref="default"))
+    return delivery_id
+
+
+def test_stale_sending_becomes_unknown(isolated_db):
+    """A crash mid-send may have reached the provider; only UNKNOWN is honest."""
+    from app.alerts.enums import TransportStatus
+    from app.alerts.models import AlertDelivery
+    from app.alerts.outbox import recover_leases
+    from app.db import session_scope
+
+    delivery_id = _stale_sending_delivery()
+    with session_scope() as session:
+        recover_leases(session, now=STALE_AT)
         assert session.get(AlertDelivery, delivery_id).transport_status \
             == TransportStatus.UNKNOWN
+
+
+def test_unknown_is_a_terminal_state_nothing_claims_or_recovers(isolated_db):
+    """UNKNOWN is a state, not a workflow (owner decision D2f).
+
+    A worker died mid-send: the request may have landed, so a repeat could be
+    a second message. The lease sweep makes the row UNKNOWN, and from then on
+    nothing claims it again, no sweep moves it, and no route retries it by
+    hand.
+    """
+    from app.alerts.enums import TransportStatus
+    from app.alerts.models import AlertDelivery
+    from app.alerts.outbox import claim, recover_leases
+    from app.db import session_scope
+
+    assert TransportStatus.UNKNOWN.is_terminal
+    delivery_id = _stale_sending_delivery()
+    with session_scope() as session:
+        assert recover_leases(session, now=STALE_AT) == {"retry_due": 0, "unknown": 1}
+    later = STALE_AT + timedelta(days=1)
+    with session_scope() as session:
+        assert not claim(session, delivery_id, owner="worker", now=later, lease_seconds=30)
+        assert recover_leases(session, now=later) == {"retry_due": 0, "unknown": 0}
+    with session_scope() as session:
+        assert session.get(AlertDelivery, delivery_id).transport_status == TransportStatus.UNKNOWN
 
 
 def test_automatic_retry_preserves_append_only_attempt_timestamps(isolated_db):
@@ -1011,14 +1031,14 @@ def test_a_test_delivery_dispatches_its_reviewed_fragment(isolated_db):
         delivery_id = new_ulid(utc_ms(now))
         session.add(AlertDelivery(
             delivery_id=delivery_id, dedupe_key=f"v1|TEST|{delivery_id}",
-            dedupe_version=1, manual_retry_sequence=0, mode="shadow",
+            dedupe_version=1, mode="shadow",
             live_profile="default",
             planning_rules_sha256=artifacts.ruleset.rules_sha256,
             delivery_kind=DeliveryKind.TEST, priority=4,
             transport_status=TransportStatus.PENDING,
             planning_state=PlanningState.READY, not_before=now,
             created_at=now, updated_at=now, attempts=0,
-            duplicate_risk_acknowledged=False, recipient_ref="default"))
+            recipient_ref="default"))
 
     with open("config/alert_phrases.v3.5.json", encoding="utf-8") as fh:
         phrase_set = validate_phrase_set(fh.read())
@@ -1302,14 +1322,14 @@ def test_a_test_probe_is_not_parked_by_quiet_hours(isolated_db):
         delivery_id = new_ulid(utc_ms(night))
         session.add(AlertDelivery(
             delivery_id=delivery_id, dedupe_key=f"v1|TEST|{delivery_id}",
-            dedupe_version=1, manual_retry_sequence=0, mode="shadow",
+            dedupe_version=1, mode="shadow",
             live_profile="default",
             planning_rules_sha256=artifacts.ruleset.rules_sha256,
             delivery_kind=DeliveryKind.TEST, priority=4,
             transport_status=TransportStatus.PENDING,
             planning_state=PlanningState.READY, not_before=night,
             created_at=night, updated_at=night, attempts=0,
-            duplicate_risk_acknowledged=False, recipient_ref="default"))
+            recipient_ref="default"))
 
     with open("config/alert_phrases.v3.5.json", encoding="utf-8") as fh:
         phrase_set = validate_phrase_set(fh.read())

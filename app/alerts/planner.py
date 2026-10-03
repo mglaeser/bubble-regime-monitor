@@ -57,8 +57,6 @@ class NotificationMemory:
     last_reminder_at: datetime | None = None
     reminder_count: int = 0
     next_notification_generation: int = 1
-    open_unknown_delivery_id: str | None = None
-    open_unknown_priority: int | None = None
 
 
 @dataclass
@@ -85,11 +83,7 @@ class DeliveryIntent:
     planning_state: str
     not_before: datetime | None
     hold_reason_code: str | None = None
-    scheduled_window_key: str | None = None
-    manual_retry_sequence: int = 0
     budget: BudgetDecision | None = None
-    duplicate_risk_acknowledged: bool = False
-    prior_unknown_delivery_id: str | None = None
 
     @property
     def transport_status(self) -> str:
@@ -130,16 +124,19 @@ def dedupe_key(
     delivery_kind: str,
     members: list[MemberIntent],
     scheduled_window_key: str | None,
-    manual_retry_sequence: int,
 ) -> str:
     """The identity of one provider INTENT.
 
     An automatic provider retry keeps the same key — same delivery, same
     render, same generation. A REMINDER increments the member generation, which
     changes the key, because a reminder is a new thing to say. A new digest
-    window changes the key. An operator-authorized retry after an ambiguous
-    outcome increments `manual_retry_sequence`, so it does not collide with the
-    original intent while still being visibly a repeat of it.
+    window changes the key. The same generation of the same episode planned
+    again - after an UNKNOWN outcome, say - has the same key, so it is the
+    existing intent, never a second one.
+
+    `manual_retry_sequence` stays in the material as the constant 0: the
+    manual retry that incremented it is gone (owner decision D2f), and keys
+    already persisted must not move.
     """
     material = {
         "dedupe_version": DEDUPE_VERSION,
@@ -149,7 +146,7 @@ def dedupe_key(
         ),
         "origin_rules": sorted({m.origin_rules_sha256 for m in members}),
         "scheduled_window_key": scheduled_window_key,
-        "manual_retry_sequence": manual_retry_sequence,
+        "manual_retry_sequence": 0,
     }
     return sha256_of(material)
 
@@ -220,20 +217,6 @@ def plan(inputs: PlanInputs) -> PlanResult:
             result.notes.append(f"{rule.rule_id}: generation {generation} already open")
             continue
 
-        if memory.open_unknown_delivery_id is not None:
-            # An AMBIGUOUS delivery may or may not have reached the phone. Do
-            # not recreate the same generation. A genuinely NEW P1 episode may
-            # bypass a lower-priority ambiguity — with the duplicate risk
-            # recorded, never hidden.
-            prior_priority = memory.open_unknown_priority or Priority.P4
-            if rule.priority == Priority.P1 and prior_priority > Priority.P1:
-                result.notes.append(
-                    f"{rule.rule_id}: P1 bypassing an ambiguous P{prior_priority} delivery"
-                )
-            else:
-                result.suppress(episode_id, SuppressionReason.UNKNOWN_BLOCK)
-                continue
-
         if _is_silenced(rule, decision.instance_fingerprint, inputs):
             result.suppress(episode_id, SuppressionReason.SILENCED)
             continue
@@ -289,12 +272,10 @@ def plan(inputs: PlanInputs) -> PlanResult:
             priority=Priority.P1,
             members=[member],
             dedupe_key=dedupe_key(delivery_kind=DeliveryKind.INITIAL, members=[member],
-                                  scheduled_window_key=None, manual_retry_sequence=0),
+                                  scheduled_window_key=None),
             planning_state=PlanningState.READY,
             not_before=now,
             budget=check_budget(Priority.P1, inputs.budget_usage, inputs.budget_limits),
-            duplicate_risk_acknowledged=memory.open_unknown_delivery_id is not None,
-            prior_unknown_delivery_id=memory.open_unknown_delivery_id,
         ))
 
     groups: dict[str, list[tuple[RuleSpec, StateDecision, str, NotificationMemory]]] = {}
@@ -334,7 +315,7 @@ def plan(inputs: PlanInputs) -> PlanResult:
             priority=Priority.P2,
             members=members,
             dedupe_key=dedupe_key(delivery_kind=kind, members=members,
-                                  scheduled_window_key=None, manual_retry_sequence=0),
+                                  scheduled_window_key=None),
             planning_state=state,
             not_before=not_before,
             hold_reason_code=hold,
@@ -354,8 +335,8 @@ def plan(inputs: PlanInputs) -> PlanResult:
     # -- reminders for episodes that were already firing ------------------
     # A reminder is not an activation, so the activation-only loop above can
     # never discover one. It is a fresh semantic generation of the SAME open
-    # episode, and therefore runs through the same silence, ambiguity,
-    # flapping, open-generation, quiet-hour, and non-P1 budget controls.
+    # episode, and therefore runs through the same silence, flapping,
+    # open-generation, quiet-hour, and non-P1 budget controls.
     for decision in inputs.decisions:
         if decision.activate_episode or decision.condition_state != "FIRING":
             continue
@@ -376,9 +357,6 @@ def plan(inputs: PlanInputs) -> PlanResult:
             result.suppress(episode_id, SuppressionReason.COOLDOWN)
             result.notes.append(
                 f"{rule.rule_id}: reminder generation {generation} already open")
-            continue
-        if memory.open_unknown_delivery_id is not None:
-            result.suppress(episode_id, SuppressionReason.UNKNOWN_BLOCK)
             continue
         if _is_silenced(rule, decision.instance_fingerprint, inputs):
             result.suppress(episode_id, SuppressionReason.SILENCED)
@@ -474,7 +452,7 @@ def reminder_intent(
         priority=rule.priority,
         members=[member],
         dedupe_key=dedupe_key(delivery_kind=DeliveryKind.REMINDER, members=[member],
-                              scheduled_window_key=None, manual_retry_sequence=0),
+                              scheduled_window_key=None),
         planning_state=(PlanningState.HELD_QUIET if held_quiet else PlanningState.READY),
         not_before=release_at,
         hold_reason_code="quiet_hours" if held_quiet else None,

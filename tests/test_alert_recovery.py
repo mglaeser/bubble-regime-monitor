@@ -246,8 +246,7 @@ def test_promotion_resolves_the_replaced_rulesets_open_episodes(isolated_db, tmp
             session.scalar(select(func.count()).select_from(AlertDigestItem)),
             session.scalar(select(func.count()).select_from(AlertRender)),
             sorted((n.instance_fingerprint, n.last_sent_at,
-                    n.next_notification_generation, n.open_unknown_delivery_id,
-                    n.updated_at)
+                    n.next_notification_generation, n.updated_at)
                    for n in session.execute(
                        select(AlertInstanceNotificationState)).scalars()),
         )
@@ -704,8 +703,9 @@ def test_cooldown_memory_survives_a_promotion(isolated_db, tmp_path):
     assert pk_columns == {"mode", "live_profile", "instance_fingerprint"}
 
 
-def test_unknown_notification_block_survives_a_promotion(isolated_db, tmp_path):
-    """A new rules hash must not make an ambiguous provider attempt retryable."""
+def test_the_notification_generation_survives_a_promotion(isolated_db, tmp_path):
+    """A new rules hash must not reset the notification generation, so a later
+    notice about the instance can never take an earlier one's identity."""
     from app.alerts.engine import run_evaluation
     from app.alerts.models import AlertInstanceNotificationState
     from app.alerts.repository import load_notification_memories
@@ -733,7 +733,6 @@ def test_unknown_notification_block_survives_a_promotion(isolated_db, tmp_path):
         now=NOW,
     )
 
-    unknown_delivery_id = "01K00000000000000000000000"
     with session_scope() as session:
         state = session.execute(
             select(AlertInstanceNotificationState).where(
@@ -741,8 +740,6 @@ def test_unknown_notification_block_survives_a_promotion(isolated_db, tmp_path):
             )
         ).scalars().one()
         fingerprint = state.instance_fingerprint
-        state.open_unknown_delivery_id = unknown_delivery_id
-        state.open_unknown_priority = 1
         state.next_notification_generation = 4
         register_promoted(session, new, now=NOW + timedelta(hours=1))
 
@@ -768,10 +765,7 @@ def test_unknown_notification_block_survives_a_promotion(isolated_db, tmp_path):
         ).scalars().all()
 
     assert len(rows) == 1
-    memory = memories[fingerprint]
-    assert memory.open_unknown_delivery_id == unknown_delivery_id
-    assert memory.open_unknown_priority == 1
-    assert memory.next_notification_generation == 4
+    assert memories[fingerprint].next_notification_generation == 4
 
 
 def test_a_promotion_withdraws_the_replaced_rulesets_queued_alert_and_sends_nothing(

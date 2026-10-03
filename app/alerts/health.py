@@ -517,12 +517,11 @@ _CLOCK_SKEW_TOLERANCE_S = 60
 
 #: The schema this build expects. Health reports a FAULT when the live
 #: database is on any other revision, so this moves in the same PR as a
-#: migration - 0022 drops the episode inheritance (D2e).
-_ALERT_SCHEMA_REVISION = "0022"
+#: migration - 0023 drops the manual retry and the replanning block (D2f).
+_ALERT_SCHEMA_REVISION = "0023"
 _REQUIRED_PARTIAL_INDEXES = frozenset({
     "uq_alert_input_snapshot_id",
     "uq_alert_episode_open",
-    "uq_alert_delivery_manual_retry_root_sequence",
 })
 _REQUIRED_UNIQUE_INDEXES = frozenset({
     "uq_alert_render_delivery",
@@ -865,17 +864,6 @@ def health_projection(
             f"outbox: {holds_missing_next_check} hold(s) have no next-check time"
         )
 
-    blocking_replanning = _count(
-        AlertDelivery,
-        *delivery_scope,
-        AlertDelivery.blocks_replanning.is_(True),
-    )
-    if blocking_replanning:
-        conditions.append(
-            f"outbox: {blocking_replanning} unresolved UNKNOWN delivery "
-            "blocker(s) await operator reconciliation"
-        )
-
     p1_latency_rows = session.execute(
         select(AlertDelivery.created_at, AlertDelivery.request_started_at).where(
             *delivery_scope,
@@ -980,7 +968,7 @@ def health_projection(
         or any(not c["healthy"] for c in components.values())
     )
     queue_degraded = bool(
-        overdue_holds or holds_missing_next_check or blocking_replanning
+        overdue_holds or holds_missing_next_check
         or missing_sidecars
         or (p1_latency_p95 is not None and p1_latency_p95 > 60_000)
     )
@@ -1088,7 +1076,6 @@ def health_projection(
             "unknown": _count(AlertDelivery,
                               *delivery_scope,
                               AlertDelivery.transport_status == TransportStatus.UNKNOWN),
-            "blocking_replanning": blocking_replanning,
             "p1_enqueue_to_attempt_p95_ms": p1_latency_p95,
         },
         "digest": {
