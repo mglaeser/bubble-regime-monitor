@@ -34,7 +34,6 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
-    UniqueConstraint,
     event,
     text,
 )
@@ -44,7 +43,6 @@ from app.alerts.enums import (
     ConditionState,
     ConfirmationRole,
     DeliveryKind,
-    DigestItemStatus,
     EpisodeStatus,
     Evaluability,
     EvaluationRunStatus,
@@ -358,7 +356,7 @@ class AlertInstanceNotificationState(Base):
 
 
 # ===========================================================================
-# A.9-A.10  episodes and digest items
+# A.9  episodes
 # ===========================================================================
 
 
@@ -419,37 +417,6 @@ class AlertEpisode(Base):
             "('RESOLVED','CANCELLED_UNCONFIRMED','CANCELLED_STALE'))",
             name="ck_alert_episode_open_consistent",
         ),
-    )
-
-
-class AlertDigestItem(Base):
-    """A P3 finding's own lifecycle inside a digest window.
-
-    Separate from the episode because a definite FAILURE may be replanned in a
-    later window while an AMBIGUOUS one may not — two facts a pair of episode
-    columns cannot hold without overwriting each other.
-    """
-
-    __tablename__ = "alert_digest_item"
-
-    digest_item_id: Mapped[str] = mapped_column(String(ULID_LEN), primary_key=True)
-    episode_id: Mapped[str] = mapped_column(
-        ForeignKey("alert_episode.episode_id"), nullable=False, index=True)
-    digest_window_key: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
-    status: Mapped[str] = mapped_column(String(16), nullable=False,
-                                        default=DigestItemStatus.PENDING)
-    delivery_id: Mapped[str | None] = mapped_column(
-        ForeignKey("alert_delivery.delivery_id"), nullable=True)
-    pending_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    planned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    still_active_summary: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    last_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
-
-    __table_args__ = (
-        UniqueConstraint("episode_id", "digest_window_key", "still_active_summary",
-                         name="uq_alert_digest_item_window"),
-        CheckConstraint(_enum_check("status", DigestItemStatus), name="ck_alert_digest_status"),
     )
 
 
@@ -750,10 +717,9 @@ END
 """,
     ),
     (
-        # TEST is the sole zero-member kind (mandate 21.3). A retrospective
-        # DIGEST may represent a resolved episode, so its row can be dropped
-        # from the live set while remaining part of the weekly count; a
-        # silenced member is never representation authority.
+        # TEST is the sole zero-member kind (mandate 21.3). For every other
+        # kind - a DIGEST row from before owner decision D2a included - a
+        # member represents its delivery only while it has not been dropped.
         "alert_delivery_requires_member",
         """
 CREATE TRIGGER IF NOT EXISTS alert_delivery_requires_member
@@ -762,13 +728,7 @@ WHEN NEW.transport_status IN ('SENDING', 'SENT')
   AND NEW.delivery_kind <> 'TEST'
   AND NOT EXISTS (
       SELECT 1 FROM alert_delivery_member m
-      WHERE m.delivery_id = NEW.delivery_id
-        AND (
-          (NEW.delivery_kind = 'DIGEST'
-           AND COALESCE(m.drop_reason, '') <> 'SILENCED_BEFORE_SEND')
-          OR
-          (NEW.delivery_kind <> 'DIGEST' AND m.dropped_at IS NULL)
-        )
+      WHERE m.delivery_id = NEW.delivery_id AND m.dropped_at IS NULL
   )
 BEGIN
     SELECT RAISE(ABORT, 'a non-TEST delivery must carry a represented member');

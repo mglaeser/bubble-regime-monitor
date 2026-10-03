@@ -58,8 +58,8 @@ log = get_logger(__name__)
 #: Bumped when the SHAPE of the summary changes, so a stored gate artifact can
 #: be told apart from one produced by a different harness. 3: unknown_blocks
 #: and p1_bypasses_of_unknown went with the replanning block (owner decision
-#: D2f).
-REPLAY_SCHEMA_VERSION = 3
+#: D2f). 4: digest_items went with the weekly digest (owner decision D2a).
+REPLAY_SCHEMA_VERSION = 4
 
 #: Rolling windows the load report uses.
 WINDOW_24H = timedelta(hours=24)
@@ -154,7 +154,6 @@ class ReplaySummary:
     held_budget: int = 0
     held_grouping: int = 0
     cancelled_superseded: int = 0
-    digest_items: int = 0
 
     # -- load -------------------------------------------------------------
     #: False until the delivery planner runs inside a replay. While it is
@@ -486,7 +485,7 @@ def run_replay(
     """
     from app.alerts.artifacts import LoadedArtifacts, register
     from app.alerts.engine import run_evaluation
-    from app.alerts.models import AlertDigestItem, AlertInputSnapshot
+    from app.alerts.models import AlertInputSnapshot
 
     committed_stage = ruleset.document.meta.active_stage
     if config.evaluate_at_stage is not None \
@@ -592,8 +591,6 @@ def run_replay(
         with scope() as session:
             _collect_episodes(session, summary, ruleset)
             _collect_deliveries(session, summary)
-            summary.digest_items = len(
-                session.execute(select(AlertDigestItem)).scalars().all())
             _collect_band_excursions(summary, records)
             activated_episodes = _activated_episodes(session)
     finally:

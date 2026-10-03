@@ -5,19 +5,11 @@ from __future__ import annotations
 import json
 from datetime import datetime
 
+import pytest
 from sqlalchemy import func, select
 
 from app.alerts.cli import build_parser as build_alert_parser
-from app.alerts.models import (
-    AlertComponentHeartbeat,
-    AlertDelivery,
-    AlertDeliveryMember,
-    AlertDigestItem,
-    AlertEvent,
-    AlertInputSnapshot,
-    AlertPhraseSetRegistry,
-    AlertRulesetRegistry,
-)
+from app.alerts.models import AlertInputSnapshot
 from app.alerts.reports import (
     economic_observation_statistics,
     snapshot_export_rows,
@@ -31,12 +23,6 @@ def test_exact_mandate_cli_surfaces_parse():
     alerts = build_alert_parser()
     assert alerts.parse_args(["recover-leases", "--once"]).command == \
         "recover-leases"
-    digest = alerts.parse_args(
-        ["digest", "--window", "2026-W33", "--dry-run"]
-    )
-    assert digest.command == "digest"
-    assert digest.window == "2026-W33"
-    assert digest.dry_run is True
 
     root = build_root_parser()
     alerts_root = root.parse_args(["alerts", "recover-leases", "--once"])
@@ -57,41 +43,10 @@ def test_exact_mandate_cli_surfaces_parse():
     assert transitions.stats_command == "transitions"
 
 
-def test_digest_dry_run_rolls_back_every_alert_mutation(isolated_db, capsys):
-    """Registration, quiet audit evidence, and planning all remain hypothetical."""
-    from app.alerts.cli import main
-    from app.db import session_scope
-
-    models = (
-        AlertPhraseSetRegistry,
-        AlertRulesetRegistry,
-        AlertDigestItem,
-        AlertDelivery,
-        AlertDeliveryMember,
-        AlertEvent,
-        AlertComponentHeartbeat,
-    )
-
-    def counts():
-        with session_scope() as session:
-            return {
-                model.__tablename__: session.execute(
-                    select(func.count()).select_from(model)
-                ).scalar_one()
-                for model in models
-            }
-
-    before = counts()
-    assert main([
-        "digest", "--window", "2000-W01", "--dry-run",
-    ]) == 0
-    output = capsys.readouterr().out
-    # Structured application logs may precede the command's pretty-printed
-    # result; the final multi-line object is the CLI contract under test.
-    payload = json.loads(output[output.rindex("{\n"):])
-    assert payload["dry_run"] is True
-    assert payload["committed"] is False
-    assert counts() == before
+def test_the_weekly_digest_command_is_gone():
+    """Owner decision D2a: the weekly digest is deleted, its subcommand too."""
+    with pytest.raises(SystemExit):
+        build_alert_parser().parse_args(["digest", "--window", "2026-W33", "--dry-run"])
 
 
 def _persist_inputs(inputs) -> None:

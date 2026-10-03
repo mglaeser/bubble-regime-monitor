@@ -173,6 +173,9 @@ class DeliveryKind(StrEnum):
     REMINDER = "REMINDER"
     BUNDLE = "BUNDLE"
     STORM = "STORM"
+    #: Stored vocabulary only: nothing plans it since the weekly digest went
+    #: (owner decision D2a); ck_alert_delivery_kind still admits it and an
+    #: older alert_delivery row may carry it.
     DIGEST = "DIGEST"
     WATCHDOG = "WATCHDOG"
     TEST = "TEST"
@@ -182,22 +185,6 @@ class MemberRole(StrEnum):
     PRIMARY = "PRIMARY"
     BUNDLED = "BUNDLED"
     ESCALATION = "ESCALATION"
-    SUMMARY = "SUMMARY"
-
-
-class DigestItemStatus(StrEnum):
-    """A digest item has its own lifecycle — not a pair of episode columns.
-
-    FAILED may be replanned in a later window. UNKNOWN is never replanned: the
-    message may already have been delivered.
-    """
-
-    PENDING = "PENDING"
-    PLANNED = "PLANNED"
-    DELIVERED = "DELIVERED"
-    FAILED = "FAILED"
-    UNKNOWN = "UNKNOWN"
-    CANCELLED = "CANCELLED"
 
 
 class EvaluationRunStatus(StrEnum):

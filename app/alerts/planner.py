@@ -29,7 +29,6 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
 from app.alerts.budgets import BudgetDecision, BudgetLimits, BudgetUsage, check_budget
-from app.alerts.calendars import digest_window_key
 from app.alerts.canonical import sha256_of
 from app.alerts.dominance import DominanceOutcome, group_key_for, resolve
 from app.alerts.enums import (
@@ -92,16 +91,8 @@ class DeliveryIntent:
 
 
 @dataclass
-class DigestIntent:
-    episode_id: str
-    rule_id: str
-    digest_window_key: str
-
-
-@dataclass
 class PlanResult:
     deliveries: list[DeliveryIntent] = field(default_factory=list)
-    digest_items: list[DigestIntent] = field(default_factory=list)
     #: episode_id -> accumulated suppression reasons
     suppressions: dict[str, list[str]] = field(default_factory=dict)
     #: rule_ids whose unsent deliveries a winner asked to cancel
@@ -129,10 +120,9 @@ def dedupe_key(
 
     An automatic provider retry keeps the same key — same delivery, same
     render, same generation. A REMINDER increments the member generation, which
-    changes the key, because a reminder is a new thing to say. A new digest
-    window changes the key. The same generation of the same episode planned
-    again - after an UNKNOWN outcome, say - has the same key, so it is the
-    existing intent, never a second one.
+    changes the key, because a reminder is a new thing to say. The same
+    generation of the same episode planned again - after an UNKNOWN outcome,
+    say - has the same key, so it is the existing intent, never a second one.
 
     `manual_retry_sequence` stays in the material as the constant 0: the
     manual retry that incremented it is gone (owner decision D2f), and keys
@@ -170,7 +160,7 @@ class PlanInputs:
     origin_rules_sha256: str = ""
     phrase_set_version: str = ""
     phrase_set_sha256: str = ""
-    budget_usage: BudgetUsage = BudgetUsage(0, 0, 0, 0)
+    budget_usage: BudgetUsage = BudgetUsage(0, 0, 0)
     budget_limits: BudgetLimits = BudgetLimits(2, 3, 6)
     flapping_fingerprints: frozenset[str] = frozenset()
 
@@ -194,7 +184,7 @@ def _cooldown_active(rule: RuleSpec, memory: NotificationMemory, now: datetime) 
 
 
 def plan(inputs: PlanInputs) -> PlanResult:
-    """Produce delivery and digest intents for one evaluation's decisions."""
+    """Produce delivery intents for one evaluation's decisions."""
     result = PlanResult()
     now = inputs.now
 
@@ -248,15 +238,12 @@ def plan(inputs: PlanInputs) -> PlanResult:
             continue
         survivors.append((rule, decision, episode_id, memory))
 
-    # -- P3 -> digest, P4 -> nothing ----------------------------------------
+    # -- P3 and P4 -> API and log only --------------------------------------
+    # P3 went to the weekly digest, which is deleted (owner decision D2a).
     sms_capable: list[tuple[RuleSpec, StateDecision, str, NotificationMemory]] = []
     for rule, decision, episode_id, memory in survivors:
-        if rule.priority == Priority.P3:
-            result.digest_items.append(DigestIntent(
-                episode_id=episode_id, rule_id=rule.rule_id,
-                digest_window_key=digest_window_key(now)))
-        elif rule.priority == Priority.P4:
-            result.notes.append(f"{rule.rule_id}: P4 — API and log only")
+        if rule.priority in (Priority.P3, Priority.P4):
+            result.notes.append(f"{rule.rule_id}: P{rule.priority} - API and log only")
         else:
             sms_capable.append((rule, decision, episode_id, memory))
 
@@ -329,7 +316,6 @@ def plan(inputs: PlanInputs) -> PlanResult:
             sent_24h=advisory_usage.sent_24h,
             sent_168h=advisory_usage.sent_168h,
             reserved=advisory_usage.reserved + 1,
-            digest_168h=advisory_usage.digest_168h,
         )
 
     # -- reminders for episodes that were already firing ------------------
@@ -381,7 +367,6 @@ def plan(inputs: PlanInputs) -> PlanResult:
                 sent_24h=advisory_usage.sent_24h,
                 sent_168h=advisory_usage.sent_168h,
                 reserved=advisory_usage.reserved + 1,
-                digest_168h=advisory_usage.digest_168h,
             )
     return result
 

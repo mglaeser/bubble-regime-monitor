@@ -45,11 +45,6 @@ def _alert_recovery_job() -> None:
     job()   # never raises
 
 
-def _alert_digest_job() -> None:
-    from app.jobs.alert_digest import job
-    job()
-
-
 def _alert_dispatch_job() -> None:
     # The SINGLE delivery worker. Disabled unless ALERTS_MODE is shadow or
     # live; in shadow it runs the whole path against the NullSender, so nothing
@@ -141,17 +136,6 @@ def start() -> BackgroundScheduler:
                            CronTrigger(minute="10,40", timezone="UTC"),
                            id="alert_watchdog", replace_existing=True,
                            coalesce=True, misfire_grace_time=1800, max_instances=1)
-        # The WEEKLY digest, Monday morning Berlin, summarising the window that
-        # closed on Sunday. Inside quiet hours [07:00, 22:00) deliberately: it
-        # is a scheduled summary and must not arrive at 03:00 just because the
-        # scheduler was free. Its own heartbeat is the proof of a quiet run:
-        # a digest job that stopped running must read as a dead component, not
-        # as permission to create a memberless provider intent.
-        _scheduler.add_job(_alert_digest_job,
-                           CronTrigger(day_of_week="mon", hour=8, minute=30,
-                                       timezone="Europe/Berlin"),
-                           id="alert_digest", replace_existing=True,
-                           coalesce=True, misfire_grace_time=21600, max_instances=1)
         # Wedged-recompute watchdog, on :05/:35 so it contends with nothing.
         # Its own job precisely BECAUSE the recompute job is max_instances=1: a
         # wedged run makes APScheduler skip that job's firings, so anything
