@@ -25,8 +25,9 @@ from app.alerts.enums import (
     ConditionState,
     EpisodeStatus,
     EvaluationStatus,
+    SuppressionReason,
 )
-from app.alerts.errors import EvaluationConflict
+from app.alerts.errors import EvaluationConflict, sanitize
 from app.alerts.models import (
     AlertConfirmationObservation,
     AlertDelivery,
@@ -145,7 +146,6 @@ def load_memories(
                 candidate_expires_at=_aware(row.candidate_expires_at),
                 candidate_ttl_policy=row.candidate_ttl_policy,
                 current_episode_id=row.current_episode_id,
-                inherited_open_episode_id=row.inherited_open_episode_id,
                 confirmed_keys=confirmed,
             ),
         )
@@ -287,7 +287,6 @@ def apply_decision(
         ),
         "last_known_input_identity": alert_input.input_identity,
         "current_episode_id": episode_id,
-        "inherited_open_episode_id": decision.inherited_open_episode_id,
         "consecutive_true": decision.consecutive_true,
         "candidate_from_state": decision.candidate_from_state,
         "candidate_target_state": decision.candidate_target_state,
@@ -369,34 +368,85 @@ def _event(session: Session, now: datetime, evaluation_id: str, alert_input: Ale
 # ---------------------------------------------------------------------------
 
 
-def open_episodes(session: Session, *, mode: str, live_profile: str) -> list[AlertEpisode]:
-    return list(session.execute(
-        select(AlertEpisode).where(
-            AlertEpisode.mode == mode,
-            AlertEpisode.live_profile == live_profile,
-            AlertEpisode.is_open.is_(True),
-        )
-    ).scalars().all())
-
-
-def origin_rulesets_with_open_episodes(
-    session: Session, *, mode: str, live_profile: str, current_rules_sha256: str
+def resolve_replaced_episodes(
+    session: Session,
+    *,
+    replacing_rules_sha256: str,
+    now: datetime,
+    actor_type: str,
+    actor_id: str | None = None,
+    mode: str | None = None,
+    live_profile: str | None = None,
 ) -> list[str]:
-    """Archived rulesets that must keep being evaluated.
+    """Resolve the open episodes another ruleset opened (owner decision D2e):
+    every one at a promotion; at an evaluation, which passes its `mode` and
+    `live_profile`, those of that mode and profile.
 
-    An episode opened under an older ruleset stays evaluable under THAT
-    ruleset until it closes — otherwise a promotion would orphan it, and the
-    condition that opened it could never resolve.
+    Each becomes RESOLVED as RULESET_REPLACED with one `episode_resolved`
+    event caused by the replacing ruleset, and the rule-state row that owns it
+    goes back to NORMAL with its version bumped, so an evaluation of the
+    replaced rules still in flight fails its compare-and-set. Nothing is
+    planned, and deliveries, digest items and notification memory are left
+    alone: the dispatcher withdraws a queued alert whose episode resolved, a
+    digest still counts it, and a cooldown survives. Returns the episode ids.
     """
-    rows = session.execute(
-        select(AlertEpisode.origin_rules_sha256).where(
-            AlertEpisode.mode == mode,
-            AlertEpisode.live_profile == live_profile,
-            AlertEpisode.is_open.is_(True),
-            AlertEpisode.origin_rules_sha256 != current_rules_sha256,
-        ).distinct()
+    scope = [AlertEpisode.is_open.is_(True),
+             AlertEpisode.origin_rules_sha256 != replacing_rules_sha256]
+    if mode is not None:
+        scope.append(AlertEpisode.mode == mode)
+    if live_profile is not None:
+        scope.append(AlertEpisode.live_profile == live_profile)
+    episodes = session.execute(
+        select(AlertEpisode).where(*scope).order_by(AlertEpisode.episode_id)
     ).scalars().all()
-    return sorted(set(rows))
+    for episode in episodes:
+        episode.episode_status = EpisodeStatus.RESOLVED
+        episode.is_open = False
+        episode.resolved_at = now
+        episode.resolution_reason = SuppressionReason.RULESET_REPLACED
+        session.execute(
+            update(AlertRuleState)
+            .where(
+                AlertRuleState.mode == episode.mode,
+                AlertRuleState.live_profile == episode.live_profile,
+                AlertRuleState.rules_sha256 == episode.origin_rules_sha256,
+                AlertRuleState.instance_fingerprint == episode.instance_fingerprint,
+                AlertRuleState.current_episode_id == episode.episode_id,
+            )
+            .values(
+                condition_state=ConditionState.NORMAL,
+                last_known_condition_state=ConditionState.NORMAL,
+                current_episode_id=None,
+                consecutive_true=0,
+                candidate_from_state=None,
+                candidate_target_state=None,
+                candidate_started_input=None,
+                candidate_expires_at=None,
+                candidate_ttl_policy=None,
+                candidate_ttl_basis=None,
+                state_version=AlertRuleState.state_version + 1,
+                updated_at=now,
+            )
+        )
+        session.add(AlertEvent(
+            event_id=new_ulid(utc_ms(now)),
+            occurred_at=now,
+            causation_type=CausationType.RULESET,
+            causation_id=replacing_rules_sha256,
+            actor_type=actor_type,
+            actor_id_redacted=sanitize(actor_id) if actor_id else None,
+            episode_id=episode.episode_id,
+            instance_fingerprint=episode.instance_fingerprint,
+            rule_id=episode.rule_id,
+            action="episode_resolved",
+            suppression_reasons=[],
+            detail_redacted=(f"{SuppressionReason.RULESET_REPLACED}: "
+                             f"{episode.origin_rules_sha256[:12]} replaced by "
+                             f"{replacing_rules_sha256[:12]}"),
+            rules_sha256=episode.origin_rules_sha256,
+        ))
+    session.flush()
+    return [episode.episode_id for episode in episodes]
 
 
 def load_notification_memories(

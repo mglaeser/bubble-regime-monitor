@@ -2,9 +2,9 @@
 
     P0b  EVALUATION CLAIM   short write txn — create or claim a STARTED row
     P1   PURE EVALUATION    NO write transaction, NO external I/O, monotonic
-                            deadline; loads the current ruleset plus every
-                            archived ruleset that still owns an open episode
-    P2   ATOMIC APPLY       one write txn; CAS every state row; on any conflict
+                            deadline; evaluates the current ruleset alone
+    P2   ATOMIC APPLY       one write txn; resolve the open episodes another
+                            ruleset opened, CAS every state row; on any conflict
                             or deadline overrun, nothing at all is applied
 
 The separation is the point. Rule evaluation and history access are the slow,
@@ -13,7 +13,7 @@ a single-writer database. And the apply must be all-or-nothing, because half a
 plan means an episode with no event, or a delivery with no episode.
 
 Idempotency is by logical identity, not by row id: the same input, the same
-ruleset set, the same mode and the same evaluator version are the SAME logical
+ruleset, the same mode and the same evaluator version are the SAME logical
 evaluation. A retry after a crash resumes it rather than producing a second
 plan.
 """
@@ -25,22 +25,24 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from app.alerts.budgets import LIMITS
 from app.alerts.canonical import new_ulid, sorted_hash_set
 from app.alerts.dto import AlertInput, evaluation_identity
 from app.alerts.enums import (
+    ActorType,
     ConditionState,
     EvaluationRunStatus,
     EvaluationStatus,
     Mode,
     RulesetItemStatus,
     RulesetRole,
+    RulesetStatus,
 )
 from app.alerts.errors import EvaluationConflict, EvaluationDeadlineExceeded, sanitize
-from app.alerts.models import AlertEvaluation, AlertEvaluationRuleset
+from app.alerts.models import AlertEvaluation, AlertEvaluationRuleset, AlertRulesetRegistry
 from app.alerts.outbox import persist_plan, planner_budget_usage
 from app.alerts.planner import PlanInputs, plan
 from app.alerts.primitives import EvaluationContext, evaluate_rule
@@ -53,9 +55,8 @@ from app.alerts.repository import (
     load_notification_memories,
     load_open_generations,
     load_recent_inputs,
-    open_episodes,
-    origin_rulesets_with_open_episodes,
     resolve_predecessor,
+    resolve_replaced_episodes,
     utc_ms,
 )
 from app.alerts.rulespec import RuleSpec
@@ -102,7 +103,6 @@ def claim_evaluation(
     *,
     alert_input: AlertInput,
     current: ValidatedRuleset,
-    evaluated_hashes: list[str],
     mode: str,
     live_profile: str,
     now: datetime,
@@ -113,7 +113,7 @@ def claim_evaluation(
     Returns (row, is_new). A live lease on a fresh STARTED row means somebody
     else is working on it; the caller backs off rather than racing.
     """
-    set_hash = sorted_hash_set(evaluated_hashes)
+    set_hash = sorted_hash_set([current.rules_sha256])
     identity = evaluation_identity(
         input_identity=alert_input.input_identity,
         current_rules_sha256=current.rules_sha256,
@@ -150,7 +150,7 @@ def claim_evaluation(
         live_profile=live_profile,
         current_rules_sha256=current.rules_sha256,
         evaluation_set_sha256=set_hash,
-        evaluated_ruleset_hashes=sorted(set(evaluated_hashes)),
+        evaluated_ruleset_hashes=[current.rules_sha256],
         evaluator_version=current.document.meta.evaluator_version,
         status=EvaluationRunStatus.STARTED,
         attempt_count=1,
@@ -161,14 +161,12 @@ def claim_evaluation(
     )
     session.add(row)
     session.flush()
-    for rules_sha in sorted(set(evaluated_hashes)):
-        session.add(AlertEvaluationRuleset(
-            evaluation_id=row.evaluation_id,
-            rules_sha256=rules_sha,
-            role=(RulesetRole.CURRENT if rules_sha == current.rules_sha256
-                  else RulesetRole.ORIGIN_CONTINUATION),
-            status=RulesetItemStatus.PENDING,
-        ))
+    session.add(AlertEvaluationRuleset(
+        evaluation_id=row.evaluation_id,
+        rules_sha256=current.rules_sha256,
+        role=RulesetRole.CURRENT,
+        status=RulesetItemStatus.PENDING,
+    ))
     return row, True
 
 
@@ -199,19 +197,12 @@ class Deadline:
 def evaluate_ruleset(
     *,
     ruleset: ValidatedRuleset,
-    role: str,
     ctx: EvaluationContext,
     memories: dict[str, tuple[Any, InstanceMemory]],
-    open_fingerprints: frozenset[str],
     now: datetime,
     deadline: Deadline,
 ) -> list[tuple[RuleSpec, StateDecision]]:
-    """Evaluate one ruleset's active rules against one input. Pure.
-
-    An ORIGIN_CONTINUATION ruleset only evaluates the instances that still own
-    an open episode: an archived ruleset may close what it opened, but it never
-    opens anything new.
-    """
+    """Evaluate one ruleset's active rules against one input. Pure."""
     stage = ruleset.document.meta.active_stage
     results: list[tuple[RuleSpec, StateDecision]] = []
 
@@ -219,9 +210,6 @@ def evaluate_ruleset(
         deadline.check(f"rule:{rule.rule_id}")
         fingerprint = instance_fingerprint(
             rule.rule_id, rule.identity_version, rule.labels)
-        if role == RulesetRole.ORIGIN_CONTINUATION and fingerprint not in open_fingerprints:
-            continue
-
         _row, memory = memories.get(fingerprint, (None, InstanceMemory()))
         # The hysteresis context must also be the state the outage interrupted.
         # Reading the stored value meant that after any outage a rule with an
@@ -257,60 +245,6 @@ def evaluate_ruleset(
     return results
 
 
-def _current_projection_with_inherited_episode(
-    decision: StateDecision,
-    episode_id: str,
-) -> StateDecision:
-    """Make a current-ruleset decision observational, not lifecycle-owning.
-
-    An archived ruleset is the sole authority for an episode it opened.  The
-    current ruleset still reports whether its own condition is normal, pending,
-    firing, or unknown, but it cannot open, activate, resolve, cancel, confirm,
-    or notify for the same mechanism while that origin episode is open.
-    """
-    decision.open_episode = False
-    decision.activate_episode = False
-    decision.resolve_episode = False
-    decision.cancel_episode = None
-    decision.episode_id = None
-    decision.inherited_open_episode_id = episode_id
-    decision.candidate_started_input = None
-    decision.candidate_from_state = None
-    decision.candidate_target_state = None
-    decision.candidate_expires_at = None
-    decision.candidate_ttl_policy = None
-    decision.candidate_ttl_basis = None
-    decision.confirmations = []
-    decision.confirmation_progress = {}
-    decision.reasons.append(f"inherited_open_episode:{episode_id}")
-    return decision
-
-
-def _reset_closed_inheritance(
-    memories: dict[str, tuple[Any, InstanceMemory]],
-    active_inherited: dict[str, str],
-) -> dict[str, tuple[Any, InstanceMemory]]:
-    """Start current-rule lifecycle memory afresh after its origin closes.
-
-    While an origin episode is open the current projection is deliberately
-    observational.  Its condition/candidate counters therefore cannot become
-    the predecessor for a later current-owned lifecycle.  Once the inherited
-    episode is absent, reset those counters but retain the row version so the
-    ordinary CAS still protects the update.
-    """
-    normalized: dict[str, tuple[Any, InstanceMemory]] = {}
-    for fingerprint, (row, memory) in memories.items():
-        if (memory.inherited_open_episode_id is not None
-                and fingerprint not in active_inherited):
-            memory = InstanceMemory(
-                state_version=memory.state_version,
-                condition_state=ConditionState.NORMAL,
-                last_known_condition_state=ConditionState.NORMAL,
-            )
-        normalized[fingerprint] = (row, memory)
-    return normalized
-
-
 # ---------------------------------------------------------------------------
 # the full run
 # ---------------------------------------------------------------------------
@@ -321,7 +255,6 @@ def run_evaluation(
     *,
     alert_input: AlertInput,
     current: ValidatedRuleset,
-    archived: dict[str, ValidatedRuleset] | None = None,
     mode: str = Mode.SHADOW,
     live_profile: str = "default",
     now: datetime | None = None,
@@ -335,24 +268,24 @@ def run_evaluation(
     fails — on its own.
     """
     now = now or datetime.now(UTC)
-    archived = archived or {}
     started = time.monotonic()
 
     # ---- P0b: claim -------------------------------------------------------
     with session_factory() as session:
-        origins = origin_rulesets_with_open_episodes(
-            session, mode=mode, live_profile=live_profile,
-            current_rules_sha256=current.rules_sha256)
-        evaluated = [current.rules_sha256, *[h for h in origins if h in archived]]
         row, claimed = claim_evaluation(
             session, alert_input=alert_input, current=current,
-            evaluated_hashes=evaluated, mode=mode, live_profile=live_profile,
+            mode=mode, live_profile=live_profile,
             now=now, lease_seconds=lease_seconds)
         evaluation_id = row.evaluation_id
         already_committed = row.status == EvaluationRunStatus.COMMITTED
-        missing_origins = [h for h in origins if h not in archived]
 
     if already_committed:
+        # A committed evaluation is never applied again, and returning writes
+        # nothing. A shadow candidate changed back on one input (A -> B -> A)
+        # leaves the episodes as B's run left them until the next input, whose
+        # apply resolves them and opens A's; shadow mode sends nothing. A live
+        # candidate changes only by a promotion, which resolves at once (#159
+        # rounds 2 and 3).
         return EvaluationOutcome(evaluation_id=evaluation_id,
                                  status=EvaluationRunStatus.COMMITTED,
                                  input_identity=alert_input.input_identity)
@@ -362,55 +295,14 @@ def run_evaluation(
                                  input_identity=alert_input.input_identity,
                                  error_code="LEASE_HELD",
                                  error_message="another worker holds a live lease")
-    if missing_origins:
-        # An open episode whose originating ruleset is not loadable cannot be
-        # continued — its rules are what decide whether it resolves, expires or
-        # keeps firing. Evaluating anyway commits the CURRENT ruleset's plans
-        # and reports a healthy COMMITTED batch, while the orphaned episode
-        # stays open forever and the partial unique index it holds blocks every
-        # future episode for that instance. A green evaluation that silently
-        # abandoned an open episode is worse than no evaluation.
-        #
-        # So this fails the batch. Nothing is applied, the mechanism is visibly
-        # unavailable rather than quietly stale, and the operator gets an error
-        # naming the hashes to restore. Audit finding B-12; logging alone was
-        # the defect, not the reporting of it.
-        log.error("alert_origin_ruleset_unavailable", evaluation_id=evaluation_id,
-                  missing=missing_origins)
-        _finish(session_factory, evaluation_id, EvaluationRunStatus.FAILED, now, started,
-                error=None, error_code="ORIGIN_RULESET_UNAVAILABLE",
-                error_message=f"origin rulesets not loadable: {sorted(missing_origins)}")
-        return EvaluationOutcome(
-            evaluation_id=evaluation_id,
-            status=EvaluationRunStatus.FAILED,
-            input_identity=alert_input.input_identity,
-            error_code="ORIGIN_RULESET_UNAVAILABLE",
-            error_message=f"origin rulesets not loadable: {sorted(missing_origins)}")
-
     # ---- P1: pure evaluation, no write transaction -----------------------
     deadline = Deadline(budget_ms)
     try:
         with session_factory() as session:
             history = load_recent_inputs(
                 session, before=_input_moment(alert_input, now))
-            memories_by_hash = {
-                rules_sha: load_memories(session, mode=mode, live_profile=live_profile,
-                                         rules_sha256=rules_sha)
-                for rules_sha in [current.rules_sha256, *archived]
-            }
-            open_by_hash: dict[str, set[str]] = {}
-            inherited_by_fingerprint: dict[str, str] = {}
-            for episode in open_episodes(session, mode=mode, live_profile=live_profile):
-                open_by_hash.setdefault(episode.origin_rules_sha256, set()).add(
-                    episode.instance_fingerprint)
-                if episode.origin_rules_sha256 != current.rules_sha256:
-                    inherited_by_fingerprint[
-                        episode.instance_fingerprint] = episode.episode_id
-
-            memories_by_hash[current.rules_sha256] = _reset_closed_inheritance(
-                memories_by_hash.get(current.rules_sha256, {}),
-                inherited_by_fingerprint,
-            )
+            memories = load_memories(session, mode=mode, live_profile=live_profile,
+                                     rules_sha256=current.rules_sha256)
 
         # THE SAME PREDECESSOR THE RENDERER WILL DESCRIBE.
         #
@@ -439,22 +331,9 @@ def run_evaluation(
             is_cold_start=previous is None,
         )
 
-        planned: list[tuple[str, RuleSpec, StateDecision]] = []
-        for rules_sha, ruleset, role in _evaluation_order(current, archived, origins):
-            deadline.check(f"ruleset:{rules_sha[:12]}")
-            for rule, decision in evaluate_ruleset(
-                ruleset=ruleset, role=role, ctx=ctx,
-                memories=memories_by_hash.get(rules_sha, {}),
-                open_fingerprints=frozenset(open_by_hash.get(rules_sha, set())),
-                now=now, deadline=deadline,
-            ):
-                if role == RulesetRole.CURRENT:
-                    inherited_id = inherited_by_fingerprint.get(
-                        decision.instance_fingerprint)
-                    if inherited_id is not None:
-                        decision = _current_projection_with_inherited_episode(
-                            decision, inherited_id)
-                planned.append((rules_sha, rule, decision))
+        deadline.check(f"ruleset:{current.rules_sha256[:12]}")
+        planned = evaluate_ruleset(ruleset=current, ctx=ctx, memories=memories,
+                                   now=now, deadline=deadline)
     except EvaluationDeadlineExceeded as exc:
         _finish(session_factory, evaluation_id, EvaluationRunStatus.TIMED_OUT, now,
                 started, error=exc)
@@ -466,23 +345,37 @@ def run_evaluation(
     # ---- P2: one atomic apply --------------------------------------------
     try:
         with session_factory() as session:
-            memories_by_hash = {
-                rules_sha: load_memories(session, mode=mode, live_profile=live_profile,
-                                         rules_sha256=rules_sha)
-                for rules_sha in [current.rules_sha256, *archived]
-            }
-            # Keyed by (ruleset, fingerprint).  The current projection points
-            # to an archived open episode through inherited_open_episode_id and
-            # never opens a second one; keeping the maps ruleset-scoped still
-            # ensures the continuation member is planned from its exact origin.
-            episode_ids_by_hash: dict[str, dict[str, str]] = {}
-            # Keyed by RULESET, then rule_id. Two rulesets in one batch can
-            # define the same rule_id with different specs — that is the whole
-            # reason an archived ruleset is loaded — so a flat map lets whichever
-            # was applied last decide how the other's members are planned.
-            rules_by_hash: dict[str, dict[str, Any]] = {}
-            for rules_sha, rule, decision in planned:
-                existing, memory = memories_by_hash.get(rules_sha, {}).get(
+            # The write lock comes first, so the check below and the apply
+            # judge one state: a promotion either committed before (and the
+            # check sees it) or waits for this transaction (#159 round 2).
+            if session.bind is not None and session.bind.dialect.name == "sqlite":
+                session.execute(text("BEGIN IMMEDIATE"))
+            # The budget bounds the evaluation above, not this apply: it commits
+            # what the evaluation decided, as one transaction under the write
+            # lock, and the state compare-and-set and the live check below keep
+            # it correct whatever the clock says (#159 rounds 5 and 6).
+            # A live evaluation applies only while its ruleset is still the
+            # promoted one: a promotion that committed after this run loaded
+            # its rules supersedes them, and nothing is applied (#159 round 1).
+            if mode == Mode.LIVE:
+                registered = session.get(AlertRulesetRegistry, current.rules_sha256)
+                if registered is None or registered.status != RulesetStatus.PROMOTED:
+                    raise EvaluationConflict(
+                        f"ruleset {current.rules_sha256[:12]} is no longer the promoted one")
+            # Only the current ruleset decides episodes (owner decision D2e).
+            # An episode another ruleset opened in this mode and profile - the
+            # candidate changed without a promotion - ends here, in the
+            # transaction that may open this ruleset's own episode for the
+            # same mechanism.
+            resolve_replaced_episodes(
+                session, replacing_rules_sha256=current.rules_sha256, now=now,
+                actor_type=ActorType.SYSTEM, mode=mode, live_profile=live_profile)
+            memories = load_memories(session, mode=mode, live_profile=live_profile,
+                                     rules_sha256=current.rules_sha256)
+            episode_ids: dict[str, str] = {}
+            rules: dict[str, Any] = {}
+            for rule, decision in planned:
+                existing, memory = memories.get(
                     decision.instance_fingerprint, (None, InstanceMemory()))
                 if existing is not None and memory.state_version != decision.expected_state_version:
                     raise EvaluationConflict(
@@ -490,15 +383,14 @@ def run_evaluation(
                     )
                 affected = apply_decision(
                     session, decision, mode=mode, live_profile=live_profile,
-                    rules_sha256=rules_sha, rule=rule, alert_input=alert_input,
+                    rules_sha256=current.rules_sha256, rule=rule, alert_input=alert_input,
                     evaluation_id=evaluation_id, now=now, existing=existing,
                     predecessor_identity=(previous.input_identity
                                           if previous is not None else None),
                 )
                 if affected:
-                    episode_ids_by_hash.setdefault(rules_sha, {})[
-                        decision.instance_fingerprint] = affected
-                rules_by_hash.setdefault(rules_sha, {})[decision.rule_id] = rule
+                    episode_ids[decision.instance_fingerprint] = affected
+                rules[decision.rule_id] = rule
 
             # ---- planning, INSIDE the same transaction --------------------
             #
@@ -512,58 +404,37 @@ def run_evaluation(
             # conflict or a deadline overrun must leave no episode without its
             # delivery intent and no intent without its episode. Two
             # transactions cannot promise that.
-            # PLANNED PER RULESET, because origin provenance is per member.
             #
-            # A batch can mix rulesets: the current one for new candidates, plus
-            # any archived ruleset that still owns an open episode. Stamping
-            # every member with the CURRENT hash would tell a later reader that
-            # a continuation was planned under rules it never saw — and mandate
-            # 14.8 keeps `origin_rules_sha256` per member precisely so a queued
-            # delivery can be rendered from the artifact that produced it.
-            active_silences = load_active_silences(session, now=now)
-            limits = LIMITS
-            recipient = _recipient_ref(live_profile)
-
-            by_ruleset: dict[str, list[StateDecision]] = {}
-            for rules_sha, _rule, decision in planned:
-                by_ruleset.setdefault(rules_sha, []).append(decision)
-
-            for rules_sha, decisions in by_ruleset.items():
-                artifacts = archived.get(rules_sha, current)
-                fingerprints = set(episode_ids_by_hash.get(rules_sha, {}))
-                # RE-READ between passes. Each `persist_plan` adds deliveries
-                # that count against the budget and bumps notification
-                # generations, so a snapshot taken once before the loop lets the
-                # second ruleset plan against headroom the first already spent —
-                # the caps would be respected per pass and breached in total.
-                plan_result = plan(PlanInputs(
-                    now=now,
-                    rules=rules_by_hash.get(rules_sha, {}),
-                    decisions=decisions,
-                    episode_ids=episode_ids_by_hash.get(rules_sha, {}),
-                    memories=load_notification_memories(
-                        session, mode=mode, live_profile=live_profile,
-                        fingerprints=fingerprints),
-                    active_silences=active_silences,
-                    open_generations=load_open_generations(
-                        session, mode=mode, live_profile=live_profile,
-                        fingerprints=fingerprints),
-                    origin_rules_sha256=rules_sha,
-                    phrase_set_version=artifacts.phrase_set_version,
-                    phrase_set_sha256=artifacts.phrase_set_sha256,
-                    budget_usage=planner_budget_usage(
-                        session, mode=mode, live_profile=live_profile, now=now),
-                    budget_limits=limits,
-                    flapping_fingerprints=load_flapping_fingerprints(
-                        session, mode=mode, live_profile=live_profile,
-                        rules_sha256=rules_sha, fingerprints=fingerprints),
-                ))
-                persist_plan(
-                    session, plan_result, mode=mode, live_profile=live_profile,
-                    planning_rules_sha256=rules_sha,
-                    recipient_ref=recipient, now=now,
-                )
-                session.flush()   # so the next pass SEES what this one wrote
+            # Members carry origin_rules_sha256 because the dispatcher renders
+            # a queued delivery from the bytes it was planned with (mandate 14.8).
+            fingerprints = set(episode_ids)
+            plan_result = plan(PlanInputs(
+                now=now,
+                rules=rules,
+                decisions=[decision for _rule, decision in planned],
+                episode_ids=episode_ids,
+                memories=load_notification_memories(
+                    session, mode=mode, live_profile=live_profile,
+                    fingerprints=fingerprints),
+                active_silences=load_active_silences(session, now=now),
+                open_generations=load_open_generations(
+                    session, mode=mode, live_profile=live_profile,
+                    fingerprints=fingerprints),
+                origin_rules_sha256=current.rules_sha256,
+                phrase_set_version=current.phrase_set_version,
+                phrase_set_sha256=current.phrase_set_sha256,
+                budget_usage=planner_budget_usage(
+                    session, mode=mode, live_profile=live_profile, now=now),
+                budget_limits=LIMITS,
+                flapping_fingerprints=load_flapping_fingerprints(
+                    session, mode=mode, live_profile=live_profile,
+                    rules_sha256=current.rules_sha256, fingerprints=fingerprints),
+            ))
+            persist_plan(
+                session, plan_result, mode=mode, live_profile=live_profile,
+                planning_rules_sha256=current.rules_sha256,
+                recipient_ref=_recipient_ref(live_profile), now=now,
+            )
             evaluation = session.get(AlertEvaluation, evaluation_id)
             if evaluation is not None:
                 evaluation.status = EvaluationRunStatus.COMMITTED
@@ -578,8 +449,7 @@ def run_evaluation(
                     AlertEvaluationRuleset.evaluation_id == evaluation_id)
             ).scalars().all():
                 item.status = RulesetItemStatus.EVALUATED
-                item.instances_evaluated = sum(
-                    1 for h, _r, _d in planned if h == item.rules_sha256)
+                item.instances_evaluated = len(planned)
     except EvaluationConflict as exc:
         # The transaction has already rolled back: NOTHING was applied.
         _finish(session_factory, evaluation_id, EvaluationRunStatus.CONFLICT, now,
@@ -593,7 +463,7 @@ def run_evaluation(
                 started, error=exc)
         raise
 
-    decisions = [d for _h, _r, d in planned]
+    decisions = [d for _r, d in planned]
     log.info("alert_evaluation_committed", evaluation_id=evaluation_id,
              rules=len(planned), firing=sum(1 for d in decisions
                                             if d.condition_state == ConditionState.FIRING))
@@ -605,18 +475,6 @@ def run_evaluation(
         duration_ms=int((time.monotonic() - started) * 1000),
         decisions=decisions,
     )
-
-
-def _evaluation_order(current: ValidatedRuleset, archived: dict[str, ValidatedRuleset],
-                      origins: list[str]) -> list[tuple[str, ValidatedRuleset, str]]:
-    order: list[tuple[str, ValidatedRuleset, str]] = [
-        (current.rules_sha256, current, RulesetRole.CURRENT)
-    ]
-    for rules_sha in origins:
-        ruleset = archived.get(rules_sha)
-        if ruleset is not None and rules_sha != current.rules_sha256:
-            order.append((rules_sha, ruleset, RulesetRole.ORIGIN_CONTINUATION))
-    return order
 
 
 def _input_moment(alert_input: AlertInput, fallback: datetime) -> datetime:

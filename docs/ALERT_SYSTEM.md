@@ -43,9 +43,24 @@ and "sent" in different pointers.
 
 **Everything is content-addressed and replayable.** Rules, phrases and the
 input sidecar are immutable artifacts identified by SHA-256. Every episode
-names the ruleset that opened it, and that ruleset keeps being evaluated until
-the episode closes. A replay reads persisted sidecars and archived bytes — it
-never asks a provider what the world looks like now.
+names the ruleset that opened it, and only the current ruleset decides
+episodes (owner decision D2e): an episode another ruleset opened is resolved
+as `RULESET_REPLACED`, at the promotion that replaces its rules or at the first
+evaluation under a new candidate
+(tests/test_alert_recovery.py::test_a_new_candidate_resolves_the_episodes_of_the_ruleset_it_replaces,
+::test_an_evaluation_covers_exactly_the_current_ruleset). A live evaluation
+applies only while its ruleset is still the promoted one: a promotion that
+commits while it runs ends it CONFLICT with nothing applied
+(::test_a_live_evaluation_applies_nothing_once_a_promotion_superseded_its_rules);
+its apply transaction takes the write lock before that check. The run's
+budget bounds the evaluation, not the apply, which commits what the
+evaluation decided whatever the clock says
+(::test_the_budget_bounds_the_evaluation_not_the_apply). Migration 0022
+ended any live episode the deleted continuation had kept open under a ruleset
+no longer promoted, as a promotion would
+(tests/test_migrations.py::test_0022_resolves_live_episodes_left_under_a_ruleset_no_longer_promoted). A replay reads
+persisted sidecars and archived bytes — it never asks a provider what the world
+looks like now.
 
 ---
 
@@ -375,6 +390,20 @@ change `ALERTS_MODE`**. Promotion validates the files structurally, registers
 their exact bytes and marks them PROMOTED, superseding the previous promotion;
 it reads no evidence (owner decision D2d) - the CI replay gate is the evidence.
 
+In the same transaction, promotion resolves every open episode a different
+ruleset opened, in every mode (owner decision D2e): the episode becomes
+RESOLVED with the reason `RULESET_REPLACED`, and its `episode_resolved` event
+names the promoted ruleset as the cause (causation `RULESET`). Promotion plans
+no message. An alert still queued for such an episode is withdrawn at dispatch,
+and the weekly digest still counts the episodes that fired. A condition that is
+still true opens a new episode at the next evaluation, under the promoted rules
+and from the start - a rule that needs two confirmations counts them again - and
+a repeat within the cooldown of an alert already sent stays suppressed, because
+the cooldown is keyed without a rules hash. A transition rule waits for its
+next transition (tests/test_alert_recovery.py::test_promotion_resolves_the_replaced_rulesets_open_episodes,
+::test_a_promotion_withdraws_the_replaced_rulesets_queued_alert_and_sends_nothing,
+::test_a_still_true_condition_reopens_under_the_promoted_ruleset).
+
 ### Crash recovery
 
 | state | meaning | action |
@@ -595,7 +624,8 @@ and the claim, which judges the ruleset that planned the work by its
 promotion, never by re-reading evidence: in live mode it takes only work
 planned under a ruleset that was promoted and is not revoked - REVOKED
 outranks a past promotion - however and whenever the work was queued, and a
-ruleset superseded since still finishes what it planned
+ruleset superseded since still finishes what it planned, except an alert whose
+episode the superseding promotion resolved, which is withdrawn (section 9)
 (tests/test_alert_promotion.py::test_live_dispatch_sends_no_work_planned_under_rules_nobody_promoted,
 ::test_live_dispatch_sends_work_planned_under_a_promoted_ruleset). The
 listing and the claim's own conditional UPDATE carry the same condition, so a

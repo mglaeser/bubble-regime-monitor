@@ -295,13 +295,9 @@ def mechanism_projection(
             "condition_state": state.condition_state if state else ConditionState.NORMAL,
             "last_known_condition_state": state.last_known_condition_state if state else None,
             "current_episode_id": state.current_episode_id if state else None,
-            "inherited_open_episode_id": state.inherited_open_episode_id if state else None,
             "suppression_reasons": _suppression_for(session, state),
             "planning_state": _planning_state_for(
-                session,
-                ((state.current_episode_id or state.inherited_open_episode_id)
-                 if state else None),
-            ),
+                session, state.current_episode_id if state else None),
             "notification_disposition": _disposition(session, state),
             "confirmation": {
                 "required": rule.confirmation.count,
@@ -328,7 +324,7 @@ def mechanism_projection(
 def _suppression_for(session: Session, state: AlertRuleState | None) -> list[str]:
     if state is None:
         return []
-    episode_id = state.current_episode_id or state.inherited_open_episode_id
+    episode_id = state.current_episode_id
     if episode_id is None:
         return []
     episode = session.get(AlertEpisode, episode_id)
@@ -343,7 +339,7 @@ def _disposition(session: Session, state: AlertRuleState | None) -> str:
     """
     if state is None:
         return "NONE"
-    episode_id = state.current_episode_id or state.inherited_open_episode_id
+    episode_id = state.current_episode_id
     if episode_id is None:
         return "NONE"
 
@@ -521,8 +517,8 @@ _CLOCK_SKEW_TOLERANCE_S = 60
 
 #: The schema this build expects. Health reports a FAULT when the live
 #: database is on any other revision, so this moves in the same PR as a
-#: migration - 0021 drops the promotion evidence stamp (D2d).
-_ALERT_SCHEMA_REVISION = "0021"
+#: migration - 0022 drops the episode inheritance (D2e).
+_ALERT_SCHEMA_REVISION = "0022"
 _REQUIRED_PARTIAL_INDEXES = frozenset({
     "uq_alert_input_snapshot_id",
     "uq_alert_episode_open",
@@ -583,11 +579,6 @@ def health_projection(
         AlertDelivery.live_profile == profile,
     )
     scoped_episode_ids = select(AlertEpisode.episode_id).where(*episode_scope)
-
-    origins = session.execute(
-        select(AlertEpisode.origin_rules_sha256)
-        .where(*episode_scope, AlertEpisode.is_open.is_(True)).distinct()
-    ).scalars().all()
 
     sqlite_info: dict[str, Any] = {}
     from sqlalchemy import text as _text
@@ -1034,8 +1025,6 @@ def health_projection(
         "promoted_rules_sha256": promoted.rules_sha256 if promoted else None,
         "live_matches_promoted": bool(
             promoted and ruleset and promoted.rules_sha256 == ruleset.rules_sha256),
-        "archived_rulesets_with_open_episodes": sorted(
-            {h for h in origins if not ruleset or h != ruleset.rules_sha256}),
         "evaluations": {
             "committed": _count(AlertEvaluation,
                                 *evaluation_scope,

@@ -113,7 +113,7 @@ def test_health_reports_mode_artifacts_and_sqlite(client):
     assert str(payload["sqlite"]["journal_mode"]).lower() == "wal"
     assert payload["sqlite"]["returning"]["insert"] is True
     assert payload["sqlite"]["returning"]["update"] is True
-    assert payload["schema"]["revision"] == "0021"
+    assert payload["schema"]["revision"] == "0022"
     assert payload["schema"]["quick_check"] == "ok"
     assert payload["schema"]["foreign_key_violations"] == 0
     assert payload["schema"]["missing_required_triggers"] == []
@@ -660,10 +660,7 @@ def test_notification_disposition_reports_transport_outcome_not_eligibility(
     from tests.test_alert_addendum_support import seed_delivery_for_episode
 
     episode_id = seed_delivery_for_episode(transport=TransportStatus.SENT)
-    state = SimpleNamespace(
-        current_episode_id=episode_id,
-        inherited_open_episode_id=None,
-    )
+    state = SimpleNamespace(current_episode_id=episode_id)
     with session_scope() as session:
         member = session.execute(select(AlertDeliveryMember)).scalars().one()
         member.delivered = True

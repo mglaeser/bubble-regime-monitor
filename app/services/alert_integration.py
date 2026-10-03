@@ -24,19 +24,14 @@ from typing import Any
 
 from sqlalchemy import select
 
-from app.alerts.artifacts import (
-    archived_rulesets,
-    load_active,
-    load_active_for_mode,
-    register,
-)
+from app.alerts.artifacts import load_active, load_active_for_mode, register
 from app.alerts.dto import ALERT_INPUT_SCHEMA_VERSION
 from app.alerts.engine import run_evaluation
 from app.alerts.enums import InputOrigin
 from app.alerts.errors import sanitize
 from app.alerts.input_builder import build_alert_input, serialize
 from app.alerts.models import AlertInputSnapshot
-from app.alerts.repository import load_input, origin_rulesets_with_open_episodes
+from app.alerts.repository import load_input
 from app.config import get_settings
 from app.db import session_scope
 from app.logging_conf import get_logger
@@ -202,19 +197,11 @@ def evaluate_input(input_identity: str, *, mode: str | None = None,
         if alert_input is None:
             log.warning("alert_input_missing", input_identity=input_identity)
             return None
-        origins = origin_rulesets_with_open_episodes(
-            session, mode=effective_mode, live_profile=settings.alerts_live_profile,
-            current_rules_sha256=artifacts.ruleset.rules_sha256)
-        # Archived rulesets that still own open episodes are rebuilt from their
-        # stored bytes and evaluated alongside the current one, so a promotion
-        # never orphans an episode.
-        archived = archived_rulesets(session, origins)
 
     return run_evaluation(
         session_scope,
         alert_input=alert_input,
         current=artifacts.ruleset,
-        archived=archived,
         mode=effective_mode,
         live_profile=settings.alerts_live_profile,
         now=now,

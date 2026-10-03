@@ -67,9 +67,8 @@ def identity_hash(*parts: object) -> str:
 def sorted_hash_set(hashes: object) -> str:
     """Order-independent identity of a SET of content hashes.
 
-    An evaluation batch may span the current ruleset plus any archived rulesets
-    that still own open episodes; the batch's identity must not depend on the
-    order they happened to be loaded in.
+    An evaluation's identity covers its evaluated set, which since owner
+    decision D2e is the current ruleset alone.
     """
     unique = sorted({str(h) for h in hashes})  # type: ignore[union-attr]
     return sha256_hex("|".join(unique))
