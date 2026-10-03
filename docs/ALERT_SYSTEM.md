@@ -692,7 +692,8 @@ digest's branch out of the member trigger: a member dropped before the send
 (resolved, say) no longer represents a `DIGEST` row, which, like every kind but
 TEST, needs a member that was not dropped (section 7). It first cancels every
 `DIGEST` delivery that has not gone out (queued, due for a retry or leased) as
-`WEEKLY_DIGEST_REMOVED`, so none reaches the wire
+`WEEKLY_DIGEST_REMOVED`, so none reaches the wire, and ends one in flight
+`UNKNOWN`, so no `DIGEST` row is left that could move to `SENDING` or `SENT`
 (tests/test_migrations.py::test_0024_cancels_a_weekly_digest_still_queued), and
 it refuses while the table holds a row. The daily digest is a different
 message and is unchanged.

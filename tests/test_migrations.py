@@ -971,10 +971,12 @@ def test_0024_cancels_a_weekly_digest_still_queued(tmp_path):
     weekly digest, so a DIGEST delivery still queued at the upgrade could
     reach the provider with nothing left to check it against. 0024 cancels
     every DIGEST delivery that has not gone out - queued, due for a retry or
-    leased, all before the wire - as WEEKLY_DIGEST_REMOVED. One in flight
-    (SENDING) may have been accepted, so lease recovery ends it UNKNOWN;
-    a sent one stays sent. Production held no DIGEST delivery (read-only,
-    2026-10-03)."""
+    leased, all before the wire - as WEEKLY_DIGEST_REMOVED. #163 round 3,
+    SOTA-A: one in flight (SENDING) may have been accepted, and the member
+    trigger without its DIGEST branch would refuse to record it SENT; 0024
+    ends it UNKNOWN, which is terminal, so no DIGEST row is left that could
+    move to SENDING or SENT. A sent one stays sent. Production held no DIGEST
+    delivery (read-only, 2026-10-03)."""
     db = str(tmp_path / "queued-digest.db")
     phrases = hashlib.sha256(b"the phrase set").hexdigest()
     rules = hashlib.sha256(b"the ruleset").hexdigest()
@@ -1026,7 +1028,7 @@ def test_0024_cancels_a_weekly_digest_still_queued(tmp_path):
         for delivery in ("01M0DIGESTQUEUED0000000000", "01M0DIGESTRETRYDUE00000000",
                          "01M0DIGESTLEASED0000000000"):
             assert rows[delivery] == ("CANCELLED", "WEEKLY_DIGEST_REMOVED"), delivery
-        assert rows["01M0DIGESTSENDING000000000"] == ("SENDING", None)
+        assert rows["01M0DIGESTSENDING000000000"] == ("UNKNOWN", None)
         assert rows["01M0DIGESTSENT000000000000"] == ("SENT", None)
 
     _run_with_db(db, _cycle)
