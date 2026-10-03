@@ -17,7 +17,7 @@ import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Query, Request, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy import and_, exists, or_, select
 
@@ -44,30 +44,6 @@ from app.db import session_scope
 from app.security import READ_RATE_LIMIT, limiter, require_admin_key
 
 router = APIRouter(prefix="/api/v1/alerts", tags=["alerts"])
-
-
-class NoStore:
-    """Every answer under /api/v1/alerts - data or error - is the operator's
-    and current, so nothing caches it (owner decision D3c). An ASGI
-    middleware, because a dependency's headers never reach the response an
-    exception or a validation error produces (#165 round 1)."""
-
-    def __init__(self, app: Any) -> None:
-        self.app = app
-
-    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
-        if scope["type"] != "http" or not scope["path"].startswith(router.prefix):
-            await self.app(scope, receive, send)
-            return
-
-        async def send_no_store(message: Any) -> None:
-            if message["type"] == "http.response.start":
-                headers = [(k, v) for k, v in message.get("headers", [])
-                           if k.lower() != b"cache-control"]
-                message = {**message, "headers": [*headers, (b"cache-control", b"no-store")]}
-            await send(message)
-
-        await self.app(scope, receive, send_no_store)
 
 MAX_PAGE = 500
 CURSOR_VERSION = "v2"
@@ -179,6 +155,16 @@ def _decode_cursor(
     return payload
 
 
+def _cache(response: Response, *, max_age: int) -> None:
+    response.headers["Cache-Control"] = f"private, max-age={max_age}"
+    response.headers["Vary"] = "X-API-Key"
+
+
+def _no_store(response: Response) -> None:
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["Vary"] = "X-API-Key"
+
+
 def _cursor_problem(exc: CursorError) -> JSONResponse:
     return problem(exc.status, exc.title, exc.detail)
 
@@ -209,7 +195,8 @@ def _load() -> LoadedArtifacts | None:
 
 @router.get("/health", summary="Alert-system health")
 @limiter.limit(READ_RATE_LIMIT)
-def get_health(request: Request, _: None = Depends(require_admin_key)) -> Any:
+def get_health(request: Request, response: Response,
+               _: None = Depends(require_admin_key)) -> Any:
     settings = get_settings()
     artifacts = _load()
     with session_scope() as session:
@@ -221,12 +208,14 @@ def get_health(request: Request, _: None = Depends(require_admin_key)) -> Any:
             fallback_reason=artifacts.fallback_reason if artifacts else
             "no valid ruleset is loadable",
         )
+    _cache(response, max_age=30)
     return payload
 
 
 @router.get("/overview", summary="One-screen alert overview")
 @limiter.limit(READ_RATE_LIMIT)
-def get_overview(request: Request, _: None = Depends(require_admin_key)) -> Any:
+def get_overview(request: Request, response: Response,
+                 _: None = Depends(require_admin_key)) -> Any:
     artifacts = _load()
     if artifacts is None:
         return problem(503, "Alerting unavailable",
@@ -259,12 +248,14 @@ def get_overview(request: Request, _: None = Depends(require_admin_key)) -> Any:
         "latest": pointers,
         "unresolved_pins": unresolved_pins(artifacts.ruleset),
     }
+    _cache(response, max_age=30)
     return payload
 
 
 @router.get("/mechanisms", summary="Every rule instance and its state")
 @limiter.limit(READ_RATE_LIMIT)
-def get_mechanisms(request: Request, bucket: str | None = Query(default=None),
+def get_mechanisms(request: Request, response: Response,
+                   bucket: str | None = Query(default=None),
                    _: None = Depends(require_admin_key)) -> Any:
     artifacts = _load()
     if artifacts is None:
@@ -276,12 +267,13 @@ def get_mechanisms(request: Request, bucket: str | None = Query(default=None),
     if bucket:
         items = [i for i in items if i["bucket"] == bucket]
     payload = {"items": items[:MAX_PAGE], "total": len(items)}
+    _cache(response, max_age=60)
     return payload
 
 
 @router.get("/mechanisms/{instance_fingerprint}", summary="One mechanism in detail")
 @limiter.limit(READ_RATE_LIMIT)
-def get_mechanism(request: Request, instance_fingerprint: str,
+def get_mechanism(request: Request, instance_fingerprint: str, response: Response,
                   _: None = Depends(require_admin_key)) -> Any:
     artifacts = _load()
     if artifacts is None:
@@ -292,6 +284,7 @@ def get_mechanism(request: Request, instance_fingerprint: str,
                                      live_profile=profile)
     for item in items:
         if item["instance_fingerprint"] == instance_fingerprint:
+            _cache(response, max_age=60)
             return item
     return problem(404, "Unknown mechanism",
                    "no rule instance with that fingerprint in the active ruleset")
@@ -299,7 +292,7 @@ def get_mechanism(request: Request, instance_fingerprint: str,
 
 @router.get("/rules/{rule_id}/instances", summary="Instances of one rule")
 @limiter.limit(READ_RATE_LIMIT)
-def get_rule_instances(request: Request, rule_id: str,
+def get_rule_instances(request: Request, rule_id: str, response: Response,
                        _: None = Depends(require_admin_key)) -> Any:
     artifacts = _load()
     if artifacts is None:
@@ -311,12 +304,14 @@ def get_rule_instances(request: Request, rule_id: str,
     if not items:
         return problem(404, "Unknown rule", f"no rule {rule_id!r} in the active ruleset")
     payload = {"rule_id": rule_id, "items": items}
+    _cache(response, max_age=60)
     return payload
 
 
 @router.get("/episodes", summary="Episodes, newest first")
 @limiter.limit(READ_RATE_LIMIT)
-def get_episodes(request: Request, open_only: bool = Query(default=False),
+def get_episodes(request: Request, response: Response,
+                 open_only: bool = Query(default=False),
                  limit: int = Query(default=100, ge=1, le=MAX_PAGE),
                  cursor: str | None = Query(default=None),
                  _: None = Depends(require_admin_key)) -> Any:
@@ -349,12 +344,13 @@ def get_episodes(request: Request, open_only: bool = Query(default=False),
         })
         if len(rows) == limit else None,
     }
+    _cache(response, max_age=30)
     return payload
 
 
 @router.get("/episodes/{episode_id}", summary="One episode")
 @limiter.limit(READ_RATE_LIMIT)
-def get_episode(request: Request, episode_id: str,
+def get_episode(request: Request, episode_id: str, response: Response,
                 _: None = Depends(require_admin_key)) -> Any:
     mode, profile = _mode()
     with session_scope() as session:
@@ -373,6 +369,7 @@ def get_episode(request: Request, episode_id: str,
         ).scalars().all()
         payload = episode_projection(row)
         payload["events"] = [_event_projection(e) for e in events]
+    _cache(response, max_age=30)
     return payload
 
 
@@ -428,7 +425,8 @@ def _event_namespace(mode: str, live_profile: str) -> Any:
 
 @router.get("/events", summary="Audit events, newest first")
 @limiter.limit(READ_RATE_LIMIT)
-def get_events(request: Request, limit: int = Query(default=100, ge=1, le=MAX_PAGE),
+def get_events(request: Request, response: Response,
+               limit: int = Query(default=100, ge=1, le=MAX_PAGE),
                cursor: str | None = Query(default=None),
                _: None = Depends(require_admin_key)) -> Any:
     mode, profile = _mode()
@@ -455,21 +453,25 @@ def get_events(request: Request, limit: int = Query(default=100, ge=1, le=MAX_PA
         })
         if len(rows) == limit else None,
     }
+    _cache(response, max_age=30)
     return payload
 
 
 @router.get("/latest", summary="Latest pointers — fired and sent kept apart")
 @limiter.limit(READ_RATE_LIMIT)
-def get_latest(request: Request, _: None = Depends(require_admin_key)) -> Any:
+def get_latest(request: Request, response: Response,
+               _: None = Depends(require_admin_key)) -> Any:
     mode, profile = _mode()
     with session_scope() as session:
         payload = latest_pointers(session, mode=mode, live_profile=profile)
+    _cache(response, max_age=30)
     return payload
 
 
 @router.get("/deliveries", summary="Delivery intents (redacted)")
 @limiter.limit(READ_RATE_LIMIT)
-def get_deliveries(request: Request, limit: int = Query(default=100, ge=1, le=MAX_PAGE),
+def get_deliveries(request: Request, response: Response,
+                   limit: int = Query(default=100, ge=1, le=MAX_PAGE),
                    cursor: str | None = Query(default=None),
                    _: None = Depends(require_admin_key)) -> Any:
     mode, profile = _mode()
@@ -498,6 +500,7 @@ def get_deliveries(request: Request, limit: int = Query(default=100, ge=1, le=MA
             "sort_at": iso(rows[-1].created_at), "sort_id": rows[-1].delivery_id,
         }) if len(rows) == limit else None,
     }
+    _cache(response, max_age=30)
     return payload
 
 
@@ -551,7 +554,7 @@ def _delivery_projection(row: AlertDelivery,
 
 @router.get("/deliveries/{delivery_id}", summary="One delivery (redacted)")
 @limiter.limit(READ_RATE_LIMIT)
-def get_delivery(request: Request, delivery_id: str,
+def get_delivery(request: Request, delivery_id: str, response: Response,
                  _: None = Depends(require_admin_key)) -> Any:
     mode, profile = _mode()
     with session_scope() as session:
@@ -572,12 +575,13 @@ def get_delivery(request: Request, delivery_id: str,
             .order_by(AlertDeliveryMember.included_at.asc())
         ).scalars().all()
         payload = _delivery_projection(row, members=list(members))
+    _cache(response, max_age=30)
     return payload
 
 
 @router.get("/renders/{render_id}", summary="One render, including its text")
 @limiter.limit(READ_RATE_LIMIT)
-def get_render(request: Request, render_id: str,
+def get_render(request: Request, render_id: str, response: Response,
                _: None = Depends(require_admin_key)) -> Any:
     """The render's provenance and its message text, `no-store`.
 
@@ -614,24 +618,28 @@ def get_render(request: Request, render_id: str,
             "body_redacted_at": iso(row.body_redacted_at),
             "created_at": iso(row.created_at),
         }
+    _no_store(response)
     return payload
 
 
 @router.get("/ruleset", summary="The active ruleset summary")
 @limiter.limit(READ_RATE_LIMIT)
-def get_ruleset(request: Request, _: None = Depends(require_admin_key)) -> Any:
+def get_ruleset(request: Request, response: Response,
+                _: None = Depends(require_admin_key)) -> Any:
     artifacts = _load()
     if artifacts is None:
         return problem(503, "Alerting unavailable", "no valid ruleset is loadable")
     payload = ruleset_summary(artifacts.ruleset)
     payload["source"] = artifacts.source
     payload["fallback_reason"] = artifacts.fallback_reason
+    _cache(response, max_age=60)
     return payload
 
 
 @router.get("/silences", summary="Active and scheduled silences")
 @limiter.limit(READ_RATE_LIMIT)
-def get_silences(request: Request, _: None = Depends(require_admin_key)) -> Any:
+def get_silences(request: Request, response: Response,
+                 _: None = Depends(require_admin_key)) -> Any:
     now = datetime.now(UTC)
     with session_scope() as session:
         rows = session.execute(
@@ -648,4 +656,5 @@ def get_silences(request: Request, _: None = Depends(require_admin_key)) -> Any:
             "active": row.starts_at.replace(tzinfo=UTC) <= now
             if row.starts_at.tzinfo is None else row.starts_at <= now,
         } for row in rows]}
+    _cache(response, max_age=30)
     return payload

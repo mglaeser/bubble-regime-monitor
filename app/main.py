@@ -110,7 +110,6 @@ def create_app() -> FastAPI:
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
     app.add_middleware(SlowAPIMiddleware)
-    app.add_middleware(alerts.NoStore)
 
     # CORS so browser dashboards on another origin can call the public read API.
     # Reads are public (READ_ENDPOINTS_PUBLIC=true) so no

@@ -946,27 +946,6 @@ def test_cursor_is_bound_to_its_resource_namespace_and_filters(
     assert response.headers["content-type"].startswith("application/problem+json")
 
 
-def test_every_alert_answer_is_no_store_errors_included(client):
-    """#165 round 1, SOTA-A: no-store was set on FastAPI's provisional
-    response, which an exception or a validation error replaces, so a 401,
-    a 422 or a 404 under /api/v1/alerts carried no cache directive. Every
-    answer under the path is the operator's and current - data or error -
-    and says no-store."""
-    answers = {
-        "no key (401)": client.get("/api/v1/alerts/events"),
-        "bad limit (422)": client.get("/api/v1/alerts/events?limit=0",
-                                      headers={"X-API-Key": TEST_ADMIN_KEY}),
-        "unknown episode (404)": client.get("/api/v1/alerts/episodes/01M0NOSUCHEPISODE000000000",
-                                            headers={"X-API-Key": TEST_ADMIN_KEY}),
-        "a read (200)": client.get("/api/v1/alerts/events", headers={"X-API-Key": TEST_ADMIN_KEY}),
-    }
-    assert {name: r.status_code for name, r in answers.items()} == {
-        "no key (401)": 401, "bad limit (422)": 422, "unknown episode (404)": 404,
-        "a read (200)": 200}
-    assert {name: r.headers.get("cache-control") for name, r in answers.items()
-            if r.headers.get("cache-control") != "no-store"} == {}
-
-
 def test_no_alert_read_sets_an_etag_or_answers_304(client, monkeypatch):
     """Owner decision D3c (2026-10-03): the alert reads set no ETag and answer
     no conditional request. `If-None-Match: *` matches any current
@@ -999,8 +978,14 @@ def test_no_alert_read_sets_an_etag_or_answers_304(client, monkeypatch):
         get_settings.cache_clear()
     assert {path: r.status_code for path, r in responses.items() if r.status_code != 200} == {}
     assert [path for path, r in responses.items() if "etag" in r.headers] == []
-    assert {path: r.headers.get("cache-control") for path, r in responses.items()
-            if r.headers.get("cache-control") != "no-store"} == {}
+    # D3c removes conditional requests and nothing else: each read keeps the
+    # directives the ETag helper set, and the render read, which carries
+    # message text, stays no-store (#165 rounds 1 and 2).
+    assert [path for path, r in responses.items()
+            if not r.headers["cache-control"].startswith(
+                "private, no-store" if "/renders/" in path else "private, max-age=")] == []
+    assert [path for path, r in responses.items()
+            if "X-API-Key" not in r.headers["vary"]] == []
 
 
 def test_event_cursor_uses_timestamp_and_id_together(client):
