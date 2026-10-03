@@ -686,8 +686,12 @@ written. Its scheduler job, its `alerts digest` command and the `digest`
 component heartbeat went with it, so health no longer expects that heartbeat.
 A P3 activation is API and log only, like a P4 (section 6): the planner notes
 it and plans nothing. `DIGEST` remains stored delivery-kind vocabulary
-(`ck_alert_delivery_kind` admits it), and the `alert_digest_item` table goes
-with its own migration. The daily digest is a different message and is
+(`ck_alert_delivery_kind` admits it). Migration 0024 drops the
+`alert_digest_item` table and the `digest` heartbeat row, and takes the
+digest's branch out of the member trigger: a member dropped before the send
+(resolved, say) no longer represents a `DIGEST` row, which, like every kind but
+TEST, needs a member that was not dropped (section 7). The migration refuses
+while the table holds a row. The daily digest is a different message and is
 unchanged.
 
 ## 11d. The audited admin surface

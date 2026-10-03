@@ -514,8 +514,8 @@ _CLOCK_SKEW_TOLERANCE_S = 60
 
 #: The schema this build expects. Health reports a FAULT when the live
 #: database is on any other revision, so this moves in the same PR as a
-#: migration - 0023 drops the manual retry and the replanning block (D2f).
-_ALERT_SCHEMA_REVISION = "0023"
+#: migration - 0024 drops the weekly digest's storage (D2a).
+_ALERT_SCHEMA_REVISION = "0024"
 _REQUIRED_PARTIAL_INDEXES = frozenset({
     "uq_alert_input_snapshot_id",
     "uq_alert_episode_open",

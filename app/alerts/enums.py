@@ -187,21 +187,6 @@ class MemberRole(StrEnum):
     ESCALATION = "ESCALATION"
 
 
-class DigestItemStatus(StrEnum):
-    """A digest item has its own lifecycle — not a pair of episode columns.
-
-    FAILED may be replanned in a later window. UNKNOWN is never replanned: the
-    message may already have been delivered.
-    """
-
-    PENDING = "PENDING"
-    PLANNED = "PLANNED"
-    DELIVERED = "DELIVERED"
-    FAILED = "FAILED"
-    UNKNOWN = "UNKNOWN"
-    CANCELLED = "CANCELLED"
-
-
 class EvaluationRunStatus(StrEnum):
     STARTED = "STARTED"
     COMMITTED = "COMMITTED"

@@ -155,7 +155,15 @@ def test_fresh_db_migrates_and_stamps(tmp_path):
 
 
 def test_only_test_may_reach_sending_without_a_represented_member(tmp_path):
-    """The database guard matches the runtime and mandate 21.3 exactly."""
+    """The database guard matches the runtime and mandate 21.3 exactly: TEST
+    is the only kind that reaches the wire without a represented member, and
+    a member represents its delivery only while it has not been dropped.
+
+    Owner decision D2a: under the weekly digest's branch a member dropped
+    before the send still represented a DIGEST unless it was silenced, and
+    0024 took that branch out of the guard. A DIGEST row an older database
+    may still hold is held to the rule of every kind.
+    """
     from app.db_migrate import upgrade_to_head
 
     db = str(tmp_path / "member-guard.db")
@@ -234,43 +242,38 @@ def test_only_test_may_reach_sending_without_a_represented_member(tmp_path):
             ("r" * 64, timestamp, timestamp),
         )
 
-    represented = "01M0MEMBERGUARDRESOLVED000"
-    add_delivery(represented, "DIGEST")
-    connection.execute(
-        """
-        INSERT INTO alert_delivery_member (
-            delivery_id, episode_id, rule_id, instance_fingerprint,
-            member_role, notification_generation, origin_rules_sha256,
-            origin_phrase_set_version, origin_phrase_set_sha256,
-            included_at, dropped_at, drop_reason, delivered
-        ) VALUES (?, 'episode-resolved', 'rule', ?, 'SUMMARY', 1, ?,
-                  'v3.4', ?, ?, ?, 'RESOLVED_BEFORE_SEND', 0)
-        """,
-        (represented, "f" * 64, "r" * 64, "p" * 64, timestamp, timestamp),
-    )
-    connection.execute(
-        "UPDATE alert_delivery SET transport_status='SENDING' WHERE delivery_id=?",
-        (represented,),
-    )
+    def add_member(delivery_id: str, episode_id: str, drop_reason: str | None) -> None:
+        connection.execute(
+            """
+            INSERT INTO alert_delivery_member (
+                delivery_id, episode_id, rule_id, instance_fingerprint,
+                member_role, notification_generation, origin_rules_sha256,
+                origin_phrase_set_version, origin_phrase_set_sha256,
+                included_at, dropped_at, drop_reason, delivered
+            ) VALUES (?, ?, 'rule', ?, 'PRIMARY', 1, ?, 'v3.4', ?, ?, ?, ?, 0)
+            """,
+            (delivery_id, episode_id, "f" * 64, "r" * 64, "p" * 64, timestamp,
+             timestamp if drop_reason else None, drop_reason),
+        )
 
-    silenced = "01M0MEMBERGUARDSILENCED000"
-    add_delivery(silenced, "DIGEST")
-    connection.execute(
-        """
-        INSERT INTO alert_delivery_member (
-            delivery_id, episode_id, rule_id, instance_fingerprint,
-            member_role, notification_generation, origin_rules_sha256,
-            origin_phrase_set_version, origin_phrase_set_sha256,
-            included_at, dropped_at, drop_reason, delivered
-        ) VALUES (?, 'episode-silenced', 'rule', ?, 'SUMMARY', 1, ?,
-                  'v3.4', ?, ?, ?, 'SILENCED_BEFORE_SEND', 0)
-        """,
-        (silenced, "e" * 64, "r" * 64, "p" * 64, timestamp, timestamp),
-    )
-    with pytest.raises(sqlite3.IntegrityError, match="represented member"):
+    # A member dropped before the send, resolved or silenced, represents
+    # nothing, whatever the kind; a DIGEST with a resolved member is the case
+    # 0024 changed. A member that was not dropped does represent it.
+    for delivery_id, kind, drop_reason in (
+            ("01M0MEMBERGUARDRESOLVED000", "INITIAL", "RESOLVED_BEFORE_SEND"),
+            ("01M0MEMBERGUARDDIGRESOLVED", "DIGEST", "RESOLVED_BEFORE_SEND"),
+            ("01M0MEMBERGUARDSILENCED000", "DIGEST", "SILENCED_BEFORE_SEND")):
+        add_delivery(delivery_id, kind)
+        add_member(delivery_id, f"episode-dropped-{kind}-{drop_reason}", drop_reason)
+        with pytest.raises(sqlite3.IntegrityError, match="represented member"):
+            connection.execute(
+                "UPDATE alert_delivery SET transport_status='SENDING' WHERE delivery_id=?",
+                (delivery_id,),
+            )
+        add_member(delivery_id, f"episode-live-{kind}-{drop_reason}", None)
         connection.execute(
             "UPDATE alert_delivery SET transport_status='SENDING' WHERE delivery_id=?",
-            (silenced,),
+            (delivery_id,),
         )
     connection.close()
 
@@ -436,7 +439,7 @@ def test_admin_atomicity_migration_upgrade_downgrade_upgrade(tmp_path):
     # Bump this in the same PR that adds a migration — that is the point of
     # pinning it rather than reading `head`, which would pass vacuously.
     assert connection.execute(
-        "select version_num from alembic_version").fetchone() == ("0023",)
+        "select version_num from alembic_version").fetchone() == ("0024",)
     connection.close()
 
 
@@ -529,7 +532,7 @@ def test_the_evidence_stamp_drop_round_trips_and_keeps_the_immutability_trigger(
             connection.execute(
                 "update alert_ruleset_registry set canonical_yaml = 'changed'")
         assert connection.execute(
-            "select version_num from alembic_version").fetchone() == ("0023",)
+            "select version_num from alembic_version").fetchone() == ("0024",)
     finally:
         connection.close()
 
@@ -795,11 +798,12 @@ def test_the_inheritance_drop_resets_inherited_state_and_round_trips(tmp_path):
         assert _states()[current][1:5] == ("NORMAL", "NORMAL", None, 0), "the reset is not reversed"
         assert _episodes() == episodes
 
-        command.upgrade(cfg, "head")
+        command.upgrade(cfg, "0022")
         assert _alert_episode_shape(db) == rebuilt
+        command.upgrade(cfg, "head")
 
     _run_with_db(db, _cycle)
-    assert _read("select version_num from alembic_version") == [("0023",)]
+    assert _read("select version_num from alembic_version") == [("0024",)]
 
 
 def _delivery_and_memory_shape(db: str) -> dict[str, object]:
@@ -944,11 +948,141 @@ def test_the_manual_retry_drop_round_trips_and_keeps_the_delivery_triggers(tmp_p
         assert _read(f"select {', '.join(memory)} "  # noqa: S608
                      "from alert_instance_notification_state") == [(None, None)]
 
-        command.upgrade(cfg, "head")
+        command.upgrade(cfg, "0023")
         assert _delivery_and_memory_shape(db) == after
+        command.upgrade(cfg, "head")
 
     _run_with_db(db, _cycle)
-    assert _read("select version_num from alembic_version") == [("0023",)]
+    assert _read("select version_num from alembic_version") == [("0024",)]
+
+
+def _sqlite_master(db: str) -> set[tuple]:
+    """Every schema object as sqlite_master holds it: type, name, table and
+    SQL text, byte for byte (an auto-index has none)."""
+    connection = sqlite3.connect(db)
+    try:
+        return set(connection.execute("select type, name, tbl_name, sql from sqlite_master"))
+    finally:
+        connection.close()
+
+
+def test_the_weekly_digest_storage_is_dropped_and_restored_exactly(tmp_path):
+    """Owner decision D2a: the weekly digest is deleted, and 0024 drops what it
+    stored - the alert_digest_item table with its indexes, the DIGEST branch
+    of the member guard and the `digest` heartbeat row.
+
+    At 0024 the guard is the text app/alerts/models.py declares, and every
+    other schema object is 0023's, byte for byte. The downgrade restores the
+    0023 sqlite_master exactly; the heartbeat row is runtime data and is not
+    re-inserted (health stopped expecting it with the job, piece 1).
+    """
+    from app.alerts.models import IMMUTABILITY_TRIGGERS
+
+    db = str(tmp_path / "weekly-digest.db")
+    guard = "alert_delivery_requires_member"
+    at = "2026-09-28 06:30:00.000000"
+
+    def _read(sql: str) -> list[tuple]:
+        connection = sqlite3.connect(db)
+        try:
+            return connection.execute(sql).fetchall()
+        finally:
+            connection.close()
+
+    def _heartbeats() -> list[tuple]:
+        return _read("select component from alert_component_heartbeat order by component")
+
+    def _cycle():
+        from alembic import command
+
+        from app.db_migrate import _alembic_config
+
+        cfg = _alembic_config()
+        command.upgrade(cfg, "0023")
+        connection = sqlite3.connect(db)
+        connection.executemany(
+            "insert into alert_component_heartbeat (component, last_heartbeat_at, status, "
+            "detail_json) values (?, ?, 'ok', '{}')", [("digest", at), ("dispatcher", at)])
+        connection.commit()
+        connection.close()
+        before = _sqlite_master(db)
+        storage = {row for row in before if row[2] == "alert_digest_item"}
+        assert {row[:2] for row in storage} == {
+            ("table", "alert_digest_item"),
+            ("index", "ix_alert_digest_item_digest_window_key"),
+            ("index", "ix_alert_digest_item_episode_id"),
+            ("index", "sqlite_autoindex_alert_digest_item_1"),
+            ("index", "sqlite_autoindex_alert_digest_item_2"),
+        }
+        (old_guard,) = {row for row in before if row[1] == guard}
+        assert "DIGEST" in old_guard[3]
+
+        command.upgrade(cfg, "0024")
+        after = _sqlite_master(db)
+        (new_guard,) = {row for row in after if row[1] == guard}
+        # sqlite_master keeps the statement without IF NOT EXISTS and without
+        # the surrounding newlines.
+        assert new_guard[3] == dict(IMMUTABILITY_TRIGGERS)[guard].strip().replace(
+            " IF NOT EXISTS", "")
+        assert "DIGEST" not in new_guard[3]
+        assert after == (before - storage - {old_guard}) | {new_guard}
+        assert _heartbeats() == [("dispatcher",)]
+
+        command.downgrade(cfg, "0023")
+        assert _sqlite_master(db) == before
+        assert _heartbeats() == [("dispatcher",)], "runtime data is not re-inserted"
+
+        command.upgrade(cfg, "0024")
+        assert _sqlite_master(db) == after
+        command.upgrade(cfg, "head")
+
+    _run_with_db(db, _cycle)
+    assert _read("select version_num from alembic_version") == [("0024",)]
+
+
+def test_the_weekly_digest_migration_refuses_to_drop_its_items(tmp_path):
+    """Fail closed on data, as 0020: 0024 drops alert_digest_item only when it
+    is empty - production held no row - and otherwise refuses: the upgrade
+    rolls back, and the database stays at 0023 with its schema, the item and
+    the heartbeat row."""
+    db = str(tmp_path / "weekly-digest-items.db")
+    item = "01M0DIGESTITEMKEPT00000000"
+
+    def _seed_and_refuse():
+        from alembic import command
+
+        from app.db_migrate import _alembic_config
+
+        cfg = _alembic_config()
+        command.upgrade(cfg, "0023")
+        connection = sqlite3.connect(db)
+        connection.execute(
+            "insert into alert_digest_item (digest_item_id, episode_id, digest_window_key, "
+            "status, pending_at, still_active_summary) values (?, 'episode-kept', '2026-W39', "
+            "'PENDING', '2026-09-28 06:30:00', 0)", (item,))
+        connection.execute(
+            "insert into alert_component_heartbeat (component, last_heartbeat_at, status, "
+            "detail_json) values ('digest', '2026-09-28 06:30:00', 'ok', '{}')")
+        connection.commit()
+        connection.close()
+        before = _sqlite_master(db)
+
+        with pytest.raises(RuntimeError, match="0024 refuses to drop alert_digest_item"):
+            command.upgrade(cfg, "0024")
+
+        assert _sqlite_master(db) == before
+        connection = sqlite3.connect(db)
+        try:
+            assert connection.execute(
+                "select version_num from alembic_version").fetchone() == ("0023",)
+            assert connection.execute(
+                "select digest_item_id from alert_digest_item").fetchall() == [(item,)]
+            assert connection.execute(
+                "select component from alert_component_heartbeat").fetchall() == [("digest",)]
+        finally:
+            connection.close()
+
+    _run_with_db(db, _seed_and_refuse)
 
 
 def test_admin_atomicity_migration_backfills_retry_chain_and_window(tmp_path):
