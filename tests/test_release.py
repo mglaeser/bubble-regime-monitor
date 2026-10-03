@@ -31,9 +31,11 @@ _SHIMS = {
 echo "podman ${*//$'\n'/ }" >> "$CALLS"   # one line per call, a multi-line argument folded
 case "$1 $2" in
   "container inspect") [[ -f "$SHIM_STATE/label" ]] || exit 1              # no container: inspect fails
-                       [[ -f "$SHIM_STATE/stopped" ]] || cat "$SHIM_STATE/label" ;;   # exited: inspect answers, the template empties
-  "build "*) [[ "$BUILD_FAILS" != "1" ]] || exit 1
-             echo "${5#*:}" >> "$SHIM_STATE/images"; cp -r "$8" "$SHIM_STATE/context" ;;
+                       # exited: inspect answers; a template that asks for a running one empties
+                       if [[ "$*" == *".State.Running"* && -f "$SHIM_STATE/stopped" ]]; then :; else cat "$SHIM_STATE/label"; fi ;;
+  "build "*) [[ "$BUILD_FAILS" != "1" ]] || exit 1           # the tag after -t, the context last
+             for ((i = 1; i < $#; i++)); do j=$((i + 1)); [[ "${!i}" == -t ]] && tag="${!j}"; done
+             echo "${tag#*:}" >> "$SHIM_STATE/images"; cp -r "${!#}" "$SHIM_STATE/context" ;;
   "run "*) for ((i = 1; i < $#; i++)); do                    # what the smoke's /data held as it started
              j=$((i + 1)); [[ "${!i}" == -v ]] || continue
              src="${!j%%:*}"; echo "$src" >> "$SHIM_STATE/smoke-dirs"
@@ -41,6 +43,7 @@ case "$1 $2" in
            done
            [[ "$SMOKE_FAILS" != "1" ]] || exit 1 ;;
   "tag "*) echo "${2#*:}" > "$SHIM_STATE/latest" ;;
+  "exec "*) [[ "$EXEC_FAILS" != "1" ]] || exit 1 ;;            # the deploy note's announcement
   "images "*) tac "$SHIM_STATE/images" 2>/dev/null | sed "s|^|localhost/bubblegauge:|"; echo localhost/bubblegauge:latest ;;
   "rmi "*) ;;
 esac
@@ -385,6 +388,166 @@ def test_the_five_newest_commit_tags_stay(release):
     kept = {f"{IMAGE}:{target}", f"{IMAGE}:old7", f"{IMAGE}:old6", f"{IMAGE}:old5", f"{IMAGE}:old4"}
     assert not kept & set(rmi.split()[2:])
     assert set(rmi.split()[2:]) == {f"{IMAGE}:old3", f"{IMAGE}:old2", f"{IMAGE}:old1"}
+
+
+class TestTheDeployNote:
+    """The release writes what it changes into the image's build context, so
+    each image carries its own note, from the commit the last container
+    carried to main's, and announces it once after the switch, inside the new
+    container (app/services/deploy_note.py). Nothing of the note passes
+    through data/, the container's volume (#150 rounds 2 and 3)."""
+
+    @staticmethod
+    def _note(release) -> Path:
+        return release.state / "context" / "deploy-note"   # the context as podman build saw it
+
+    def test_the_image_carries_the_range_the_paths_and_the_commits(self, release):
+        """In git's own -z forms: each changed path ended by a NUL, each commit
+        a NUL-separated record of its sha, subject and body."""
+        old = release.main()
+        target = release.advance("Breadth: Polygon only")
+        code, calls = release(running=old)
+        assert code == 0
+        note = self._note(release)
+        assert (note / "range").read_text() == f"{old} {target} 1\n"
+        assert (note / "files").read_bytes() == b"change.txt\0"
+        assert (note / "log").read_bytes().startswith(f"{target}\nBreadth: Polygon only\n".encode())
+        build = next(c for c in calls if c.startswith("podman build"))
+        assert "--build-arg" not in build                 # the note names its commit itself
+        assert not (release.checkout / "data").exists()   # and the release never makes data/
+
+    def test_an_exited_container_names_the_commit_the_deploy_replaces(self, release):
+        """#150 round 10, SOTA-A: the base came from a RUNNING container only, so
+        with the service down main's parent stood in, and A -> B (scoring) -> C
+        (docs) described B..C alone - no scoring change. The base is the last
+        container's commit, running or exited."""
+        old = release.main()
+        release.commit("app/engine/aggregate.py", "x = 1\n")          # B: scoring
+        target = release.advance("docs only")                        # C
+        (release.state / "stopped").write_text("")
+        assert release(running=old)[0] == 0
+        note = self._note(release)
+        assert (note / "range").read_text() == f"{old} {target} 2\n"
+        assert b"app/engine/aggregate.py\0" in (note / "files").read_bytes()
+
+    @pytest.mark.parametrize("previous", [None, "f" * 40])
+    def test_without_a_known_previous_commit_the_image_carries_no_note(self, release, previous):
+        """No container at all - the first release on a host, one removed by
+        hand - or a last commit off main's history: the release cannot name
+        what the deploy replaces, and a guessed range could understate it, so
+        the image carries no note. A message can be missing, never wrong."""
+        release.advance()
+        assert release(running=previous)[0] == 0
+        assert not self._note(release).exists()
+
+    def test_the_release_announces_its_note_once_after_the_service_answers(self, release):
+        """#150 rounds 6-11: inside a container, a first run, a restart and a
+        hand rollback look alike, and every record of runs had a window. The
+        release is the one thing that knows a deploy happened, so it announces
+        the note - once, inside the new container, after the service answers
+        on the new commit. A restart, a reboot or a hand rollback never runs the
+        release, so none of them announces anything."""
+        old = release.main()
+        release.advance()
+        code, calls = release(running=old)
+        assert code == 0
+        announce = [i for i, c in enumerate(calls) if c.startswith("podman exec")]
+        assert [calls[i] for i in announce] == ["podman exec bubblegauge python -m app.services.deploy_note"]
+        assert announce[0] > max(i for i, c in enumerate(calls) if c.startswith("curl "))
+
+    def test_a_note_that_is_not_sent_fails_no_release(self, release):
+        release.advance()
+        code, calls = release(running=release.main(), env={"EXEC_FAILS": "1"})
+        assert code == 0 and "deploy note not sent" in release.output  # type: ignore[attr-defined]
+
+    def test_a_note_that_cannot_be_written_fails_no_release(self, release):
+        """#150 round 16, SOTA-A: the note was written under the release's ERR
+        trap, so a write that failed - a full runtime directory, say - ended the
+        release before the build. Writing the note is best effort too: whatever
+        fails while it is written removes it, and the release goes on."""
+        import shutil
+
+        shim = release.state.parent / "bin" / "git"
+        shim.write_text(f'#!/usr/bin/env bash\n[[ "$1" != diff ]] || exit 1\nexec {shutil.which("git")} "$@"\n')
+        shim.chmod(0o755)
+        old = release.main()
+        target = release.advance()
+        code, calls = release(running=old)
+        assert code == 0 and "deploy note omitted" in release.output  # type: ignore[attr-defined]
+        assert any(c.startswith("podman build") for c in calls)
+        assert not self._note(release).exists()
+        assert (release.state / "label").read_text().strip() == target
+
+    def test_the_log_is_capped_at_what_the_reader_reads(self, release):
+        """#150 round 16, SOTA-A: the log was written whole, however large. The
+        release caps it at the reader's cap, and the reader drops the record
+        the cap cut (app/services/deploy_note.py)."""
+        from app.services.deploy_note import _LOG_BYTES
+
+        old = release.main()
+        (release.seed / "change.txt").write_text("a large commit\n")
+        message = release.seed.parent / "message.txt"
+        message.write_text("A large commit\n\n" + "x" * (_LOG_BYTES + 4096) + "\n")
+        _git("add", "-A", cwd=release.seed)
+        _git("commit", "--quiet", "-F", str(message), cwd=release.seed)
+        _git("push", "--quiet", "origin", "main", cwd=release.seed)
+        assert release(running=old)[0] == 0
+        assert (self._note(release) / "log").stat().st_size == _LOG_BYTES
+
+    @pytest.mark.parametrize("fault", [{"RESTART_FAILS": "1"}, {"STATUS": "500"}])
+    def test_a_release_that_does_not_come_up_announces_nothing(self, release, fault):
+        release.advance()
+        code, calls = release(running=release.main(), env=fault)
+        assert code != 0 and not any(c.startswith("podman exec") for c in calls)
+
+    def test_a_renamed_file_names_both_its_paths(self, release):
+        """#150 round 7, SOTA-A: git diff lists a detected rename by its new path
+        only, so renaming a listed scoring file read as a lower class. With
+        --no-renames the old path is listed deleted and the new one added."""
+        old = release.main()
+        _git("mv", "tracked.txt", "moved.txt", cwd=release.seed)
+        _git("commit", "--quiet", "-m", "rename", cwd=release.seed)
+        _git("push", "--quiet", "origin", "main", cwd=release.seed)
+        assert release(running=old)[0] == 0
+        assert (self._note(release) / "files").read_bytes() == b"moved.txt\0tracked.txt\0"
+
+    def test_a_path_with_a_space_travels_whole(self, release):
+        """#150 round 4, SOTA-A: a space-separated line split a legal path."""
+        old = release.main()
+        release.commit("docs/deploy note.md", "a doc\n")
+        assert release(running=old)[0] == 0
+        assert (self._note(release) / "files").read_bytes() == b"docs/deploy note.md\0"
+
+    @pytest.mark.parametrize("planted", ["data/deploy-note", "data/deploy-note.tmp", "data/deploy-note.runs"])
+    def test_the_release_writes_nothing_into_data(self, release, planted):
+        """#150 rounds 2 and 3, SOTA-A: data/ is the container's /data and the
+        container's root is the host user, so a host write there could follow a
+        link the container planted (round 2), and a note handed over there could
+        be deleted under a newer release's (round 3). The note travels in the
+        image instead: what the container plants in data/ stays as it was."""
+        victim = release.checkout.parent.parent / "victim"
+        victim.write_text("the host's own\n")
+        (release.checkout / "data").mkdir()
+        (release.checkout / planted).symlink_to(victim)
+        release.advance()
+        assert release(running=None)[0] == 0
+        assert victim.read_text() == "the host's own\n" and (release.checkout / planted).is_symlink()
+        assert [p.name for p in (release.checkout / "data").iterdir()] == [Path(planted).name]
+
+    def test_a_commit_that_tracks_the_notes_name_steers_no_host_write(self, release):
+        """git archive exports a tracked symlink as a symlink, so the release
+        removes whatever the commit put under the note's name before it writes."""
+        victim = release.checkout.parent.parent / "victim"
+        victim.write_text("the host's own\n")
+        old = release.main()
+        (release.seed / "deploy-note").symlink_to(victim)
+        _git("add", "-A", cwd=release.seed)
+        _git("commit", "--quiet", "-m", "track the note's name", cwd=release.seed)
+        _git("push", "--quiet", "origin", "main", cwd=release.seed)
+        assert release(running=old)[0] == 0
+        assert victim.read_text() == "the host's own\n"
+        assert self._note(release).is_dir() and not self._note(release).is_symlink()
+        assert (self._note(release) / "range").read_text().startswith(f"{old} ")
 
 
 def _directives(unit: str) -> dict[str, list[str]]:

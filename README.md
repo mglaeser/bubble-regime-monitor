@@ -142,7 +142,10 @@ from scratch in a throwaway container, points `:latest` at it and restarts the
 Podman Quadlet service, which migrates the database as it boots (one
 transaction), then waits for `/healthz`. A release that fails is reported over
 iMessage and tried again at the next tick; nothing rolls back. A merge reaches
-production within about six minutes. Install, operation and the hand rollback:
+production within about six minutes, and the new image then sends one
+iMessage: the areas the deploy changes, which the model names from a closed
+list after reading the merged commits, and how likely the score logic changed,
+computed from the changed files. Install, operation, the deploy note and the hand rollback:
 **`docs/AUTO_DEPLOY.md`**.
 
 To release at once: `make deploy` (`systemctl --user start bubblegauge-release.service`).

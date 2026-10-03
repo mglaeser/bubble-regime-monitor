@@ -129,6 +129,9 @@ class Settings(BaseSettings):
     # URL, pinged after every successful recompute. When the pings stop,
     # Healthchecks alerts on its own channels. Empty: off.
     healthchecks_ping_url: str = ""
+    # The deploy note (app/services/deploy_note.py): the image's own note, which
+    # the release writes into the build context and announces after the switch.
+    deploy_note_path: str = "/app/deploy-note"
 
     # --- ALERT SYSTEM (docs/ALERT_SYSTEM.md) --------------------------------
     # Two INDEPENDENT switches. Evidence capture may run with alerting fully

@@ -59,6 +59,36 @@ A merge reaches production within one tick plus the release, about six
 minutes: merge outside the stretch from :50 before to :35 after the recompute
 slots (02/06/10/14/18/22 UTC).
 
+### The deploy note
+
+After each release the new image sends one iMessage, when iMessage is enabled:
+the commit, how many commits it carries, the areas the deploy changes, and a
+last line the code computes from the changed files, never the model - `Score
+logic: high | medium | low | very low - <reason>`: high when scoring code and
+the pinned golden fixture changed together, medium when scoring code changed
+alone, low when only data-input adapters changed, very low otherwise. The model
+reads the merged commits' titles and descriptions and the changed paths and
+answers with at most three codes from a closed list (`alerts`, `messages`,
+`data`, `feed`, `api`, `deploy`, `security`, `docs`, `tests`, `deps`); the note
+renders each code's fixed phrase, so no word the model writes reaches the
+message, and none of the phrases speaks of the score. A reply that is anything
+but those codes, or a model that fails, sends the bare deploy - the commit and
+how many commits it carries - with the score line. The release writes the note into the
+image's build context, so each image carries its own (`/app/deploy-note`) and
+nothing of it passes through `data/`. The release announces it once, after
+the service answers on the new commit: it runs `python -m
+app.services.deploy_note` inside the new container. A restart, a reboot or a
+hand rollback never runs the release, so none of them announces anything, and
+the container keeps no state for the note. It is best effort: a note that is
+not sent is not sent later - the release says so and goes on - and the next
+note begins at the commit the last container carried, so a deploy can go
+unannounced; a release that cannot name that commit (no container at all, or
+one off main's history), or whose note fails to be written, builds an image
+without a note. A message never
+describes the wrong change; it can be missing (`app/services/deploy_note.py`;
+AGENTS.md rule 1 names this note as the one prompt that carries repository
+text).
+
 ### Install (once, on the host)
 
 ```bash
