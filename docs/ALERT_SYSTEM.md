@@ -449,6 +449,13 @@ POST /api/v1/admin/alerts/render      validate reviewed TEST bytes; never persis
 POST /api/v1/admin/alerts/send-test   queue an audited TEST delivery
 ```
 
+The episode, event and delivery listings run newest first, `limit` rows a page
+(100 by default, at most 500). A full page carries `next_cursor`, the position
+of its last row, `<RFC 3339 time>~<id>`; passed back as `cursor`, it continues
+the listing strictly after that row. The cursor is a plain keyset position, not
+a capability (owner decision D3b, 2026-10-03): unsigned, with no expiry and no
+binding to a listing or a filter. One that names no position is a 422.
+
 A mechanism that has never fired is still in `/mechanisms`, with
 `activation_status`, `disabled_reason` and its unresolved pins. An operator has
 to be able to see that a rule exists and why it is dark.

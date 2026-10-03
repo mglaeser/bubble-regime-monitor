@@ -855,95 +855,148 @@ def test_error_responses_are_problem_json(client):
     assert {"type", "title", "status", "detail"} <= set(body)
 
 
-def test_expired_cursor_version_is_410(client):
-    import base64
-
-    stale = base64.urlsafe_b64encode(
-        json.dumps({"v": "v0", "event_id": "x"}).encode()).decode().rstrip("=")
-    response = client.get(f"/api/v1/alerts/events?cursor={stale}",
-                          headers={"X-API-Key": TEST_ADMIN_KEY})
-    assert response.status_code == 410
-    assert response.headers["content-type"].startswith("application/problem+json")
-    assert response.json()["status"] == 410
-
-
-def test_malformed_cursor_is_rfc9457_problem(client):
-    response = client.get(
-        "/api/v1/alerts/events?cursor=not-valid-base64!",
-        headers={"X-API-Key": TEST_ADMIN_KEY},
+def _seed_listings(*moments) -> dict[str, list[str]]:
+    """At each moment one episode, one global event and one TEST delivery, in
+    the namespace the client reads (disabled/default); every second episode is
+    closed. Returns the seeded ids of each paginated listing, in seed order."""
+    from app.alerts.artifacts import load_active, register
+    from app.alerts.canonical import new_ulid
+    from app.alerts.models import (
+        AlertDelivery,
+        AlertEpisode,
+        AlertEvaluation,
+        AlertEvent,
+        AlertInputSnapshot,
     )
-    assert response.status_code == 422
-    assert response.headers["content-type"].startswith("application/problem+json")
-    assert {"type", "title", "status", "detail"} <= set(response.json())
+    from app.alerts.repository import utc_ms
+    from app.db import session_scope
+
+    namespace = {"mode": "disabled", "live_profile": "default"}
+    seeded: dict[str, list[str]] = {"episodes": [], "events": [], "deliveries": []}
+    with session_scope() as session:
+        rules_sha = register(session, load_active(session))
+        identity = "listing-input".ljust(64, "0")
+        session.add(AlertInputSnapshot(
+            input_identity=identity, snapshot_id=None, origin="MANUAL",
+            built_at=moments[0], computed_at=moments[0], alert_input_schema_version=1,
+            methodology_version="test", methodology_sha256="m" * 64,
+            reconstructed=False, evaluation_eligibility="EVALUABLE",
+            ineligibility_reasons=[], payload="{}", payload_sha256="p" * 64,
+        ))
+        session.flush()
+        evaluation_id = new_ulid(utc_ms(moments[0]))
+        session.add(AlertEvaluation(
+            evaluation_id=evaluation_id, idempotency_key="listing-evaluation",
+            input_identity=identity, current_rules_sha256=rules_sha,
+            evaluation_set_sha256="s" * 64, evaluated_ruleset_hashes=[rules_sha],
+            evaluator_version="1", status="COMMITTED", attempt_count=1,
+            started_at=moments[0], finished_at=moments[0], plan_applied=True,
+            **namespace,
+        ))
+        session.flush()
+        for n, at in enumerate(moments):
+            episode_id, event_id, delivery_id = (new_ulid(utc_ms(at)) for _ in range(3))
+            is_open = n % 2 == 0
+            session.add_all([
+                AlertEpisode(
+                    episode_id=episode_id, origin_rules_sha256=rules_sha,
+                    instance_fingerprint=f"listing-{n}", rule_id="regime.band_to_derisk",
+                    priority=2, episode_status="FIRING" if is_open else "RESOLVED",
+                    is_open=is_open, opened_at=at, trigger_input_identity=identity,
+                    created_evaluation_id=evaluation_id, **namespace),
+                AlertEvent(
+                    event_id=event_id, occurred_at=at, causation_type="SCHEDULER",
+                    actor_type="SYSTEM", action="listing", suppression_reasons=[]),
+                AlertDelivery(
+                    delivery_id=delivery_id, dedupe_key=f"listing-{n}",
+                    planning_rules_sha256=rules_sha, delivery_kind="TEST", priority=4,
+                    transport_status="PENDING", planning_state="NONE",
+                    created_at=at, updated_at=at, recipient_ref="default", **namespace),
+            ])
+            seeded["episodes"].append(episode_id)
+            seeded["events"].append(event_id)
+            seeded["deliveries"].append(delivery_id)
+    return seeded
 
 
-def test_cursor_expires_after_24_hours_not_only_after_a_version_change(client):
-    import base64
+def test_a_malformed_cursor_is_a_422_never_a_500(client):
+    """A cursor that is not `<RFC 3339 time>~<id>` is refused at the boundary
+    (AGENTS.md rule 3) by every paginated read: 422, never a 500, a time that
+    no UTC instant can hold and the retired base64 envelope included. Only the
+    status is pinned here: the format of every alert error is owner decision
+    D3d's (one error format)."""
+    malformed = [
+        "not-a-position",                     # no "~"
+        "~",                                  # neither half
+        "~x",                                 # no time
+        "2026-08-25T12:00:00Z~",              # no id
+        "yesterday~x",                        # not a timestamp
+        "2026-13-01T00:00:00Z~x",             # no 13th month
+        "9999-12-31T23:59:59-23:59~x",        # after the last instant UTC can hold
+        "0001-01-01T00:00:00+23:59~x",        # before the first
+        "eyJ2IjoidjIifQ",                     # the retired envelope, {"v":"v2"}
+    ]
+    answered = {(listing, cursor): client.get(f"/api/v1/alerts/{listing}",
+                                              params={"cursor": cursor},
+                                              headers={"X-API-Key": TEST_ADMIN_KEY}).status_code
+                for listing in ("episodes", "events", "deliveries") for cursor in malformed}
+    assert {key: status for key, status in answered.items() if status != 422} == {}
+
+
+def test_a_cursor_is_a_position_not_a_capability(client):
+    """Owner decision D3b (2026-10-03): `next_cursor` is the last row's keyset
+    position, `<RFC 3339 time>~<id>`, and nothing more - no signature, no
+    expiry, no binding to a listing or a filter. A cursor taken without
+    `open_only` is accepted with it and positions that listing, and the same
+    instant written with another offset is the same position."""
     from datetime import UTC, datetime, timedelta
 
-    payload = {
-        "v": "v2",
-        "issued_at": (datetime.now(UTC) - timedelta(hours=25)).isoformat(),
-        "resource": "events",
-        "mode": "disabled",
-        "live_profile": "default",
-        "sort_at": datetime.now(UTC).isoformat(),
-        "sort_id": "event-old",
-    }
-    raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-    cursor = base64.urlsafe_b64encode(raw).decode().rstrip("=")
+    newest = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
+    open_newest, closed, open_oldest = _seed_listings(
+        newest, newest - timedelta(minutes=1), newest - timedelta(minutes=2))["episodes"]
+    path, headers = "/api/v1/alerts/episodes", {"X-API-Key": TEST_ADMIN_KEY}
 
-    response = client.get(
-        f"/api/v1/alerts/events?cursor={cursor}",
-        headers={"X-API-Key": TEST_ADMIN_KEY},
-    )
-    assert response.status_code == 410
-    assert response.json()["title"] == "Cursor expired"
-    assert response.headers["content-type"].startswith("application/problem+json")
+    first = client.get(path, params={"limit": 1}, headers=headers).json()
+    assert [item["episode_id"] for item in first["items"]] == [open_newest]
+    assert first["next_cursor"] == f"2026-08-25T12:00:00Z~{open_newest}"
+
+    def after(cursor: str, **filters: str) -> list[str]:
+        response = client.get(path, params={"cursor": cursor, **filters}, headers=headers)
+        assert response.status_code == 200, response.text
+        return [item["episode_id"] for item in response.json()["items"]]
+
+    assert after(first["next_cursor"]) == [closed, open_oldest]
+    assert after(first["next_cursor"], open_only="true") == [open_oldest]
+    assert after(f"2026-08-25T14:00:00+02:00~{open_newest}") == [closed, open_oldest]
 
 
-@pytest.mark.parametrize(
-    ("path", "payload", "title"),
-    [
-        (
-            "/api/v1/alerts/episodes",
-            {"resource": "events", "mode": "disabled",
-             "live_profile": "default"},
-            "Cursor query mismatch",
-        ),
-        (
-            "/api/v1/alerts/events",
-            {"resource": "events", "mode": "shadow",
-             "live_profile": "default"},
-            "Cursor namespace mismatch",
-        ),
-        (
-            "/api/v1/alerts/episodes?open_only=true",
-            {"resource": "episodes", "mode": "disabled",
-             "live_profile": "default", "open_only": False},
-            "Cursor query mismatch",
-        ),
-    ],
-)
-def test_cursor_is_bound_to_its_resource_namespace_and_filters(
-        client, path, payload, title):
-    from datetime import UTC, datetime
+@pytest.mark.parametrize(("listing", "id_key"), [
+    ("episodes", "episode_id"), ("events", "event_id"), ("deliveries", "delivery_id")])
+def test_pages_concatenate_to_the_full_listing(client, listing, id_key):
+    """Walked one row a page, each page from the previous page's
+    `next_cursor`, a listing comes back whole and in its order, two rows that
+    share a timestamp included: the position is time and id together, and
+    strict. The walk ends on the first page that is not full, the only page
+    without a cursor."""
+    from datetime import UTC, datetime, timedelta
 
-    from app.routers.alerts import _encode_cursor
+    moment = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
+    seeded = _seed_listings(moment, moment, moment - timedelta(minutes=1))[listing]
+    path, headers = f"/api/v1/alerts/{listing}", {"X-API-Key": TEST_ADMIN_KEY}
+    listed = [item[id_key] for item in client.get(path, headers=headers).json()["items"]]
+    assert set(seeded) <= set(listed)
 
-    cursor = _encode_cursor({
-        **payload,
-        "sort_at": datetime.now(UTC).isoformat(),
-        "sort_id": "cursor-boundary",
-    })
-    separator = "&" if "?" in path else "?"
-    response = client.get(
-        f"{path}{separator}cursor={cursor}",
-        headers={"X-API-Key": TEST_ADMIN_KEY},
-    )
-    assert response.status_code == 422
-    assert response.json()["title"] == title
-    assert response.headers["content-type"].startswith("application/problem+json")
+    walked: list[str] = []
+    cursor = None
+    for _ in range(len(listed) + 1):
+        params = {"limit": 1} if cursor is None else {"limit": 1, "cursor": cursor}
+        page = client.get(path, params=params, headers=headers).json()
+        walked += [item[id_key] for item in page["items"]]
+        cursor = page["next_cursor"]
+        if cursor is None:
+            break
+    assert cursor is None
+    assert walked == listed
 
 
 def test_no_alert_read_sets_an_etag_or_answers_304(client, monkeypatch):
