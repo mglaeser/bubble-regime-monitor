@@ -922,9 +922,9 @@ def _seed_listings(*moments) -> dict[str, list[str]]:
 def test_a_malformed_cursor_is_a_422_never_a_500(client):
     """A cursor that is not `<RFC 3339 time>~<id>` is refused at the boundary
     (AGENTS.md rule 3) by every paginated read: 422, never a 500, a time that
-    no UTC instant can hold and the retired base64 envelope included. Only the
-    status is pinned here: the format of every alert error is owner decision
-    D3d's (one error format)."""
+    no UTC instant can hold and the retired base64 envelope included, with the
+    `no-store` the cursor's error carried before. Only those are pinned here:
+    the format of every alert error is owner decision D3d's (one error format)."""
     malformed = [
         "not-a-position",                     # no "~"
         "~",                                  # neither half
@@ -938,9 +938,11 @@ def test_a_malformed_cursor_is_a_422_never_a_500(client):
     ]
     answered = {(listing, cursor): client.get(f"/api/v1/alerts/{listing}",
                                               params={"cursor": cursor},
-                                              headers={"X-API-Key": TEST_ADMIN_KEY}).status_code
+                                              headers={"X-API-Key": TEST_ADMIN_KEY})
                 for listing in ("episodes", "events", "deliveries") for cursor in malformed}
-    assert {key: status for key, status in answered.items() if status != 422} == {}
+    assert {key: r.status_code for key, r in answered.items() if r.status_code != 422} == {}
+    assert {key: r.headers.get("cache-control") for key, r in answered.items()
+            if r.headers.get("cache-control") != "no-store"} == {}
 
 
 def test_a_cursor_is_a_position_not_a_capability(client):

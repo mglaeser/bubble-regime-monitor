@@ -105,7 +105,9 @@ def _after(timestamp_column: Any, id_column: Any, cursor: str) -> Any:
     except (ValueError, OverflowError) as exc:
         raise HTTPException(
             status_code=422,
-            detail="cursor must be a next_cursor value: <RFC 3339 time>~<id>") from exc
+            detail="cursor must be a next_cursor value: <RFC 3339 time>~<id>",
+            # the directives the cursor's problem() answer carried
+            headers={"Cache-Control": "no-store", "Vary": "X-API-Key"}) from exc
     return or_(timestamp_column < at, and_(timestamp_column == at, id_column < row_id))
 
 
