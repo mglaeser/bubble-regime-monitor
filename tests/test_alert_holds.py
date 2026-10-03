@@ -702,36 +702,6 @@ def test_real_automatic_retry_reuses_its_original_render():
         assert len(renders) == 1
 
 
-def test_live_dispatch_sends_work_planned_under_an_unpromoted_ruleset():
-    """Owner decision D2d: the dispatcher judges no ruleset at send time.
-
-    The CI replay gate is the evidence. At runtime only `load_active_for_mode`
-    remains, and the dispatch job applies it before a pass; a queued delivery
-    goes out whichever registered ruleset planned it - here one that was
-    registered and never promoted.
-    """
-    from app.alerts.dispatcher import dispatch_once
-
-    delivery_id, phrase_set = _memberless_delivery(DeliveryKind.TEST)
-    with session_scope() as session:
-        delivery = session.get(AlertDelivery, delivery_id)
-        assert delivery is not None
-        delivery.mode = "live"
-
-    sender = NullSender()
-    report = dispatch_once(
-        session_scope, phrase_set=phrase_set, mode="live",
-        live_profile="default", sender=sender, now=NOW,
-    )
-
-    assert report.sent == 1, report.notes
-    assert len(sender.sent) == 1
-    with session_scope() as session:
-        delivery = session.get(AlertDelivery, delivery_id)
-        assert delivery is not None
-        assert delivery.transport_status == TransportStatus.SENT
-
-
 def test_p1_is_never_transitioned_to_a_hold():
     from app.alerts.outbox import hold_for_budget
 

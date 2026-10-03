@@ -116,7 +116,7 @@ class AlertRulesetRegistry(Base):
     promoted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     promoted_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
     #: Stamped ONLY by the evidence-gated promotion service. Nothing reads it
-    #: since owner decision D2d removed delivery admission.
+    #: since owner decision D2d removed the runtime evidence checks.
     evidence_checked_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True)
     superseded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

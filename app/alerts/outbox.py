@@ -43,6 +43,7 @@ from app.alerts.enums import (
     EpisodeStatus,
     MemberRole,
     PlanningState,
+    RulesetStatus,
     SuppressionReason,
     TransportStatus,
 )
@@ -55,6 +56,7 @@ from app.alerts.models import (
     AlertEvent,
     AlertInstanceNotificationState,
     AlertRender,
+    AlertRulesetRegistry,
     AlertRuleState,
 )
 from app.alerts.planner import DeliveryIntent, DigestIntent, PlanResult
@@ -357,16 +359,29 @@ def release_due_holds(
 
 def claimable(session: Session, *, mode: str, live_profile: str, now: datetime,
               limit: int = 10) -> list[AlertDelivery]:
-    """READY rows whose `not_before` has passed. P1 first, then oldest."""
+    """READY rows whose `not_before` has passed. P1 first, then oldest.
+
+    In live mode, only work planned under a ruleset that was promoted and is
+    not revoked: the ruleset that planned a message is judged by identity,
+    never by evidence (owner decision D2d). Work queued under rules nobody
+    promoted - however and whenever it was planned - is never claimed, and a
+    ruleset superseded since still finishes what it planned (#153 round 3).
+    """
+    query = select(AlertDelivery).where(
+        AlertDelivery.mode == mode,
+        AlertDelivery.live_profile == live_profile,
+        AlertDelivery.planning_state == PlanningState.READY,
+        AlertDelivery.transport_status.in_(
+            [TransportStatus.PENDING, TransportStatus.RETRY_DUE]),
+        (AlertDelivery.not_before.is_(None)) | (AlertDelivery.not_before <= now),
+    )
+    if mode == "live":
+        query = query.where(AlertDelivery.planning_rules_sha256.in_(
+            select(AlertRulesetRegistry.rules_sha256).where(
+                AlertRulesetRegistry.promoted_at.is_not(None),
+                AlertRulesetRegistry.status != RulesetStatus.REVOKED)))
     return list(session.execute(
-        select(AlertDelivery).where(
-            AlertDelivery.mode == mode,
-            AlertDelivery.live_profile == live_profile,
-            AlertDelivery.planning_state == PlanningState.READY,
-            AlertDelivery.transport_status.in_(
-                [TransportStatus.PENDING, TransportStatus.RETRY_DUE]),
-            (AlertDelivery.not_before.is_(None)) | (AlertDelivery.not_before <= now),
-        )
+        query
         .order_by(
             AlertDelivery.priority.asc(),
             AlertDelivery.created_at.asc(),

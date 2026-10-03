@@ -572,18 +572,21 @@ is queued. Stages 1 and 2 enable
 only the P4 ops rules, and the planner maps P4 to "API and log only", creating
 no delivery. Separately, the dispatcher has no LLM path at any stage.
 
-What the runtime no longer checks, by that decision: a queued delivery is not
-judged again by the ruleset that planned it, and admission is not re-checked at
-the wire - a demotion or a supersession after planning no longer withholds work
-already queued, and a promotion change reaches the wire at the next dispatch
-pass, at most one pass later (the job runs at least every 20 s). What stops a
-live send now: ALERTS_MODE other than `live`; a silence; and the dispatch job's
-own check before every pass - a candidate that is not the promoted artifact
-refuses the pass before any sender exists
-(tests/test_alert_promotion.py::test_the_live_dispatch_job_refuses_an_unpromoted_candidate),
-while queued work goes out whichever registered ruleset planned it
-(tests/test_alert_holds.py::test_live_dispatch_sends_work_planned_under_an_unpromoted_ruleset).
-Every live row is planned under the ruleset promoted at that moment:
+What the runtime no longer checks, by that decision: the evidence and the
+stage, and nothing is re-checked at the wire - a demotion after planning no
+longer withholds work already queued, and a promotion change reaches the wire
+at the next dispatch pass, at most one pass later (the job runs at least every
+20 s). What stops a live send now: ALERTS_MODE other than `live`; a silence;
+the dispatch job's own check before every pass - a candidate that is not the
+promoted artifact refuses the pass before any sender exists
+(tests/test_alert_promotion.py::test_the_live_dispatch_job_refuses_an_unpromoted_candidate);
+and the claim, which judges the ruleset that planned the work by identity,
+never by evidence: in live mode it takes only work planned under a ruleset
+that was promoted and is not revoked, however and whenever the work was
+queued, and a ruleset superseded since still finishes what it planned
+(tests/test_alert_promotion.py::test_live_dispatch_sends_no_work_planned_under_rules_nobody_promoted,
+::test_live_dispatch_sends_work_planned_under_a_promoted_ruleset).
+Live work is also planned under the ruleset promoted at that moment:
 evaluation, the weekly digest and the admin send-test load through
 `load_active_for_mode`, so in live mode a ruleset that was never promoted
 plans nothing (tests/test_alert_api.py::test_a_live_send_test_is_planned_under_the_promoted_ruleset_only,

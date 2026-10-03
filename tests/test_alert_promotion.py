@@ -551,6 +551,103 @@ def test_the_live_dispatch_job_refuses_an_unpromoted_candidate(monkeypatch):
         assert row.detail_json["mode"] == "live"
 
 
+def _queued_live_test_delivery(session, rules_sha256: str) -> str:
+    from datetime import UTC, datetime
+
+    from app.alerts.canonical import new_ulid
+    from app.alerts.enums import DeliveryKind, PlanningState, TransportStatus
+    from app.alerts.models import AlertDelivery
+    from app.alerts.repository import utc_ms
+
+    now = datetime(2026, 10, 1, 12, 0, tzinfo=UTC)     # the job runs on the real clock
+    delivery_id = new_ulid(utc_ms(now))
+    session.add(AlertDelivery(
+        delivery_id=delivery_id, dedupe_key=f"queued-{rules_sha256[:8]}", mode="live",
+        live_profile="default", planning_rules_sha256=rules_sha256,
+        delivery_kind=DeliveryKind.TEST, priority=3,
+        transport_status=TransportStatus.PENDING, planning_state=PlanningState.READY,
+        not_before=now, created_at=now, updated_at=now, recipient_ref="default"))
+    session.flush()
+    return delivery_id
+
+
+def _run_the_live_dispatch_job(monkeypatch, planning: str):
+    """Promote the committed artifacts, which the job loads in live mode;
+    queue one live delivery planned under `planning`; run the job once."""
+    import hashlib
+    from dataclasses import replace
+    from datetime import UTC, datetime
+
+    import app.alerts.dispatcher as dispatcher_module
+    from app.alerts.artifacts import load_active, register
+    from app.alerts.enums import RulesetStatus
+    from app.alerts.models import AlertDelivery, AlertRulesetRegistry
+    from app.alerts.sender import NullSender
+    from app.config import get_settings
+    from app.db import session_scope
+    from app.jobs import alert_dispatch
+
+    sender = NullSender()
+    monkeypatch.setattr(dispatcher_module, "default_sender", lambda **kw: sender)
+    monkeypatch.setenv("ALERTS_MODE", "live")
+    get_settings.cache_clear()
+    then = datetime(2026, 10, 1, tzinfo=UTC)
+    with session_scope() as session:
+        promoted = load_active(session)
+        register_promoted(session, promoted, now=then)
+        if planning == "the promoted ruleset":
+            sha = promoted.ruleset.rules_sha256
+        else:
+            other = replace(promoted, ruleset=replace(
+                promoted.ruleset, rules_sha256=hashlib.sha256(planning.encode()).hexdigest()))
+            sha = register(session, other, now=then)
+            row = session.get(AlertRulesetRegistry, sha)
+            if planning != "a ruleset never promoted":
+                row.promoted_at = then
+            if planning == "a ruleset promoted, then superseded":
+                row.status, row.superseded_at = RulesetStatus.SUPERSEDED, then
+            if planning == "a ruleset promoted, then revoked":
+                row.status = RulesetStatus.REVOKED
+        delivery_id = _queued_live_test_delivery(session, sha)
+
+    result = alert_dispatch.run_once()
+    with session_scope() as session:
+        status = session.get(AlertDelivery, delivery_id).transport_status
+    return result, sender, status
+
+
+@pytest.mark.usefixtures("isolated_db")
+@pytest.mark.parametrize("planning", ["a ruleset never promoted", "a ruleset promoted, then revoked"])
+def test_live_dispatch_sends_no_work_planned_under_rules_nobody_promoted(monkeypatch, planning):
+    """#153 round 3: with the admission gone, live work queued under rules
+    nobody promoted - before an upgrade, say - went out once a different
+    artifact was promoted and the job's load passed. The claim judges the
+    ruleset that planned the work by identity, never by evidence: promoted, and
+    not revoked. The work stays queued; nothing is sent."""
+    from app.alerts.enums import TransportStatus
+
+    result, sender, status = _run_the_live_dispatch_job(monkeypatch, planning)
+
+    assert result["status"] == "ok"
+    assert result["claimed"] == 0
+    assert sender.sent == []
+    assert status == TransportStatus.PENDING
+
+
+@pytest.mark.usefixtures("isolated_db")
+@pytest.mark.parametrize("planning", ["the promoted ruleset", "a ruleset promoted, then superseded"])
+def test_live_dispatch_sends_work_planned_under_a_promoted_ruleset(monkeypatch, planning):
+    """A ruleset superseded since it planned the work still finishes it: it was
+    promoted, and a supersession is not a revocation."""
+    from app.alerts.enums import TransportStatus
+
+    result, sender, status = _run_the_live_dispatch_job(monkeypatch, planning)
+
+    assert result["sent"] == 1, result
+    assert len(sender.sent) == 1
+    assert status == TransportStatus.SENT
+
+
 @pytest.mark.usefixtures("isolated_db")
 def test_live_health_reports_promotion_agreement_and_no_admission_gate(monkeypatch):
     """Health keeps the one runtime question that remains: is the loaded
