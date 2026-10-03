@@ -572,6 +572,20 @@ is queued. Stages 1 and 2 enable
 only the P4 ops rules, and the planner maps P4 to "API and log only", creating
 no delivery. Separately, the dispatcher has no LLM path at any stage.
 
+What the runtime no longer checks, by that decision: a queued delivery is not
+judged again by the ruleset that planned it, and admission is not re-checked at
+the wire - a demotion or a supersession after planning no longer withholds work
+already queued, and a promotion change reaches the wire at the next dispatch
+pass, at most one pass later (the job runs at least every 20 s). What stops a
+live send now: ALERTS_MODE other than `live`; a silence; and the dispatch job's
+own check before every pass - a candidate that is not the promoted artifact
+refuses the pass before any sender exists
+(tests/test_alert_promotion.py::test_the_live_dispatch_job_refuses_an_unpromoted_candidate),
+while queued work goes out whichever registered ruleset planned it
+(tests/test_alert_holds.py::test_live_dispatch_sends_work_planned_under_an_unpromoted_ruleset).
+No code writes a REVOKED ruleset (production holds none), and production held
+no queued delivery when the gate went (read-only, 2026-10-03).
+
 ## 11b. The former Stage 2 blocker, resolved by named operator decisions
 
 Until 2026-08-27 the stage-3 replay FAILED on its own non-P1 volume caps
