@@ -1,20 +1,12 @@
 """The one path by which an artifact becomes PROMOTED.
 
-`register(promote=True)` wrote `promoted_at` with no reference to the replay
-evidence, and three production callers used it: the CLI, the admin route and
-replay. That timestamp is what `delivery_admission_blockers` trusts when it
-decides a queued delivery was authorised, which opened a laundering path:
+Promotion checks the committed replay evidence before it writes any promotion
+metadata, and a refusal changes nothing. `register` carries no authority and
+never promotes, so the state mutation lives here, behind the check.
 
-  1. ruleset C fails its gate, and is marked promoted anyway;
-  2. valid ruleset B later supersedes C;
-  3. B clears deployment-level admission;
-  4. a queued C delivery passes per-delivery admission, because C carries a
-     historical `promoted_at` and is merely SUPERSEDED rather than unpromoted.
-
-Nothing in that sequence involves a defect in C being noticed. Promotion has to
-mean the evidence was checked, not that somebody called a function with a
-keyword argument — so the state mutation lives here, behind the check, and
-`register` no longer performs it.
+Since owner decision D2d nothing at runtime reads the evidence or the
+`evidence_checked_at` stamp: live mode requires only that the loaded bytes be
+the promoted ones (`app.alerts.artifacts.load_active_for_mode`).
 """
 
 from __future__ import annotations

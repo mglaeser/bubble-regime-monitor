@@ -12,7 +12,7 @@ Order matters, and every step can still stop the send:
        retain resolved digest members as retrospective evidence
     3  budget recheck: the AUTHORITATIVE count, immediately before sending
     4  render: reusing the existing render on a retry, never re-rendering
-    5  revalidate at wire time; re-check quiet hours and live admission
+    5  revalidate at wire time; re-check quiet hours
     6  send
     7  classify the outcome into one of four typed states
 
@@ -63,7 +63,6 @@ from app.alerts.outbox import (
     mark_sent,
     mark_transient,
     mark_unknown,
-    pending_planning_rulesets,
     record_dispatch_budget_decision,
     recover_leases,
     release,
@@ -71,10 +70,6 @@ from app.alerts.outbox import (
     revalidate_members,
 )
 from app.alerts.phrase_registry import ValidatedPhraseSet, validate_phrase_set
-from app.alerts.promotion import (
-    delivery_admission_blockers,
-    live_admission_blockers,
-)
 from app.alerts.quiet_hours import would_be_held
 from app.alerts.render_context import (
     RenderContext,
@@ -297,58 +292,6 @@ def is_live(mode: str) -> bool:
     return mode == "live"
 
 
-def withdrawn_admission(session: Any, delivery: AlertDelivery) -> list[str]:
-    """Everything that has stopped authorising this delivery since the pass began.
-
-    BOTH gates, because they answer different questions and either can turn
-    false in the gap. The deployment can be demoted or its ruleset swapped
-    (`live_admission_blockers`); this message's own planning ruleset can be
-    revoked (`delivery_admission_blockers`). Re-checking only the second left
-    an active-ruleset change between the pass-level check and the wire
-    completely unseen — and that is the change an operator makes when they want
-    messages to stop.
-    """
-    return [*live_admission_blockers(session),
-            *delivery_admission_blockers(session, delivery.planning_rules_sha256)]
-
-
-def audit_withdrawn_admission(session: Any, delivery: AlertDelivery, *,
-                              outcome: Any, mode: str,
-                              report: DispatchReport) -> bool:
-    """Record a send that crossed a withdrawal. Returns whether one did.
-
-    A RESIDUAL RACE lives here and cannot be closed by checking harder. The
-    send is deliberately outside every transaction — no external I/O may hold a
-    write lock — so the last admission check is always followed by the send,
-    and an authorisation can be withdrawn in between. A demotion, a ruleset
-    swap: no amount of re-checking removes a window that exists BECAUSE the
-    check must end before the send begins.
-
-    What can be removed is the silence. An operator who lowered the stage to
-    stop messages needs to know one crossed, and a message that went out under
-    an authorisation that no longer holds should not be indistinguishable from
-    one that went out cleanly. Recording it turns an invisible race into an
-    auditable one, which is the honest limit of check-then-act.
-
-    A request that never started cannot have crossed anything, so it is not
-    reported: that would turn a connection refused into an audit finding.
-    """
-    if not is_live(mode) or not getattr(outcome, "request_started", False):
-        return False
-    # The same both-gates question as the pre-send check. A message that
-    # crossed a DEPLOYMENT-level withdrawal is exactly the one an operator
-    # needs told about.
-    withdrawn = withdrawn_admission(session, delivery)
-    if not withdrawn:
-        return False
-    report.notes.append(
-        f"{delivery.delivery_id}: sent under an authorisation withdrawn "
-        "while the request was in flight")
-    log.error("alert_sent_under_withdrawn_admission",
-              delivery_id=delivery.delivery_id, blockers=withdrawn)
-    return True
-
-
 def _phrase_set_of_ruleset(session: Any, rules_sha256: str,
                            fallback: ValidatedPhraseSet
                            ) -> ValidatedPhraseSet | None:
@@ -559,28 +502,8 @@ def dispatch_once(
     owner = _owner()
     report = DispatchReport()
 
-    # A live dispatcher must not deliver at a stage its own committed evidence
-    # does not support. The CI gate protects the repository; this protects the
-    # operator, whose container was started from an image and never consulted
-    # a pull request. Fail-closed: nothing is claimed, nothing is sent, and the
-    # reason is on the report rather than in a traceback.
-    if live:
-        with session_factory() as session:
-            blockers = live_admission_blockers(session)
-        if blockers:
-            # Refused BEFORE any sender exists. Stage 1 promises no sender is
-            # constructed at all, and building one to then not use it would
-            # break that promise silently — the object reads credentials and
-            # can open a client. `is None` rather than `or` so an injected
-            # sender is never quietly replaced.
-            report.notes.extend(blockers)
-            report.notes.append(
-                "live delivery withheld: the ruleset's active stage is not "
-                "backed by its gate evidence")
-            log.error("alert_live_admission_refused", blockers=blockers)
-            _heartbeat(report, mode=mode, live_profile=live_profile)
-            return report
-
+    # `is None` rather than `or`, so an injected sender is never quietly
+    # replaced.
     if sender is None:
         sender = default_sender(live=live)
 
@@ -590,35 +513,8 @@ def dispatch_once(
     with session_factory() as session:
         report.released = release_due_holds(
             session, mode=mode, live_profile=live_profile, now=now)
-        # A queued delivery carries the hash of the ruleset that PLANNED it,
-        # and a promotion between planning and dispatch means that is no longer
-        # the ruleset checked above. Judging a message by rules that did not
-        # authorise it is the mismatch: something else being fine now does not
-        # make this one sendable.
-        #
-        # Admission is a property of the RULESET, so it is checked once per
-        # DISTINCT planning ruleset and the failures are excluded IN THE QUERY.
-        # Two earlier versions got this wrong in opposite directions: refusing
-        # the whole pass let one stale message silence every live alert
-        # including P1, and filtering after the fact let blocked rows consume
-        # the claim limit so everything behind them starved. Excluding them in
-        # the query means the limit is spent on work that can actually go, with
-        # no scan to bound and nothing left stranded behind a long enough
-        # backlog.
-        blocked: list[str] = []
-        if live:
-            for rules_sha in sorted(pending_planning_rulesets(
-                    session, mode=mode, live_profile=live_profile, now=now)):
-                found = delivery_admission_blockers(session, rules_sha)
-                if found:
-                    blocked.append(rules_sha)
-                    report.notes.extend(found)
-                    log.error("alert_queued_admission_refused",
-                              rules_sha256=rules_sha[:12], blockers=found)
-
         candidates = [d.delivery_id for d in claimable(
-            session, mode=mode, live_profile=live_profile, now=now, limit=limit,
-            exclude_rules_sha256=blocked)]
+            session, mode=mode, live_profile=live_profile, now=now, limit=limit)]
 
     for delivery_id in candidates:
         with session_factory() as session:
@@ -843,19 +739,6 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
         pass_now = _utc_clock_value(lambda: now)
         attempt_now = pass_now
 
-        # Re-check live admission before the final wire-time gates. The
-        # pass-level check ran before this delivery's work; promotion or
-        # demotion during rendering must not authorise bytes under stale state.
-        if is_live(mode):
-            late = withdrawn_admission(session, delivery)
-            if late:
-                report.notes.extend(late)
-                report.held += 1
-                log.error("alert_admission_withdrawn_before_send",
-                          delivery_id=delivery_id, blockers=late)
-                release(session, delivery, now=attempt_now)
-                return
-
         # Rendering is not instantaneous.  A silence can begin after the
         # pass-start revalidation yet before the provider boundary, so perform
         # the same membership decision against the actual wire clock.  Persist
@@ -997,8 +880,6 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
         if delivery is None:
             return
 
-        audit_withdrawn_admission(session, delivery, outcome=outcome, mode=mode,
-                                  report=report)
         if outcome.is_success:
             mark_sent(session, delivery, now=completed_at,
                       http_status=outcome.http_status)

@@ -59,9 +59,18 @@ def _snapshot(**over) -> Snapshot:
     return Snapshot(**base)
 
 
-def _admitted(monkeypatch):
-    monkeypatch.setattr("app.alerts.promotion.live_admission_blockers",
-                        lambda _session, *, path=None: [])
+def _admitted():
+    """Promote the committed artifacts, so the engine's admission holds: live
+    mode runs only the promoted bytes (owner decision D2d)."""
+    from app.alerts.artifacts import load_active
+    from tests.conftest import register_promoted
+
+    with session_scope() as session:
+        register_promoted(session, load_active(session))
+
+
+#: What `load_active_for_mode(mode="live")` says when nothing is promoted.
+_NOTHING_PROMOTED = "live mode requires a PROMOTED ruleset and the registry has none"
 
 
 class TestDigestFacts:
@@ -134,7 +143,7 @@ class TestEngineOn:
         with session_scope() as s:
             s.add(_snapshot())
             s.commit()
-        _admitted(monkeypatch)
+        _admitted()
         sends: list[str] = []
         self._sent(monkeypatch, sends)
         reply = "bubblegauge 51/100, band trim: valuations lead the reading, credit stays calm."
@@ -153,22 +162,22 @@ class TestEngineOn:
         with session_scope() as s:
             s.add(_snapshot())
             s.commit()
-        monkeypatch.setattr("app.alerts.promotion.live_admission_blockers",
-                            lambda _session, *, path=None: ["nothing has been promoted"])
+        # Nothing is promoted, so the live check refuses (owner decision D2d).
         sends: list[str] = []
         self._sent(monkeypatch, sends)
         monkeypatch.setattr(digest, "send_imessage", lambda body, **_kw: (_ for _ in ()).throw(AssertionError("old sender")))
         monkeypatch.setattr(composer, "complete",
                             lambda **_kw: type("C", (), {"text": '{"phrasing": 0}'})())
         out = digest.send_daily_digest()
-        assert out["status"] == "refused" and out["blockers"] == ["nothing has been promoted"]
+        assert out["status"] == "refused"
+        assert out["blockers"] == [_NOTHING_PROMOTED]
         assert sends == []
 
     def test_a_gateway_failure_sends_the_evergreen_text(self, monkeypatch, engine_on):
         with session_scope() as s:
             s.add(_snapshot())
             s.commit()
-        _admitted(monkeypatch)
+        _admitted()
         sends: list[str] = []
         self._sent(monkeypatch, sends)
         monkeypatch.setattr(composer, "complete", lambda **_kw: (_ for _ in ()).throw(RuntimeError("down")))
@@ -177,7 +186,7 @@ class TestEngineOn:
         assert sends == ["bubblegauge 51/100 trim. range 40-61. SPY IN, QQQ OUT. Flags 2/4."]
 
     def test_the_transport_names_its_channel_and_the_gate_binds_it(self, monkeypatch, engine_on):
-        _admitted(monkeypatch)
+        _admitted()
         assert service._Transport("imessage").channel == "imessage"
         assert service.transport_for(get_settings()) == ("imessage", "+491510000000")
         composed = composer._issue(text="x", source="deterministic", trigger="daily_digest", channel="sms")
@@ -205,7 +214,7 @@ class TestRoundOneOn118:
     a reloaded configuration could deliver to B what was authorised for A."""
 
     def test_the_bytes_go_to_the_recipient_the_gate_saw(self, monkeypatch, engine_on):
-        _admitted(monkeypatch)
+        _admitted()
         recipients: list[str | None] = []
         sends: list[str] = []
         TestEngineOn()._sent(monkeypatch, sends, recipients)
@@ -231,3 +240,61 @@ class TestRoundOneOn118:
                             lambda body, *, recipient=None: seen.append(recipient) or type("R", (), {"ok": True})())
         service._Transport("sms").send("Band trim.", recipient_ref="+491510000000")
         assert seen == ["+491510000000"]
+
+
+class _Recording:
+    """A transport that names its channel and records what it was handed."""
+
+    channel = "imessage"
+
+    def __init__(self) -> None:
+        self.sent: list[str] = []
+
+    def send(self, message: str, *, recipient_ref: str, idempotency_key: str | None = None):
+        self.sent.append(message)
+        return type("R", (), {"ok": True, "status_code": 202, "operation_id": "op", "error": None})()
+
+
+class TestAdmission:
+    """The engine's admission (docs/MESSAGE_ENGINE.md decision 5). Since owner
+    decision D2d it is `load_active_for_mode(session, mode="live")`, asked
+    inside `emit` immediately before the transport, whatever ALERTS_MODE says
+    (it is `disabled` here, the default)."""
+
+    @staticmethod
+    def _emit(priority: int = 3) -> tuple[object, list[str]]:
+        from app.message_engine import gate
+
+        composed = composer._issue(text="bubblegauge 51/100.", source="deterministic",
+                                   trigger="daily_digest", channel="imessage")
+        sender = _Recording()
+        with session_scope() as s:
+            out = gate.emit(s, composed=composed, recipient_ref="+491510000000",
+                            sender=sender, priority=priority)
+        return out, sender.sent
+
+    def test_the_promoted_deployment_sends(self):
+        _admitted()
+        out, sent = self._emit()
+        assert out.sent is True and sent == ["bubblegauge 51/100."]
+
+    @pytest.mark.parametrize("priority", [1, 2, 3])
+    def test_nothing_promoted_refuses_every_priority(self, priority):
+        """A P1 does not bypass admission: decision 2's exemption covers
+        phrasing, and admission is whether bytes may reach a wire at all."""
+        out, sent = self._emit(priority)
+        assert out.sent is False and sent == []
+        assert out.blockers == (_NOTHING_PROMOTED,)
+
+    def test_a_gate_that_cannot_be_evaluated_refuses(self, monkeypatch):
+        """Fail-closed: the check raising is a blocker, never an admission."""
+        _admitted()                     # only the broken check can refuse now
+
+        def _broken(_session, *, mode, **_kw):
+            raise RuntimeError("registry unreadable")
+
+        monkeypatch.setattr("app.alerts.artifacts.load_active_for_mode", _broken)
+        out, sent = self._emit()
+        assert out.sent is False and sent == []
+        assert out.blockers == ("the admission gate could not be evaluated, so "
+                                "nothing authorises this send: RuntimeError",)

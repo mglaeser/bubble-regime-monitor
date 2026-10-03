@@ -214,14 +214,9 @@ def register(session: Session, artifacts: LoadedArtifacts, *,
 
     Registering is cheap and idempotent — the bytes are addressed by their
     hash, and re-registering the same hash is a no-op. It also carries no
-    authority, which is why promotion is no longer a keyword argument here.
-
-    `promote=True` used to write `promoted_at` with no reference to the replay
-    evidence, and `delivery_admission_blockers` trusts that timestamp when it
-    decides a queued delivery was authorised. A failing ruleset marked promoted
-    this way stayed authorised for its queued work even after a valid ruleset
-    superseded it. Promotion now lives in `app.alerts.promotion_service`,
-    behind the evidence check.
+    authority, which is why promotion is not a keyword argument here:
+    promotion lives in `app.alerts.promotion_service`, behind the evidence
+    check.
     """
     now = now or datetime.now(UTC)
     phrase = artifacts.phrase_set

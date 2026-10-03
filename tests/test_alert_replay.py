@@ -897,11 +897,10 @@ def test_the_committed_stage_is_not_one_whose_replay_failed():
     enforcement. Nothing stopped `active_stage: 3` being committed next to
     evidence saying stage 3 breaches its budget.
 
-    This is the repository-level half of that enforcement, and it is
-    deliberately small: it reads the committed ruleset and the committed
-    artifact and refuses the combination. The runtime half — a container
-    checking the same thing before it delivers — is the promotion gate, which
-    is its own change.
+    This is that enforcement, and it is deliberately small: it reads the
+    committed ruleset and the committed artifact and refuses the combination.
+    Since owner decision D2d there is no runtime half - no container re-reads
+    the evidence before it delivers; the CI replay gate is the evidence.
     """
     ruleset = validate_from_disk(rules_path=RULES, phrase_path=PHRASES,
                                  service_version="3.8.0").ruleset
