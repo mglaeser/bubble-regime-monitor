@@ -478,3 +478,33 @@ def test_nothing_in_the_app_reads_the_replay_evidence():
         if path.is_file() and "__pycache__" not in path.parts
         and "alert-stage1-gate" in path.read_text(encoding="utf-8", errors="replace"))
     assert readers == []
+
+
+@pytest.mark.usefixtures("isolated_db")
+def test_a_broken_shipped_file_is_a_problem_answer_never_a_500(monkeypatch):
+    """#158 round 1 (SOTA-B): shipped_blocker validates the shipped files, and
+    the route called it outside its error handling, so a broken shipped file
+    answered 500 (AGENTS.md rule 3). It answers 422 with the problem."""
+    from fastapi.testclient import TestClient
+
+    import app.alerts.artifacts as artifacts
+    from app.alerts.errors import AlertingUnavailable
+    from app.config import get_settings
+    from app.main import app
+
+    real = artifacts.validate_from_disk
+
+    def broken_when_shipped(**kwargs):
+        if kwargs.get("rules_path") == artifacts.REPO_RULES:
+            raise AlertingUnavailable("no ruleset at the shipped path")
+        return real(**kwargs)
+
+    monkeypatch.setattr(artifacts, "validate_from_disk", broken_when_shipped)
+    monkeypatch.setenv("ADMIN_API_KEY", "a" * 40)  # pragma: allowlist secret - a planted shape
+    get_settings.cache_clear()
+    try:
+        response = TestClient(app, raise_server_exceptions=False).post(
+            "/api/v1/admin/alerts/promote", headers={"X-API-Key": "a" * 40})
+    finally:
+        get_settings.cache_clear()
+    assert response.status_code == 422, response.text

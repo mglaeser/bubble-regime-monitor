@@ -56,7 +56,11 @@ def cmd_validate(args: argparse.Namespace) -> int:
     if args.promote:
         from app.alerts.artifacts import promote, shipped_blocker
 
-        blocker = shipped_blocker(artifacts)
+        try:
+            blocker = shipped_blocker(artifacts)
+        except AlertError as exc:
+            _print({"valid": False, "error_code": exc.code, "problems": exc.redacted().split("; ")})
+            return 1
         if blocker:
             _print({"valid": True, **summary, "promoted": False, "blockers": [blocker]})
             return 1

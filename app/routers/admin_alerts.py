@@ -231,7 +231,10 @@ def admin_promote(response: Response, _: None = Depends(require_admin_key)) -> A
 
     from app.alerts.artifacts import promote, shipped_blocker
 
-    blocker = shipped_blocker(artifacts)
+    try:
+        blocker = shipped_blocker(artifacts)
+    except AlertError as exc:
+        return problem(422, "Shipped ruleset invalid", exc.redacted())
     if blocker:
         return problem(409, "Promotion refused", blocker)
     with session_scope() as session:

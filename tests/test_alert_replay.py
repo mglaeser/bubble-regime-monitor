@@ -968,3 +968,30 @@ def test_the_ci_replay_gate_is_the_evidence_and_it_blocks():
     job_header = ci[:start]
     assert "continue-on-error: true" not in job_header
 
+
+
+def test_the_committed_stage_passes_its_own_replay():
+    """#158 round 1 (SOTA-B): the CI gate's --check proves the committed
+    artifact regenerates byte for byte; it does not by itself prove the
+    replay passed. Since promotion reads no evidence (owner decision D2d),
+    this is the check that the stage the shipped ruleset commits to is backed
+    by a passing replay of exactly those bytes: passed, no failures, every
+    mandatory event detected, and judged against the budget the code
+    enforces. Raising active_stage without evidence to match fails CI here."""
+    import json
+
+    import yaml
+
+    from app.alerts.budgets import LIMITS
+
+    root = Path(__file__).resolve().parents[1]
+    stage = yaml.safe_load((root / "config" / "alert_rules.v3.2.yaml").read_text(
+        encoding="utf-8"))["meta"]["active_stage"]
+    run = json.loads((root / "docs" / "alert-stage1-gate.json").read_text(
+        encoding="utf-8"))["runs"][f"stage_{stage}"]
+    assert run["evaluated_at_stage"] == stage
+    assert run["passed"] is True and run["failures"] == [], run["failures"]
+    assert run["mandatory_event_detected"] == run["mandatory_event_total"] > 0
+    if run["notification_planning_ran"]:
+        assert run["budget_limits"] == {"cap_24h": LIMITS.cap_24h, "cap_168h": LIMITS.cap_168h,
+                                        "target_168h": LIMITS.target_168h}
