@@ -690,9 +690,12 @@ it and plans nothing. `DIGEST` remains stored delivery-kind vocabulary
 `alert_digest_item` table and the `digest` heartbeat row, and takes the
 digest's branch out of the member trigger: a member dropped before the send
 (resolved, say) no longer represents a `DIGEST` row, which, like every kind but
-TEST, needs a member that was not dropped (section 7). The migration refuses
-while the table holds a row. The daily digest is a different message and is
-unchanged.
+TEST, needs a member that was not dropped (section 7). It first cancels every
+`DIGEST` delivery that has not gone out (queued, due for a retry or leased) as
+`WEEKLY_DIGEST_REMOVED`, so none reaches the wire
+(tests/test_migrations.py::test_0024_cancels_a_weekly_digest_still_queued), and
+it refuses while the table holds a row. The daily digest is a different
+message and is unchanged.
 
 ## 11d. The audited admin surface
 

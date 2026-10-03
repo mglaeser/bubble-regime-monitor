@@ -118,6 +118,18 @@ _DIGEST_ITEM_0008 = (
 
 
 def upgrade() -> None:
+    # A DIGEST delivery that has not gone out is cancelled: nothing plans,
+    # renders or validates a weekly digest any more, so none may reach the
+    # wire (#163 round 1). Only work before the wire - queued, due for a
+    # retry, leased; one in flight may have been accepted, and lease recovery
+    # ends it UNKNOWN. No event row is written; the reason is on the row.
+    # Production held no DIGEST delivery (read-only, 2026-10-03).
+    op.execute(
+        "UPDATE alert_delivery SET transport_status = 'CANCELLED', planning_state = 'NONE', "
+        "cancel_reason = 'WEEKLY_DIGEST_REMOVED', lease_owner = NULL, lease_until = NULL, "
+        "updated_at = strftime('%Y-%m-%d %H:%M:%f', 'now') "
+        "WHERE delivery_kind = 'DIGEST' "
+        "AND transport_status IN ('PENDING', 'RETRY_DUE', 'LEASED')")
     # Fail closed on data, as 0020: the table is dropped only when it is
     # empty. Production held no row (read-only, 2026-10-03). A host that
     # holds rows keeps them: the upgrade raises, the one upgrade transaction

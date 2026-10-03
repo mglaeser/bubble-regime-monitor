@@ -966,6 +966,72 @@ def _sqlite_master(db: str) -> set[tuple]:
         connection.close()
 
 
+def test_0024_cancels_a_weekly_digest_still_queued(tmp_path):
+    """#163 round 1, SOTA-A: the digest's binding validation went with the
+    weekly digest, so a DIGEST delivery still queued at the upgrade could
+    reach the provider with nothing left to check it against. 0024 cancels
+    every DIGEST delivery that has not gone out - queued, due for a retry or
+    leased, all before the wire - as WEEKLY_DIGEST_REMOVED. One in flight
+    (SENDING) may have been accepted, so lease recovery ends it UNKNOWN;
+    a sent one stays sent. Production held no DIGEST delivery (read-only,
+    2026-10-03)."""
+    db = str(tmp_path / "queued-digest.db")
+    phrases = hashlib.sha256(b"the phrase set").hexdigest()
+    rules = hashlib.sha256(b"the ruleset").hexdigest()
+    at = "2026-10-01 10:00:00.000000"
+    deliveries = {  # delivery id: (transport_status, planning_state)
+        "01M0DIGESTQUEUED0000000000": ("PENDING", "READY"),
+        "01M0DIGESTRETRYDUE00000000": ("RETRY_DUE", "READY"),
+        "01M0DIGESTLEASED0000000000": ("LEASED", "READY"),
+        "01M0DIGESTSENDING000000000": ("SENDING", "READY"),
+        "01M0DIGESTSENT000000000000": ("SENT", "NONE"),
+    }
+
+    def _cycle():
+        from alembic import command
+
+        from app.db_migrate import _alembic_config
+
+        cfg = _alembic_config()
+        command.upgrade(cfg, "0023")
+        connection = sqlite3.connect(db)
+        connection.execute(
+            "insert into alert_phrase_set_registry (phrase_set_version, phrase_set_sha256, "
+            "canonical_json, validator_version, validated_at, worst_case_test_sha256) "
+            "values ('v9.9', ?, '{}', '1', ?, ?)", (phrases, at, phrases))
+        connection.execute(
+            "insert into alert_ruleset_registry (rules_sha256, rule_version, "
+            "canonical_yaml, phrase_set_version, phrase_set_sha256, "
+            "alert_input_schema_version, methodology_version, "
+            "methodology_manifest_sha256, min_service_version, max_service_version, "
+            "validated_at, status) values (?, 'v9.9.9', 'meta: {}', 'v9.9', ?, 1, 'm', ?, "
+            "'3.8.0', '3.99.99', ?, 'VALIDATED')", (rules, phrases, phrases, at))
+        connection.execute("drop trigger alert_delivery_insert_requires_member")
+        for delivery, (status, planning) in deliveries.items():
+            connection.execute(
+                "insert into alert_delivery (delivery_id, dedupe_key, dedupe_version, mode, "
+                "live_profile, planning_rules_sha256, delivery_kind, priority, "
+                "transport_status, planning_state, created_at, updated_at, attempts, "
+                "recipient_ref) values (?, ?, 1, 'live', 'default', ?, 'DIGEST', 3, ?, ?, ?, "
+                "?, 1, 'default')", (delivery, delivery, rules, status, planning, at, at))
+        connection.commit()
+        connection.close()
+
+        command.upgrade(cfg, "0024")
+
+        connection = sqlite3.connect(db)
+        rows = dict((r[0], r[1:]) for r in connection.execute(
+            "select delivery_id, transport_status, cancel_reason from alert_delivery"))
+        connection.close()
+        for delivery in ("01M0DIGESTQUEUED0000000000", "01M0DIGESTRETRYDUE00000000",
+                         "01M0DIGESTLEASED0000000000"):
+            assert rows[delivery] == ("CANCELLED", "WEEKLY_DIGEST_REMOVED"), delivery
+        assert rows["01M0DIGESTSENDING000000000"] == ("SENDING", None)
+        assert rows["01M0DIGESTSENT000000000000"] == ("SENT", None)
+
+    _run_with_db(db, _cycle)
+
+
 def test_the_weekly_digest_storage_is_dropped_and_restored_exactly(tmp_path):
     """Owner decision D2a: the weekly digest is deleted, and 0024 drops what it
     stored - the alert_digest_item table with its indexes, the DIGEST branch
