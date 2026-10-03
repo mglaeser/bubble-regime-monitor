@@ -7,8 +7,7 @@ never promotes, so the state mutation lives here, behind the check.
 Since owner decision D2d nothing at runtime reads the evidence: live mode
 requires that the loaded bytes be the promoted ones
 (`app.alerts.artifacts.load_active_for_mode`), and the live claim takes only
-work planned under a ruleset this service promoted - it reads the
-`evidence_checked_at` stamp written here (`app.alerts.outbox.claimable`).
+work planned under a promoted ruleset (`app.alerts.outbox.claimable`).
 """
 
 from __future__ import annotations
@@ -139,7 +138,6 @@ def _mark_promoted(session: Session, rules_sha256: str, *, actor: str,
     row.status = RulesetStatus.PROMOTED
     row.promoted_at = now
     row.promoted_by = sanitize(actor)
-    row.evidence_checked_at = now
     # A re-promoted row is not superseded any more. Leaving the old stamp made
     # the row say two things at once, and anything reading `superseded_at` as
     # "no longer current" would treat the CURRENT promotion as retired.

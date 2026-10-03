@@ -598,8 +598,6 @@ def _run_the_live_dispatch_job(monkeypatch, planning: str):
             row = session.get(AlertRulesetRegistry, sha)
             if planning != "a ruleset never promoted":
                 row.promoted_at = then
-            if planning != "a ruleset promoted before promotion checked evidence":
-                row.evidence_checked_at = then
             if planning == "a ruleset promoted, then superseded":
                 row.status, row.superseded_at = RulesetStatus.SUPERSEDED, then
             if planning == "a ruleset promoted, then revoked":
@@ -613,17 +611,16 @@ def _run_the_live_dispatch_job(monkeypatch, planning: str):
 
 
 @pytest.mark.usefixtures("isolated_db")
-@pytest.mark.parametrize("planning", ["a ruleset never promoted", "a ruleset promoted, then revoked",
-                                      "a ruleset promoted before promotion checked evidence"])
+@pytest.mark.parametrize("planning", ["a ruleset never promoted", "a ruleset promoted, then revoked"])
 def test_live_dispatch_sends_no_work_planned_under_rules_nobody_promoted(monkeypatch, planning):
     """#153 round 3: with the admission gone, live work queued under rules
     nobody promoted - before an upgrade, say - went out once a different
-    artifact was promoted and the job's load passed. Round 4: so did work
-    planned under a ruleset promoted before promotion checked evidence. The
-    claim judges the ruleset that planned the work by how it was promoted,
-    never by re-reading evidence: promoted through the evidence-gated service,
-    and not revoked - REVOKED outranks a past promotion (#153 round 7). The
-    work stays queued; nothing is sent."""
+    artifact was promoted and the job's load passed. The claim judges the
+    ruleset that planned the work by its promotion, never by re-reading
+    evidence: promoted, and not revoked - REVOKED outranks a past promotion
+    (#153 round 7). The work stays queued; nothing is sent. A ruleset promoted
+    before promotion checked evidence (round 4) cannot exist past 0021
+    (tests/test_migrations.py::test_the_stamp_migration_refuses_a_ruleset_promoted_without_it)."""
     from app.alerts.enums import TransportStatus
 
     result, sender, status = _run_the_live_dispatch_job(monkeypatch, planning)

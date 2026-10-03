@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 
 import pytest
@@ -446,8 +447,102 @@ def test_admin_atomicity_migration_upgrade_downgrade_upgrade(tmp_path):
     # Bump this in the same PR that adds a migration — that is the point of
     # pinning it rather than reading `head`, which would pass vacuously.
     assert connection.execute(
-        "select version_num from alembic_version").fetchone() == ("0020",)
+        "select version_num from alembic_version").fetchone() == ("0021",)
     connection.close()
+
+
+def test_the_evidence_stamp_drop_round_trips_and_keeps_the_immutability_trigger(
+        tmp_path):
+    """Owner decision D2d: 0021 drops alert_ruleset_registry.evidence_checked_at.
+
+    A native DROP COLUMN, never a batch rebuild, which would take the
+    alert_ruleset_registry_immutable trigger with the old table. The row
+    survives both ways, and the downgrade stamps a promoted row with its
+    promotion, so the 0020 claim keeps sending what it sent before.
+    """
+    db = str(tmp_path / "evidence-stamp.db")
+    trigger = "alert_ruleset_registry_immutable"
+    sha = hashlib.sha256(b"a promoted ruleset").hexdigest()
+    phrase_sha = hashlib.sha256(b"its phrase set").hexdigest()
+
+    def _state():
+        connection = sqlite3.connect(db)
+        try:
+            columns = {row[1] for row in connection.execute(
+                "pragma table_info('alert_ruleset_registry')")}
+            rows = connection.execute(
+                "select rules_sha256, status from alert_ruleset_registry").fetchall()
+            stamps = (connection.execute(
+                "select evidence_checked_at from alert_ruleset_registry").fetchall()
+                if "evidence_checked_at" in columns else None)
+            has_trigger = connection.execute(
+                "select 1 from sqlite_master where type='trigger' and name=?",
+                (trigger,)).fetchone() is not None
+        finally:
+            connection.close()
+        return columns, rows, stamps, has_trigger
+
+    def _cycle():
+        from alembic import command
+
+        from app.db_migrate import _alembic_config
+
+        cfg = _alembic_config()
+        command.upgrade(cfg, "0020")
+        connection = sqlite3.connect(db)
+        connection.execute(
+            "insert into alert_phrase_set_registry (phrase_set_version, "
+            "phrase_set_sha256, canonical_json, validator_version, validated_at, "
+            "worst_case_test_sha256) values ('v9.9', ?, '{}', '1', "
+            "'2026-09-20 15:55:12', ?)", (phrase_sha, phrase_sha))
+        connection.execute(
+            "insert into alert_ruleset_registry (rules_sha256, rule_version, "
+            "canonical_yaml, phrase_set_version, phrase_set_sha256, "
+            "alert_input_schema_version, methodology_version, "
+            "methodology_manifest_sha256, min_service_version, "
+            "max_service_version, validated_at, promoted_at, promoted_by, "
+            "status, evidence_checked_at) values (?, 'v9.9.9', 'meta: {}', "
+            "'v9.9', ?, 1, 'm', ?, '3.8.0', '3.99.99', '2026-09-20 15:55:12', "
+            "'2026-09-20 15:55:12', 'operator', 'PROMOTED', "
+            "'2026-09-20 15:55:12')", (sha, phrase_sha, phrase_sha))
+        connection.commit()
+        connection.close()
+        columns, rows, stamps, has_trigger = _state()
+        assert "evidence_checked_at" in columns
+        assert rows == [(sha, "PROMOTED")]
+        assert stamps == [("2026-09-20 15:55:12",)]
+        assert has_trigger
+
+        command.upgrade(cfg, "0021")
+        columns, rows, _stamps, has_trigger = _state()
+        assert "evidence_checked_at" not in columns
+        assert rows == [(sha, "PROMOTED")]
+        assert has_trigger
+
+        command.downgrade(cfg, "0020")
+        columns, rows, stamps, has_trigger = _state()
+        assert "evidence_checked_at" in columns
+        assert stamps == [("2026-09-20 15:55:12",)], "a promoted row is stamped with its promotion"
+        assert rows == [(sha, "PROMOTED")]
+        assert has_trigger
+
+        command.upgrade(cfg, "head")
+
+    _run_with_db(db, _cycle)
+    columns, rows, _stamps, has_trigger = _state()
+    assert "evidence_checked_at" not in columns
+    assert rows == [(sha, "PROMOTED")]
+    assert has_trigger
+    connection = sqlite3.connect(db)
+    try:
+        # Present AND guarding: the bytes still cannot change under the hash.
+        with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+            connection.execute(
+                "update alert_ruleset_registry set canonical_yaml = 'changed'")
+        assert connection.execute(
+            "select version_num from alembic_version").fetchone() == ("0021",)
+    finally:
+        connection.close()
 
 
 def test_admin_atomicity_migration_backfills_retry_chain_and_window(tmp_path):
@@ -625,6 +720,54 @@ def test_the_selector_migration_refuses_to_drop_rows(tmp_path, table, insert):
         connection = sqlite3.connect(db)
         assert connection.execute("select version_num from alembic_version").fetchone() == ("0019",)
         assert connection.execute(f"select count(*) from {table}").fetchone() == (1,)  # noqa: S608
+        connection.close()
+
+    _run_with_db(db, _seed_and_refuse)
+
+
+def test_the_stamp_migration_refuses_a_ruleset_promoted_without_it(tmp_path):
+    """#153 round 4, SOTA-A: work planned under a ruleset promoted before
+    promotion checked evidence must not be sent. Up to 0020 the live claim
+    requires the stamp; 0021 drops it only when no promoted row lacks it -
+    production held none - and otherwise refuses: the upgrade rolls back, the
+    database stays at 0020 and the row keeps its promotion."""
+    db = str(tmp_path / "unstamped-promotion.db")
+    sha = hashlib.sha256(b"promoted before the gate").hexdigest()
+    phrase_sha = hashlib.sha256(b"its phrase set").hexdigest()
+
+    def _seed_and_refuse():
+        from alembic import command
+
+        from app.db_migrate import _alembic_config
+
+        cfg = _alembic_config()
+        command.upgrade(cfg, "0020")
+        connection = sqlite3.connect(db)
+        connection.execute(
+            "insert into alert_phrase_set_registry (phrase_set_version, "
+            "phrase_set_sha256, canonical_json, validator_version, validated_at, "
+            "worst_case_test_sha256) values ('v9.9', ?, '{}', '1', "
+            "'2026-08-01 00:00:00', ?)", (phrase_sha, phrase_sha))
+        connection.execute(
+            "insert into alert_ruleset_registry (rules_sha256, rule_version, "
+            "canonical_yaml, phrase_set_version, phrase_set_sha256, "
+            "alert_input_schema_version, methodology_version, "
+            "methodology_manifest_sha256, min_service_version, "
+            "max_service_version, validated_at, promoted_at, promoted_by, "
+            "status) values (?, 'v9.9.8', 'meta: {}', 'v9.9', ?, 1, 'm', ?, "
+            "'3.8.0', '3.99.99', '2026-08-01 00:00:00', '2026-08-01 00:00:00', "
+            "'operator', 'PROMOTED')", (sha, phrase_sha, phrase_sha))
+        connection.commit()
+        connection.close()
+
+        with pytest.raises(RuntimeError, match="0021 refuses to drop the promotion evidence stamp"):
+            command.upgrade(cfg, "0021")
+
+        connection = sqlite3.connect(db)
+        assert connection.execute("select version_num from alembic_version").fetchone() == ("0020",)
+        assert connection.execute(
+            "select status, promoted_at, evidence_checked_at from alert_ruleset_registry"
+        ).fetchall() == [("PROMOTED", "2026-08-01 00:00:00", None)]
         connection.close()
 
     _run_with_db(db, _seed_and_refuse)

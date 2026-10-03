@@ -358,18 +358,18 @@ def release_due_holds(
 
 def _admitted() -> Any:
     """The live claim's condition: the ruleset that planned the work was
-    promoted through the evidence-gated service and is not revoked - REVOKED
-    outranks a past promotion. Judged by how it was promoted, never by
-    re-reading evidence (owner decision D2d); a ruleset superseded since still
-    finishes what it planned. Work queued under rules nobody promoted that way
-    - however and whenever it was planned - is never claimed (#153 rounds 3,
-    4 and 7)."""
+    promoted and is not revoked - REVOKED outranks a past promotion. Judged by
+    its promotion, never by re-reading evidence (owner decision D2d); a
+    ruleset superseded since still finishes what it planned. Work queued
+    under rules nobody promoted - however and whenever it was planned - is
+    never claimed (#153 rounds 3 and 7). Every promoted ruleset was promoted
+    through the service: migration 0021 refuses to upgrade a database holding
+    one promoted before promotion checked evidence (#153 round 4)."""
     return or_(
         AlertDelivery.mode != "live",
         AlertDelivery.planning_rules_sha256.in_(
             select(AlertRulesetRegistry.rules_sha256).where(
                 AlertRulesetRegistry.promoted_at.is_not(None),
-                AlertRulesetRegistry.evidence_checked_at.is_not(None),
                 AlertRulesetRegistry.status != RulesetStatus.REVOKED)))
 
 
