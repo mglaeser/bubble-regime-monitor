@@ -41,6 +41,7 @@ from app.alerts.models import (
 from app.alerts.registry import ValidatedRuleset, instance_fingerprint, unresolved_pins
 from app.alerts.rulespec import RuleSpec
 from app.alerts.sources import read_source
+from app.config import configured_environment, retired_env_keys
 
 
 def iso(moment: datetime | None) -> str | None:
@@ -509,8 +510,7 @@ _RECOVERY_MAX_SILENCE_S = 90 * 60
 #: Retention is daily; allow one missed-hour window without masking a missed
 #: day. The scheduler's own misfire grace is six hours.
 _RETENTION_MAX_SILENCE_S = 36 * 60 * 60
-#: Digest is weekly. Its Stage-4 preflight has a stricter two-hour proof tied
-#: to the cutover run; ordinary health still needs to detect a missed week.
+#: Digest is weekly; health detects a missed week.
 _DIGEST_MAX_SILENCE_S = 8 * 24 * 60 * 60
 #: Recompute runs every four hours.  Ten hours permits two missed slots, the
 #: watchdog's 90-minute grace and ordinary timer jitter without allowing a
@@ -1023,6 +1023,15 @@ def health_projection(
             for blocker in live_admission_blockers
         )
 
+    # The daily digest is the owner's standing message, governed by its
+    # transports alone (owner decision D2c removed its retirement switch).
+    # A digest without a transport is named whatever the alerts do: health
+    # makes no promise about what else reaches the owner.
+    no_digest_transport = settings.daily_digest_transport == "none"
+    if no_digest_transport:
+        conditions.append("the daily digest has no transport")
+    retired = retired_env_keys(configured_environment())
+    conditions.extend(f"retired setting {key} is set and changes nothing: {why}" for key, why in retired)
     critical = (
         ruleset is None
         or schema_fault
@@ -1050,7 +1059,7 @@ def health_projection(
     return {
         "status": (
             "critical" if critical
-            else "degraded" if fallback_reason or queue_degraded
+            else "degraded" if fallback_reason or queue_degraded or no_digest_transport or retired
             else "ok"
         ),
         "components": components,

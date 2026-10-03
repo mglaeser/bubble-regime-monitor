@@ -10,12 +10,11 @@ controls are implemented, but the committed ruleset remains at Stage 1.**
 Sidecar capture is on (`ALERT_INPUT_CAPTURE`
 defaults true — it records evidence and nothing else) while `ALERTS_MODE`
 defaults `disabled`. Deterministic delivery, reminders, bundles, the weekly
-digest, watchdog/recovery, retention, cutover checks and actionability evidence
+digest, watchdog/recovery, retention and actionability evidence
 are implemented and tested. They are not permission to send: live alert
 delivery is refused below Stage 3, and the committed Stage-3 replay currently
-fails its non-P1 volume gate. The separate legacy daily digest may still send
-through its configured transport until the observed Stage-4 cutover is
-completed. See [Rollout status and remaining evidence](#rollout-status-and-remaining-evidence).
+fails its non-P1 volume gate. The separate daily digest sends through its
+configured transport, governed by its transport switches alone. See [Rollout status and remaining evidence](#rollout-status-and-remaining-evidence).
 
 ---
 
@@ -307,14 +306,18 @@ Three separate scopes. **Alert reads do not fall back to the admin key** —
 unlike the scoring API, which does. That fallback is exactly what would put an
 admin credential in a browser.
 
-`DAILY_SMS_ENABLED` is the migration alias for `SMS_ENABLED` and the explicit
-Stage-4 **master switch** for the whole legacy daily digest. Before cutover,
-when the alias is unset, `IMESSAGE_ENABLED` may select iMessage and iMessage
-wins when both configured transports are on; there is no send-failure fallback.
-After the observed Stage-4 gate, setting `DAILY_SMS_ENABLED=false` disables the
-legacy schedule regardless of whether its previous carrier was sipgate or
-iMessage. Turning the alert system on still never changes this value or
-implicitly disables the legacy digest.
+The daily digest is governed by its transport switches alone:
+`IMESSAGE_ENABLED` selects iMessage when it is configured, and iMessage wins
+when both configured transports are on; otherwise `SMS_ENABLED` selects
+sipgate; there is no send-failure fallback. It has no retirement switch: the
+`DAILY_SMS_ENABLED` migration alias went with the Stage-4 cutover it served
+(owner decision D2c). A `DAILY_SMS_ENABLED` left in an environment - the
+process environment or the `.env` file the settings read - changes nothing,
+and never in silence: the boot logs `retired_setting_present`, the
+alerts preflight fails `no_retired_settings`, and the alert health projection
+names it. Turning the alert system on never changes the digest's transport,
+and a digest without one is named by the alert health projection ("the daily
+digest has no transport").
 
 Volume, lease, retention and LLM settings live in `app/config.py`; each has a
 safe default. The `ALERTS_LLM_*` settings reserve the dormant Stage-7/A-B
@@ -478,7 +481,7 @@ refuses to use it in production.
 | 1 | schema, sidecar capture, pure evaluation, CAS, read API, replay | **implemented; this is the committed active stage** |
 | 2 | `[PIN]` calibration, replay budgets, mandatory-event fixtures | gate machinery is implemented; real calibration/mandatory-event artifacts remain operator evidence and are not invented |
 | 3 | deterministic P1/P2 delivery and weekly digest | planner, outbox, renderer, typed sender, dispatcher, reminders, digest and admission controls are implemented; promotion is blocked by the measured non-P1 volume failures below |
-| 4 | reversible legacy daily-digest cutover | preflight/apply/confirm/rollback workflow is implemented; completion awaits two observed live weeks, two exact-window digests, healthy live components and an explicit operator configuration change |
+| 4 | legacy daily-digest cutover | deleted with its switch (owner decision D2c, 2026-10-02): the daily digest is the message engine's product and is not retired. The gate's CLI never checked the switch - `alerts cutover apply` recorded the operator's intent and printed "set DAILY_SMS_ENABLED=false in the deployment environment", its one importer was that CLI, and the production database holds no cutover event (read-only, 2026-10-02) - and the `DAILY_SMS_ENABLED` alias, the cutover's one purpose, is gone (unset on the production host). The digest's transports decide; `/api/v1/alerts/health` names a digest without one |
 | 5 | constellations and bundled P2 | evaluators, dominance and atomic multi-member bundling are implemented and stage-gated |
 | 6 | EWMA / CUSUM | intentionally absent until immutable calibration and out-of-sample evidence exist |
 | 7 | P3 enrichment and LLM A/B review | P3 inventory, code-only selector and actionability evidence trail are implemented; the selector is not invoked by the production dispatcher and retention depends on future A/B evidence |
@@ -696,36 +699,6 @@ The HTTP operator actions are admin-scoped and `no-store`:
   AMBIGUOUS is first-class so an unsure reviewer cannot inflate the KPI. A
   delivery-less episode label is qualitative evidence only; because it cannot
   identify a render source, it cannot enter a deterministic-vs-LLM A/B result.
-* **`bubblegauge alerts cutover status|preflight|apply|confirm|rollback|confirm-rollback`** — the Stage
-  4 gate made checkable. Preflight evaluates every mandate condition from the
-  database (a two-week live span with recently created-and-sent market
-  activity, one successful digest in each of the exact two closed weekly
-  windows, zero suppressed P1
-  activations and zero P1 holds, fresh healthy live-namespace heartbeats,
-  reconciled live UNKNOWNs) and names each unmet one. `apply` records a request
-  and prints the exact deployment change;
-  it reports `applied=false`. After setting `DAILY_SMS_ENABLED=false` and
-  restarting, `confirm --request-event …` rechecks the gate, observes that the
-  explicit toggle and effective transport are off, then records completion.
-  Rollback uses the same request/observation split, but requesting a rollback
-  is never gated on the health that prompted it.
-
-  Temporal evidence is bound to the intent, not just its provider timestamp or
-  label. A market intent created before the 14-day window cannot become recent
-  operation merely because an old queue is drained now. Likewise, ISO week
-  `W` qualifies only when its digest was both created and sent after `W` closed
-  at the following Monday 00:00 UTC and before the next Monday (and never after
-  the preflight clock). Draining two historical windows together is recovery,
-  not two weeks of observed digest cadence.
-
-  A terminal `SENT` scalar is not sufficient historical evidence. Each
-  qualifying digest must still have an exact one-to-one member/item graph and
-  at least one non-silenced represented member. A surviving member must carry
-  its render-proven `delivered` bit and a `DELIVERED` item stamped at the
-  provider `sent_at`; a resolved retrospective member may remain dropped while
-  its item records delivery; and a silenced member must remain undelivered with
-  a `CANCELLED` item. This validation deliberately distrusts legacy/imported
-  rows that predate today's transition triggers.
 
 ## 11e. Render-time truth (mandate 17.5)
 

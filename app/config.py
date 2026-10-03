@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from functools import lru_cache
 from typing import Literal
@@ -225,11 +226,6 @@ class Settings(BaseSettings):
     alerts_llm_timeout_s: int = 6
     alerts_llm_render_cap_24h: int = 12
 
-    # Migration-friendly alias for the legacy `sms_enabled`. Until the Stage 4
-    # cutover the daily digest keeps running: ALERTS_MODE=live must NOT
-    # implicitly disable it. See `effective_daily_sms_enabled`.
-    daily_sms_enabled: bool | None = None
-
     # Runtime. mc_samples / mc_seed DEFAULT to the canonical frozen artifact
     # (F-01/L-07) so the runtime MC seed is causally the frozen value; env vars
     # may still override for operational runs.
@@ -307,18 +303,6 @@ class Settings(BaseSettings):
                     and self.sipgate_token and self.sipgate_recipient)
 
     @property
-    def effective_daily_sms_enabled(self) -> bool:
-        """Whether the LEGACY daily digest runs.
-
-        DAILY_SMS_ENABLED wins when explicitly set; otherwise the legacy
-        SMS_ENABLED still governs. The alert system never touches this — the
-        Stage 4 cutover is an explicit operator action, not a side effect of
-        turning alerts on."""
-        if self.daily_sms_enabled is not None:
-            return self.daily_sms_enabled
-        return self.sms_enabled
-
-    @property
     def imessage_configured(self) -> bool:
         """Credentials + destination present. Independent of the switch, so a
         half-configured deployment reports "enabled but not configured" rather
@@ -334,19 +318,15 @@ class Settings(BaseSettings):
 
     @property
     def daily_digest_transport(self) -> Literal["imessage", "sipgate", "none"]:
-        """Which transport carries the daily digest.
+        """Which transport carries the daily digest: its own switches alone.
 
-        ``DAILY_SMS_ENABLED=false`` is the documented Stage-4 MASTER cutover
-        for the legacy daily digest, regardless of whether that digest was
-        carried by sipgate or iMessage. Without this first check an iMessage
-        deployment kept scheduling the legacy message after the operator had
-        performed the documented cutover.
-
-        In the absence of that explicit Stage-4 value, iMessage wins when both
-        transport switches are on — see the IMESSAGE_* block. Legacy
-        ``SMS_ENABLED=false`` plus ``IMESSAGE_ENABLED=true`` still means "send
-        my digest over iMessage"; only the explicit migration alias is the
-        cross-transport cutover authority.
+        iMessage when IMESSAGE_ENABLED is on and configured, else sipgate when
+        SMS_ENABLED is on, else none - turning alerts on never changes it. The
+        digest has no retirement switch: DAILY_SMS_ENABLED, the migration alias
+        whose one purpose was the Stage-4 cutover, went with the cutover (owner
+        decision D2c, 2026-10-02; no backward compatibility, ruling of
+        2026-09-20). A digest without a transport is named by health ("the
+        daily digest has no transport", app/alerts/health.py).
 
         REQUIRES `imessage_configured`, not merely the switch. Selecting on the
         switch alone meant that adding IMESSAGE_ENABLED=true to a WORKING SMS
@@ -361,11 +341,9 @@ class Settings(BaseSettings):
         configured one over nothing loses no information. The unconfigured
         switch is reported loudly by every operator surface rather than being
         absorbed here: see `imessage_enabled_but_unconfigured`."""
-        if self.daily_sms_enabled is False:
-            return "none"
         if self.imessage_enabled and self.imessage_configured:
             return "imessage"
-        if self.effective_daily_sms_enabled:
+        if self.sms_enabled:
             return "sipgate"
         return "none"
 
@@ -389,6 +367,40 @@ _TYPO_PRONE = (
     "LLM_MODEL",
     "LLM_AUTH_HEADER",
 )
+
+
+def configured_environment() -> dict[str, str]:
+    """What the settings read: the dotenv file Settings loads (model_config's
+    env_file, relative to the working directory) under the process
+    environment, which wins as it does for Settings. The key detectors below
+    read this, so a key written only in the file is seen too (#151 round 6);
+    they report key names, never values."""
+    from dotenv import dotenv_values
+
+    env_file = Settings.model_config.get("env_file")
+    files = [env_file] if isinstance(env_file, str | os.PathLike) else list(env_file or ())
+    merged: dict[str, str] = {}
+    for path in files:
+        merged.update({key: value or "" for key, value in dotenv_values(path).items()})
+    merged.update(os.environ)
+    return merged
+
+
+#: Settings that were removed. An old value in an environment changes nothing,
+#: and that is said loudly - at boot, in the alerts preflight, in health - so
+#: it is never dropped in silence the way `extra="ignore"` would drop it.
+RETIRED_ENV_KEYS: dict[str, str] = {
+    "DAILY_SMS_ENABLED": (
+        "removed with the Stage-4 cutover (owner decision D2c, 2026-10-02): the daily "
+        "digest follows its transports, so switch IMESSAGE_ENABLED and SMS_ENABLED off "
+        "to stop it, and remove this key"),
+}
+
+
+def retired_env_keys(environ: Mapping[str, str]) -> list[tuple[str, str]]:
+    """(key, why) for every retired setting the environment still holds."""
+    present = {key.upper() for key in environ}
+    return [(key, why) for key, why in RETIRED_ENV_KEYS.items() if key in present]
 
 
 def near_miss_env_keys(environ: Mapping[str, str]) -> list[tuple[str, str]]:

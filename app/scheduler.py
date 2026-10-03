@@ -7,7 +7,7 @@ from __future__ import annotations
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from app.config import get_settings
+from app.config import configured_environment, get_settings, retired_env_keys
 from app.engine.recompute_slots import cron_hour_expression
 from app.logging_conf import get_logger
 
@@ -169,11 +169,10 @@ def start() -> BackgroundScheduler:
                            id="alert_retention", replace_existing=True,
                            coalesce=True, misfire_grace_time=21600, max_instances=1)
         digest_schedule = "disabled"
-        # Gated on the selected TRANSPORT. With DAILY_SMS_ENABLED unset, a
-        # legacy SMS_ENABLED=false plus IMESSAGE_ENABLED=true still selects
-        # iMessage. Explicit DAILY_SMS_ENABLED=false is different: it is the
-        # documented Stage-4 master cutover and selects no legacy transport at
-        # all. Turning the alert system on still never changes that switch.
+        # Gated on the selected TRANSPORT (Settings.daily_digest_transport):
+        # iMessage when enabled and configured, else sipgate when SMS_ENABLED
+        # is on; with neither, no digest is scheduled and health names it.
+        # Turning alerts on never changes it.
         digest_transport = settings.daily_digest_transport
         if settings.imessage_enabled_but_unconfigured:
             # Loud at boot, whatever the digest ends up doing: the switch is on
@@ -186,6 +185,11 @@ def start() -> BackgroundScheduler:
                             ("IMESSAGE_API_KEY", bool(settings.imessage_api_key)),
                             ("IMESSAGE_RECIPIENT", bool(settings.imessage_recipient)),
                         ) if not present])
+        for key, why in retired_env_keys(configured_environment()):
+            # Loud at boot: a removed setting's old value changes nothing, and
+            # the digest follows its transports - never in silence.
+            log.error("retired_setting_present", key=key, why=why,
+                      selected_transport=digest_transport)
         if digest_transport != "none":
             _scheduler.add_job(
                 _sms_job,

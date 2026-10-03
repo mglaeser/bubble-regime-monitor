@@ -7,6 +7,8 @@ and the assertion is on the exact bytes that would have gone to the proxy.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from app.config import Settings, near_miss_env_keys
@@ -673,27 +675,103 @@ class TestTransportSelection:
         assert get_settings().daily_digest_transport == "none"
         get_settings.cache_clear()
 
-    def test_explicit_stage4_toggle_disables_imessage_legacy_digest_too(
-            self, isolated_db, monkeypatch):
-        """DAILY_SMS_ENABLED is the legacy-digest master cutover switch.
-
-        The old implementation applied ``false`` only to sipgate, so a fully
-        configured iMessage digest remained scheduled after an operator had
-        performed the documented Stage-4 cutover.
+    @pytest.mark.parametrize("alerts_mode", ["disabled", "shadow", "live"])
+    def test_the_daily_digest_is_governed_by_its_transports_alone(
+            self, isolated_db, monkeypatch, alerts_mode):
+        """#151 (owner decision D2c): the Stage-4 cutover went with its switch.
+        DAILY_SMS_ENABLED - the migration alias whose one purpose was the
+        cutover - is gone, so the daily digest has no retirement switch: its
+        transports decide in every alerts mode, and a key left in an
+        environment changes nothing. (The deleted cutover CLI only recorded an
+        operator's intent and printed "set DAILY_SMS_ENABLED=false"; nothing at
+        runtime ever checked that switch.)
         """
-        monkeypatch.setenv("DAILY_SMS_ENABLED", "false")
+        monkeypatch.setenv("ALERTS_MODE", alerts_mode)
+        monkeypatch.setenv("DAILY_SMS_ENABLED", "false")          # a leftover key
         monkeypatch.setenv("IMESSAGE_ENABLED", "true")
         monkeypatch.setenv("IMESSAGE_API_BASE_URL", "http://127.0.0.1:12345")
-        monkeypatch.setenv("IMESSAGE_API_KEY", "configured-test-key-123456789")
+        monkeypatch.setenv("IMESSAGE_API_KEY", "configured-test-key-123456789")  # pragma: allowlist secret
         monkeypatch.setenv("IMESSAGE_RECIPIENT", "+491510000000")
-        monkeypatch.setenv("SMS_ENABLED", "true")
-        from app.config import get_settings
+        from app.config import Settings, get_settings
 
         get_settings.cache_clear()
-        settings = get_settings()
-        assert settings.effective_daily_sms_enabled is False
-        assert settings.daily_digest_transport == "none"
+        assert get_settings().daily_digest_transport == "imessage"
+        assert "daily_sms_enabled" not in Settings.model_fields
         get_settings.cache_clear()
+
+    def test_a_retired_setting_is_said_loudly(self, isolated_db, monkeypatch, capsys):
+        """#151 round 5, SOTA-A: removing DAILY_SMS_ENABLED dropped an old
+        "false" in silence - pydantic ignores unknown keys - so after an upgrade
+        the digest would follow its transports without a word. The removal
+        stands (owner decision D2c; no backward compatibility, ruling of
+        2026-09-20); it is never silent: the retired key is named at boot,
+        fails the alerts preflight, and health names it (tests/test_alert_api.py).
+        """
+        import json
+        from types import SimpleNamespace
+
+        from app import scheduler
+        from app.alerts.cli import cmd_preflight
+        from app.config import get_settings, retired_env_keys
+
+        assert [key for key, _ in retired_env_keys({"daily_sms_enabled": "false"})] == ["DAILY_SMS_ENABLED"]
+        assert retired_env_keys({"SMS_ENABLED": "true", "IMESSAGE_ENABLED": "true"}) == []
+
+        monkeypatch.setenv("DAILY_SMS_ENABLED", "false")
+        get_settings.cache_clear()
+        logged: list[tuple[str, dict]] = []
+        monkeypatch.setattr(scheduler.log, "error", lambda event, **kw: logged.append((event, kw)))
+
+        class _FakeScheduler:
+            def __init__(self, **_kwargs):
+                pass
+
+            def add_job(self, *_args, **_kwargs):
+                return None
+
+            def start(self):
+                return None
+
+        monkeypatch.setattr(scheduler, "BackgroundScheduler", lambda **_kw: _FakeScheduler())
+        monkeypatch.setattr(scheduler, "_scheduler", None)
+        try:
+            scheduler.start()
+        finally:
+            scheduler._scheduler = None
+        assert [kw["key"] for event, kw in logged if event == "retired_setting_present"] == ["DAILY_SMS_ENABLED"]
+
+        cmd_preflight(SimpleNamespace())
+        out = capsys.readouterr().out
+        report = json.loads(out[out.index('{\n  "checks"'):] if '{\n  "checks"' in out else out[out.rindex("{"):])
+        checks = report["checks"]
+        retired = [c for c in checks if c["check"] == "no_retired_settings"]
+        assert retired and retired[0]["ok"] is False and "DAILY_SMS_ENABLED" in retired[0]["detail"]
+        get_settings.cache_clear()
+
+    def test_a_key_written_only_in_the_dotenv_file_is_seen(self, monkeypatch, tmp_path):
+        """#151 round 6, SOTA-A: the detectors read the process environment
+        only, but Settings also loads .env from the working directory, so a
+        retired or misspelt key written only there went unnamed. They read
+        what the settings read (configured_environment) - key names, never
+        values."""
+        from app.config import configured_environment, near_miss_env_keys, retired_env_keys
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("DAILY_SMS_ENABLED", raising=False)
+        monkeypatch.delenv("IMESSAG_ENABLED", raising=False)
+        (tmp_path / ".env").write_text("DAILY_SMS_ENABLED=false\nIMESSAG_ENABLED=true\n", encoding="utf-8")
+        environ = configured_environment()
+        assert [key for key, _ in retired_env_keys(environ)] == ["DAILY_SMS_ENABLED"]
+        assert ("IMESSAG_ENABLED", "IMESSAGE_ENABLED") in near_miss_env_keys(environ)
+
+    def test_nothing_in_the_application_reads_a_cutover_record(self):
+        """The deleted gate wrote audit records (cutover_apply_requested and
+        its kin); no module of the application reads one, so the environment
+        switch above is the only control over the daily digest."""
+        app_dir = Path(__file__).resolve().parents[1] / "app"
+        readers = [str(p.relative_to(app_dir.parent)) for p in sorted(app_dir.rglob("*.py"))
+                   if "cutover_" in p.read_text(encoding="utf-8")]
+        assert readers == []
 
     def test_digest_sends_over_imessage_and_not_sipgate(
             self, isolated_db, imessage_env, monkeypatch):

@@ -131,6 +131,46 @@ def test_health_reports_mode_artifacts_and_sqlite(client):
     assert payload["legacy_daily_digest_enabled"] is False
 
 
+@pytest.mark.parametrize("alerts_mode", ["disabled", "live"])
+def test_health_names_a_daily_digest_without_transport(client, monkeypatch, alerts_mode):
+    """The daily digest is the owner's standing message, governed by its
+    transports alone (owner decision D2c removed its retirement switch). A
+    digest without a transport is named - degraded - whatever the alerts do,
+    live mode included: health promises nothing about what else reaches the
+    owner (#151 round 4, SOTA-A and SOTA-B: configured-live is not admitted-
+    live). A configured transport clears it."""
+    from app.config import get_settings
+
+    condition = "the daily digest has no transport"
+    monkeypatch.setenv("ALERTS_MODE", alerts_mode)
+    get_settings.cache_clear()
+    try:
+        payload = client.get("/api/v1/alerts/health", headers={"X-API-Key": READ_KEY}).json()
+        assert payload["alerts_mode"] == alerts_mode and payload["legacy_daily_digest_enabled"] is False
+        assert condition in payload["conditions"] and payload["status"] in ("degraded", "critical")
+
+        monkeypatch.setenv("IMESSAGE_ENABLED", "true")
+        monkeypatch.setenv("IMESSAGE_API_BASE_URL", "http://127.0.0.1:12345")
+        monkeypatch.setenv("IMESSAGE_API_KEY", "configured-test-key-123456789")  # pragma: allowlist secret
+        monkeypatch.setenv("IMESSAGE_RECIPIENT", "+491510000000")
+        get_settings.cache_clear()
+        payload = client.get("/api/v1/alerts/health", headers={"X-API-Key": READ_KEY}).json()
+        assert payload["legacy_daily_digest_enabled"] is True and condition not in payload["conditions"]
+    finally:
+        get_settings.cache_clear()
+
+
+def test_health_names_a_retired_setting(client, monkeypatch):
+    """A removed setting's old value changes nothing, and health says so -
+    degraded, the key named (DAILY_SMS_ENABLED, removed with the Stage-4
+    cutover by owner decision D2c)."""
+    monkeypatch.setenv("DAILY_SMS_ENABLED", "false")
+    payload = client.get("/api/v1/alerts/health", headers={"X-API-Key": READ_KEY}).json()
+    assert any(c.startswith("retired setting DAILY_SMS_ENABLED is set and changes nothing")
+               for c in payload["conditions"])
+    assert payload["status"] in ("degraded", "critical")
+
+
 def test_health_projects_every_quick_check_error_without_crashing(
     client, monkeypatch,
 ):
