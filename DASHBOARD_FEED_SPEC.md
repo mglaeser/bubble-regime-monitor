@@ -34,6 +34,13 @@
 > **v1.1 (service v3.7.0) additive delta:** one new series key and one new
 > metric key, `fear_greed` — see **section 7**. The v1.0 inventory below is
 > unchanged; totals are now **13 series + 35 metrics**.
+>
+> **2026-10-03 (owner decision D13):** the two IMF keys `cofer_gold_share_pct`
+> and `cofer_ust_share_pct` leave the contract; totals are now **13 series +
+> 33 metrics**. Both had shipped `available:false` since the IMF retired their
+> service (2026-09-27). The companion dashboard reads metrics by name and reads
+> neither key (checked at its main, 2026-10-03), so it needs no change; no
+> backward compatibility is kept (owner ruling 2026-09-20).
 
 ### Series (12 + 1, see §7)
 
@@ -52,9 +59,9 @@
 | `ust10y_tr` | 10Y US Treasuries TR (IEF ETF proxy) | total_return | USD | tiingo:IEF | decision 4B |
 | `tbill3m_tr` | 3M T-bills / cash TR (BIL ETF proxy) | total_return | USD | tiingo:BIL | decision 4B |
 
-### Metrics (34 + 1, see §7)
+### Metrics (32 + 1, see §7)
 
-`cape` · `excess_cape_yield` · `sp500_top10_weight_pct` · `semis_runup_2yr_pp` · `hy_oas_bps` · `hy_oas_52w_change_bps` (≈252 business-day lookback in the persisted history) · `pct_above_200dma` · `margin_debt_yoy_pct` · `gsadf` (detail: statistic, cv90, cv95, contested, state, gsadf_sup — **since v4.0 the value is the endpoint BSADF, not the GSADF sup; see §8**) · `lppls_confidence` (detail: state, bands, n_windows_qualifying, n_windows_positive) · `vix_level` · `vix_term_state` (categorical: value null, `detail.state` ∈ contango/flat/backwardation) · `vix_term_ratio` · `vrp` (unit `annualized_variance_pts_pct2`) · `skew` · `qqq_close` · `spy_close` · `ndx_close` (**always** available:false — no free raw index; use `qqq_close`) · `gold_spot` · `silver_spot` · `gold_silver_ratio` (note states spot vs ETF basis) · `gold_ttm_pct` · `btc_spot` · `btc_ath` (detail: basis `monthly_closes+spot`, coverage_start — **not a curated all-time record**) · `btc_drawdown_pct` (≤ 0 by construction) · `usd_broad_index_level` · `usd_broad_index_ytd_pct` (vs last-December month-end) · `usdjpy` · `usdchf` · `ust10y_yield_pct` · `tbill3m_yield_pct` · `mmf_total_assets_usd` (USD_mn, quarterly Z.1) · `cofer_gold_share_pct` (IMF **IFS**: gold ÷ total reserves — **NOT** COFER; quarterly, ~1-quarter lag) · `cofer_ust_share_pct` (IMF **COFER**: USD share of allocated FX reserves; quarterly, ~1-quarter lag)
+`cape` · `excess_cape_yield` · `sp500_top10_weight_pct` · `semis_runup_2yr_pp` · `hy_oas_bps` · `hy_oas_52w_change_bps` (≈252 business-day lookback in the persisted history) · `pct_above_200dma` · `margin_debt_yoy_pct` · `gsadf` (detail: statistic, cv90, cv95, contested, state, gsadf_sup — **since v4.0 the value is the endpoint BSADF, not the GSADF sup; see §8**) · `lppls_confidence` (detail: state, bands, n_windows_qualifying, n_windows_positive) · `vix_level` · `vix_term_state` (categorical: value null, `detail.state` ∈ contango/flat/backwardation) · `vix_term_ratio` · `vrp` (unit `annualized_variance_pts_pct2`) · `skew` · `qqq_close` · `spy_close` · `ndx_close` (**always** available:false — no free raw index; use `qqq_close`) · `gold_spot` · `silver_spot` · `gold_silver_ratio` (note states spot vs ETF basis) · `gold_ttm_pct` · `btc_spot` · `btc_ath` (detail: basis `monthly_closes+spot`, coverage_start — **not a curated all-time record**) · `btc_drawdown_pct` (≤ 0 by construction) · `usd_broad_index_level` · `usd_broad_index_ytd_pct` (vs last-December month-end) · `usdjpy` · `usdchf` · `ust10y_yield_pct` · `tbill3m_yield_pct` · `mmf_total_assets_usd` (USD_mn, quarterly Z.1)
 
 ## 3 · Endpoint
 
@@ -143,6 +150,9 @@ The complete real `metrics` block, verbatim:
 > adapter read (`dataservices.imf.org` no longer resolves), so the adapter is
 > gone. Both keys stay in the contract as `available:false` (source `imf:COFER`
 > / `imf:IFS`, note naming the retirement); a value is never fabricated.
+>
+> **2026-10-03 — dropped (owner decision D13).** Both keys leave the contract;
+> the feed no longer carries them.
 
 A real full series (capture #2, `usd_broad_index`, first/last points shown — all 61 present in the artifact):
 
@@ -261,7 +271,7 @@ And a REAL degradation row (capture #1, before the min_rows fix) — this is pre
 2. DXY → Fed Broad Dollar Index (`usd_broad_index`), never labeled DXY (ICE licensing).
 3. BTC ATH basis = max(provider monthly closes, current spot), coverage start in `detail` — not a curated record. Drawdown is computed against that basis and is ≤ 0 by construction.
 4. `vix_term_state` is categorical: `value` is null (the contract requires numeric values) and the reading lives in `detail.state`; the numeric companion is `vix_term_ratio`.
-5. ~~COFER reserve shares ship `available:false` (new IMF provider = out of scope).~~ **Resolved in v3.7.5:** both are connected via `app/sources/imf_reserves.py`. `cofer_ust_share_pct` IS COFER (USD share of allocated FX reserves); `cofer_gold_share_pct` is IMF **IFS** (gold ÷ total reserves), NOT COFER — COFER is FX-only, so the key name stays a labeled historical misnomer. Quarterly (~1-quarter lag), non-scoring, per-item graceful degradation. Requires a deploy-host network policy that allows `imf.org`. **Not connected again since 2026-09-27:** the IMF retired that service, both keys ship `available:false`.
+5. ~~COFER reserve shares ship `available:false` (new IMF provider = out of scope).~~ **Resolved in v3.7.5:** both are connected via `app/sources/imf_reserves.py`. `cofer_ust_share_pct` IS COFER (USD share of allocated FX reserves); `cofer_gold_share_pct` is IMF **IFS** (gold ÷ total reserves), NOT COFER — COFER is FX-only, so the key name stays a labeled historical misnomer. Quarterly (~1-quarter lag), non-scoring, per-item graceful degradation. Requires a deploy-host network policy that allows `imf.org`. **Not connected again since 2026-09-27:** the IMF retired that service, both keys ship `available:false`. **Dropped 2026-10-03 (owner decision D13):** both keys left the contract.
 6. §5 now carries real capture-#2 bytes (metrics block verbatim + envelope); the complete per-point byte contract is committed at `docs/dashboard-feed-capture2.json`. The pre-capture sketch is retained under "5-legacy" for history only.
 7. **`silver_spot` is permanently the labeled SLV-close fallback on the free Twelve Data tier** (XAG/USD needs the Grow plan; XAU/USD works free — confirmed by capture #1). The dashboard's "render prose spot only when source is true spot" rule handles this by design; `gold_silver_ratio` states its `mixed` basis. If a paid TD plan is ever added, true silver spot activates automatically with no code change.
 8. Twelve Data 1-month bars are dated at the month **start** (the current partial bar reads `YYYY-MM-01`), so the `btc` series uses a 35-day stale SLA; `btc_spot` (daily) carries the fresh date.

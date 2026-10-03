@@ -82,7 +82,7 @@ class TestBuildFeedGolden:
         feed = df.build_feed(raw, data)
         assert sorted(feed["series"].keys()) == sorted(df.SERIES_KEYS)
         assert sorted(feed["metrics"].keys()) == sorted(df.METRIC_KEYS)
-        assert len(df.SERIES_KEYS) == 13 and len(df.METRIC_KEYS) == 35  # v3.7.0: +fear_greed
+        assert len(df.SERIES_KEYS) == 13 and len(df.METRIC_KEYS) == 33  # v3.7.0 +fear_greed; D13 -2 IMF keys
 
     def test_points_always_61_and_left_padded(self, snapshot, patched_sources):
         raw, data = snapshot
@@ -202,19 +202,14 @@ class TestDegradation:
         # spot keeps its true-spot source; the ETF fallback is only for spot failure
         assert feed["metrics"]["gold_spot"]["available"] is True
 
-    def test_imf_reserve_keys_stay_in_the_contract_unavailable(self, snapshot,
-                                                               patched_sources):
+    def test_the_imf_reserve_keys_left_the_contract(self, snapshot, patched_sources):
         """The IMF retired the SDMX service the reserves adapter read
-        (2026-09-27: dataservices.imf.org has no DNS record). The two keys
-        stay in the frozen contract, unavailable and never fabricated."""
+        (2026-09-27); the owner dropped both keys from the contract (D13,
+        2026-10-03) rather than ship them unavailable for good."""
         raw, data = snapshot
         m = df.build_feed(raw, data)["metrics"]
-        for key, source in (("cofer_ust_share_pct", "imf:COFER"),
-                            ("cofer_gold_share_pct", "imf:IFS")):
-            assert m[key]["available"] is False
-            assert m[key]["value"] is None
-            assert m[key]["source"] == source
-            assert "retired" in m[key]["note"]
+        for key in ("cofer_ust_share_pct", "cofer_gold_share_pct"):
+            assert key not in m and key not in df.METRIC_KEYS
         assert m["mmf_total_assets_usd"]["unit"] == "USD_mn"    # neighbours unaffected
 
     def test_spot_failure_falls_back_to_labeled_etf_close(self, snapshot, patched_sources,

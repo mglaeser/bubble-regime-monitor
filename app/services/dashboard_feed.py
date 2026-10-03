@@ -3,7 +3,7 @@
 
 DESIGN CONTRACT (dashboard-side sign-off, 2026-07-15; decisions 1A/2A/3A/4B/5A;
 v3.7.0 additive delta: +fear_greed series & metric — see spec section 7):
-  * 13 monthly series + 35 scalar metrics; keys name the CONCEPT (gold, btc,
+  * 13 monthly series + 33 scalar metrics; keys name the CONCEPT (gold, btc,
     ust10y_tr) — sources/proxies live in name/source/note, never in the key.
   * Every series: EXACTLY 61 monthly points (t-60..t0), last close of month,
     raw values (the client rebases), LEFT-PADDED with explicit nulls when
@@ -218,7 +218,7 @@ METRIC_KEYS = [
     "btc_spot", "btc_ath", "btc_drawdown_pct",
     "usd_broad_index_level", "usd_broad_index_ytd_pct", "usdjpy", "usdchf",
     "ust10y_yield_pct", "tbill3m_yield_pct",
-    "mmf_total_assets_usd", "cofer_gold_share_pct", "cofer_ust_share_pct",
+    "mmf_total_assets_usd",
     "fear_greed",  # v3.7.0 additive
 ]
 
@@ -343,7 +343,7 @@ def build_feed(raw: Any, data: Any) -> dict[str, Any]:
     # with that state reported a regime nothing had measured. Until s4 scored the
     # endpoint the two were the same number, so the pairing was correct by
     # construction — the same invariant lppls_confidence still holds below.
-    # The metric key stays "gsadf" (METRIC_KEYS is a frozen 35-key contract); the
+    # The metric key stays "gsadf" (METRIC_KEYS is the 33-key contract); the
     # unscored sup remains visible under detail so nothing is lost.
     # The configured family is a methodology constant, so it is known even on a
     # run where s4 produced nothing. Reading it from the run's extra published
@@ -497,15 +497,6 @@ def build_feed(raw: Any, data: Any) -> dict[str, Any]:
     except Exception as exc:
         m["mmf_total_assets_usd"] = _unavailable("USD_mn", "fred:MMMFFAQ027S",
                                                  f"source failed: {str(exc)[:120]}")
-
-    # IMF official-reserves shares: not connected. The IMF retired the SDMX
-    # service the v3.7.5 adapter read (dataservices.imf.org no longer
-    # resolves); the keys stay in the frozen contract, unavailable, never
-    # fabricated. cofer_gold_share_pct was IMF IFS, not COFER (COFER is
-    # FX-only); the key name is a dashboard-contract misnomer.
-    retired = "not connected: the IMF retired the SDMX service (dataservices.imf.org)"
-    m["cofer_ust_share_pct"] = _unavailable("pct", "imf:COFER", retired)
-    m["cofer_gold_share_pct"] = _unavailable("pct", "imf:IFS", retired)
 
     # CNN Fear & Greed scalar (v3.7.0) — same fetch as the series above.
     if fng is not None:
