@@ -460,6 +460,40 @@ class TestTheDeployNote:
         code, calls = release(running=release.main(), env={"EXEC_FAILS": "1"})
         assert code == 0 and "deploy note not sent" in release.output  # type: ignore[attr-defined]
 
+    def test_a_note_that_cannot_be_written_fails_no_release(self, release):
+        """#150 round 16, SOTA-A: the note was written under the release's ERR
+        trap, so a write that failed - a full runtime directory, say - ended the
+        release before the build. Writing the note is best effort too: whatever
+        fails while it is written removes it, and the release goes on."""
+        import shutil
+
+        shim = release.state.parent / "bin" / "git"
+        shim.write_text(f'#!/usr/bin/env bash\n[[ "$1" != diff ]] || exit 1\nexec {shutil.which("git")} "$@"\n')
+        shim.chmod(0o755)
+        old = release.main()
+        target = release.advance()
+        code, calls = release(running=old)
+        assert code == 0 and "deploy note omitted" in release.output  # type: ignore[attr-defined]
+        assert any(c.startswith("podman build") for c in calls)
+        assert not self._note(release).exists()
+        assert (release.state / "label").read_text().strip() == target
+
+    def test_the_log_is_capped_at_what_the_reader_reads(self, release):
+        """#150 round 16, SOTA-A: the log was written whole, however large. The
+        release caps it at the reader's cap, and the reader drops the record
+        the cap cut (app/services/deploy_note.py)."""
+        from app.services.deploy_note import _LOG_BYTES
+
+        old = release.main()
+        (release.seed / "change.txt").write_text("a large commit\n")
+        message = release.seed.parent / "message.txt"
+        message.write_text("A large commit\n\n" + "x" * (_LOG_BYTES + 4096) + "\n")
+        _git("add", "-A", cwd=release.seed)
+        _git("commit", "--quiet", "-F", str(message), cwd=release.seed)
+        _git("push", "--quiet", "origin", "main", cwd=release.seed)
+        assert release(running=old)[0] == 0
+        assert (self._note(release) / "log").stat().st_size == _LOG_BYTES
+
     @pytest.mark.parametrize("fault", [{"RESTART_FAILS": "1"}, {"STATUS": "500"}])
     def test_a_release_that_does_not_come_up_announces_nothing(self, release, fault):
         release.advance()

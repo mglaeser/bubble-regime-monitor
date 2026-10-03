@@ -83,7 +83,8 @@ the container keeps no state for the note. It is best effort: a note that is
 not sent is not sent later - the release says so and goes on - and the next
 note begins at the commit the last container carried, so a deploy can go
 unannounced; a release that cannot name that commit (no container at all, or
-one off main's history) builds an image without a note. A message never
+one off main's history), or whose note fails to be written, builds an image
+without a note. A message never
 describes the wrong change; it can be missing (`app/services/deploy_note.py`;
 AGENTS.md rule 1 names this note as the one prompt that carries repository
 text).

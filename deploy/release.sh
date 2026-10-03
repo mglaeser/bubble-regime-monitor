@@ -97,15 +97,20 @@ git archive "$TARGET" | tar -x -C "$RUNTIME_DIRECTORY/src"
 # a path nor a commit message can hold (#150 round 4). A rename is listed as
 # its old path and its new one: git names a detected rename by the new path
 # alone, and the likelihood matches the listed scoring files exactly (#150
-# round 7).
+# round 7). Writing the note is best effort too: whatever fails while it is
+# written - a full runtime directory, say - removes it, and the release goes on
+# without one; the log is capped at the 1 MiB the reader reads (#150 round 16).
+write_note() {
+  mkdir "$note" || return 1
+  printf '%s %s %s\n' "$1" "$TARGET" "$(git rev-list --count "$1..$TARGET")" > "$note/range" || return 1
+  git diff --name-only --no-renames -z "$1" "$TARGET" > "$note/files" || return 1
+  { git log -z --format='%H%n%s%n%b' "$1..$TARGET" || true; } | head -c 1048576 > "$note/log"
+}
 base="$(last)"
 note="$RUNTIME_DIRECTORY/src/deploy-note"
 rm -rf "$note"
 if [[ -n "$base" && "$base" != "$TARGET" ]] && git merge-base --is-ancestor "$base" "$TARGET" 2>/dev/null; then
-  mkdir "$note"
-  printf '%s %s %s\n' "$base" "$TARGET" "$(git rev-list --count "$base..$TARGET")" > "$note/range"
-  git diff --name-only --no-renames -z "$base" "$TARGET" > "$note/files"
-  git log -z --format='%H%n%s%n%b' "$base..$TARGET" > "$note/log"
+  write_note "$base" || { rm -rf "$note"; printf '==> deploy note omitted\n' >&2; }
 fi
 podman build --label "$LABEL=$TARGET" -t "$IMAGE:$TARGET" \
   -f "$RUNTIME_DIRECTORY/src/Containerfile" "$RUNTIME_DIRECTORY/src"
