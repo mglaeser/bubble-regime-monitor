@@ -619,8 +619,8 @@ def test_live_dispatch_sends_no_work_planned_under_rules_nobody_promoted(monkeyp
     ruleset that planned the work by its promotion, never by re-reading
     evidence: promoted, and not revoked - REVOKED outranks a past promotion
     (#153 round 7). The work stays queued; nothing is sent. A ruleset promoted
-    before promotion checked evidence (round 4) cannot exist past 0021
-    (tests/test_migrations.py::test_the_stamp_migration_refuses_a_ruleset_promoted_without_it)."""
+    before promotion checked evidence (round 4) is withdrawn by 0021
+    (tests/test_migrations.py::test_the_stamp_migration_withdraws_a_promotion_made_without_it)."""
     from app.alerts.enums import TransportStatus
 
     result, sender, status = _run_the_live_dispatch_job(monkeypatch, planning)

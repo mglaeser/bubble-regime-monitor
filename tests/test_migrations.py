@@ -725,17 +725,21 @@ def test_the_selector_migration_refuses_to_drop_rows(tmp_path, table, insert):
     _run_with_db(db, _seed_and_refuse)
 
 
-def test_the_stamp_migration_refuses_a_ruleset_promoted_without_it(tmp_path):
+def test_the_stamp_migration_withdraws_a_promotion_made_without_it(tmp_path):
     """#153 round 4, SOTA-A: work planned under a ruleset promoted before
-    promotion checked evidence must not be sent. Up to 0020 the live claim
-    requires the stamp; 0021 drops it only when no promoted row lacks it -
-    production held none - and otherwise refuses: the upgrade rolls back, the
-    database stays at 0020 and the row keeps its promotion."""
+    promotion checked evidence must not be sent - up to 0020 the live claim
+    requires the stamp. #157 round 1, SOTA-A: refusing the upgrade until the
+    operator re-promoted could never pass, because the code that ships with
+    0021 no longer writes the stamp. 0021 withdraws such a promotion instead:
+    it authorised no live work under 0020 either. With no promoted ruleset
+    left, live mode refuses to load until the operator promotes again, which
+    works on 0021. Production held none (read-only, 2026-10-03)."""
     db = str(tmp_path / "unstamped-promotion.db")
-    sha = hashlib.sha256(b"promoted before the gate").hexdigest()
+    stamped = hashlib.sha256(b"promoted through the service").hexdigest()
+    unstamped = hashlib.sha256(b"promoted before the gate").hexdigest()
     phrase_sha = hashlib.sha256(b"its phrase set").hexdigest()
 
-    def _seed_and_refuse():
+    def _seed_and_upgrade():
         from alembic import command
 
         from app.db_migrate import _alembic_config
@@ -748,29 +752,32 @@ def test_the_stamp_migration_refuses_a_ruleset_promoted_without_it(tmp_path):
             "phrase_set_sha256, canonical_json, validator_version, validated_at, "
             "worst_case_test_sha256) values ('v9.9', ?, '{}', '1', "
             "'2026-08-01 00:00:00', ?)", (phrase_sha, phrase_sha))
-        connection.execute(
-            "insert into alert_ruleset_registry (rules_sha256, rule_version, "
-            "canonical_yaml, phrase_set_version, phrase_set_sha256, "
-            "alert_input_schema_version, methodology_version, "
-            "methodology_manifest_sha256, min_service_version, "
-            "max_service_version, validated_at, promoted_at, promoted_by, "
-            "status) values (?, 'v9.9.8', 'meta: {}', 'v9.9', ?, 1, 'm', ?, "
-            "'3.8.0', '3.99.99', '2026-08-01 00:00:00', '2026-08-01 00:00:00', "
-            "'operator', 'PROMOTED')", (sha, phrase_sha, phrase_sha))
+        for sha, version, status, stamp in (
+                (unstamped, "v9.9.8", "PROMOTED", None),
+                (stamped, "v9.9.7", "SUPERSEDED", "2026-07-01 00:00:00")):
+            connection.execute(
+                "insert into alert_ruleset_registry (rules_sha256, rule_version, "
+                "canonical_yaml, phrase_set_version, phrase_set_sha256, "
+                "alert_input_schema_version, methodology_version, "
+                "methodology_manifest_sha256, min_service_version, "
+                "max_service_version, validated_at, promoted_at, promoted_by, "
+                "status, evidence_checked_at) values (?, ?, 'meta: {}', 'v9.9', ?, 1, 'm', ?, "
+                "'3.8.0', '3.99.99', '2026-07-01 00:00:00', '2026-08-01 00:00:00', "
+                "'operator', ?, ?)", (sha, version, phrase_sha, phrase_sha, status, stamp))
         connection.commit()
         connection.close()
 
-        with pytest.raises(RuntimeError, match="0021 refuses to drop the promotion evidence stamp"):
-            command.upgrade(cfg, "0021")
+        command.upgrade(cfg, "0021")
 
         connection = sqlite3.connect(db)
-        assert connection.execute("select version_num from alembic_version").fetchone() == ("0020",)
-        assert connection.execute(
-            "select status, promoted_at, evidence_checked_at from alert_ruleset_registry"
-        ).fetchall() == [("PROMOTED", "2026-08-01 00:00:00", None)]
+        assert connection.execute("select version_num from alembic_version").fetchone() == ("0021",)
+        rows = dict((sha, (status, promoted_at)) for sha, status, promoted_at in connection.execute(
+            "select rules_sha256, status, promoted_at from alert_ruleset_registry"))
         connection.close()
+        assert rows[unstamped] == ("VALIDATED", None), "the unstamped promotion is withdrawn"
+        assert rows[stamped] == ("SUPERSEDED", "2026-08-01 00:00:00"), "a stamped one is kept"
 
-    _run_with_db(db, _seed_and_refuse)
+    _run_with_db(db, _seed_and_upgrade)
 
 
 def test_render_integrity_migration_refuses_competing_final_renders(tmp_path):

@@ -602,10 +602,12 @@ plans nothing (tests/test_alert_api.py::test_a_live_send_test_is_planned_under_t
 tests/test_alert_digest.py::test_the_live_weekly_digest_is_planned_under_the_promoted_ruleset_only);
 a row planned under a ruleset since superseded was authorized when it was
 planned. Every promoted ruleset was promoted through the service: migration
-0021 dropped the promotion evidence stamp only where no promoted row lacked it,
-and refuses otherwise (tests/test_migrations.py::test_the_stamp_migration_refuses_a_ruleset_promoted_without_it);
-on leaf (read-only, 2026-10-03) both registry rows - the PROMOTED one (rules
-v3.2.3, phrase set v3.5) and the SUPERSEDED v3.2.2 - carried it. Production
+0021 withdrew any promotion made before promotion checked evidence - it
+authorised no live work under 0020 either - before it dropped the stamp; a
+withdrawn PROMOTED row leaves live mode refusing to load until the operator
+promotes again (tests/test_migrations.py::test_the_stamp_migration_withdraws_a_promotion_made_without_it).
+On leaf (read-only, 2026-10-03) both registry rows - the PROMOTED one (rules
+v3.2.3, phrase set v3.5) and the SUPERSEDED v3.2.2 - carried the stamp. Production
 holds no REVOKED ruleset and held no queued delivery when the gate went
 (read-only, 2026-10-03).
 

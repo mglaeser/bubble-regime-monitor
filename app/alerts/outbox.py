@@ -363,8 +363,8 @@ def _admitted() -> Any:
     ruleset superseded since still finishes what it planned. Work queued
     under rules nobody promoted - however and whenever it was planned - is
     never claimed (#153 rounds 3 and 7). Every promoted ruleset was promoted
-    through the service: migration 0021 refuses to upgrade a database holding
-    one promoted before promotion checked evidence (#153 round 4)."""
+    through the service: migration 0021 withdrew any promotion made before
+    promotion checked evidence (#153 round 4)."""
     return or_(
         AlertDelivery.mode != "live",
         AlertDelivery.planning_rules_sha256.in_(
