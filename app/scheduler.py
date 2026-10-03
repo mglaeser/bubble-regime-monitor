@@ -4,12 +4,10 @@ POST /api/v1/admin/refresh."""
 
 from __future__ import annotations
 
-import os
-
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from app.config import get_settings, retired_env_keys
+from app.config import configured_environment, get_settings, retired_env_keys
 from app.engine.recompute_slots import cron_hour_expression
 from app.logging_conf import get_logger
 
@@ -187,7 +185,7 @@ def start() -> BackgroundScheduler:
                             ("IMESSAGE_API_KEY", bool(settings.imessage_api_key)),
                             ("IMESSAGE_RECIPIENT", bool(settings.imessage_recipient)),
                         ) if not present])
-        for key, why in retired_env_keys(os.environ):
+        for key, why in retired_env_keys(configured_environment()):
             # Loud at boot: a removed setting's old value changes nothing, and
             # the digest follows its transports - never in silence.
             log.error("retired_setting_present", key=key, why=why,

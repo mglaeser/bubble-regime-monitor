@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import sys
 from pathlib import Path
@@ -80,7 +79,7 @@ def cmd_preflight(_args: argparse.Namespace) -> int:
     """Everything that must be true before a stage is advanced."""
     from app.alerts.artifacts import validate_from_disk
     from app.alerts.errors import AlertError
-    from app.config import get_settings, near_miss_env_keys, retired_env_keys
+    from app.config import configured_environment, get_settings, near_miss_env_keys, retired_env_keys
     from app.db import session_scope
     from app.models import Snapshot
 
@@ -128,11 +127,11 @@ def cmd_preflight(_args: argparse.Namespace) -> int:
     # Fails the preflight rather than merely reporting: a digest configured
     # under a misspelt key is indistinguishable from one deliberately off, and
     # this is the house mechanism for surfacing exactly that.
-    near = near_miss_env_keys(os.environ)
+    near = near_miss_env_keys(configured_environment())
     check("no_misspelt_settings", not near,
           "; ".join(f"{actual} looks like {intended}" for actual, intended in near)
           or "no near-miss environment keys")
-    retired = retired_env_keys(os.environ)
+    retired = retired_env_keys(configured_environment())
     check("no_retired_settings", not retired,
           "; ".join(f"{key}: {why}" for key, why in retired) or "no retired settings")
     check("imessage_switch_matches_config", not settings.imessage_enabled_but_unconfigured,

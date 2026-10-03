@@ -9,7 +9,6 @@ never as the literal string "<PIN>" in a numeric field.
 from __future__ import annotations
 
 import json
-import os
 from datetime import UTC, datetime, timedelta
 from math import ceil
 from typing import Any
@@ -42,7 +41,7 @@ from app.alerts.models import (
 from app.alerts.registry import ValidatedRuleset, instance_fingerprint, unresolved_pins
 from app.alerts.rulespec import RuleSpec
 from app.alerts.sources import read_source
-from app.config import retired_env_keys
+from app.config import configured_environment, retired_env_keys
 
 
 def iso(moment: datetime | None) -> str | None:
@@ -1031,7 +1030,7 @@ def health_projection(
     no_digest_transport = settings.daily_digest_transport == "none"
     if no_digest_transport:
         conditions.append("the daily digest has no transport")
-    retired = retired_env_keys(os.environ)
+    retired = retired_env_keys(configured_environment())
     conditions.extend(f"retired setting {key} is set and changes nothing: {why}" for key, why in retired)
     critical = (
         ruleset is None

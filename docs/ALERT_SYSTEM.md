@@ -311,8 +311,9 @@ The daily digest is governed by its transport switches alone:
 when both configured transports are on; otherwise `SMS_ENABLED` selects
 sipgate; there is no send-failure fallback. It has no retirement switch: the
 `DAILY_SMS_ENABLED` migration alias went with the Stage-4 cutover it served
-(owner decision D2c). A `DAILY_SMS_ENABLED` left in an environment changes
-nothing, and never in silence: the boot logs `retired_setting_present`, the
+(owner decision D2c). A `DAILY_SMS_ENABLED` left in an environment - the
+process environment or the `.env` file the settings read - changes nothing,
+and never in silence: the boot logs `retired_setting_present`, the
 alerts preflight fails `no_retired_settings`, and the alert health projection
 names it. Turning the alert system on never changes the digest's transport,
 and a digest without one is named by the alert health projection ("the daily

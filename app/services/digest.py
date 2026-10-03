@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 from sqlalchemy import select
 
-from app.config import get_settings, near_miss_env_keys
+from app.config import configured_environment, get_settings, near_miss_env_keys
 from app.db import session_scope
 from app.engine.sms_report import deterministic_report
 from app.logging_conf import get_logger
@@ -79,7 +78,7 @@ def no_transport_reason() -> str:
     `Settings` is built with `extra="ignore"`, so `IMESSAG_ENABLED=true` is
     dropped without a word. Paired with SMS_ENABLED=false that produces a
     service which sends nothing and, until this ran, explained nothing."""
-    near = near_miss_env_keys(os.environ)
+    near = near_miss_env_keys(configured_environment())
     if near:
         pairs = ", ".join(f"{actual!r} looks like {intended!r}" for actual, intended in near)
         return (f"no digest transport enabled, and the environment holds a probable "

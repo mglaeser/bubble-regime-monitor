@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from functools import lru_cache
 from typing import Literal
@@ -366,6 +367,23 @@ _TYPO_PRONE = (
     "LLM_MODEL",
     "LLM_AUTH_HEADER",
 )
+
+
+def configured_environment() -> dict[str, str]:
+    """What the settings read: the dotenv file Settings loads (model_config's
+    env_file, relative to the working directory) under the process
+    environment, which wins as it does for Settings. The key detectors below
+    read this, so a key written only in the file is seen too (#151 round 6);
+    they report key names, never values."""
+    from dotenv import dotenv_values
+
+    env_file = Settings.model_config.get("env_file")
+    files = [env_file] if isinstance(env_file, str | os.PathLike) else list(env_file or ())
+    merged: dict[str, str] = {}
+    for path in files:
+        merged.update({key: value or "" for key, value in dotenv_values(path).items()})
+    merged.update(os.environ)
+    return merged
 
 
 #: Settings that were removed. An old value in an environment changes nothing,

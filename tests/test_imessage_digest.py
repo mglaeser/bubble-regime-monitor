@@ -748,6 +748,22 @@ class TestTransportSelection:
         assert retired and retired[0]["ok"] is False and "DAILY_SMS_ENABLED" in retired[0]["detail"]
         get_settings.cache_clear()
 
+    def test_a_key_written_only_in_the_dotenv_file_is_seen(self, monkeypatch, tmp_path):
+        """#151 round 6, SOTA-A: the detectors read the process environment
+        only, but Settings also loads .env from the working directory, so a
+        retired or misspelt key written only there went unnamed. They read
+        what the settings read (configured_environment) - key names, never
+        values."""
+        from app.config import configured_environment, near_miss_env_keys, retired_env_keys
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("DAILY_SMS_ENABLED", raising=False)
+        monkeypatch.delenv("IMESSAG_ENABLED", raising=False)
+        (tmp_path / ".env").write_text("DAILY_SMS_ENABLED=false\nIMESSAG_ENABLED=true\n", encoding="utf-8")
+        environ = configured_environment()
+        assert [key for key, _ in retired_env_keys(environ)] == ["DAILY_SMS_ENABLED"]
+        assert ("IMESSAG_ENABLED", "IMESSAGE_ENABLED") in near_miss_env_keys(environ)
+
     def test_nothing_in_the_application_reads_a_cutover_record(self):
         """The deleted gate wrote audit records (cutover_apply_requested and
         its kin); no module of the application reads one, so the environment
