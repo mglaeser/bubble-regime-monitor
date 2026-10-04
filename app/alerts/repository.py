@@ -23,6 +23,7 @@ from app.alerts.enums import (
     ActorType,
     CausationType,
     ConditionState,
+    DeliveryKind,
     EpisodeStatus,
     EvaluationStatus,
     SuppressionReason,
@@ -468,12 +469,29 @@ def load_notification_memories(
     return {
         row.instance_fingerprint: NotificationMemory(
             last_sent_at=row.last_sent_at,
-            last_reminder_at=row.last_reminder_at,
-            reminder_count=row.reminder_count,
             next_notification_generation=row.next_notification_generation,
         )
         for row in rows
     }
+
+
+def load_reminders_sent(session: Session, *, episode_ids: set[str]) -> dict[str, int]:
+    """Reminders sent per episode: the REMINDER deliveries whose body
+    represented it, which `mark_sent` alone marks `delivered`. A queued,
+    UNKNOWN or failed reminder is not one. Episodes with none are absent."""
+    if not episode_ids:
+        return {}
+    rows = session.execute(
+        select(AlertDeliveryMember.episode_id, func.count())
+        .join(AlertDelivery, AlertDelivery.delivery_id == AlertDeliveryMember.delivery_id)
+        .where(
+            AlertDeliveryMember.episode_id.in_(sorted(episode_ids)),
+            AlertDeliveryMember.delivered.is_(True),
+            AlertDelivery.delivery_kind == DeliveryKind.REMINDER,
+        )
+        .group_by(AlertDeliveryMember.episode_id)
+    ).all()
+    return {str(episode_id): int(count) for episode_id, count in rows}
 
 
 def load_open_generations(

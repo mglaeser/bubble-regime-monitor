@@ -91,6 +91,7 @@ def _plan_from_persisted_silences():
         decisions=[decision],
         episode_ids={FINGERPRINT: "episode"},
         memories={FINGERPRINT: NotificationMemory()},
+        reminders_sent={},
         active_silences=active,
         origin_rules_sha256="r" * 64,
         phrase_set_version="v3.3",

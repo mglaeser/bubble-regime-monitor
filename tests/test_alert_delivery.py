@@ -197,6 +197,7 @@ def _inputs(rules: list[RuleSpec], *, now=NOW, **overrides) -> PlanInputs:
         "decisions": decisions,
         "episode_ids": {f"fp-{r.rule_id}": f"EP-{r.rule_id}" for r in rules},
         "memories": {f"fp-{r.rule_id}": NotificationMemory() for r in rules},
+        "reminders_sent": {},
         "origin_rules_sha256": "rules-hash",
         "phrase_set_version": "v3.2",
         "phrase_set_sha256": "phrase-hash",

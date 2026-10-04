@@ -188,9 +188,13 @@ def test_a_reminder_is_persisted_once_and_advances_only_after_confirmed_send(
     Planning generation 2 must not advance durable notification memory.  A
     later evaluation while that row is still open must discover the persisted
     generation and refrain from branching another intent.  Only a confirmed
-    sender outcome advances the next generation and reminder count.
+    sender outcome advances the next generation and counts the episode's
+    reminder - per episode, from its delivered members, no longer an
+    instance column (migration 0026).
     """
     import yaml
+
+    from app.alerts.repository import load_reminders_sent
 
     source = yaml.safe_load(
         pathlib.Path("config/alert_rules.v3.2.yaml").read_text(encoding="utf-8"))
@@ -237,13 +241,13 @@ def test_a_reminder_is_persisted_once_and_advances_only_after_confirmed_send(
     with session_scope() as session:
         episode = session.query(AlertEpisode).filter_by(
             rule_id="regime.band_to_derisk", is_open=True).one()
-        fingerprint = episode.instance_fingerprint
+        fingerprint, episode_id = episode.instance_fingerprint, episode.episode_id
         memory = session.get(
             AlertInstanceNotificationState,
             ("shadow", "default", fingerprint),
         )
         assert memory.next_notification_generation == 2
-        assert memory.reminder_count == 0
+        assert load_reminders_sent(session, episode_ids={episode_id}) == {}
 
     # More than 48 hours later the authoritative target state still holds.
     due_at = base + timedelta(days=3)
@@ -267,7 +271,7 @@ def test_a_reminder_is_persisted_once_and_advances_only_after_confirmed_send(
             ("shadow", "default", fingerprint),
         )
         assert memory.next_notification_generation == 2
-        assert memory.reminder_count == 0
+        assert load_reminders_sent(session, episode_ids={episode_id}) == {}
 
     # A fresh evaluation sees generation 2 in the database and must not create
     # a second reminder while the first is queued.
@@ -294,8 +298,7 @@ def test_a_reminder_is_persisted_once_and_advances_only_after_confirmed_send(
             ("shadow", "default", fingerprint),
         )
         assert memory.next_notification_generation == 3
-        assert memory.reminder_count == 1
-        assert memory.last_reminder_at is not None
+        assert load_reminders_sent(session, episode_ids={episode_id}) == {episode_id: 1}
         member = session.query(AlertDeliveryMember).filter_by(
             delivery_id=reminder.delivery_id).one()
         assert member.delivered is True
@@ -413,7 +416,9 @@ def test_the_same_reminder_generation_is_not_planned_again_after_an_unknown(
     evaluation plans the same generation of the same episode, whose dedupe
     key is the UNKNOWN row's own, so the existing intent stands - the identity
     keeps it from being said twice, not a replanning block. Nothing is sent
-    again, and the notification memory does not advance."""
+    again, the notification memory does not advance, and the episode has no
+    reminder sent (counted per episode since migration 0026)."""
+    from app.alerts.repository import load_reminders_sent
     from app.alerts.sender import NullSender
     from app.config import get_settings
 
@@ -437,11 +442,119 @@ def test_the_same_reminder_generation_is_not_planned_again_after_an_unknown(
             AlertDelivery).filter_by(delivery_kind="REMINDER").all()]
         memory = session.get(AlertInstanceNotificationState,
                              ("shadow", "default", episode.instance_fingerprint))
-        generation = (memory.next_notification_generation, memory.reminder_count)
+        generation = (memory.next_notification_generation,
+                      load_reminders_sent(session, episode_ids={episode.episode_id}))
     assert reminders == [TransportStatus.UNKNOWN]
     assert reasons == []
-    assert generation == (2, 0)
+    assert generation == (2, {})
     assert (later.claimed, len(requests)) == (0, 1)
+    get_settings.cache_clear()
+
+
+# --- a reminder belongs to its episode ------------------------------------------
+
+
+def _told() -> list[list[tuple[str, str]]]:
+    """What each regime.band_to_derisk episode was told, oldest episode
+    first: every delivery planned for it, as (kind, transport status)."""
+    with session_scope() as session:
+        episodes = session.query(AlertEpisode).filter_by(
+            rule_id="regime.band_to_derisk").order_by(AlertEpisode.opened_at).all()
+        return [[(str(delivery.delivery_kind), str(delivery.transport_status))
+                 for delivery in session.query(AlertDelivery).join(
+                     AlertDeliveryMember,
+                     AlertDeliveryMember.delivery_id == AlertDelivery.delivery_id)
+                 .filter(AlertDeliveryMember.episode_id == episode.episode_id)
+                 .order_by(AlertDelivery.created_at)]
+                for episode in episodes]
+
+
+def test_a_reminder_belongs_to_its_episode_not_to_the_instance_lifetime(
+        tmp_path, monkeypatch):
+    """A reminder belongs to its EPISODE. regime.band_to_derisk allows one
+    reminder, 48 hours after the last message: `max_reminders` counts the
+    reminders sent for the episode being considered, and the delay runs from
+    that episode's latest sent message (its alert or its last reminder).
+
+    The first episode is alerted, reminded while it still fires two days
+    later, and resolves. A second episode fires once the cooldown has run
+    and is alerted. A day later it is not due - the delay runs from its own
+    alert, not from the first episode's reminder - and two days later,
+    still firing, it gets its own one reminder, and no second.
+
+    Before, the count lived on the rule instance and nothing reset it, so
+    after an instance's first reminder no later episode of it was reminded
+    again. Production (read-only, 2026-10-04): regime.band_to_derisk's
+    reminder of 2026-10-02 22:02 set that count to 1, which left every
+    later episode of the most important P1 unremindable.
+    """
+    from app.alerts.sender import NullSender
+    from app.config import get_settings
+
+    _stage3_shadow(tmp_path, monkeypatch, "reminder-per-episode")
+    base = datetime(2026, 8, 20, 6, 0, tzinfo=UTC)
+    fired = _evaluate("de-risk", base + timedelta(hours=4), _evaluate("trim", base, None))
+    _dispatch(NullSender(), base + timedelta(hours=5))
+    held = _evaluate("de-risk", base + timedelta(days=3), fired)
+    _dispatch(NullSender(), base + timedelta(days=3, hours=1))
+    resolved = _evaluate("trim", base + timedelta(days=3, hours=4), held)
+    assert _told() == [[("INITIAL", "SENT"), ("REMINDER", "SENT")]]
+
+    # 48 hours after the first episode's reminder, its cooldown has run.
+    second = base + timedelta(days=6)
+    refired = _evaluate("de-risk", second, resolved)
+    _dispatch(NullSender(), second + timedelta(hours=1))
+    early = _evaluate("de-risk", second + timedelta(days=1), refired)
+    assert _told()[1] == [("INITIAL", "SENT")]
+    due = _evaluate("de-risk", second + timedelta(days=2, hours=4), early)
+    _dispatch(NullSender(), second + timedelta(days=2, hours=5))
+    _evaluate("de-risk", second + timedelta(days=4, hours=8), due)
+
+    assert _told() == [[("INITIAL", "SENT"), ("REMINDER", "SENT")],
+                       [("INITIAL", "SENT"), ("REMINDER", "SENT")]]
+    get_settings.cache_clear()
+
+
+def test_an_episode_the_cooldown_kept_silent_is_reminded_after_the_last_message(
+        tmp_path, monkeypatch):
+    """An episode whose alert the instance cooldown suppressed has no message
+    of its own. Its one reminder is due 48 hours after the last message that
+    told the owner about the condition - a message of an earlier episode,
+    here the first episode's reminder - and it gets no second. The cooldown
+    is unchanged: it still suppresses the alert.
+
+    Production's regime.band_to_derisk took this path (read-only,
+    2026-10-04): the episode open since 2026-10-01 10:01 had its alert
+    suppressed by the cooldown of the 2026-09-30 22:01 alert, and its
+    reminder is the one sent on 2026-10-02 22:02, 48 hours after that alert.
+    """
+    from app.alerts.sender import NullSender
+    from app.config import get_settings
+
+    _stage3_shadow(tmp_path, monkeypatch, "reminder-after-cooldown")
+    base = datetime(2026, 8, 20, 6, 0, tzinfo=UTC)
+    fired = _evaluate("de-risk", base + timedelta(hours=4), _evaluate("trim", base, None))
+    _dispatch(NullSender(), base + timedelta(hours=5))
+    held = _evaluate("de-risk", base + timedelta(days=3), fired)
+    last_message = base + timedelta(days=3, hours=1)
+    _dispatch(NullSender(), last_message)
+    resolved = _evaluate("trim", base + timedelta(days=3, hours=4), held)
+
+    # It fires again seven hours after that reminder, inside its cooldown.
+    refired = _evaluate("de-risk", last_message + timedelta(hours=7), resolved)
+    early = _evaluate("de-risk", last_message + timedelta(days=1), refired)
+    assert _told()[1] == []
+    due = _evaluate("de-risk", last_message + timedelta(days=2, hours=3), early)
+    _dispatch(NullSender(), last_message + timedelta(days=2, hours=4))
+    _evaluate("de-risk", last_message + timedelta(days=4, hours=7), due)
+
+    with session_scope() as session:
+        silent = session.query(AlertEpisode).filter_by(
+            rule_id="regime.band_to_derisk", is_open=True).one()
+        reasons = list(silent.suppression_reasons)
+    assert reasons == ["COOLDOWN"]
+    assert _told() == [[("INITIAL", "SENT"), ("REMINDER", "SENT")],
+                       [("REMINDER", "SENT")]]
     get_settings.cache_clear()
 
 

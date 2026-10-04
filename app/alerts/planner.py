@@ -53,8 +53,6 @@ class NotificationMemory:
     """Hash-independent memory for one instance. Survives a promotion."""
 
     last_sent_at: datetime | None = None
-    last_reminder_at: datetime | None = None
-    reminder_count: int = 0
     next_notification_generation: int = 1
 
 
@@ -155,6 +153,7 @@ class PlanInputs:
     decisions: list[StateDecision]
     episode_ids: dict[str, str]                       # instance_fingerprint -> episode_id
     memories: dict[str, NotificationMemory]           # instance_fingerprint -> memory
+    reminders_sent: dict[str, int]                    # episode_id -> reminders sent for it
     active_silences: ActiveSilences = ActiveSilences()
     open_generations: frozenset[tuple[str, int]] = frozenset()   # (fingerprint, generation)
     origin_rules_sha256: str = ""
@@ -403,16 +402,35 @@ def reminder_intent(
 ) -> DeliveryIntent | None:
     """A reminder for a still-open episode, if policy allows one.
 
+    A reminder belongs to its EPISODE, not to the rule instance's lifetime:
+    `max_reminders` counts the reminders sent for this episode
+    (`inputs.reminders_sent`), and the delay runs from the instance's last
+    sent message (`last_sent_at`). While the episode has a sent message of
+    its own, that is its latest one - its alert or its last reminder: an
+    instance has one open episode at a time, and the dispatcher drops a
+    queued message whose episode has resolved. An episode with none - its
+    alert was suppressed by the instance cooldown, or ended UNKNOWN - is
+    reminded `after_seconds` after the last message that told the owner
+    about the condition, which an earlier episode sent, and that is its one
+    reminder. The cooldown stays per instance: it suppresses alerts, never
+    reminders, as before.
+
+    The count used to live on the instance, and nothing reset it: after an
+    instance's first reminder no later episode of it was reminded again.
+    Production (read-only, 2026-10-04): regime.band_to_derisk's reminder of
+    2026-10-02 22:02 set it to 1 and left every later episode of it
+    unremindable. That reminder was the one of the episode still open, whose
+    alert the cooldown had suppressed.
+
     A reminder opens a NEW notification generation — that is what distinguishes
     it from a transport retry, which reuses everything.
     """
     policy = rule.reminder_policy
-    if not policy.enabled or memory.reminder_count >= policy.max_reminders:
+    if not policy.enabled or inputs.reminders_sent.get(episode_id, 0) >= policy.max_reminders:
         return None
-    reference = memory.last_reminder_at or memory.last_sent_at
-    if reference is None:
+    if memory.last_sent_at is None:
         return None
-    if inputs.now < reference + timedelta(seconds=policy.after_seconds or 0):
+    if inputs.now < memory.last_sent_at + timedelta(seconds=policy.after_seconds or 0):
         return None
 
     member = MemberIntent(

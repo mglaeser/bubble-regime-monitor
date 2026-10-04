@@ -579,7 +579,7 @@ def test_mark_sent_cools_exactly_the_render_represented_members(isolated_db):
             session.add(AlertInstanceNotificationState(
                 mode="shadow", live_profile="default",
                 instance_fingerprint=fingerprint,
-                rule_id="regime.band_to_derisk", reminder_count=0,
+                rule_id="regime.band_to_derisk",
                 next_notification_generation=1, updated_at=now,
             ))
 
