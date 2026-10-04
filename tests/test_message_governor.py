@@ -291,7 +291,6 @@ class TestRoundFourOn140:
         from app.message_engine import composer
         from app.message_engine.checks import Channel
 
-        monkeypatch.setattr(composer, "library_sign_off", lambda lib=None: None)
         monkeypatch.setattr(composer, "complete",
                             lambda **_kw: (_ for _ in ()).throw(AssertionError("a P1 asks no model")))
         with session_scope():
@@ -301,7 +300,7 @@ class TestRoundFourOn140:
         try:
             started = time.monotonic()
             out = composer.compose(trigger="daily_digest", channel=Channel.IMESSAGE, priority=gov.P1,
-                                   facts={"median": 59}, settings=_settings())
+                                   facts={"median": 59}, lib=composer.library(), settings=_settings())
             took = time.monotonic() - started
         finally:
             holder.rollback()

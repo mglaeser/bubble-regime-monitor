@@ -1,24 +1,24 @@
-"""The engine's callers — the service triggers, through compose() and the gate.
+"""The engine's caller - the daily digest, through compose() and admission.
 
 Lives with the services, not in the engine package: the engine is a library
-that imports no transport (a pin holds that), and this module is the one
-place in the application that holds both a transport and the gate.
+that imports no transport, and this module is the one place in the
+application that holds both a transport and the engine.
 
 This is the go-live wiring: the daily digest goes through the engine when
 MESSAGE_ENGINE_ENABLED is on - the model writes the message from the
 snapshot's facts and the references, the basic checks run, and the owner's
 template goes out otherwise (docs/MESSAGE_ENGINE.md, decision 24); nothing
-reaches a transport except through `gate.emit`. With the engine off, the
-digest is the deterministic template (app/engine/sms_report.py) and no model
-is called.
+of the engine's reaches a transport except through `deliver`. With the
+engine off, the digest is the deterministic template
+(app/engine/sms_report.py) and no model is called.
 
 Two things are deliberate here. `compose()` is called OUTSIDE any session
 (decision 13): the engine owns its transactions, and a caller holding a
 write lock across the model call is the defect rounds 32/39-41 chased.
-And a refusal by the gate - admission, an unsigned library, a channel the
-Composed was not made for - is a REFUSAL: the message is not sent by the
-old path instead, because that would make every gate advisory the moment
-the engine is switched on. Enable the engine only on a promoted deployment.
+And a refusal - an unsigned library, or a deployment not admitted - is a
+REFUSAL: the message is not sent by the old path instead, because that
+would make every control advisory the moment the engine is switched on.
+Enable the engine only on a promoted deployment.
 """
 from __future__ import annotations
 
@@ -40,43 +40,12 @@ SCORE_SCALE_MAX = 100
 RED_FLAG_TOTAL = 4
 
 
-class _Transport:
-    """A sender that names its channel (decision 17) over the existing
-    transports, which promise never to raise.
+def transport_for(settings: Settings) -> tuple[str | None, str]:
+    """(channel, recipient) for the configured digest transport, or (None, why).
 
-    THE RECIPIENT THE GATE SAW IS THE RECIPIENT THE BYTES GO TO. The first
-    version ignored `recipient_ref` and let the transport read its own
-    configured destination, so the gate could admit and record a send to A
-    while a reloaded configuration delivered it to B (#118 round 1,
-    SOTA-A, executed). The recipient is passed through explicitly, and an
-    empty one is refused here rather than defaulted by the transport.
-    """
-
-    def __init__(self, channel: str) -> None:
-        self.channel = channel
-
-    def send(self, message: str, *, recipient_ref: str,
-             idempotency_key: str | None = None) -> Any:
-        if not recipient_ref:
-            return _Refused("no recipient bound to this send")
-        if self.channel == Channel.IMESSAGE.value:
-            return send_imessage(message, recipient=recipient_ref)
-        return send_sms(message, recipient=recipient_ref)
-
-
-class _Refused:
-    """A transport result for a send that never left this process."""
-
-    ok = False
-    status_code = None
-    operation_id = None
-
-    def __init__(self, error: str) -> None:
-        self.error = error
-
-
-def transport_for(settings: Settings) -> tuple[str | None, str | None]:
-    """(channel, recipient) for the configured digest transport, or (None, why)."""
+    A channel comes only with its recipient: each branch returns one only
+    when that transport's recipient is configured (`imessage_configured`
+    requires it; the sipgate branch checks it)."""
     transport = settings.daily_digest_transport
     if transport == "imessage":
         if not settings.imessage_configured:
@@ -89,30 +58,77 @@ def transport_for(settings: Settings) -> tuple[str | None, str | None]:
     return None, "no digest transport enabled (IMESSAGE_ENABLED/SMS_ENABLED both false)"
 
 
+def _send(channel: str, text: str, recipient: str) -> Any:
+    """Put `text` on `channel`'s wire, to `recipient`. The transports
+    promise never to raise.
+
+    THE RECIPIENT IS PASSED, NEVER LOOKED UP AGAIN: a transport that read
+    its own configured destination could deliver to B, after a reloaded
+    configuration, what was resolved for A (#118 round 1, SOTA-A, executed).
+    """
+    if channel == Channel.IMESSAGE.value:
+        return send_imessage(text, recipient=recipient)
+    return send_sms(text, recipient=recipient)
+
+
 def deliver(*, trigger: str, facts: dict[str, object], priority: int,
             settings: Settings | None = None) -> dict[str, Any]:
-    """Compose one message for `trigger` and hand it to the gate. Never raises."""
+    """Compose one message for `trigger` and send it. Never raises.
+
+    TWO CONTROLS, BOTH HERE, IN THIS ORDER:
+
+    1. The owner's sign-off on the prompt library (ruling Q34, decision 14),
+       BEFORE anything is composed: an unsigned or unreadable library
+       composes nothing - no model call, no attempt row - and sends nothing.
+       The library is read ONCE, here: the sign-off is checked on that read
+       and compose() composes from the same object and reads no file, so
+       what was signed is what is sent (#178 round 1, SOTA-A, executed).
+    2. Admission (ruling Q25, decision 5), AFTER the compose and right before
+       the wire: a compose spans a model call, and a ruleset deployed in that
+       gap and not yet promoted refuses the send. It takes no priority, so a
+       P1 does not bypass it.
+
+    WHY THE PROVENANCE TOKEN WENT (re-evaluation E7, 2026-10-04). `gate.emit`
+    refused a `Composed` that compose() had not minted a keyed digest for
+    (decision 15), and a sender of another channel (decision 17). Its one
+    caller was this function, which sends only what it composed in the same
+    call, on the channel it composed for: a token minted and checked within
+    one call of it proved nothing the call did not already know. No function
+    takes a `Composed` to the wire now, and an import pin keeps every other
+    module out of the engine (tests/test_message_engine.py::
+    TestRoundOneOn145::test_only_the_daily_digest_reaches_the_engine).
+    """
     settings = settings or get_settings()
     channel, recipient = transport_for(settings)
     if channel is None:
         return {"status": "skipped", "reason": recipient, "engine": True, "trigger": trigger}
+    common: dict[str, Any] = {"engine": True, "trigger": trigger, "transport": channel}
 
+    # 1. THE LIBRARY, READ ONCE, AND ITS SIGN-OFF, before anything is
+    # composed: the library or why it may not be used. On a refusal nothing
+    # is composed, so the compose fields say so, and the log names no
+    # trigger: the caller's string is never logged (decision 19).
+    lib = composer.signed_library()
+    if isinstance(lib, str):
+        log.warning("message_engine_delivery_refused", channel=channel, blockers=[lib])
+        return {**common, "source": None, "compose_reason": None, "chars": 0, "message": "",
+                "status": "refused", "blockers": [lib]}
+
+    # ...and the compose is made from that same read.
     composed = composer.compose(trigger=trigger, channel=Channel(channel), priority=priority,
-                                facts=facts, settings=settings)
-    with session_scope() as session:
-        out = gate.emit(session, composed=composed, recipient_ref=recipient or "",
-                        sender=_Transport(channel), priority=priority)
+                                facts=facts, lib=lib, settings=settings)
+    common.update(source=composed.source, compose_reason=composed.reason,
+                  chars=len(composed.text), message=composed.text)
 
-    common: dict[str, Any] = {
-        "engine": True, "trigger": trigger, "transport": channel,
-        "source": composed.source, "compose_reason": composed.reason,
-        "chars": len(composed.text), "message": composed.text,
-    }
-    if out.refused:
+    # 2. ADMISSION, after the compose and right before the wire.
+    with session_scope() as session:
+        blockers = gate.admission_blockers(session)
+    if blockers:
         log.warning("message_engine_delivery_refused", trigger=composed.trigger,
-                    channel=channel, blockers=list(out.blockers))
-        return {**common, "status": "refused", "blockers": list(out.blockers)}
-    result = out.result
+                    channel=channel, blockers=blockers)
+        return {**common, "status": "refused", "blockers": blockers}
+
+    result = _send(channel, composed.text, recipient)
     ok = bool(getattr(result, "ok", False))
     log.info("message_engine_delivery", trigger=composed.trigger, channel=channel,
              sent=ok, source=composed.source, chars=len(composed.text),

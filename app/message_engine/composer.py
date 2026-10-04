@@ -16,14 +16,11 @@ attempt (app/message_engine/governor.py).
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 import json
 import math
 import re
-import secrets
 import unicodedata
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from time import monotonic
@@ -58,17 +55,9 @@ _DEADLINE_S = 60.0
 
 @dataclass(frozen=True)
 class Composed:
-    """What the engine produced, and how.
-
-    PROVENANCE IS PROVED, NOT DECLARED. `gate.emit` takes a Composed rather
-    than text so that the composer's product is the only thing it puts on a
-    wire - but the class is public, and a Composed built by hand carried
-    any text past every control the composer applies (#112 round 6, SOTA-A,
-    executed). The token is a keyed digest over the fields, minted only by
-    `_issue` with a key this process draws at import; `issued()` is the
-    gate's check. Building the object is still a deliberate act of the
-    codebase, not a message.
-    """
+    """What the engine produced, and how. Its one consumer is
+    `app.services.engine_delivery.deliver`, which composes and sends it in
+    one call; why no token proves where it came from is said there."""
 
     text: str
     #: generated | fallback | deterministic
@@ -77,29 +66,6 @@ class Composed:
     channel: str
     #: Why the model's text was not used, when it was not.
     reason: str | None = None
-    #: Minted by `_issue`; see the class docstring.
-    token: str = field(default="", repr=False, compare=False)
-
-
-_PROVENANCE_KEY = secrets.token_bytes(32)
-
-
-def _digest(text: str, source: str, trigger: str, channel: str) -> str:
-    parts = "\x1f".join((text, source, trigger, channel)).encode("utf-8")
-    return hmac.new(_PROVENANCE_KEY, parts, hashlib.sha256).hexdigest()
-
-
-def _issue(*, text: str, source: str, trigger: str, channel: str,
-           reason: str | None = None) -> Composed:
-    """A Composed the gate will accept: the composer's own product."""
-    return Composed(text=text, source=source, trigger=trigger, channel=channel,
-                    reason=reason, token=_digest(text, source, trigger, channel))
-
-
-def issued(composed: Composed) -> bool:
-    """Did this process's composer produce exactly this Composed?"""
-    expected = _digest(composed.text, composed.source, composed.trigger, composed.channel)
-    return hmac.compare_digest(composed.token, expected)
 
 
 def _bare_event(trigger: str, channel: Channel, reason: str, *, known: bool) -> Composed:
@@ -119,9 +85,9 @@ def _bare_event(trigger: str, channel: Channel, reason: str, *, known: bool) -> 
     """
     label = re.sub(r"[^A-Za-z0-9_.\-]+", "", trigger)[:40] if known else ""
     label = label or "unknown"
-    return _issue(text=f"bubblegauge: {label} fired.",
-                  source="deterministic", trigger=label, channel=channel.value,
-                  reason=reason)
+    return Composed(text=f"bubblegauge: {label} fired.",
+                    source="deterministic", trigger=label, channel=channel.value,
+                    reason=reason)
 
 
 def library() -> dict[str, Any]:
@@ -133,28 +99,39 @@ def library() -> dict[str, Any]:
 _SIGNED_RE = re.compile(r"^\s*SIGNED\b", re.IGNORECASE)
 
 
-def library_sign_off(lib: dict[str, Any] | None = None) -> str | None:
-    """Why the library may not reach a wire, or None once the owner has signed.
+def library_sign_off(lib: dict[str, Any]) -> str | None:
+    """Why this library may not reach a wire, or None once the owner has signed.
 
     The status line is DATA. The shipped v1.0.0 says "DRAFT - owner sign-off
     required" (ruling Q34), and nothing read it, so an admitted deployment
     could have sent unsigned content (#112 round 2, SOTA-A, executed). The
     owner signs by editing the status to begin with "SIGNED" ("SIGNED
     <date> <who>") in a reviewed PR - never a code change - and until then
-    `compose()` is inert and `gate.emit` refuses. A library with no status
-    is unsigned too.
+    `engine_delivery.deliver` composes nothing and sends nothing. A library
+    with no status is unsigned too.
     """
-    if lib is None:
-        try:
-            lib = library()
-        except Exception as exc:  # noqa: BLE001 - an unreadable library is unsigned
-            return (f"prompt library unreadable, so nothing is signed off: "
-                    f"{type(exc).__name__} (ruling Q34)")
     status = str(lib.get("status", "")).strip()
     if _SIGNED_RE.match(status):
         return None
     return (f"prompt library {lib.get('version', '?')} is not signed off by the "
             f"owner (status {status!r}; ruling Q34)")
+
+
+def signed_library() -> dict[str, Any] | str:
+    """The prompt library, READ ONCE, if the owner has signed it; otherwise
+    why it may not reach a wire. An unreadable library is unsigned.
+
+    The caller composes from the object returned here, and compose() reads
+    no file: a sign-off checked on one read while compose() made another let
+    a library that turned DRAFT between the two be composed and sent
+    unsigned (#178 round 1, SOTA-A, executed)."""
+    try:
+        lib = library()
+        unsigned = library_sign_off(lib)
+    except Exception as exc:  # noqa: BLE001 - an unreadable library is unsigned
+        return (f"prompt library unreadable, so nothing is signed off: "
+                f"{type(exc).__name__} (ruling Q34)")
+    return lib if unsigned is None else unsigned
 
 
 #: Anything that would break one message into several, or smuggle formatting
@@ -384,6 +361,7 @@ def _prepare(trigger: str, entry: dict[str, Any], facts: dict[str, object], chan
 
 def compose(*, trigger: str, channel: Channel,
             priority: int, facts: dict[str, object],
+            lib: dict[str, Any],
             settings: Settings | None = None,
             now: datetime | None = None) -> Composed:
     """Produce the message for one trigger. Never raises, always returns text.
@@ -392,21 +370,22 @@ def compose(*, trigger: str, channel: Channel,
     governor on a short transaction of its own, so the claim is durable before
     the model is called and no lock is held across the call. Callers must not
     hold an open write transaction while calling this.
+
+    `lib` is the prompt library as the caller read it ONCE and checked its
+    sign-off on (`signed_library`, decision 14); this reads no file, so the
+    library composed from is the library signed (#178 round 1, SOTA-A).
+    `engine_delivery.deliver`, the one caller, composes nothing from a
+    library the owner has not signed.
     """
     settings = settings or get_settings()
     moment = now or datetime.now(UTC)
     try:
-        lib = library()
         prompts = lib["prompts"]
         if not isinstance(prompts, dict):
             raise TypeError("'prompts' is not a mapping")
     except Exception as exc:  # noqa: BLE001 - the promise is "never raises"
         return _bare_event(trigger, channel,
                            f"prompt library unreadable: {type(exc).__name__}", known=False)
-    unsigned = library_sign_off(lib)
-    if unsigned is not None:
-        # INERT until the owner signs: no model call, no attempt row.
-        return _bare_event(trigger, channel, unsigned, known=trigger in prompts)
     entry = prompts.get(trigger)
     if entry is None:
         return _bare_event(trigger, channel, "trigger not in library", known=False)
@@ -427,8 +406,8 @@ def compose(*, trigger: str, channel: Channel,
     if short is not None:
         # The engine switched off, or a P1 that must arrive: no model, no
         # database work.
-        return _issue(text=fallback, source="deterministic", trigger=trigger,
-                      channel=channel.value, reason=short.reason)
+        return Composed(text=fallback, source="deterministic", trigger=trigger,
+                        channel=channel.value, reason=short.reason)
     try:
         # The caller's instant, if it gave one; otherwise the governor reads
         # the clock itself once it holds the lock (#140 round 5).
@@ -463,7 +442,7 @@ def compose(*, trigger: str, channel: Channel,
             # The reaper already closed this claim: the call outran its TTL.
             return _fallback(trigger, channel, priority, fallback,
                              "reply arrived after the claim expired", finished, asked=True)
-        return _issue(text=text, source="generated", trigger=trigger, channel=channel.value)
+        return Composed(text=text, source="generated", trigger=trigger, channel=channel.value)
     _close(claim_id, gov.Outcome.FORMAT_REJECTED, problem, finished)
     return _fallback(trigger, channel, priority, fallback, f"rejected: {problem}", finished,
                      asked=True)
@@ -503,5 +482,5 @@ def _fallback(trigger: str, channel: Channel, priority: int,
         # Recording is bookkeeping; the text is the promise. A locked database
         # loses this row, never the message.
         pass
-    return _issue(text=text, source="fallback", trigger=trigger,
-                  channel=channel.value, reason=reason)
+    return Composed(text=text, source="fallback", trigger=trigger,
+                    channel=channel.value, reason=reason)

@@ -2,6 +2,7 @@
 through the engine when MESSAGE_ENGINE_ENABLED is on, untouched when off."""
 from __future__ import annotations
 
+import copy
 from datetime import UTC, datetime
 
 import pytest
@@ -14,6 +15,9 @@ from app.services import digest
 from app.services import engine_delivery as service
 
 pytestmark = pytest.mark.usefixtures("isolated_db")
+
+#: The real sign-off check, which the fixture below replaces.
+_SIGN_OFF = composer.library_sign_off
 
 
 @pytest.fixture(autouse=True)
@@ -71,6 +75,12 @@ def _admitted():
 
 #: What `load_active_for_mode(mode="live")` says when nothing is promoted.
 _NOTHING_PROMOTED = "live mode requires a PROMOTED ruleset and the registry has none"
+
+#: The keys of what `deliver` returns, refused and sent: the digest and the
+#: admin endpoint pass them on.
+_COMMON = {"engine", "trigger", "transport", "source", "compose_reason", "chars", "message", "status"}
+_REFUSED = _COMMON | {"blockers"}
+_SENT = _COMMON | {"transport_status", "operation_id", "error"}
 
 
 class TestDigestFacts:
@@ -158,11 +168,18 @@ class TestEngineOn:
             rows = s.query(MessageEngineAttempt).all()
             assert [r.outcome for r in rows] == ["ok"] and rows[0].trigger == "daily_digest"
 
-    def test_a_refusal_is_a_refusal_not_a_fall_through(self, monkeypatch, engine_on):
+    @pytest.mark.parametrize("control", ["admission", "sign-off"])
+    def test_a_refusal_is_a_refusal_not_a_fall_through(self, monkeypatch, engine_on, control):
+        """Either control's refusal sends nothing, by the old sender neither."""
         with session_scope() as s:
             s.add(_snapshot())
             s.commit()
-        # Nothing is promoted, so the live check refuses (owner decision D2d).
+        if control == "sign-off":
+            _admitted()                 # only the sign-off can refuse now
+            monkeypatch.setattr(composer, "library_sign_off", lambda lib=None: "library unsigned")
+            blocker = "library unsigned"
+        else:
+            blocker = _NOTHING_PROMOTED  # nothing is promoted (owner decision D2d)
         sends: list[str] = []
         self._sent(monkeypatch, sends)
         monkeypatch.setattr(digest, "send_imessage", lambda body, **_kw: (_ for _ in ()).throw(AssertionError("old sender")))
@@ -170,7 +187,7 @@ class TestEngineOn:
                             lambda **_kw: type("C", (), {"text": '{"phrasing": 0}'})())
         out = digest.send_daily_digest()
         assert out["status"] == "refused"
-        assert out["blockers"] == [_NOTHING_PROMOTED]
+        assert out["blockers"] == [blocker]
         assert sends == []
 
     def test_a_gateway_failure_sends_the_evergreen_text(self, monkeypatch, engine_on):
@@ -184,16 +201,6 @@ class TestEngineOn:
         out = digest.send_daily_digest()
         assert out["status"] == "sent" and out["source"] == "fallback" and out["llm_used"] is False
         assert sends == ["bubblegauge 51/100 trim. range 40-61. SPY IN, QQQ OUT. Flags 2/4."]
-
-    def test_the_transport_names_its_channel_and_the_gate_binds_it(self, monkeypatch, engine_on):
-        _admitted()
-        assert service._Transport("imessage").channel == "imessage"
-        assert service.transport_for(get_settings()) == ("imessage", "+491510000000")
-        composed = composer._issue(text="x", source="deterministic", trigger="daily_digest", channel="sms")
-        from app.message_engine import gate
-        with session_scope() as s:
-            out = gate.emit(s, composed=composed, recipient_ref="+1", sender=service._Transport("imessage"), priority=3)
-        assert out.sent is False and "composed for sms" in out.blockers[0]
 
     def test_no_transport_configured_is_skipped_before_composing(self, monkeypatch):
         monkeypatch.setenv("MESSAGE_ENGINE_ENABLED", "true")
@@ -211,82 +218,174 @@ class TestEngineOn:
 class TestRoundOneOn118:
     """#118 round 1 (SOTA-A, executed): the transport ignored the recipient the
     gate admitted and recorded, and read its own configured destination, so
-    a reloaded configuration could deliver to B what was authorised for A."""
+    a reloaded configuration could deliver to B what was authorised for A.
+    Since re-evaluation E7 (2026-10-04) `deliver` takes the channel and its
+    recipient from the configured transport once, and hands that recipient
+    to the wire."""
 
-    def test_the_bytes_go_to_the_recipient_the_gate_saw(self, monkeypatch, engine_on):
+    def test_the_bytes_go_to_the_recipient_deliver_resolved(self, monkeypatch, engine_on):
         _admitted()
         recipients: list[str | None] = []
         sends: list[str] = []
         TestEngineOn()._sent(monkeypatch, sends, recipients)
-        # The configuration changes between admission and the wire.
-        monkeypatch.setenv("IMESSAGE_RECIPIENT", "+499999999999")
-        composed = composer._issue(text="Band trim.", source="deterministic", trigger="daily_digest", channel="imessage")
-        from app.message_engine import gate
-        with session_scope() as s:
-            out = gate.emit(s, composed=composed, recipient_ref="+491510000000",
-                            sender=service._Transport("imessage"), priority=3)
-        assert out.sent is True and recipients == ["+491510000000"]
+        monkeypatch.setattr(composer, "complete", lambda **_kw: type("C", (), {"text": "Band trim."})())
+        compose = composer.compose
 
-    @pytest.mark.parametrize("channel", ["imessage", "sms"])
-    def test_an_empty_recipient_is_refused_before_any_transport(self, monkeypatch, channel):
-        monkeypatch.setattr(service, "send_imessage", lambda *a, **k: (_ for _ in ()).throw(AssertionError("sent")))
-        monkeypatch.setattr(service, "send_sms", lambda *a, **k: (_ for _ in ()).throw(AssertionError("sent")))
-        result = service._Transport(channel).send("Band trim.", recipient_ref="")
-        assert result.ok is False and "no recipient" in result.error
+        def compose_then_reconfigure(**kw):
+            composed = compose(**kw)
+            # The configuration changes between the compose and the wire.
+            monkeypatch.setenv("IMESSAGE_RECIPIENT", "+499999999999")
+            get_settings.cache_clear()
+            return composed
+
+        monkeypatch.setattr(composer, "compose", compose_then_reconfigure)
+        out = service.deliver(trigger="daily_digest", facts=digest.digest_facts(_snapshot()), priority=3)
+        assert out["status"] == "sent" and sends == ["Band trim."] and recipients == ["+491510000000"]
 
     def test_the_sms_recipient_is_passed_through_too(self, monkeypatch):
-        seen: list[str | None] = []
-        monkeypatch.setattr(service, "send_sms",
-                            lambda body, *, recipient=None: seen.append(recipient) or type("R", (), {"ok": True})())
-        service._Transport("sms").send("Band trim.", recipient_ref="+491510000000")
-        assert seen == ["+491510000000"]
+        monkeypatch.setenv("IMESSAGE_ENABLED", "false")
+        monkeypatch.setenv("SMS_ENABLED", "true")
+        monkeypatch.setenv("SIPGATE_TOKEN_ID", "token-XYZ")
+        monkeypatch.setenv("SIPGATE_TOKEN", "secret")
+        monkeypatch.setenv("SIPGATE_RECIPIENT", "+491520000000")
+        get_settings.cache_clear()
+        try:
+            _admitted()
+            seen: list[str | None] = []
+            monkeypatch.setattr(service, "send_imessage",
+                                lambda *a, **k: (_ for _ in ()).throw(AssertionError("imessage")))
+            monkeypatch.setattr(service, "send_sms",
+                                lambda body, *, recipient=None: seen.append(recipient) or type("R", (), {"ok": True})())
+            out = service.deliver(trigger="daily_digest", facts=digest.digest_facts(_snapshot()), priority=3)
+            assert out["status"] == "sent" and out["transport"] == "sms" and seen == ["+491520000000"]
+        finally:
+            get_settings.cache_clear()
+
+    @pytest.mark.parametrize("env", [
+        {"IMESSAGE_ENABLED": "true", "IMESSAGE_API_BASE_URL": "https://messages.example.com",
+         "IMESSAGE_API_KEY": _KEY, "IMESSAGE_RECIPIENT": "", "SMS_ENABLED": "false"},
+        {"IMESSAGE_ENABLED": "false", "SMS_ENABLED": "true", "SIPGATE_TOKEN_ID": "token-XYZ",
+         "SIPGATE_TOKEN": "secret", "SIPGATE_RECIPIENT": ""},
+    ], ids=["imessage", "sms"])
+    def test_a_channel_comes_only_with_its_recipient(self, monkeypatch, env):
+        """Why the empty-recipient refusal went (E7): with no recipient
+        configured there is no channel, so nothing is composed or sent."""
+        for name, value in env.items():
+            monkeypatch.setenv(name, value)
+        get_settings.cache_clear()
+        try:
+            monkeypatch.setattr(composer, "compose", lambda **_kw: (_ for _ in ()).throw(AssertionError("composed")))
+            assert service.transport_for(get_settings())[0] is None
+            out = service.deliver(trigger="daily_digest", facts={}, priority=3)
+            assert out["status"] == "skipped"
+        finally:
+            get_settings.cache_clear()
 
 
-class _Recording:
-    """A transport that names its channel and records what it was handed."""
+class TestSignOff:
+    """The owner's sign-off on the library (docs/MESSAGE_ENGINE.md decision
+    14), asked by `deliver` before anything is composed (re-evaluation E7): a
+    library the owner has not signed composes nothing - no model call, no
+    attempt row - and sends nothing, on an admitted deployment too."""
 
-    channel = "imessage"
+    @pytest.mark.parametrize("library, blocker", [
+        ("draft", "is not signed off by the owner"),
+        ("unreadable", "prompt library unreadable, so nothing is signed off"),
+    ], ids=["draft", "unreadable"])
+    def test_an_unsigned_library_is_refused_and_nothing_composed(self, monkeypatch, engine_on,
+                                                                   library, blocker):
+        _admitted()                     # only the sign-off can refuse
+        shipped = composer.library()
+        if library == "draft":
+            monkeypatch.setattr(composer, "library",
+                                lambda: {**shipped, "status": "DRAFT - owner sign-off required"})
+        else:
+            monkeypatch.setattr(composer, "library", lambda: (_ for _ in ()).throw(OSError("gone")))
+        monkeypatch.setattr(composer, "library_sign_off", _SIGN_OFF)    # the real check
+        monkeypatch.setattr(composer, "compose", lambda **_kw: (_ for _ in ()).throw(AssertionError("composed")))
+        sends: list[str] = []
+        TestEngineOn()._sent(monkeypatch, sends)
+        out = service.deliver(trigger="daily_digest", facts=digest.digest_facts(_snapshot()), priority=3)
+        [reason] = out["blockers"]
+        assert out["status"] == "refused" and blocker in reason and sends == []
+        assert set(out) == _REFUSED
+        assert (out["source"], out["compose_reason"], out["chars"], out["message"]) == (None, None, 0, "")
+        with session_scope() as s:
+            assert s.query(MessageEngineAttempt).count() == 0
 
-    def __init__(self) -> None:
-        self.sent: list[str] = []
+    @pytest.mark.parametrize("later", ["draft", "error"])
+    def test_the_library_is_read_once_and_composed_from_that_read(self, monkeypatch, engine_on, later):
+        """#178 round 1, SOTA-A (executed): the sign-off was checked on one
+        read of the library and compose() read the file again, so a library
+        that turned DRAFT, or unreadable, between the two reads was composed
+        and sent unsigned - its text, or a bare event. A loader that answers
+        SIGNED once and DRAFT (or an error) on every later call: one read per
+        delivery, and the prompt and the message are the SIGNED read's."""
+        _admitted()
+        signed = composer.library()
+        assert signed["status"].startswith("SIGNED")
+        draft = copy.deepcopy(signed)
+        draft["status"] = "DRAFT - owner sign-off required"
+        draft["prompts"]["daily_digest"].update(prompt="TASK: DRAFT TASK {median}",
+                                                fallback="DRAFT TEMPLATE {median}")
+        reads: list[str] = []
 
-    def send(self, message: str, *, recipient_ref: str, idempotency_key: str | None = None):
-        self.sent.append(message)
-        return type("R", (), {"ok": True, "status_code": 202, "operation_id": "op", "error": None})()
+        def loader():
+            reads.append("read")
+            if len(reads) == 1:
+                return signed
+            if later == "error":
+                raise OSError("the file changed under the read")
+            return draft
+
+        monkeypatch.setattr(composer, "library", loader)
+        monkeypatch.setattr(composer, "library_sign_off", _SIGN_OFF)    # the real check
+        prompts: list[str] = []
+
+        def complete(*, user, **_kw):
+            prompts.append(user)
+            raise RuntimeError("down")          # so the template goes out as well
+
+        monkeypatch.setattr(composer, "complete", complete)
+        sends: list[str] = []
+        TestEngineOn()._sent(monkeypatch, sends)
+        out = service.deliver(trigger="daily_digest", facts=digest.digest_facts(_snapshot()), priority=3)
+        assert out["status"] == "sent" and out["source"] == "fallback"
+        assert sends == ["bubblegauge 51/100 trim. range 40-61. SPY IN, QQQ OUT. Flags 2/4."]
+        assert len(prompts) == 1 and "DRAFT" not in prompts[0] and "TASK: Write today's digest." in prompts[0]
+        assert len(reads) == 1
 
 
 class TestAdmission:
     """The engine's admission (docs/MESSAGE_ENGINE.md decision 5). Since owner
-    decision D2d it is `load_active_for_mode(session, mode="live")`, asked
-    inside `emit` immediately before the transport, whatever ALERTS_MODE says
-    (it is `disabled` here, the default)."""
+    decision D2d it is `load_active_for_mode(session, mode="live")`, asked by
+    `deliver` after the compose and right before the wire (re-evaluation E7),
+    whatever ALERTS_MODE says (it is `disabled` here, the default)."""
 
     @staticmethod
-    def _emit(priority: int = 3) -> tuple[object, list[str]]:
-        from app.message_engine import gate
+    def _deliver(monkeypatch, priority: int = 3) -> tuple[dict, list[str]]:
+        sends: list[str] = []
+        TestEngineOn()._sent(monkeypatch, sends)
+        monkeypatch.setattr(composer, "complete", lambda **_kw: type("C", (), {"text": "bubblegauge 51/100."})())
+        out = service.deliver(trigger="daily_digest", facts=digest.digest_facts(_snapshot()),
+                              priority=priority)
+        return out, sends
 
-        composed = composer._issue(text="bubblegauge 51/100.", source="deterministic",
-                                   trigger="daily_digest", channel="imessage")
-        sender = _Recording()
-        with session_scope() as s:
-            out = gate.emit(s, composed=composed, recipient_ref="+491510000000",
-                            sender=sender, priority=priority)
-        return out, sender.sent
-
-    def test_the_promoted_deployment_sends(self):
+    def test_the_promoted_deployment_sends(self, monkeypatch, engine_on):
         _admitted()
-        out, sent = self._emit()
-        assert out.sent is True and sent == ["bubblegauge 51/100."]
+        out, sent = self._deliver(monkeypatch)
+        assert out["status"] == "sent" and sent == ["bubblegauge 51/100."]
+        assert set(out) == _SENT
 
     @pytest.mark.parametrize("priority", [1, 2, 3])
-    def test_nothing_promoted_refuses_every_priority(self, priority):
+    def test_nothing_promoted_refuses_every_priority(self, monkeypatch, engine_on, priority):
         """A P1 does not bypass admission: decision 2's exemption covers
         phrasing, and admission is whether bytes may reach a wire at all."""
-        out, sent = self._emit(priority)
-        assert out.sent is False and sent == []
-        assert out.blockers == (_NOTHING_PROMOTED,)
+        out, sent = self._deliver(monkeypatch, priority)
+        assert out["status"] == "refused" and sent == []
+        assert out["blockers"] == [_NOTHING_PROMOTED] and set(out) == _REFUSED
 
-    def test_a_gate_that_cannot_be_evaluated_refuses(self, monkeypatch):
+    def test_a_gate_that_cannot_be_evaluated_refuses(self, monkeypatch, engine_on):
         """Fail-closed: the check raising is a blocker, never an admission."""
         _admitted()                     # only the broken check can refuse now
 
@@ -294,7 +393,31 @@ class TestAdmission:
             raise RuntimeError("registry unreadable")
 
         monkeypatch.setattr("app.alerts.artifacts.load_active_for_mode", _broken)
-        out, sent = self._emit()
-        assert out.sent is False and sent == []
-        assert out.blockers == ("the admission gate could not be evaluated, so "
-                                "nothing authorises this send: RuntimeError",)
+        out, sent = self._deliver(monkeypatch)
+        assert out["status"] == "refused" and sent == []
+        assert out["blockers"] == ["the admission gate could not be evaluated, so "
+                                   "nothing authorises this send: RuntimeError"]
+
+    def test_admission_is_asked_after_the_compose(self, monkeypatch, engine_on):
+        """At send time, not before the compose: a deployment admitted when
+        the compose begins and not when it ends sends nothing - here a
+        ruleset deployed during the model call and never promoted."""
+        from app.alerts.errors import AlertingUnavailable
+
+        _admitted()
+
+        def _unpromoted(_session, *, mode, **_kw):
+            raise AlertingUnavailable("live mode refuses an unpromoted ruleset")
+
+        compose = composer.compose
+
+        def compose_then_deploy(**kw):
+            composed = compose(**kw)
+            monkeypatch.setattr("app.alerts.artifacts.load_active_for_mode", _unpromoted)
+            return composed
+
+        monkeypatch.setattr(composer, "compose", compose_then_deploy)
+        out, sent = self._deliver(monkeypatch)
+        assert out["status"] == "refused" and sent == []
+        assert out["blockers"] == ["live mode refuses an unpromoted ruleset"]
+        assert out["source"] == "generated"         # composed, then refused at the wire
