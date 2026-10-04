@@ -55,6 +55,7 @@ from app.alerts.repository import (
     load_notification_memories,
     load_open_generations,
     load_recent_inputs,
+    load_reminders_sent,
     resolve_predecessor,
     resolve_replaced_episodes,
     utc_ms,
@@ -415,6 +416,8 @@ def run_evaluation(
                 memories=load_notification_memories(
                     session, mode=mode, live_profile=live_profile,
                     fingerprints=fingerprints),
+                reminders_sent=load_reminders_sent(
+                    session, episode_ids=set(episode_ids.values())),
                 active_silences=load_active_silences(session, now=now),
                 open_generations=load_open_generations(
                     session, mode=mode, live_profile=live_profile,

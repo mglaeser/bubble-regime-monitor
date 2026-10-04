@@ -441,7 +441,7 @@ def test_admin_atomicity_migration_upgrade_downgrade_upgrade(tmp_path):
     # Bump this in the same PR that adds a migration — that is the point of
     # pinning it rather than reading `head`, which would pass vacuously.
     assert connection.execute(
-        "select version_num from alembic_version").fetchone() == ("0025",)
+        "select version_num from alembic_version").fetchone() == ("0026",)
     connection.close()
 
 
@@ -534,7 +534,7 @@ def test_the_evidence_stamp_drop_round_trips_and_keeps_the_immutability_trigger(
             connection.execute(
                 "update alert_ruleset_registry set canonical_yaml = 'changed'")
         assert connection.execute(
-            "select version_num from alembic_version").fetchone() == ("0025",)
+            "select version_num from alembic_version").fetchone() == ("0026",)
     finally:
         connection.close()
 
@@ -805,7 +805,7 @@ def test_the_inheritance_drop_resets_inherited_state_and_round_trips(tmp_path):
         command.upgrade(cfg, "head")
 
     _run_with_db(db, _cycle)
-    assert _read("select version_num from alembic_version") == [("0025",)]
+    assert _read("select version_num from alembic_version") == [("0026",)]
 
 
 def _delivery_and_memory_shape(db: str) -> dict[str, object]:
@@ -955,7 +955,7 @@ def test_the_manual_retry_drop_round_trips_and_keeps_the_delivery_triggers(tmp_p
         command.upgrade(cfg, "head")
 
     _run_with_db(db, _cycle)
-    assert _read("select version_num from alembic_version") == [("0025",)]
+    assert _read("select version_num from alembic_version") == [("0026",)]
 
 
 def _sqlite_master(db: str) -> set[tuple]:
@@ -1120,6 +1120,161 @@ def test_0025_rewrites_the_raw_datetime_text_earlier_migrations_wrote(tmp_path):
     _run_with_db(db, _cycle)
 
 
+def test_the_instance_reminder_count_drop_round_trips_from_the_deliveries(tmp_path):
+    """A reminder belongs to its episode, and the planner counts an episode's
+    reminders from its delivered REMINDER members, so 0026 drops the
+    instance's lifetime reminder_count and last_reminder_at with their CHECK.
+
+    The CHECK names reminder_count, which SQLite's native DROP COLUMN
+    refuses, so the table is rebuilt: its rows, primary key, generation CHECK
+    and rule_id index survive, and nothing else in the schema moves. The
+    downgrade restores the 0025 schema exactly, CHECKs included, and both
+    values as mark_sent wrote them, from the deliveries: an instance reminded
+    once comes back with 1 and its reminder's sent_at; one whose reminder
+    ended UNKNOWN, one never reminded and the shadow row of the reminded
+    instance, with 0 and NULL.
+    """
+    import copy
+
+    db = str(tmp_path / "reminder-count.db")
+    phrases = hashlib.sha256(b"the phrase set").hexdigest()
+    rules = hashlib.sha256(b"the ruleset that planned it").hexdigest()
+    alert_input = hashlib.sha256(b"the input").hexdigest()
+    evaluation = "01M0EVALUATIONOFTHEALERTS0"
+    reminded, unknown, never = (hashlib.sha256(name).hexdigest()
+                                for name in (b"reminded", b"unknown", b"never"))
+    at = "2026-10-01 10:00:00.000000"
+    alerted_at = "2026-10-01 10:00:09.000000"
+    reminded_at = "2026-10-03 10:00:07.000000"
+    # delivery id: (episode id, fingerprint, kind, transport status, sent_at, delivered)
+    deliveries = {
+        "01M0REMINDEDINITIAL0000000": ("01M0REMINDEDEPISODE0000000", reminded,
+                                       "INITIAL", "SENT", alerted_at, 1),
+        "01M0REMINDEDREMINDER000000": ("01M0REMINDEDEPISODE0000000", reminded,
+                                       "REMINDER", "SENT", reminded_at, 1),
+        "01M0UNKNOWNINITIAL00000000": ("01M0UNKNOWNEPISODE00000000", unknown,
+                                       "INITIAL", "SENT", alerted_at, 1),
+        "01M0UNKNOWNREMINDER0000000": ("01M0UNKNOWNEPISODE00000000", unknown,
+                                       "REMINDER", "UNKNOWN", None, 0),
+    }
+    # (mode, fingerprint, last_sent_at, last_reminder_at, reminder_count, generation)
+    memories = (("live", reminded, reminded_at, reminded_at, 1, 3),
+                ("live", unknown, alerted_at, None, 0, 2),
+                ("live", never, None, None, 0, 1),
+                ("shadow", reminded, None, None, 0, 1))
+
+    def _read(sql: str) -> list[tuple]:
+        connection = sqlite3.connect(db)
+        try:
+            return connection.execute(sql).fetchall()
+        finally:
+            connection.close()
+
+    def _columns() -> set[str]:
+        return {row[1] for row in _read("pragma table_info('alert_instance_notification_state')")}
+
+    def _rows(columns: str) -> list[tuple]:
+        return _read(f"select {columns} from alert_instance_notification_state "  # noqa: S608
+                     "order by mode, instance_fingerprint")
+
+    kept = ("mode, live_profile, instance_fingerprint, rule_id, last_sent_at, "
+            "next_notification_generation, updated_at")
+    full = kept + ", last_reminder_at, reminder_count"
+
+    def _cycle():
+        from alembic import command
+
+        from app.db_migrate import _alembic_config
+
+        cfg = _alembic_config()
+        command.upgrade(cfg, "0025")
+        connection = sqlite3.connect(db)
+        connection.execute(
+            "insert into alert_phrase_set_registry (phrase_set_version, phrase_set_sha256, "
+            "canonical_json, validator_version, validated_at, worst_case_test_sha256) "
+            "values ('v9.9', ?, '{}', '1', ?, ?)", (phrases, at, phrases))
+        connection.execute(
+            "insert into alert_ruleset_registry (rules_sha256, rule_version, "
+            "canonical_yaml, phrase_set_version, phrase_set_sha256, "
+            "alert_input_schema_version, methodology_version, "
+            "methodology_manifest_sha256, min_service_version, max_service_version, "
+            "validated_at, status) values (?, 'v9.9.9', 'meta: {}', 'v9.9', ?, 1, 'm', ?, "
+            "'3.8.0', '3.99.99', ?, 'VALIDATED')", (rules, phrases, phrases, at))
+        connection.execute(
+            "insert into alert_input_snapshot (input_identity, origin, built_at, "
+            "alert_input_schema_version, reconstructed, evaluation_eligibility, "
+            "ineligibility_reasons, payload, payload_sha256) values "
+            "(?, 'RECOMPUTE', ?, 1, 0, 'EVALUABLE', '[]', '{}', ?)",
+            (alert_input, at, alert_input))
+        connection.execute(
+            "insert into alert_evaluation (evaluation_id, idempotency_key, input_identity, "
+            "mode, live_profile, current_rules_sha256, evaluation_set_sha256, "
+            "evaluated_ruleset_hashes, evaluator_version, status, attempt_count, "
+            "started_at, plan_applied) values (?, ?, ?, 'live', 'default', ?, ?, ?, '1', "
+            "'COMMITTED', 1, ?, 1)",
+            (evaluation, rules, alert_input, rules, rules, f'["{rules}"]', at))
+        for episode, fingerprint in {(e, f) for e, f, *_ in deliveries.values()}:
+            connection.execute(
+                "insert into alert_episode (episode_id, mode, live_profile, origin_rules_sha256, "
+                "instance_fingerprint, rule_id, labels, priority, episode_status, is_open, "
+                "suppression_reasons, opened_at, activated_at, trigger_input_identity, "
+                "created_evaluation_id, last_evaluation_id) values (?, 'live', 'default', ?, "
+                "?, 'regime.band_to_derisk', '{}', 1, 'FIRING', 1, '[]', ?, ?, ?, ?, ?)",
+                (episode, rules, fingerprint, at, at, alert_input, evaluation, evaluation))
+        for delivery, (episode, fingerprint, kind, status, sent_at, delivered) in (
+                deliveries.items()):
+            connection.execute(
+                "insert into alert_delivery (delivery_id, dedupe_key, dedupe_version, mode, "
+                "live_profile, planning_rules_sha256, delivery_kind, priority, "
+                "transport_status, planning_state, created_at, updated_at, attempts, "
+                "recipient_ref) values (?, ?, 1, 'live', 'default', ?, ?, 1, 'PENDING', "
+                "'READY', ?, ?, 0, 'default')", (delivery, delivery, rules, kind, at, at))
+            connection.execute(
+                "insert into alert_delivery_member (delivery_id, episode_id, rule_id, "
+                "instance_fingerprint, member_role, notification_generation, "
+                "origin_rules_sha256, origin_phrase_set_version, origin_phrase_set_sha256, "
+                "included_at, delivered) values (?, ?, 'regime.band_to_derisk', ?, "
+                "'PRIMARY', 1, ?, 'v9.9', ?, ?, ?)",
+                (delivery, episode, fingerprint, rules, phrases, at, delivered))
+            connection.execute(
+                "update alert_delivery set transport_status = ?, planning_state = 'NONE', "
+                "sent_at = ?, attempts = 1 where delivery_id = ?", (status, sent_at, delivery))
+        connection.executemany(
+            "insert into alert_instance_notification_state (mode, live_profile, "
+            "instance_fingerprint, rule_id, last_sent_at, last_reminder_at, reminder_count, "
+            "next_notification_generation, updated_at) values (?, 'default', ?, "
+            "'regime.band_to_derisk', ?, ?, ?, ?, ?)",
+            [(*memory, at) for memory in memories])
+        connection.commit()
+        connection.close()
+        before, rows = _delivery_and_memory_shape(db), _rows(full)
+        assert [row[-2:] for row in rows] == [
+            (reminded_at, 1), (None, 0), (None, 0), (None, 0)], "as mark_sent wrote them"
+
+        command.upgrade(cfg, "0026")
+        after = _delivery_and_memory_shape(db)
+        assert {"last_reminder_at", "reminder_count"}.isdisjoint(_columns())
+        assert _rows(kept) == [row[:7] for row in rows]
+        unmoved = copy.deepcopy(before["schema"])
+        for column in ("last_reminder_at", "reminder_count"):
+            del unmoved["columns"]["alert_instance_notification_state"][column]
+        assert after["schema"] == unmoved
+        assert after["checks"] == {**before["checks"], "alert_instance_notification_state": [
+            ("ck_alert_notif_generation", "next_notification_generation >= 1")]}
+        assert _read("pragma foreign_key_check") == []
+        assert _read("pragma integrity_check") == [("ok",)]
+
+        command.downgrade(cfg, "0025")
+        assert _delivery_and_memory_shape(db) == before
+        assert _rows(full) == rows
+
+        command.upgrade(cfg, "0026")
+        assert _delivery_and_memory_shape(db) == after
+
+    _run_with_db(db, _cycle)
+    assert _read("select version_num from alembic_version") == [("0026",)]
+
+
 def test_the_weekly_digest_storage_is_dropped_and_restored_exactly(tmp_path):
     """Owner decision D2a: the weekly digest is deleted, and 0024 drops what it
     stored - the alert_digest_item table with its indexes, the DIGEST branch
@@ -1191,7 +1346,7 @@ def test_the_weekly_digest_storage_is_dropped_and_restored_exactly(tmp_path):
         command.upgrade(cfg, "head")
 
     _run_with_db(db, _cycle)
-    assert _read("select version_num from alembic_version") == [("0025",)]
+    assert _read("select version_num from alembic_version") == [("0026",)]
 
 
 def test_the_weekly_digest_migration_refuses_to_drop_its_items(tmp_path):

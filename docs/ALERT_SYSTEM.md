@@ -734,8 +734,13 @@ planned as usual
 A reminder is planned as after a definite failure: nothing confirmed advances
 the notification memory, so its delay counts from the instance's last
 confirmed send, and when that send is older than the delay, an episode whose
-first alert ended UNKNOWN is reminded at the next evaluation (while the
-instance has a reminder left). An UNKNOWN body and its events expire on the
+first alert ended UNKNOWN is reminded at the next evaluation, as is one whose
+alert the cooldown suppressed. A reminder belongs to its episode:
+`max_reminders` counts the reminders sent for that episode, so every episode
+has its own (migration 0026 dropped the instance's lifetime count;
+tests/test_alert_end_to_end.py::test_a_reminder_belongs_to_its_episode_not_to_the_instance_lifetime,
+::test_an_episode_the_cooldown_kept_silent_is_reminded_after_the_last_message).
+An UNKNOWN body and its events expire on the
 normal horizons (section 11a). Health counts UNKNOWN deliveries, and a
 dispatch pass whose send ends UNKNOWN reports its heartbeat critical; nothing
 awaits an operator. Production held no UNKNOWN delivery, no

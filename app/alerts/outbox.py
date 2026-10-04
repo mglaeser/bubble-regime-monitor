@@ -877,7 +877,9 @@ def mark_sending(session: Session, delivery: AlertDelivery, *, now: datetime) ->
 
 def mark_sent(session: Session, delivery: AlertDelivery, *, now: datetime,
               http_status: int | None) -> None:
-    """Confirmed success. Only render-proven members start a cooldown."""
+    """Confirmed success. Only render-proven members start a cooldown, and
+    only a render-proven member of a REMINDER counts as its episode's
+    reminder (`repository.load_reminders_sent` reads `delivered`)."""
     delivery.transport_status = TransportStatus.SENT
     delivery.planning_state = PlanningState.NONE
     delivery.sent_at = now
@@ -904,9 +906,6 @@ def mark_sent(session: Session, delivery: AlertDelivery, *, now: datetime,
             state.next_notification_generation = max(
                 state.next_notification_generation, member.notification_generation + 1)
             state.updated_at = now
-            if delivery.delivery_kind == DeliveryKind.REMINDER:
-                state.last_reminder_at = now
-                state.reminder_count += 1
     if len(represented) != len(members):
         _event(
             session,

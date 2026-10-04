@@ -332,7 +332,9 @@ class AlertInstanceNotificationState(Base):
     """Notification memory that must survive a ruleset promotion.
 
     Keyed WITHOUT a rules hash on purpose: promoting a ruleset must not reset a
-    cooldown, a reminder count or the notification generation.
+    cooldown or the notification generation. A reminder belongs to its episode
+    and is counted from its deliveries (`repository.load_reminders_sent`), not
+    here (migration 0026).
     """
 
     __tablename__ = "alert_instance_notification_state"
@@ -343,14 +345,10 @@ class AlertInstanceNotificationState(Base):
 
     rule_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     last_sent_at: Mapped[datetime | None] = mapped_column(TZDateTime, nullable=True)
-    last_reminder_at: Mapped[datetime | None] = mapped_column(
-        TZDateTime, nullable=True)
-    reminder_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     next_notification_generation: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False)
 
     __table_args__ = (
-        CheckConstraint("reminder_count >= 0", name="ck_alert_notif_reminder_count"),
         CheckConstraint("next_notification_generation >= 1", name="ck_alert_notif_generation"),
     )
 
