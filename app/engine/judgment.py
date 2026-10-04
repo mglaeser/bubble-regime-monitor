@@ -85,7 +85,7 @@ def run_completion(prompt: str) -> str:
 
     settings = get_settings()
     result = complete(user=prompt, max_tokens=settings.llm_max_tokens, settings=settings)
-    log.info("completion_ok", model=settings.llm_model, wire=result.wire)
+    log.info("completion_ok", model=settings.llm_model)
     return result.text
 
 
