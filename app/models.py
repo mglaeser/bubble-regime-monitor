@@ -22,8 +22,11 @@ class TZDateTime(TypeDecorator[datetime]):
     the rows always have: an aware value is moved to UTC before it is bound,
     and a naive one is taken as UTC (the recipe refuses it; this code has
     always meant UTC). What comes back is aware UTC, so no caller re-stamps a
-    value read from the database. A row whose text carries an offset
-    (migration 0007's raw bind) keeps its instant."""
+    value read from the database. SQLite compares the stored TEXT, so a
+    column compares by instant only while every row is in the storage form
+    the ORM writes (`YYYY-MM-DD HH:MM:SS.ffffff`): migration 0025 rewrote the
+    raw text earlier migrations wrote, and a migration that writes datetime
+    text raw writes that form."""
 
     impl = DateTime
     cache_ok = True
