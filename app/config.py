@@ -45,8 +45,6 @@ class Settings(BaseSettings):
     admin_api_key: str = "change-me-to-a-long-random-string"
     read_endpoints_public: bool = True
 
-    # Auto-deploy webhook (v3.5.0, docs/AUTO_DEPLOY.md). The endpoint is
-    # FAIL-CLOSED: it returns 503 unless BOTH values are set. The secret is the
     # SEC EDGAR etiquette (MANDATORY, format: "Name email").
     # SEC_EDGAR_UA is the v3.1 name; SEC_USER_AGENT remains accepted.
     sec_user_agent: str = "bubblegauge-monitor admin@example.com"
@@ -206,7 +204,7 @@ class Settings(BaseSettings):
     # falsification-clock reset + regenerated golden; a config flag that moves
     # one is a hole straight through it. Activation is a CODE change under that
     # ceremony. sub_score keeps the `asymmetric` parameter, exercised by tests.
-    lppls_timeout_s: int = 1500  # generous headroom for the Atom N2800 (background recompute; API serves the last snapshot meanwhile)
+    lppls_timeout_s: int = 1500  # generous headroom for the LPPLS fit (background recompute; API serves the last snapshot meanwhile)
     gsadf_timeout_s: int = 1800
 
     service_version: str = "3.9.0"

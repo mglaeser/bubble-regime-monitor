@@ -112,8 +112,7 @@ def start() -> BackgroundScheduler:
                            id="recompute", replace_existing=True,
                            coalesce=True, misfire_grace_time=3600, max_instances=1)
         # Breadth cache refresh twice daily, off the recompute hours so the two
-        # never contend. 2x150 symbols/day rolls the ~503 universe over inside
-        # the 3-day cache SLA well within Twelve Data's 800 credits/day.
+        # never contend.
         _scheduler.add_job(_breadth_job, CronTrigger(hour="1,13", minute=0, timezone="UTC"),
                            id="breadth_refresh", replace_existing=True,
                            coalesce=True, misfire_grace_time=3600, max_instances=1)

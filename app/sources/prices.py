@@ -15,14 +15,15 @@ Chain (spec v3.1 section 2):
   credits/day, resets 00:00 UTC. The free plan does NOT include index data
   (indices are on the $29/mo Grow plan).
 - TERTIARY  Alpha Vantage (ALPHAVANTAGE_API_KEY, 25 req/day): CORE tickers
-  ONLY (SPY/QQQ/SMH/SOXX); never for the constituent sweep. Free tier is
-  UNADJUSTED daily — acceptable for short-window ETF math, flagged.
+  ONLY (SPY/QQQ/SMH/SOXX). Free tier is UNADJUSTED daily — acceptable for
+  short-window ETF math, flagged.
 - TERMINAL  SQLite cache: last good series per canonical symbol served with
   stale flags on total provider failure. Never a 500.
 
-INDEX HANDLING (decisive): no free tier serves raw index levels, so
-NDX -> QQQ and SPX -> SPY ETF proxies everywhere; proxy substitutions are
-recorded in provenance, never silent.
+INDEX HANDLING (decisive): none of the chain's free tiers serves raw index
+levels, so NDX -> QQQ and SPX -> SPY ETF proxies everywhere; proxy
+substitutions are recorded in provenance, never silent. (FRED serves the raw
+NASDAQ100 level free; the service does not read it, see the README.)
 
 Provider health: 3 consecutive failures put a provider on a 6-hour cooldown,
 persisted in SQLite across runs.
@@ -43,7 +44,7 @@ from app.sources import Provenance, SourceError, SourceResult
 log = get_logger(__name__)
 
 CORE_TICKERS = ("SPY", "QQQ", "SMH", "SOXX")
-INDEX_PROXIES = {"NDX": "QQQ", "SPX": "SPY"}  # free tiers serve no raw indices
+INDEX_PROXIES = {"NDX": "QQQ", "SPX": "SPY"}  # the chain's free tiers serve no raw indices
 
 FAIL_THRESHOLD = 3
 COOLDOWN = timedelta(hours=6)
@@ -312,7 +313,7 @@ def fetch_alphavantage(canonical: str) -> tuple[list[tuple[str, float]], str, bo
         raise ProviderNotConfigured("alphavantage: no ALPHAVANTAGE_API_KEY configured")
     vendor, proxy = resolve_symbol(canonical)
     if vendor not in CORE_TICKERS:
-        # 25 req/day budget: strictly core symbols, never the breadth sweep
+        # 25 req/day budget: strictly core symbols
         raise ProviderNotConfigured(f"alphavantage: {vendor} outside CORE ticker budget")
     with httpx.Client(timeout=TIMEOUT) as client:
         resp = client.get(
@@ -502,8 +503,9 @@ def fetch_polygon_grouped(date_iso: str) -> dict[str, float]:
     """Every US stock's close for one date via Polygon/Massive grouped-daily.
 
     Free tier: 5 req/min, EOD, ~2 yr history — one call covers the whole S&P 500
-    for a day. Raises ProviderNotConfigured when no key is set (breadth then
-    falls back to the Twelve Data per-symbol path)."""
+    for a day. Raises ProviderNotConfigured when no key is set (Polygon is
+    breadth's only provider: without a key D1 is dropped and its block
+    renormalized)."""
     settings = get_settings()
     if not settings.polygon_api_key:
         raise ProviderNotConfigured("polygon: no POLYGON_API_KEY configured")

@@ -46,7 +46,7 @@
 
 | key | name | kind | unit | source | note |
 |---|---|---|---|---|---|
-| `qqq` | NASDAQ-100 (QQQ ETF proxy, dividend-adjusted) | total_return | USD | tiingo:QQQ | no free raw index |
+| `qqq` | NASDAQ-100 (QQQ ETF proxy, dividend-adjusted) | total_return | USD | tiingo:QQQ | the service reads no raw index |
 | `spy` | S&P 500 (SPY ETF proxy, dividend-adjusted) | total_return | USD | tiingo:SPY | |
 | `gold` | Gold (GLD ETF proxy) | price | USD | tiingo:GLD | not spot; ~0.40 %/yr ER drag |
 | `silver` | Silver (SLV ETF proxy) | price | USD | tiingo:SLV | not spot |
@@ -61,7 +61,7 @@
 
 ### Metrics (32 + 1, see §7)
 
-`cape` · `excess_cape_yield` · `sp500_top10_weight_pct` · `semis_runup_2yr_pp` · `hy_oas_bps` · `hy_oas_52w_change_bps` (≈252 business-day lookback in the persisted history) · `pct_above_200dma` · `margin_debt_yoy_pct` · `gsadf` (detail: statistic, cv90, cv95, contested, state, gsadf_sup — **since v4.0 the value is the endpoint BSADF, not the GSADF sup; see §8**) · `lppls_confidence` (detail: state, bands, n_windows_qualifying, n_windows_positive) · `vix_level` · `vix_term_state` (categorical: value null, `detail.state` ∈ contango/flat/backwardation) · `vix_term_ratio` · `vrp` (unit `annualized_variance_pts_pct2`) · `skew` · `qqq_close` · `spy_close` · `ndx_close` (**always** available:false — no free raw index; use `qqq_close`) · `gold_spot` · `silver_spot` · `gold_silver_ratio` (note states spot vs ETF basis) · `gold_ttm_pct` · `btc_spot` · `btc_ath` (detail: basis `monthly_closes+spot`, coverage_start — **not a curated all-time record**) · `btc_drawdown_pct` (≤ 0 by construction) · `usd_broad_index_level` · `usd_broad_index_ytd_pct` (vs last-December month-end) · `usdjpy` · `usdchf` · `ust10y_yield_pct` · `tbill3m_yield_pct` · `mmf_total_assets_usd` (USD_mn, quarterly Z.1)
+`cape` · `excess_cape_yield` · `sp500_top10_weight_pct` · `semis_runup_2yr_pp` · `hy_oas_bps` · `hy_oas_52w_change_bps` (≈252 business-day lookback in the persisted history) · `pct_above_200dma` · `margin_debt_yoy_pct` · `gsadf` (detail: statistic, cv90, cv95, contested, state, gsadf_sup — **since v4.0 the value is the endpoint BSADF, not the GSADF sup; see §8**) · `lppls_confidence` (detail: state, bands, n_windows_qualifying, n_windows_positive) · `vix_level` · `vix_term_state` (categorical: value null, `detail.state` ∈ contango/flat/backwardation) · `vix_term_ratio` · `vrp` (unit `annualized_variance_pts_pct2`) · `skew` · `qqq_close` · `spy_close` · `ndx_close` (**always** available:false — the service reads no raw index; use `qqq_close`) · `gold_spot` · `silver_spot` · `gold_silver_ratio` (note states spot vs ETF basis) · `gold_ttm_pct` · `btc_spot` · `btc_ath` (detail: basis `monthly_closes+spot`, coverage_start — **not a curated all-time record**) · `btc_drawdown_pct` (≤ 0 by construction) · `usd_broad_index_level` · `usd_broad_index_ytd_pct` (vs last-December month-end) · `usdjpy` · `usdchf` · `ust10y_yield_pct` · `tbill3m_yield_pct` · `mmf_total_assets_usd` (USD_mn, quarterly Z.1)
 
 ## 3 · Endpoint
 
