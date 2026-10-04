@@ -59,6 +59,15 @@ _SLOT_RE = re.compile(r"\{([A-Za-z_][A-Za-z_0-9]*)\}")
 #: 900 s), so the reply, the checks and the claim's close fit after it.
 _DEADLINE_S = 600.0
 
+#: How hard the model reasons before it writes: little, as it writes from
+#: numbers and references it is given. On the configured route the model's
+#: thinking is silence - the gateway's heartbeats reach the client only with
+#: the first output - and the route gives up after about 250-300 s of it.
+#: Measured 2026-10-04 through the edge: at the route's default effort the
+#: production digest prompt waited 97 s for its first byte and the richer one
+#: of decision 28 failed at 256-303 s; at "low" they answered in 9 and 14 s.
+_EFFORT = "low"
+
 
 @dataclass(frozen=True)
 class Composed:
@@ -449,7 +458,8 @@ def compose(*, trigger: str, channel: Channel,
     moment = now or datetime.now(UTC)
     started = monotonic()
     try:
-        answer = complete(user=prompt, deadline_s=_DEADLINE_S, settings=settings).text
+        answer = complete(user=prompt, deadline_s=_DEADLINE_S, reasoning_effort=_EFFORT,
+                          settings=settings).text
     except Exception as exc:  # noqa: BLE001 - the promise is "never raises"
         failed_at = moment + timedelta(seconds=monotonic() - started)
         _close(claim_id, gov.Outcome.TECHNICAL_ERROR, type(exc).__name__, failed_at)

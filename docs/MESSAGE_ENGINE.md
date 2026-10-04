@@ -622,6 +622,14 @@ the daily digest alone, so the digest is what changed:
   leaves the reading against the band lines, the thresholds and the trend
   rule. iMessage holds 350 code points (`MESSAGE_ENGINE_IMESSAGE_MAX_CHARS`);
   SMS stays one GSM-7 segment of 150 septets, and the template is unchanged.
+- **The effort.** The model is asked for low reasoning effort
+  (`composer._EFFORT`, the Responses API's `reasoning.effort`): it writes
+  from numbers it is given. On the configured route its thinking is
+  silence - the gateway's heartbeats reach the client only with the first
+  output - and the route gives up after about 250-300 s of it. Measured on
+  2026-10-04 through the edge: at the route's default effort the production
+  prompt waited 97 s for its first byte and the richer one failed at 256-303
+  s; at low effort they answered in 9 and 14 s.
 - **Not the other messages.** The alerts render reviewed fixed phrases and
   have no model path (`tests/test_alert_delivery.py::test_the_alert_system_has_no_model_path`),
   the failure alarm and the host notices are fixed text by design (they

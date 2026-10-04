@@ -47,6 +47,9 @@ MAX_ATTEMPTS = 2
 RETRY_WAIT_S = 2.0
 RETRY_MIN_REMAINING_S = 30.0
 _TRANSIENT_STATUSES = frozenset({408, 409, 429})
+# The reasoning efforts the Responses API names (`reasoning.effort`). A call
+# that asks for none sends no reasoning field, and the route decides.
+REASONING_EFFORTS = frozenset({"minimal", "low", "medium", "high"})
 
 # Independent of the requested token cap: a broken or hostile peer must not be
 # able to grow one event, the aggregate wire input, or the output indefinitely.
@@ -745,6 +748,7 @@ class GatewayClient:
         system: str | None = None,
         max_tokens: int | None = None,
         deadline_s: float | None = None,
+        reasoning_effort: str | None = None,
     ) -> Completion:
         token_limit = self.config.max_tokens if max_tokens is None else max_tokens
         if type(token_limit) is not int or not 1 <= token_limit <= self.config.max_tokens:
@@ -757,6 +761,8 @@ class GatewayClient:
         ):
             raise GatewayConfigError(
                 "LLM deadline must be positive and no greater than the wall limit")
+        if reasoning_effort is not None and reasoning_effort not in REASONING_EFFORTS:
+            raise GatewayConfigError("LLM reasoning effort must be one the Responses API names")
 
         wall_seconds = DEFAULT_WALL_DEADLINE_S if deadline_s is None else deadline_s
         deadline = self._clock() + wall_seconds
@@ -768,6 +774,8 @@ class GatewayClient:
         }
         if system is not None:
             payload["instructions"] = system
+        if reasoning_effort is not None:
+            payload["reasoning"] = {"effort": reasoning_effort}
 
         # Build all per-call synchronization before acquiring the global slot,
         # so an allocation failure cannot strand the single-flight semaphore.
@@ -853,6 +861,7 @@ def complete(
     system: str | None = None,
     max_tokens: int | None = None,
     deadline_s: float | None = None,
+    reasoning_effort: str | None = None,
     settings: Settings | None = None,
 ) -> Completion:
     """Complete through the configured route, asking once more after a transient
@@ -867,4 +876,5 @@ def complete(
         system=system,
         max_tokens=max_tokens,
         deadline_s=deadline_s,
+        reasoning_effort=reasoning_effort,
     )
