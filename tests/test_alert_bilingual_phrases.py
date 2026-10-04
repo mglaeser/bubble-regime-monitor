@@ -45,7 +45,7 @@ class TestTheLegacyFormIsRefused:
     def test_meta_names_the_default_and_every_language(self, key):
         raw = json.loads(_tiny("Stufe {F_X}.", "Level {F_X}.", languages=["de", "en"]))
         del raw["meta"][key]
-        with pytest.raises(PhraseSetInvalid, match=rf"meta\.{key} must be"):
+        with pytest.raises(PhraseSetInvalid, match=rf"meta\.{key}\n  Field required"):
             validate_phrase_set(json.dumps(raw), language="de")
 
 
@@ -83,8 +83,8 @@ class TestMultilingualForm:
         ({"de": "Stufe {F_X}.", "en": "Level {F_X}.", "fr": "Niveau."}, "undeclared ['fr']"),
         ({"de": "Stufe {F_X}.", "en": "Level."}, "same slots"),           # slots differ
         ({"de": "Stufe {F_X}.", "en": ""}, "missing ['en']"),             # empty text
-        (["Stufe"], "must be a language-to-text object"),
-        ("Stufe {F_X}.", "must be a language-to-text object"),          # one string: the legacy form
+        (["Stufe"], "headlines.H.text\n  Input should be a valid dictionary"),
+        ("Stufe {F_X}.", "headlines.H.text\n  Input should be a valid dictionary"),  # the legacy form
     ])
     def test_every_declared_language_must_be_present_and_agree(self, bad, needle):
         raw = json.loads(_tiny("x", "y", languages=["de", "en"]))

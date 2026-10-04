@@ -17,13 +17,19 @@ Three things are checked at validation time, not at send time:
   2. the MINIMAL assembly fits at maximum slot widths — the guarantee that
      something always fits;
   3. the FULL assembly fits at maximum slot widths — the design target.
+
+The file's structure is a pydantic schema (`PhraseSetDocument`), as the
+ruleset's is; the checks here are what no schema states.
 """
 
 from __future__ import annotations
 
+import json
 import re
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass
+from typing import Annotated
+
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from app.alerts.canonical import canonical_json, sha256_hex, sha256_of
 from app.alerts.errors import MessageLanguageInvalid, PhraseSetInvalid
@@ -37,6 +43,69 @@ _SLOT_RE = re.compile(r"\{([A-Z0-9_]+)\}")
 #: Assembly order. A message is HEADLINE, then phrases, then facts already
 #: interpolated into those, then the next-check hint, then caveats.
 JOIN = " "
+
+
+class PhraseSetMeta(BaseModel):
+    phrase_set_version: str = Field(min_length=1)
+    #: The default language and every language the set carries. Both are
+    #: required: absent, they once meant the German-only legacy form owner
+    #: ruling 3 deleted (#119 round 5).
+    language: str = Field(min_length=1)
+    languages: list[Annotated[str, Field(min_length=1)]] = Field(min_length=1)
+
+
+class FactEntry(BaseModel):
+    label: str
+    unit: str = ""
+    max_width: int
+    description: str = ""
+
+
+class FragmentEntry(BaseModel):
+    #: language -> text. The one-string form every set before v3.5 used is
+    #: refused (owner ruling 3: no backward compatibility).
+    text: dict[str, str]
+    #: Optional; given, it names exactly the slots the text uses.
+    slots: list[str] = Field(default_factory=list)
+    priority: int = 100
+
+
+class PhraseSetDocument(BaseModel):
+    meta: PhraseSetMeta
+    facts: dict[Annotated[str, Field(pattern=r"^F_")], FactEntry] = Field(default_factory=dict)
+    headlines: dict[str, FragmentEntry] = Field(min_length=1)
+    phrases: dict[str, FragmentEntry] = Field(default_factory=dict)
+    next_check: dict[str, FragmentEntry] = Field(default_factory=dict)
+    caveats: dict[str, FragmentEntry] = Field(min_length=1)
+
+    def sections(self) -> dict[str, dict[str, FragmentEntry]]:
+        """Each fragment table, by the kind of fragment it holds."""
+        return {"headline": self.headlines, "phrase": self.phrases,
+                "next_check": self.next_check, "caveat": self.caveats}
+
+    @model_validator(mode="after")
+    def _in_the_declared_languages(self) -> PhraseSetDocument:
+        """The default language is declared, and EVERY fragment carries
+        EVERY declared language and no other: a missing translation is a
+        message that cannot be rendered in the operator's language, and a
+        fragment is reviewed as a whole."""
+        meta = self.meta
+        if meta.language not in meta.languages:
+            raise ValueError(
+                f"meta.language {meta.language!r} is not among meta.languages {meta.languages}")
+        declared = set(meta.languages)
+        problems: list[str] = []
+        for kind, fragments in self.sections().items():
+            for code, fragment in fragments.items():
+                present = {lang for lang, text in fragment.text.items() if text.strip()}
+                missing, extra = sorted(declared - present), sorted(set(fragment.text) - declared)
+                if missing or extra:
+                    problems.append(
+                        f"{kind} {code!r}: text must cover exactly the declared languages "
+                        f"(missing {missing}, undeclared {extra})")
+        if problems:
+            raise ValueError("; ".join(problems))
+        return self
 
 
 @dataclass(frozen=True)
@@ -66,9 +135,9 @@ class FragmentSpec:
     text: str
     slots: tuple[str, ...]
     kind: str                      # headline | phrase | next_check | caveat
-    priority: int = 100            # lower is dropped LAST when fitting
+    priority: int                  # lower is dropped LAST when fitting
     #: (language, text) for every language the set was reviewed in.
-    texts: tuple[tuple[str, str], ...] = ()
+    texts: tuple[tuple[str, str], ...]
 
 
 @dataclass(frozen=True)
@@ -87,9 +156,9 @@ class ValidatedPhraseSet:
     #: carries. The bytes (sha256, canonical_json) cover all of them: one
     #: promotion admits the whole reviewed set, and the operator picks the
     #: language by setting, not by re-promotion.
-    language: str = "de"
-    languages: tuple[str, ...] = ("de",)
-    worst_case_by_language: dict[str, dict[str, int]] = field(default_factory=dict)
+    language: str
+    languages: tuple[str, ...]
+    worst_case_by_language: dict[str, dict[str, int]]
 
     def fragment(self, code: str) -> FragmentSpec | None:
         for table in (self.headlines, self.phrases, self.next_checks, self.caveats):
@@ -105,47 +174,15 @@ def _slots_of(text: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(_SLOT_RE.findall(text)))
 
 
-def _texts_of(entry: dict[str, Any], kind: str, code: str, languages: tuple[str, ...],
-              problems: list[str]) -> dict[str, str] | None:
-    """The fragment's text in every declared language, or None with a problem.
-
-    A fragment's `text` is an object keyed by language. The one-string form
-    every set before v3.5 used is refused (owner ruling 3: no backward
-    compatibility). A set must carry EVERY declared language for EVERY
-    fragment: a missing translation is a message that cannot be rendered in
-    the operator's language, and a fragment is reviewed as a whole.
-    """
-    raw = entry["text"]
-    if isinstance(raw, dict) and raw and all(isinstance(v, str) for v in raw.values()):
-        texts = dict(raw)
-    else:
-        problems.append(f"{kind} {code!r}: 'text' must be a language-to-text object")
-        return None
-    missing = [lang for lang in languages if not texts.get(lang, "").strip()]
-    extra = [lang for lang in texts if lang not in languages]
-    if missing or extra:
-        problems.append(
-            f"{kind} {code!r}: text must cover exactly the declared languages "
-            f"{list(languages)} (missing {missing}, undeclared {extra})")
-        return None
-    return texts
-
-
 def _load_fragments(
-    raw: dict[str, Any], kind: str, facts: dict[str, FactSpec], problems: list[str],
-    *, languages: tuple[str, ...], language: str,
+    entries: dict[str, FragmentEntry], kind: str, facts: dict[str, FactSpec],
+    problems: list[str], *, languages: tuple[str, ...], language: str,
 ) -> dict[str, FragmentSpec]:
     out: dict[str, FragmentSpec] = {}
-    for code, entry in sorted(raw.items()):
-        if not isinstance(entry, dict) or "text" not in entry:
-            problems.append(f"{kind} {code!r}: missing 'text'")
-            continue
-        texts = _texts_of(entry, kind, code, languages, problems)
-        if texts is None:
-            continue
+    for code, entry in sorted(entries.items()):
         bad = False
         slots_by_language: dict[str, tuple[str, ...]] = {}
-        for lang, text in texts.items():
+        for lang, text in entry.text.items():
             offender = first_non_gsm7(text)
             if offender is not None:
                 problems.append(
@@ -178,17 +215,16 @@ def _load_fragments(
         if unknown:
             problems.append(f"{kind} {code!r}: references undeclared facts {unknown}")
             continue
-        declared = tuple(entry.get("slots", slots))
-        if set(declared) != set(slots):
+        if "slots" in entry.model_fields_set and set(entry.slots) != set(slots):
             problems.append(
-                f"{kind} {code!r}: declares slots {sorted(declared)} but its text uses "
+                f"{kind} {code!r}: declares slots {sorted(entry.slots)} but its text uses "
                 f"{sorted(slots)}"
             )
             continue
         out[code] = FragmentSpec(
-            code=code, text=texts[language], slots=slots, kind=kind,
-            priority=int(entry.get("priority", 100)),
-            texts=tuple((lang, texts[lang]) for lang in languages),
+            code=code, text=entry.text[language], slots=slots, kind=kind,
+            priority=entry.priority,
+            texts=tuple((lang, entry.text[lang]) for lang in languages),
         )
     return out
 
@@ -254,53 +290,22 @@ def validate_phrase_set(raw_json: str, *, language: str | None = None) -> Valida
     says so in `language` - the promoted bytes are the authority, the
     setting is a preference. Every language is held to the worst-case fit.
     """
-    import json
-
     try:
         raw = json.loads(raw_json)
+        # Strict: a value is what the reviewed file says, never a coercion of it.
+        document = PhraseSetDocument.model_validate(raw, strict=True)
     except json.JSONDecodeError as exc:
         raise PhraseSetInvalid(f"phrase set is not valid JSON: {exc}") from exc
-    if not isinstance(raw, dict):
-        raise PhraseSetInvalid("phrase set must be a JSON object")
+    except ValidationError as exc:
+        raise PhraseSetInvalid(f"phrase set failed schema validation: {exc}") from exc
+
+    languages = tuple(dict.fromkeys(document.meta.languages))
+    wanted = _requested_language(language)
+    active = wanted if wanted in languages else document.meta.language
 
     problems: list[str] = []
-    meta = raw.get("meta") or {}
-    version = meta.get("phrase_set_version")
-    if not version:
-        raise PhraseSetInvalid("phrase set has no meta.phrase_set_version")
-    # Both keys are required. Absent, they once took the legacy defaults - a
-    # German-only set, the single-language form owner ruling 3 deleted - so an
-    # absent key is refused like an empty one (#119 round 5).
-    default_language = meta.get("language")
-    if not isinstance(default_language, str) or not default_language:
-        raise PhraseSetInvalid("meta.language must be a non-empty language code")
-    declared = meta.get("languages")
-    if (not isinstance(declared, list) or not declared
-            or any(not isinstance(lang, str) or not lang for lang in declared)):
-        raise PhraseSetInvalid("meta.languages must be a non-empty list of language codes")
-    languages = tuple(dict.fromkeys(str(lang) for lang in declared))
-    if default_language not in languages:
-        raise PhraseSetInvalid(
-            f"meta.language {default_language!r} is not among meta.languages {list(languages)}")
-    wanted = _requested_language(language)
-    active = wanted if wanted in languages else default_language
-
-    facts: dict[str, FactSpec] = {}
-    for fact_id, entry in sorted((raw.get("facts") or {}).items()):
-        if not fact_id.startswith("F_"):
-            problems.append(f"fact {fact_id!r} must start with 'F_'")
-            continue
-        try:
-            facts[fact_id] = FactSpec(
-                fact_id=fact_id,
-                label=entry["label"],
-                unit=entry.get("unit", ""),
-                max_width=int(entry["max_width"]),
-                description=entry.get("description", ""),
-            )
-        except (KeyError, TypeError, ValueError) as exc:
-            problems.append(f"fact {fact_id!r} is malformed: {exc}")
-
+    facts = {fact_id: FactSpec(fact_id=fact_id, **entry.model_dump())
+             for fact_id, entry in sorted(document.facts.items())}
     # `score` as a fact would be exactly the ambiguity the mandate forbids.
     for banned in ("F_SCORE", "F_BAND"):
         if banned in facts:
@@ -308,20 +313,9 @@ def validate_phrase_set(raw_json: str, *, language: str | None = None) -> Valida
                 f"fact {banned!r} is forbidden — name the median and the point score separately"
             )
 
-    def load(section: str, kind: str) -> dict[str, FragmentSpec]:
-        return _load_fragments(raw.get(section) or {}, kind, facts, problems,
-                               languages=languages, language=active)
-
-    headlines = load("headlines", "headline")
-    phrases = load("phrases", "phrase")
-    next_checks = load("next_check", "next_check")
-    caveats = load("caveats", "caveat")
-
-    if not headlines:
-        problems.append("phrase set declares no headlines")
-    if not caveats:
-        problems.append("phrase set declares no caveats")
-
+    headlines, phrases, next_checks, caveats = (
+        _load_fragments(entries, kind, facts, problems, languages=languages, language=active)
+        for kind, entries in document.sections().items())
     if problems:
         raise PhraseSetInvalid("; ".join(problems))
 
@@ -370,7 +364,7 @@ def validate_phrase_set(raw_json: str, *, language: str | None = None) -> Valida
     }
     canonical = canonical_json(raw)
     return ValidatedPhraseSet(
-        version=str(version),
+        version=document.meta.phrase_set_version,
         sha256=sha256_hex(canonical),
         canonical_json=canonical,
         worst_case_test_sha256=sha256_of(worst_case),
