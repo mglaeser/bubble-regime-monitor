@@ -38,6 +38,14 @@ def client(isolated_db, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+def _chain_head() -> str:
+    from alembic.script import ScriptDirectory
+
+    from app.db_migrate import _alembic_config
+
+    return str(ScriptDirectory.from_config(_alembic_config()).get_current_head())
+
+
 def _alert_reads(client, ids: dict[str, str] | None = None) -> list[str]:
     """Every GET route under /api/v1/alerts, enumerated from the app's own
     OpenAPI document rather than from a list kept here (FastAPI nests included
@@ -157,7 +165,9 @@ def test_health_reports_mode_artifacts_and_sqlite(client):
     assert str(payload["sqlite"]["journal_mode"]).lower() == "wal"
     assert payload["sqlite"]["returning"]["insert"] is True
     assert payload["sqlite"]["returning"]["update"] is True
-    assert payload["schema"]["revision"] == "0024"
+    # The expected revision is the migration chain's own head (Alembic), not a
+    # constant each migration has to remember to move (A14).
+    assert payload["schema"]["revision"] == payload["schema"]["expected_revision"] == _chain_head()
     assert payload["schema"]["quick_check"] == "ok"
     assert payload["schema"]["foreign_key_violations"] == 0
     assert payload["schema"]["missing_required_triggers"] == []

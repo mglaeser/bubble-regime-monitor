@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from functools import cache
 from math import ceil
 from typing import Any
 
@@ -512,10 +513,6 @@ _EVALUATOR_MAX_SILENCE_S = 10 * 60 * 60
 #: is called a fault rather than noise.
 _CLOCK_SKEW_TOLERANCE_S = 60
 
-#: The schema this build expects. Health reports a FAULT when the live
-#: database is on any other revision, so this moves in the same PR as a
-#: migration - 0024 drops the weekly digest's storage (D2a).
-_ALERT_SCHEMA_REVISION = "0024"
 _REQUIRED_PARTIAL_INDEXES = frozenset({
     "uq_alert_input_snapshot_id",
     "uq_alert_episode_open",
@@ -523,6 +520,20 @@ _REQUIRED_PARTIAL_INDEXES = frozenset({
 _REQUIRED_UNIQUE_INDEXES = frozenset({
     "uq_alert_render_delivery",
 })
+
+
+@cache
+def _schema_head() -> str:
+    """The schema this build expects: the head of its own migration chain.
+
+    Health reports a FAULT when the live database is on any other revision.
+    Alembic answers which revision that is, so no constant has to move with
+    every migration (re-evaluation A14)."""
+    from alembic.script import ScriptDirectory
+
+    from app.db_migrate import _alembic_config
+
+    return str(ScriptDirectory.from_config(_alembic_config()).get_current_head())
 
 
 def _now_utc() -> datetime:
@@ -911,9 +922,9 @@ def health_projection(
             f"journal_mode is {sqlite_info.get('journal_mode')!s}, not WAL")
     if int(sqlite_info.get("busy_timeout", 0)) <= 0:
         schema_faults.append("busy_timeout is not positive")
-    if schema_revision != _ALERT_SCHEMA_REVISION:
+    if schema_revision != _schema_head():
         schema_faults.append(
-            f"schema revision is {schema_revision!s}, expected {_ALERT_SCHEMA_REVISION}")
+            f"schema revision is {schema_revision!s}, expected {_schema_head()}")
     if missing_required_triggers:
         schema_faults.append(
             "missing required trigger(s): " + ", ".join(missing_required_triggers))
@@ -1094,7 +1105,7 @@ def health_projection(
         "sqlite": sqlite_info,
         "schema": {
             "revision": schema_revision,
-            "expected_revision": _ALERT_SCHEMA_REVISION,
+            "expected_revision": _schema_head(),
             "quick_check": quick_check,
             "foreign_key_violations": foreign_key_violations,
             "required_triggers": sorted(required_triggers),

@@ -28,6 +28,7 @@ check: the release is reported, and the previous image is the hand rollback.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from sqlalchemy import inspect
 
@@ -35,12 +36,15 @@ from app.config import get_settings
 from app.db import get_engine
 from app.logging_conf import get_logger
 
+if TYPE_CHECKING:
+    from alembic.config import Config
+
 log = get_logger(__name__)
 
 _ALEMBIC_INI = Path(__file__).resolve().parents[1] / "alembic.ini"
 
 
-def _alembic_config():
+def _alembic_config() -> Config:
     from alembic.config import Config
 
     cfg = Config(str(_ALEMBIC_INI))
