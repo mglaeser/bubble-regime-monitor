@@ -953,19 +953,16 @@ def test_automatic_retry_preserves_append_only_attempt_timestamps(isolated_db):
         assert "attempt=1" in (events[0].detail_redacted or "")
 
 
-@pytest.mark.parametrize("use_returning", [True, False])
-def test_returning_and_fallback_claim(isolated_db, monkeypatch, use_returning):
-    """Both SQLite claim routes are one conditional UPDATE, never select-then-set."""
+def test_the_claim_is_one_conditional_update_returning(isolated_db):
+    """The claim is one conditional UPDATE ... RETURNING, never select-then-set."""
     from sqlalchemy import event
 
     from app.alerts.outbox import claim
     from app.db import get_engine, session_scope
 
-    delivery_id = f"D-claim-{'returning' if use_returning else 'fallback'}"
+    delivery_id = "D-claim-returning"
     _seed_delivery(delivery_id)
     engine = get_engine()
-    dialect = engine.dialect
-    monkeypatch.setattr(dialect, "update_returning", use_returning)
     statements: list[str] = []
 
     def capture_update(_conn, _cursor, statement, _parameters, _context, _many):
@@ -994,7 +991,54 @@ def test_returning_and_fallback_claim(isolated_db, monkeypatch, use_returning):
         event.remove(engine, "before_cursor_execute", capture_update)
 
     assert statements
-    assert (" RETURNING " in f" {statements[0].upper()} ") is use_returning
+    assert all(" RETURNING " in f" {statement.upper()} " for statement in statements)
+
+
+def test_a_database_without_update_returning_fails_the_claim_loudly(
+        isolated_db, monkeypatch):
+    """SQLite before 3.35 has no UPDATE ... RETURNING, and the claim has no
+    rowcount route to fall back to (re-evaluation A8): the database refuses
+    the statement, the claim raises, and nothing is leased. The boot's
+    migrations already need 3.35 (0021 and 0022 use the native DROP COLUMN
+    of the same release), so this pins the loud end of a path production
+    does not take."""
+    import sqlite3
+
+    from sqlalchemy import event
+    from sqlalchemy.exc import OperationalError
+
+    from app.alerts.models import AlertDelivery
+    from app.alerts.outbox import claim
+    from app.db import get_engine, session_scope
+
+    delivery_id = _seed_delivery("D-claim-no-returning")
+    engine = get_engine()
+    # What SQLAlchemy reports, and what the database answers, before 3.35.
+    monkeypatch.setattr(engine.dialect, "update_returning", False)
+    updates: list[str] = []
+
+    def refuse_returning(_cursor, statement, _parameters, _context):
+        if statement.lstrip().upper().startswith("UPDATE ALERT_DELIVERY"):
+            updates.append(statement)
+            if " RETURNING " in f" {statement.upper()} ":
+                raise sqlite3.OperationalError('near "RETURNING": syntax error')
+        return False
+
+    event.listen(engine, "do_execute", refuse_returning)
+    try:
+        with pytest.raises(OperationalError, match="RETURNING"):
+            with session_scope() as session:
+                claim(session, delivery_id, owner="worker-a", now=NOW,
+                      lease_seconds=30)
+    finally:
+        event.remove(engine, "do_execute", refuse_returning)
+
+    assert len(updates) == 1
+    with session_scope() as session:
+        delivery = session.get(AlertDelivery, delivery_id)
+        assert delivery is not None
+        assert delivery.transport_status == "PENDING"
+        assert delivery.lease_owner is None
 
 
 def test_a_test_delivery_dispatches_its_reviewed_fragment(isolated_db):

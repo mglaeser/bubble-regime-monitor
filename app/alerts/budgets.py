@@ -5,10 +5,10 @@ Two counts, deliberately different:
   * the PLANNER uses an advisory count that includes work already queued or
     reserved, so it does not plan five messages it knows it cannot send;
   * the DISPATCHER re-checks immediately before submission using CONFIRMED
-    SENT deliveries, every in-flight reservation, and READY queued work that
-    ranks before the current delivery.  The ordered queue reservation prevents
-    concurrent workers from spending the same final slot without making every
-    queued row wait on every other queued row.
+    SENT deliveries and every other in-flight reservation (LEASED or
+    SENDING). Queued work reserves nothing there: it spends no budget until
+    it is claimed, and once claimed it is in flight
+    (`outbox.dispatch_budget_usage`).
 
 **P1 is exempt from all of it.** `check_budget` refuses to even evaluate a P1,
 rather than evaluating one and happening to return True.
@@ -39,12 +39,6 @@ PLANNER_RESERVED_STATUSES: frozenset[str] = frozenset({
 #: Other workers already at the wire always reserve dispatch headroom.
 DISPATCH_IN_FLIGHT_STATUSES: frozenset[str] = frozenset({
     TransportStatus.LEASED, TransportStatus.SENDING,
-})
-
-#: Eligible READY rows reserve dispatch headroom only when their deterministic
-#: queue rank precedes the current lease. Durable quiet/budget holds do not.
-DISPATCH_ORDERED_READY_STATUSES: frozenset[str] = frozenset({
-    TransportStatus.PENDING, TransportStatus.RETRY_DUE,
 })
 
 

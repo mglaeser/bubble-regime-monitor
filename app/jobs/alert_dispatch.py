@@ -1,9 +1,9 @@
 """The delivery dispatcher job.
 
-ONE worker. The single-worker assumption is what lets the pre-send budget
-recheck be a simple read: two workers could each see headroom for the last
-message in the window. If a second worker is ever enabled, that recheck and the
-lease claim both need a fresh concurrency review.
+The scheduler runs ONE pass at a time (`max_instances=1`), and a pass takes
+the queue in claim order, P1 first, then oldest. `bubblegauge alerts dispatch
+--once` can run a pass beside it: no row is claimed twice and the budget caps
+hold (`app/alerts/dispatcher.py`).
 
 The job refuses to run unless ALERTS_MODE is `live` or `shadow`. In shadow it
 uses the NullSender, so a shadow deployment exercises the whole path —

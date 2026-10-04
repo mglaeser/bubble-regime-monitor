@@ -1,9 +1,9 @@
-"""The single delivery worker: claim, revalidate, render, send, classify.
+"""The delivery worker: claim, revalidate, render, send, classify.
 
-One configured worker. On the Atom N2800 target this is a capacity decision as
-much as a correctness one. Conditional leases and deterministic queued budget
-reservations still fail closed if duplicate processes briefly overlap; scaling
-the deployment beyond one worker remains a concurrency-review boundary.
+Two passes can overlap: the scheduler's and `bubblegauge alerts dispatch
+--once`. The claim is a conditional UPDATE, so a row is claimed once, and the
+budget recheck counts every other claimed or sending row, so the caps hold
+(`outbox.dispatch_budget_usage`).
 
 Order matters, and every step can still stop the send:
 

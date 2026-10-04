@@ -116,8 +116,9 @@ def start() -> BackgroundScheduler:
         _scheduler.add_job(_breadth_job, CronTrigger(hour="1,13", minute=0, timezone="UTC"),
                            id="breadth_refresh", replace_existing=True,
                            coalesce=True, misfire_grace_time=3600, max_instances=1)
-        # The delivery dispatcher polls the outbox. `max_instances=1` is the
-        # single-worker guarantee the budget recheck depends on.
+        # The delivery dispatcher polls the outbox, one pass at a time
+        # (`max_instances=1`), so a pass takes the queue in claim order. The
+        # budget caps do not depend on it (outbox.dispatch_budget_usage).
         _scheduler.add_job(_alert_dispatch_job,
                            CronTrigger(second=f"*/{max(20, settings.alerts_dispatch_poll_s)}",
                                        timezone="UTC"),

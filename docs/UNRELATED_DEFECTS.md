@@ -24,6 +24,10 @@ tracking: it IS in scope for the alert system and is scheduled as Phase B5
 (audit B-14, per-member JIT rendering). Remove from this file once B5 lands.
 
 ## U-03 — stale "Atom N2800" framing in alert code
+**Resolved 2026-10-04 (re-evaluation A8):** the dispatcher's docstring now says what the code
+does: overlapping passes claim a row once and keep the budget caps, because every other claimed
+or sending row reserves a slot. The caps do not depend on a single worker.
+
 `app/alerts/dispatcher.py:3` justifies the single-worker design with "On the
 Atom N2800 target this is a capacity decision". The host is an EPYC now. The
 single-worker decision stays correct (the pre-send budget recheck depends on
