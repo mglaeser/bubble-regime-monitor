@@ -1,9 +1,9 @@
 """POST /api/v1/admin/refresh — manual recompute; requires X-API-Key.
 
 The recompute runs in a BACKGROUND thread and this endpoint returns 202
-immediately: a full gather takes many minutes (constituent breadth sweep,
-R GSADF simulation, LPPLS fits), and a synchronous handler invited hung
-curls and accidental concurrent sweeps. A single-flight lock guarantees at
+immediately: a full gather takes many minutes (R GSADF simulation, LPPLS
+fits), and a synchronous handler invited hung curls and accidental
+concurrent recomputes. A single-flight lock guarantees at
 most one recompute at a time (shared with the scheduler); a request while
 one is running reports `already_running` instead of stacking another.
 """

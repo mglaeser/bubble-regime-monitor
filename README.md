@@ -42,13 +42,13 @@ Rootless Podman notes: the `:Z` suffix on the `./data:/data` bind mount applies 
   FRED / SSGA / Tiingo    │  BLOCK S — Structural Fragility                  │
   EDGAR / FINRA / CBOE ──▶│   S1 Valuation (0.33)  S2 Concentration (0.27)   │
   multpl / shillerdata    │   S3 Semis GSY (0.20)  S4 GSADF (0.07, CONTESTED)│
-  Wikipedia constituents  │   S5 Credit (0.13)                               │
-                          │        S = Π(sᵢ+ε)^wᵢ − ε                        │
+  Polygon grouped-daily   │   S5 Credit (0.13)                               │
+                          │        S = Π r(sᵢ)^wᵢ,  r(x) = 0.10 + 0.90·x     │
                           │                                                  │
                           │  BLOCK D — Dynamics / Trigger                    │
                           │   D1 Breadth (0.35)   D2 Margin (0.13)           │
                           │   D3 Hyperscaler FCF (0.32)  D4 LPPLS (0.20)     │
-                          │        D = min(Π(dⱼ+ε)^wⱼ − ε · V, 1)            │
+                          │        D = min(Π r(dⱼ)^wⱼ · V, 1)                │
                           │                                                  │
                           │  V — VIX term-structure multiplier (lagging)     │
                           │  Score = 100·S^α·D^β, red-flag override ≥3 → ≥70 │

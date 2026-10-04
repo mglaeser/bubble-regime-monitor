@@ -79,8 +79,8 @@ jobs:
           # version of this comment claimed that, and it is false. Measured:
           # flipping `strict = true` to false in pyproject.toml drops 217 errors
           # to 84 with the file count unchanged at 113 and this floor satisfied.
-          # 122 files today; the floor sits below that so ordinary file movement
-          # does not trip it.
+          # The floor sits below today's file count (the step prints it) so
+          # ordinary file movement does not trip it.
           MYPY_MIN_FILES: "100"
           # DEPTH is pinned separately, because the ratchet only ever blocks a
           # RISE -- so a config loosening lowers the count, passes, and then

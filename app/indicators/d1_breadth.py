@@ -3,7 +3,7 @@
 WHAT/HOW/WHY/references/caveats: see app.references.REGISTRY["d1"]; summary:
 
     pct = 100 * #{members with close > SMA200} / N  (constituent closes via the
-          Polygon/Massive grouped-daily universe, Twelve Data fallback)
+          Polygon/Massive grouped-daily universe)
     sub_score = max(0.05, clip((hi - pct)/(hi - lo), 0, 1))
     MC anchors lo ~ U(30,40), hi ~ U(85,95); baseline lo=35, hi=90.
     NOTE (v3.3.0): hi raised 75 -> 90 because bull-market breadth routinely
