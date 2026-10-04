@@ -439,7 +439,8 @@ def dispatch_once(
     limit: int = 5,
     clock: Callable[[], datetime] | None = None,
 ) -> DispatchReport:
-    """One pass of the outbox. Never raises."""
+    """One pass of the outbox. A send is classified, never raised; a database
+    error propagates to the caller (`app.jobs.alert_dispatch.job` reports it)."""
     from app.config import get_settings
 
     supplied_now = now is not None

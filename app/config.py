@@ -54,10 +54,11 @@ class Settings(BaseSettings):
     def effective_sec_ua(self) -> str:
         return self.sec_edgar_ua or self.sec_user_agent
 
-    # Daily SMS digest via the sipgate REST API v2 (POST /sessions/sms).
-    # Auth is a Personal Access Token (token ID + token, scope
-    # sessions:sms:write). Sent once a day at SMS_DAILY_HOUR:SMS_DAILY_MINUTE
-    # UTC; disabled unless SMS_ENABLED=true and credentials are present.
+    # The SMS transport, the sipgate REST API v2 (POST /sessions/sms), for the
+    # daily digest, the failure alarm and the alerts when iMessage is not
+    # chosen (daily_digest_transport below). Auth is a Personal Access Token
+    # (token ID + token, scope sessions:sms:write). The digest goes out once a
+    # day at SMS_DAILY_HOUR:SMS_DAILY_MINUTE UTC over the chosen transport.
     sms_enabled: bool = False
     sipgate_token_id: str = ""       # Personal Access Token ID (Basic-auth username)
     sipgate_token: str = ""          # Personal Access Token (Basic-auth password)
@@ -84,10 +85,11 @@ class Settings(BaseSettings):
     # is a defect, not a fallback, and a silent downgrade to SMS would hide the
     # proxy being down precisely when the operator needs to know.
     #
-    # Shares SMS_DAILY_HOUR/MINUTE and SMS_MAX_LEN — the schedule and the body
-    # are transport-independent. The proxy accepts 4000 Unicode code points,
-    # so the 160-char ASCII cap is now a self-imposed SMS-era limit rather
-    # than a physical one; raising it is a product decision, not a migration.
+    # Shares SMS_DAILY_HOUR/MINUTE and SMS_MAX_LEN — the schedule and the
+    # engine-off body are transport-independent. The proxy accepts 4000
+    # Unicode code points, so the 150-char ASCII cap is a self-imposed SMS-era
+    # limit there rather than a physical one; with the message engine on, the
+    # iMessage text is held to MESSAGE_ENGINE_IMESSAGE_MAX_CHARS instead.
     imessage_enabled: bool = False
     imessage_api_base_url: str = ""  # origin only, e.g. https://messages.example.com
     imessage_api_key: str = ""       # scoped `messages:send` key, `imp_` prefix

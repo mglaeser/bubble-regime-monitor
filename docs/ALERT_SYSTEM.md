@@ -223,18 +223,18 @@ currently ask for, and should not be added without deciding that it should.
 
 ## 6. Priorities, budgets and quiet hours
 
-| class | channel | quiet hours | budget | default cooldown |
+| class | channel | quiet hours | budget | cooldown (each rule sets its own; stage 3) |
 |---|---|---|---|---|
-| P1 | immediate SMS | **ignored** | **exempt** | 48h |
-| P2 | bundled SMS | `[07:00, 22:00)` Europe/Berlin | non-P1 caps | 24h |
+| P1 | immediate, by iMessage or SMS | **ignored** | **exempt** | 48h; `structure.s3_tier_150` 30 days, `constellation.falsification_event` none |
+| P2 | bundled, by iMessage or SMS | `[07:00, 22:00)` Europe/Berlin | non-P1 caps | 6h to 30 days |
 | P3 | API / log only (weekly digest deleted, D2a) | n/a | none | n/a |
 | P4 | API / log only | n/a | none | n/a |
 
 Quiet hours use IANA rules, so the release time moves with DST; exactly 22:00
 is held. The non-P1 budget is 2 per rolling 168h in quiet regimes, hard-capped
-at 3/24h and 6/168h. **P1 is never held by either** — enforced by the ruleset
-loader *and* by a CHECK constraint on `alert_delivery`, so a future planner bug
-cannot even persist the mistake.
+at 5/24h and 8/168h (`app/alerts/budgets.py` `LIMITS`). **P1 is never held by
+either** — enforced by the ruleset loader *and* by a CHECK constraint on
+`alert_delivery`, so a future planner bug cannot even persist the mistake.
 
 ---
 
