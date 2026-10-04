@@ -29,8 +29,8 @@ Volume=%h/playground/bubble-regime-monitor/data:/data:z
 PublishPort=127.0.0.1:8000:8000
 Environment=FORWARDED_ALLOW_IPS=10.0.2.100
 # The resolvers compose.yml pins since the July 2026 outage (broken in-container
-# DNS); checked from the image on the host, the providers and hc-ping.com
-# resolve through them.
+# DNS); checked from the image on the host, the providers resolve through
+# them.
 DNS=1.1.1.1
 DNS=8.8.8.8
 # Hardening (audit B-12): no capabilities, no privilege escalation. The image
