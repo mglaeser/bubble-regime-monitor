@@ -423,7 +423,8 @@ marked `RECONSTRUCTED` and never counts as successful mandatory-event recall.
 ## 10. The API
 
 Reads and the admin actions take `ADMIN_API_KEY`; silences take
-`ALERTS_WRITE_API_KEY`. Errors are RFC 9457 `application/problem+json`. Reads
+`ALERTS_WRITE_API_KEY`. Errors are the service's one format (owner decision
+D3d, 2026-10-03): `application/json` `{"detail": ...}`, as on every route. Reads
 set no `ETag` and answer no conditional request (owner decision D3c,
 2026-10-03); the render read and the mutations are `Cache-Control: no-store`.
 

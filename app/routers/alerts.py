@@ -3,7 +3,8 @@
 Operator-only: every route takes the admin key, per handler, and nothing else
 (owner decision D3a, 2026-10-03). Every response is redacted: no recipient, no
 raw provider error, no raw model output, no secret-shaped configuration. Errors
-use RFC 9457 `application/problem+json`.
+are the service's one format, an HTTPException's `{"detail": ...}` (owner
+decision D3d, 2026-10-03).
 
 Delivery and render endpoints project their real namespace-scoped tables even
 when the committed Stage-1 rollout leaves them empty. An operator checking
@@ -16,7 +17,6 @@ from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
-from fastapi.responses import JSONResponse
 from sqlalchemy import and_, exists, or_, select
 
 from app.alerts.artifacts import LoadedArtifacts, load_active
@@ -45,33 +45,9 @@ router = APIRouter(prefix="/api/v1/alerts", tags=["alerts"])
 
 MAX_PAGE = 500
 
-
-def problem(status: int, title: str, detail: str, *, type_: str = "about:blank",
-            extra: dict[str, object] | None = None,
-            headers: dict[str, str] | None = None) -> JSONResponse:
-    """RFC 9457 problem details, with a sanitized detail string.
-
-    `extra` carries machine-readable members alongside the prose. A refusal an
-    operator has to parse out of a sentence is a refusal their tooling cannot
-    act on.
-    """
-    content: dict[str, object] = {
-        "type": type_, "title": title, "status": status, "detail": detail,
-    }
-    if extra:
-        content.update(extra)
-    response_headers = {
-        "Cache-Control": "no-store",
-        "Vary": "X-API-Key",
-    }
-    if headers:
-        response_headers.update(headers)
-    return JSONResponse(
-        status_code=status,
-        media_type="application/problem+json",
-        content=content,
-        headers=response_headers,
-    )
+# The headers problem() set on every alert error: D3d changes an error's
+# body, not its cache directives.
+ERROR_HEADERS = {"Cache-Control": "no-store", "Vary": "X-API-Key"}
 
 
 def _next_cursor(at: datetime, row_id: str) -> str:
@@ -106,8 +82,7 @@ def _after(timestamp_column: Any, id_column: Any, cursor: str) -> Any:
         raise HTTPException(
             status_code=422,
             detail="cursor must be a next_cursor value: <RFC 3339 time>~<id>",
-            # the directives the cursor's problem() answer carried
-            headers={"Cache-Control": "no-store", "Vary": "X-API-Key"}) from exc
+            headers=ERROR_HEADERS) from exc
     return or_(timestamp_column < at, and_(timestamp_column == at, id_column < row_id))
 
 
@@ -160,8 +135,9 @@ def get_overview(request: Request, response: Response,
                  _: None = Depends(require_admin_key)) -> Any:
     artifacts = _load()
     if artifacts is None:
-        return problem(503, "Alerting unavailable",
-                       "no valid ruleset is loadable; see /api/v1/alerts/health")
+        raise HTTPException(status_code=503,
+                            detail="no valid ruleset is loadable; see /api/v1/alerts/health",
+                            headers=ERROR_HEADERS)
     mode, profile = _mode()
     with session_scope() as session:
         mechanisms = mechanism_projection(session, artifacts.ruleset, mode=mode,
@@ -201,7 +177,8 @@ def get_mechanisms(request: Request, response: Response,
                    _: None = Depends(require_admin_key)) -> Any:
     artifacts = _load()
     if artifacts is None:
-        return problem(503, "Alerting unavailable", "no valid ruleset is loadable")
+        raise HTTPException(status_code=503, detail="no valid ruleset is loadable",
+                            headers=ERROR_HEADERS)
     mode, profile = _mode()
     with session_scope() as session:
         items = mechanism_projection(session, artifacts.ruleset, mode=mode,
@@ -219,7 +196,8 @@ def get_mechanism(request: Request, instance_fingerprint: str, response: Respons
                   _: None = Depends(require_admin_key)) -> Any:
     artifacts = _load()
     if artifacts is None:
-        return problem(503, "Alerting unavailable", "no valid ruleset is loadable")
+        raise HTTPException(status_code=503, detail="no valid ruleset is loadable",
+                            headers=ERROR_HEADERS)
     mode, profile = _mode()
     with session_scope() as session:
         items = mechanism_projection(session, artifacts.ruleset, mode=mode,
@@ -228,8 +206,9 @@ def get_mechanism(request: Request, instance_fingerprint: str, response: Respons
         if item["instance_fingerprint"] == instance_fingerprint:
             _cache(response, max_age=60)
             return item
-    return problem(404, "Unknown mechanism",
-                   "no rule instance with that fingerprint in the active ruleset")
+    raise HTTPException(status_code=404,
+                        detail="no rule instance with that fingerprint in the active ruleset",
+                        headers=ERROR_HEADERS)
 
 
 @router.get("/rules/{rule_id}/instances", summary="Instances of one rule")
@@ -238,13 +217,15 @@ def get_rule_instances(request: Request, rule_id: str, response: Response,
                        _: None = Depends(require_admin_key)) -> Any:
     artifacts = _load()
     if artifacts is None:
-        return problem(503, "Alerting unavailable", "no valid ruleset is loadable")
+        raise HTTPException(status_code=503, detail="no valid ruleset is loadable",
+                            headers=ERROR_HEADERS)
     mode, profile = _mode()
     with session_scope() as session:
         items = mechanism_projection(session, artifacts.ruleset, mode=mode,
                                      live_profile=profile, rule_ids={rule_id})
     if not items:
-        return problem(404, "Unknown rule", f"no rule {rule_id!r} in the active ruleset")
+        raise HTTPException(status_code=404, detail=f"no rule {rule_id!r} in the active ruleset",
+                            headers=ERROR_HEADERS)
     payload = {"rule_id": rule_id, "items": items}
     _cache(response, max_age=60)
     return payload
@@ -293,7 +274,8 @@ def get_episode(request: Request, episode_id: str, response: Response,
             )
         ).scalars().first()
         if row is None:
-            return problem(404, "Unknown episode", "no episode with that id")
+            raise HTTPException(status_code=404, detail="no episode with that id",
+                                headers=ERROR_HEADERS)
         events = session.execute(
             select(AlertEvent).where(AlertEvent.episode_id == episode_id)
             .order_by(AlertEvent.occurred_at.asc(), AlertEvent.event_id.asc()).limit(200)
@@ -480,7 +462,8 @@ def get_delivery(request: Request, delivery_id: str, response: Response,
             )
         ).scalars().first()
         if row is None:
-            return problem(404, "Unknown delivery", "no delivery with that id")
+            raise HTTPException(status_code=404, detail="no delivery with that id",
+                                headers=ERROR_HEADERS)
         from app.alerts.models import AlertDeliveryMember
 
         members = session.execute(
@@ -517,7 +500,8 @@ def get_render(request: Request, render_id: str, response: Response,
             )
         ).scalars().first()
         if row is None:
-            return problem(404, "Unknown render", "no render with that id")
+            raise HTTPException(status_code=404, detail="no render with that id",
+                                headers=ERROR_HEADERS)
         payload = {
             "render_id": row.render_id,
             "delivery_id": row.delivery_id,
@@ -542,7 +526,8 @@ def get_ruleset(request: Request, response: Response,
                 _: None = Depends(require_admin_key)) -> Any:
     artifacts = _load()
     if artifacts is None:
-        return problem(503, "Alerting unavailable", "no valid ruleset is loadable")
+        raise HTTPException(status_code=503, detail="no valid ruleset is loadable",
+                            headers=ERROR_HEADERS)
     payload = ruleset_summary(artifacts.ruleset)
     payload["source"] = artifacts.source
     payload["fallback_reason"] = artifacts.fallback_reason
