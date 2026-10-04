@@ -12,25 +12,7 @@ WHAT/HOW/WHY/references/caveats: see app.references.REGISTRY["v"]; summary:
 CAVEAT (verbatim): LAGGING CONFIRMATION only — never treated as a leading
 signal; capped so D cannot exceed 1.0.
 
-EPISTEMIC GUARDRAILS (verbatim):
-1. NOT-A-PROBABILITY. The headline is a 0-100 regime heuristic = structured
-   expert judgment; it is uncalibrated and is not investment advice.
-2. n ~= 4 CALIBRATION IMPOSSIBILITY. The reference class of comparable US
-   equity manias is ~= {1929, 2000, 2007, 2021}. With ~4 events, no honest
-   probability calibration is possible.
-3. REFERENCE-CLASS CAVEAT. The current episode may be rational
-   general-purpose-technology (GPT) repricing rather than a bubble. Chen,
-   Chen & Huang (2026, arXiv 2604.25826) show GSADF-type tests spuriously
-   reject the no-bubble null 93-100% of the time under hump-shaped GPT
-   fundamentals; hence the GSADF indicator carries a low weight and a
-   permanent CONTESTED flag.
-4. NOMINAL != EFFECTIVE WEIGHTS. Nominal weights rarely equal a variable's
-   realized influence (Paruolo, Saisana & Saltelli 2013); read the weights as
-   design intent, not as measured influence.
-5. NEVER HTTP 500 ON DATA FAILURE. On any upstream data failure the service
-   must fall back down a defined chain, or drop the indicator and renormalize
-   its block, always attaching a provenance note. Upstream failure must never
-   surface as a 500.
+EPISTEMIC GUARDRAILS: the five, verbatim, are in app/references.py.
 """
 
 from __future__ import annotations
