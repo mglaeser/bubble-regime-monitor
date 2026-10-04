@@ -905,9 +905,13 @@ def test_alert_errors_use_the_one_format(client, monkeypatch, tmp_path):
         errors["a render preview with no ruleset"] = (503, client.post(
             "/api/v1/admin/alerts/render", headers=admin))
         monkeypatch.delenv("ALERTS_RULES_PATH")
-        monkeypatch.setenv("ALERTS_PHRASE_PATH", str(not_json))
+        monkeypatch.setenv("ALERTS_PHRASE_PATH", str(not_json))  # falls back to no registry
         get_settings.cache_clear()
-        errors["a render preview of an invalid phrase set"] = (422, client.post(
+        errors |= {f"GET /api/v1/alerts/{read} with an invalid phrase set": (503, client.get(
+            f"/api/v1/alerts/{read}", headers=admin)) for read in (
+            "overview", "mechanisms", "mechanisms/" + "0" * 64, "rules/no-such-rule/instances",
+            "ruleset")}
+        errors["a render preview of an invalid phrase set"] = (503, client.post(
             "/api/v1/admin/alerts/render", headers=admin))
     finally:
         get_settings.cache_clear()

@@ -27,7 +27,7 @@ from sqlalchemy.orm import Session
 
 from app import methodology as _M
 from app.alerts.enums import ActorType, RulesetStatus
-from app.alerts.errors import AlertingUnavailable, RulesetInvalid, sanitize
+from app.alerts.errors import AlertingUnavailable, PhraseSetInvalid, RulesetInvalid, sanitize
 from app.alerts.models import AlertPhraseSetRegistry, AlertRulesetRegistry
 from app.alerts.phrase_registry import (
     PHRASE_VALIDATOR_VERSION,
@@ -120,9 +120,10 @@ def load_active(session: Session, *, service_version: str | None = None) -> Load
     try:
         return validate_from_disk(rules_path=rules_path, phrase_path=phrase_path,
                                   service_version=service_version)
-    except (RulesetInvalid, AlertingUnavailable) as exc:
+    except (RulesetInvalid, PhraseSetInvalid, AlertingUnavailable) as exc:
         candidate_error = sanitize(exc)
-        log.warning("alert_rules_invalid", path=str(rules_path), error=candidate_error)
+        log.warning("alert_rules_invalid", path=str(rules_path), phrase_path=str(phrase_path),
+                    error=candidate_error)
 
     promoted = load_promoted(session, service_version=service_version)
     if promoted is None:
