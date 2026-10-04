@@ -99,8 +99,8 @@ def library() -> dict[str, Any]:
 _SIGNED_RE = re.compile(r"^\s*SIGNED\b", re.IGNORECASE)
 
 
-def library_sign_off(lib: dict[str, Any] | None = None) -> str | None:
-    """Why the library may not reach a wire, or None once the owner has signed.
+def library_sign_off(lib: dict[str, Any]) -> str | None:
+    """Why this library may not reach a wire, or None once the owner has signed.
 
     The status line is DATA. The shipped v1.0.0 says "DRAFT - owner sign-off
     required" (ruling Q34), and nothing read it, so an admitted deployment
@@ -110,17 +110,28 @@ def library_sign_off(lib: dict[str, Any] | None = None) -> str | None:
     `engine_delivery.deliver` composes nothing and sends nothing. A library
     with no status is unsigned too.
     """
-    if lib is None:
-        try:
-            lib = library()
-        except Exception as exc:  # noqa: BLE001 - an unreadable library is unsigned
-            return (f"prompt library unreadable, so nothing is signed off: "
-                    f"{type(exc).__name__} (ruling Q34)")
     status = str(lib.get("status", "")).strip()
     if _SIGNED_RE.match(status):
         return None
     return (f"prompt library {lib.get('version', '?')} is not signed off by the "
             f"owner (status {status!r}; ruling Q34)")
+
+
+def signed_library() -> dict[str, Any] | str:
+    """The prompt library, READ ONCE, if the owner has signed it; otherwise
+    why it may not reach a wire. An unreadable library is unsigned.
+
+    The caller composes from the object returned here, and compose() reads
+    no file: a sign-off checked on one read while compose() made another let
+    a library that turned DRAFT between the two be composed and sent
+    unsigned (#178 round 1, SOTA-A, executed)."""
+    try:
+        lib = library()
+        unsigned = library_sign_off(lib)
+    except Exception as exc:  # noqa: BLE001 - an unreadable library is unsigned
+        return (f"prompt library unreadable, so nothing is signed off: "
+                f"{type(exc).__name__} (ruling Q34)")
+    return lib if unsigned is None else unsigned
 
 
 #: Anything that would break one message into several, or smuggle formatting
@@ -350,6 +361,7 @@ def _prepare(trigger: str, entry: dict[str, Any], facts: dict[str, object], chan
 
 def compose(*, trigger: str, channel: Channel,
             priority: int, facts: dict[str, object],
+            lib: dict[str, Any],
             settings: Settings | None = None,
             now: datetime | None = None) -> Composed:
     """Produce the message for one trigger. Never raises, always returns text.
@@ -359,14 +371,15 @@ def compose(*, trigger: str, channel: Channel,
     the model is called and no lock is held across the call. Callers must not
     hold an open write transaction while calling this.
 
-    The library's sign-off is the caller's to check BEFORE calling this:
+    `lib` is the prompt library as the caller read it ONCE and checked its
+    sign-off on (`signed_library`, decision 14); this reads no file, so the
+    library composed from is the library signed (#178 round 1, SOTA-A).
     `engine_delivery.deliver`, the one caller, composes nothing from a
-    library the owner has not signed (decision 14).
+    library the owner has not signed.
     """
     settings = settings or get_settings()
     moment = now or datetime.now(UTC)
     try:
-        lib = library()
         prompts = lib["prompts"]
         if not isinstance(prompts, dict):
             raise TypeError("'prompts' is not a mapping")

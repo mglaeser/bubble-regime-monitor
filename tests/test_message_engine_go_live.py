@@ -2,6 +2,7 @@
 through the engine when MESSAGE_ENGINE_ENABLED is on, untouched when off."""
 from __future__ import annotations
 
+import copy
 from datetime import UTC, datetime
 
 import pytest
@@ -311,6 +312,48 @@ class TestSignOff:
         assert (out["source"], out["compose_reason"], out["chars"], out["message"]) == (None, None, 0, "")
         with session_scope() as s:
             assert s.query(MessageEngineAttempt).count() == 0
+
+    @pytest.mark.parametrize("later", ["draft", "error"])
+    def test_the_library_is_read_once_and_composed_from_that_read(self, monkeypatch, engine_on, later):
+        """#178 round 1, SOTA-A (executed): the sign-off was checked on one
+        read of the library and compose() read the file again, so a library
+        that turned DRAFT, or unreadable, between the two reads was composed
+        and sent unsigned - its text, or a bare event. A loader that answers
+        SIGNED once and DRAFT (or an error) on every later call: one read per
+        delivery, and the prompt and the message are the SIGNED read's."""
+        _admitted()
+        signed = composer.library()
+        assert signed["status"].startswith("SIGNED")
+        draft = copy.deepcopy(signed)
+        draft["status"] = "DRAFT - owner sign-off required"
+        draft["prompts"]["daily_digest"].update(prompt="TASK: DRAFT TASK {median}",
+                                                fallback="DRAFT TEMPLATE {median}")
+        reads: list[str] = []
+
+        def loader():
+            reads.append("read")
+            if len(reads) == 1:
+                return signed
+            if later == "error":
+                raise OSError("the file changed under the read")
+            return draft
+
+        monkeypatch.setattr(composer, "library", loader)
+        monkeypatch.setattr(composer, "library_sign_off", _SIGN_OFF)    # the real check
+        prompts: list[str] = []
+
+        def complete(*, user, **_kw):
+            prompts.append(user)
+            raise RuntimeError("down")          # so the template goes out as well
+
+        monkeypatch.setattr(composer, "complete", complete)
+        sends: list[str] = []
+        TestEngineOn()._sent(monkeypatch, sends)
+        out = service.deliver(trigger="daily_digest", facts=digest.digest_facts(_snapshot()), priority=3)
+        assert out["status"] == "sent" and out["source"] == "fallback"
+        assert sends == ["bubblegauge 51/100 trim. range 40-61. SPY IN, QQQ OUT. Flags 2/4."]
+        assert len(prompts) == 1 and "DRAFT" not in prompts[0] and "TASK: Write today's digest." in prompts[0]
+        assert len(reads) == 1
 
 
 class TestAdmission:

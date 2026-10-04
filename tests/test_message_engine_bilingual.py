@@ -90,7 +90,7 @@ class TestComposeInGerman:
         with session_scope():
             out = composer.compose(trigger="daily_digest", channel=Channel.IMESSAGE, priority=3,
                                    facts=digest.digest_facts(self._snapshot()),
-                                   settings=_settings(message_language=language))
+                                   lib=composer.library(), settings=_settings(message_language=language))
         assert out.source == "generated" and out.text == reply
         assert f"one message in {name}" in prompts[0]
 
@@ -105,7 +105,7 @@ class TestComposeInGerman:
         with session_scope():
             out = composer.compose(trigger="daily_digest", channel=Channel.IMESSAGE, priority=3,
                                    facts=digest.digest_facts(self._snapshot()),
-                                   settings=_settings(message_language=None))
+                                   lib=composer.library(), settings=_settings(message_language=None))
         assert out.source == "generated"
         assert "one message in English" in prompts[0] and "None" not in prompts[0]
 
@@ -114,7 +114,7 @@ class TestComposeInGerman:
         with session_scope():
             out = composer.compose(trigger="BAND_TO_TRIM", channel=Channel.SMS, priority=2,
                                    facts={"F_BAND_EFFECTIVE": "trim", "F_BAND_PREVIOUS": "hold", "F_NEXT_CHECK": "14:00"},
-                                   settings=_settings(message_language="de"))
+                                   lib=composer.library(), settings=_settings(message_language="de"))
         assert out.source == "fallback"
         assert out.text == "bubblegauge: Vorsichtsstufe auf trim gewechselt (vorher: hold). Nächster Lauf 14:00 UTC."
 
@@ -163,7 +163,7 @@ class TestRoundOneOn120:
         with session_scope():
             out = composer.compose(trigger="BAND_TO_TRIM", channel=Channel.SMS, priority=2,
                                    facts={"F_BAND_EFFECTIVE": "trim", "F_BAND_PREVIOUS": "hold", "F_NEXT_CHECK": "14:00"},
-                                   settings=_settings(message_language="de"))
+                                   lib=composer.library(), settings=_settings(message_language="de"))
         assert out.source == "generated" and "Nächster Lauf" in out.text
         assert first_non_gsm7(out.text) is None                  # nothing outside GSM-7
         assert septets(out.text) == len(out.text) <= 150         # every umlaut is ONE septet: no UCS-2

@@ -53,7 +53,8 @@ def _compose(monkeypatch, reply, *, trigger="daily_digest", channel=Channel.IMES
 
     monkeypatch.setattr(composer, "complete", complete)
     out = composer.compose(trigger=trigger, channel=channel, priority=priority,
-                           facts=dict(FACTS if facts is None else facts), settings=_settings(**over), now=now)
+                           facts=dict(FACTS if facts is None else facts), lib=composer.library(),
+                           settings=_settings(**over), now=now)
     return out, prompts
 
 

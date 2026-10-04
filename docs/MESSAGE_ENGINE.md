@@ -461,10 +461,13 @@ by editing the line to begin with `SIGNED` in a reviewed PR: data, never
 code. Until then `compose()` is inert (no model call, no attempt row, only
 the bare event line) and `gate.emit` refuses to put anything of the
 engine's on a wire, even when admitted. An unreadable library is unsigned.
-2026-10-04, re-evaluation E7: `engine_delivery.deliver` checks the sign-off
-once, before anything is composed, so an unsigned or unreadable library
+2026-10-04, re-evaluation E7: `engine_delivery.deliver` reads the library
+once (`composer.signed_library`) and checks the sign-off on that read,
+before anything is composed, so an unsigned or unreadable library
 composes nothing (no model call, no attempt row, no bare event line) and
-sends nothing; `compose()` no longer checks it, and `gate.emit` is gone.
+sends nothing; `compose()` composes from that same object and reads no
+file (#178 round 1), it no longer checks the sign-off, and `gate.emit` is
+gone.
 
 ## Decision 15 — provenance is proved, not declared
 

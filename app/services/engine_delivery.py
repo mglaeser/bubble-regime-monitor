@@ -80,8 +80,9 @@ def deliver(*, trigger: str, facts: dict[str, object], priority: int,
     1. The owner's sign-off on the prompt library (ruling Q34, decision 14),
        BEFORE anything is composed: an unsigned or unreadable library
        composes nothing - no model call, no attempt row - and sends nothing.
-       compose() reads the same file, which ships in the image: only /data
-       is mounted, so nothing writes it at run time.
+       The library is read ONCE, here: the sign-off is checked on that read
+       and compose() composes from the same object and reads no file, so
+       what was signed is what is sent (#178 round 1, SOTA-A, executed).
     2. Admission (ruling Q25, decision 5), AFTER the compose and right before
        the wire: a compose spans a model call, and a ruleset deployed in that
        gap and not yet promoted refuses the send. It takes no priority, so a
@@ -103,17 +104,19 @@ def deliver(*, trigger: str, facts: dict[str, object], priority: int,
         return {"status": "skipped", "reason": recipient, "engine": True, "trigger": trigger}
     common: dict[str, Any] = {"engine": True, "trigger": trigger, "transport": channel}
 
-    # 1. THE SIGN-OFF, before anything is composed. Nothing is composed, so
-    # the compose fields say so, and the log names no trigger: the caller's
-    # string is never logged (decision 19).
-    unsigned = composer.library_sign_off()
-    if unsigned is not None:
-        log.warning("message_engine_delivery_refused", channel=channel, blockers=[unsigned])
+    # 1. THE LIBRARY, READ ONCE, AND ITS SIGN-OFF, before anything is
+    # composed: the library or why it may not be used. On a refusal nothing
+    # is composed, so the compose fields say so, and the log names no
+    # trigger: the caller's string is never logged (decision 19).
+    lib = composer.signed_library()
+    if isinstance(lib, str):
+        log.warning("message_engine_delivery_refused", channel=channel, blockers=[lib])
         return {**common, "source": None, "compose_reason": None, "chars": 0, "message": "",
-                "status": "refused", "blockers": [unsigned]}
+                "status": "refused", "blockers": [lib]}
 
+    # ...and the compose is made from that same read.
     composed = composer.compose(trigger=trigger, channel=Channel(channel), priority=priority,
-                                facts=facts, settings=settings)
+                                facts=facts, lib=lib, settings=settings)
     common.update(source=composed.source, compose_reason=composed.reason,
                   chars=len(composed.text), message=composed.text)
 

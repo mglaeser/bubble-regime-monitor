@@ -300,7 +300,7 @@ class TestRoundFourOn140:
         try:
             started = time.monotonic()
             out = composer.compose(trigger="daily_digest", channel=Channel.IMESSAGE, priority=gov.P1,
-                                   facts={"median": 59}, settings=_settings())
+                                   facts={"median": 59}, lib=composer.library(), settings=_settings())
             took = time.monotonic() - started
         finally:
             holder.rollback()
