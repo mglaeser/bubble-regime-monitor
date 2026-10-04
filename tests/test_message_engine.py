@@ -78,12 +78,13 @@ class TestTheModelWritesTheMessage:
         _, prompts = _compose(monkeypatch, REPLY)
         prompt = prompts[0]
         assert "ROLE: You write the once-daily text digest" in prompt
-        assert "TASK: Write today's digest." in prompt
+        assert "TASK: Write today's digest about one point" in prompt
         assert "headline score (median of the model runs): 59 out of 100" in prompt   # DATA, filled
         for name, value in FACTS.items():
             assert f"  {name} = {value}" in prompt, name                               # every number
         assert "Valuation Extremity" in prompt and "Why it matters:" in prompt and "Sources:" in prompt
-        assert "at most 200 characters" in prompt and "in English" in prompt
+        assert "Caveat:" in prompt and "FRAMEWORK - how the monitor reads its numbers:" in prompt
+        assert "at most 350 characters" in prompt and "in English" in prompt
         # the design the owner replaced is not sent
         assert "HARD RULES" not in prompt and "two variants" not in prompt
 
@@ -132,7 +133,7 @@ class TestTheModelWritesTheMessage:
 class TestTheTemplateGoesOutOtherwise:
     @pytest.mark.parametrize("reply, reason", [
         ("", "empty"),
-        ("x" * 201, "longer than 200 characters"),
+        ("x" * 351, "longer than 350 characters"),
         ("See https://example.com for the reading.", "a link"),
         ("Reading 59\x07 today.", "a control character"),
     ])
@@ -541,7 +542,9 @@ def _snapshot(**over) -> types.SimpleNamespace:
     base = {"median": 59.4, "action_band": "trim", "override_fired": False, "iqr_lo": 57.2, "iqr_hi": 61.1,
             "red_flag_count": 1, "trend_states": {"SPY": {"faber_10mo": "IN"}, "QQQ": {"faber_10mo": "IN"}},
             "block_s": {"indicators": {"s1": {"sub_score": 0.8}, "s2": {"sub_score": None}}},
-            "block_d": {"indicators": {"d1": {"sub_score": 0.11}}}, "judgment_call": "Valuations are stretched."}
+            "block_d": {"indicators": {"d1": {"sub_score": 0.11}}}, "judgment_call": "Valuations are stretched.",
+            "band5": 52.3, "band95": 66.0, "red_flag_meta": {}, "override_required_count": 3,
+            "v_state": "contango", "v_multiplier": 1.0, "data_degraded": False}
     base.update(over)
     return types.SimpleNamespace(**base)
 
@@ -1069,10 +1072,10 @@ class TestTypedFacts:
             assert basic_check(text, channel=channel, max_chars=cap) is None, (trigger, language, text)
 
     def test_a_template_that_does_not_fit_sends_the_bare_event(self, monkeypatch):
-        monkeypatch.setattr(composer, "template_for", lambda entry, language: "Reading {median}. " + "calm " * 50)
+        monkeypatch.setattr(composer, "template_for", lambda entry, language: "Reading {median}. " + "calm " * 80)
         out, prompts = _compose(monkeypatch, REPLY, message_engine_enabled=False)
         assert out.source == "deterministic" and out.text == "bubblegauge: daily_digest fired." and prompts == []
-        assert "longer than 200 characters" in (out.reason or "")
+        assert "longer than 350 characters" in (out.reason or "")
 
     def test_a_dropped_fact_is_logged_by_name_and_kind_only(self, monkeypatch):
         seen: list[dict] = []
@@ -1149,7 +1152,9 @@ class TestRoundTwoOn145:
     def test_the_unwired_entries_are_gone_and_the_library_is_re_signed(self):
         lib = composer.library()
         assert not self.GONE & set(lib["prompts"]) and len(lib["prompts"]) == 23
-        assert lib["version"] == "1.2.0" and lib["status"].startswith("SIGNED 2026-10-01")
+        # re-signed since on the owner's request of 2026-10-04 (tests/test_digest_change_context.py)
+        assert lib["version"] == "1.3.0" and lib["status"].startswith("SIGNED 2026-10-04")
+        assert "Previously: SIGNED 2026-10-01" in lib["status"]
         assert not any("llm" in entry for entry in lib["prompts"].values())
 
 

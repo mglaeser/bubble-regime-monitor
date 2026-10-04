@@ -39,9 +39,11 @@ converge, and 57 review rounds on #121 and 20 on #124 showed it.
   (owner decision D7, 2026-09-28; `composer.typed`): a finite number, a
   truth value, one of the monitor's own words for that fact
   (`composer.WORDS`: the digest's band as the snapshot displays it,
-  "suppressed (block degraded)" too; the trend states; the override
-  suffix; the alert contract's band states, assets and recompute slot
-  times), or the prior judgment, redacted and capped at 180 characters.
+  "suppressed (block degraded)" too; the trend states; the band and the
+  trends a day and a week earlier; the VIX term structure's state; the
+  override suffix; the alert contract's band states, assets and recompute
+  slot times), or the prior judgment, redacted and capped at 300
+  characters, its own cap (180 until decision 28).
   Each word domain is the whole of its producer's range, pinned there
   (`tests/test_message_engine.py::TestRoundThreeOn145`): the digest's band
   is `action_band_with_override`'s three bands and compute.py's two
@@ -286,9 +288,10 @@ decision 27.
 ## Channel contract (rulings Q27, Q29, Q30)
 
 SMS: at most 150 septets, GSM-7 (3GPP 23.038) - the German letters ä ö ü Ä Ö
-Ü ß are basic-table characters, one septet each. iMessage: at most 200 code
-points (`MESSAGE_ENGINE_IMESSAGE_MAX_CHARS`). The model is told the channel's
-length and alphabet; the basic checks hold it to them (decision 24).
+Ü ß are basic-table characters, one septet each. iMessage: at most 350 code
+points (`MESSAGE_ENGINE_IMESSAGE_MAX_CHARS`; 200 until the owner's request of
+2026-10-04, decision 28). The model is told the channel's length and alphabet;
+the basic checks hold it to them (decision 24).
 
 ## Decision 27 — any failed call is a strike (owner decision D1, 2026-09-28)
 
@@ -581,3 +584,47 @@ template; the composer asks the model to write in the selected language and
 sends that language's template otherwise. An entry without a translation
 for the selected language renders in the library's own language: the
 owner's words in one language beat no words at all.
+
+## Decision 28 — the digest's model is handed what the API serves (the owner, 2026-10-04)
+
+The owner asked that every message the model writes be handed as much as the
+API serves, references included, as the save-haven monitor gets it; that it
+make one point but explain it at more length, 350 characters on iMessage;
+and that it give more context when something changes. No new route and no
+new design: more input, and the prompt that asks for it. The model writes
+the daily digest alone, so the digest is what changed:
+
+- **The facts** (`app/services/digest.py`, `digest_facts`). Beside the
+  headline, what `GET /api/v1/score` serves: the 5-95 range, the band lines
+  and the headline's distance from them, each warning flag and its reading
+  minus its threshold, the override's rule, each trend's distance from its
+  10-month average, the VIX term structure, both blocks out of 100, five
+  readings by their own values (CAPE, the top-10 share, the semiconductors'
+  run-up, breadth, the margin-debt growth) and whether data is degraded.
+  And the change: the newest snapshot 22 to 30 hours older - yesterday's
+  same slot, or the one before when it was missed - with its headline, band,
+  override, flags and trends and each sub-score's change, and the newest 166
+  to 174 hours older - last week's - with its headline, band and flag count.
+  Nothing older: after an outage the change is left out rather than called
+  a day's. Every fact stays a number, a truth
+  value or the monitor's own word (decision 16), and the judgment is passed
+  whole, at its own 300-character cap.
+- **The references** (`app/message_engine/context.py`). Each indicator's
+  grounding and first caveat join its methodology record, and the digest's
+  prompt adds the framework the methodology endpoint serves
+  (`app.references.FRAMEWORK`) with each leg's caveat: repo-authored text
+  only (AGENTS.md ground rule 1).
+- **The prompt** (library 1.3.0, re-signed on the owner's instruction). One
+  point, chosen by what changed since a day earlier - the band, the
+  override, a flag, a trend - else a clear move of the headline, else the
+  biggest driver or the line the reading sits close to; explained with what
+  changed, which indicators moved it, what they measure, and where it
+  leaves the reading against the band lines, the thresholds and the trend
+  rule. iMessage holds 350 code points (`MESSAGE_ENGINE_IMESSAGE_MAX_CHARS`);
+  SMS stays one GSM-7 segment of 150 septets, and the template is unchanged.
+- **Not the other messages.** The alerts render reviewed fixed phrases and
+  have no model path (`tests/test_alert_delivery.py::test_the_alert_system_has_no_model_path`),
+  the failure alarm and the host notices are fixed text by design (they
+  report breakage, ruling Q25), and the deploy note's model names areas
+  from a closed list (AGENTS.md ground rule 1). A model in any of them is new
+  design, which the request ruled out.

@@ -15,6 +15,7 @@ from app.references import (
     DISCLAIMER,
     EPISTEMIC_CAVEATS,
     FALSIFICATION_CRITERIA,
+    FRAMEWORK,
     LEG_REFERENCES,
     REGISTRY,
     UNVERIFIED_CITATIONS,
@@ -31,13 +32,7 @@ def get_methodology(request: Request, _: None = Depends(require_read_access)) ->
     with session_scope() as session:
         outcomes = session.execute(select(FalsificationOutcome)).scalars().all()
     data = {
-        "framework": (
-            "Three-leg hybrid: Leg 1 = hierarchical two-block weighted geometric composite "
-            "(Structural Fragility S x Dynamics/Trigger D) with VIX multiplier, non-compensatory "
-            "red-flag override, and a seeded Monte Carlo whose MEDIAN is the headline; "
-            "Leg 2 = Faber 10-month trend trigger; Leg 3 = fast volatility alarm. "
-            "The legs are NOT averaged. Action bands: < 45 hold; 45-60 trim; >= 60 or override -> de-risk."
-        ),
+        "framework": FRAMEWORK,
         # The full framework disclaimer stays HERE (this endpoint is the spec);
         # v3.6.0 removed the per-response "Research, not advice." meta tag.
         "disclaimer": DISCLAIMER,

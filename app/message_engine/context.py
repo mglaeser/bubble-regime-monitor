@@ -4,7 +4,10 @@ A generated context sentence explains what a reading means; it is written
 from what the repository itself knows about the indicator behind the
 trigger: its methodology record and the data sources it is computed from
 (``app/references.py``). This module selects that material per trigger and
-renders it as one bounded block of text.
+renders it as one bounded block of text. The daily digest is also given the
+framework the methodology endpoint serves - how the legs combine, where the
+bands lie, and each leg's caveat - since its message explains a whole
+reading against it.
 
 Everything here is REPO-AUTHORED: the registries' own sentences and labels,
 never upstream or user text (AGENTS.md, ground rule 1). Nothing here puts a
@@ -16,7 +19,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from app.references import REGISTRY, SOURCE_REGISTRY
+from app.references import FRAMEWORK, LEGS_SCIENCE, REGISTRY, SOURCE_REGISTRY
 
 #: Which methodology records explain which trigger. Every trigger of the
 #: prompt library is listed, most with nothing: an operational notice, a
@@ -48,6 +51,10 @@ TRIGGER_INDICATORS: dict[str, tuple[str, ...]] = {
     "RECOMPUTE_OUTAGE": (),
 }
 
+#: The triggers explained against the whole framework: the digest, whose
+#: message is about the whole reading.
+FRAMEWORK_TRIGGERS = frozenset({"daily_digest"})
+
 #: The data sources each indicator is computed from, by source-registry key.
 INDICATOR_SOURCES: dict[str, tuple[str, ...]] = {
     "s1": ("cape", "fred_real10y"),
@@ -71,13 +78,16 @@ _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
 
 @dataclass(frozen=True)
 class Reference:
-    """One indicator's material: its name, what it measures, why it matters,
-    and the names of the sources it is computed from."""
+    """One indicator's material: its name, how well its grounding is
+    established, what it measures, why it matters, its first caveat (empty
+    when it has none), and the names of the sources it is computed from."""
 
     indicator: str
     name: str
+    grounding: str
     what: str
     why: str
+    caveat: str
     sources: tuple[str, ...]
 
 
@@ -104,8 +114,10 @@ def references_for(trigger: str) -> tuple[Reference, ...]:
         found.append(Reference(
             indicator=indicator,
             name=record.name,
+            grounding=record.grounding,
             what=_bounded(record.what),
             why=_bounded(record.why),
+            caveat=_bounded(record.caveats[0]) if record.caveats else "",
             sources=tuple(sources[key].name for key in INDICATOR_SOURCES[indicator]),
         ))
     return tuple(found)
@@ -115,7 +127,18 @@ def render(references: tuple[Reference, ...]) -> str:
     """The material as one block for a prompt; empty when there is none."""
     lines = []
     for ref in references:
-        lines.append(f"- {ref.name} ({ref.indicator.upper()}): {ref.what}")
+        lines.append(f"- {ref.name} ({ref.indicator.upper()}, {ref.grounding}): {ref.what}")
         lines.append(f"  Why it matters: {ref.why}")
+        if ref.caveat:
+            lines.append(f"  Caveat: {ref.caveat}")
         lines.append(f"  Sources: {'; '.join(ref.sources)}")
     return "\n".join(lines)
+
+
+def framework_for(trigger: str) -> str:
+    """The framework as the methodology endpoint serves it, then each leg's
+    name and caveat, as one block; empty for a trigger not explained
+    against it."""
+    if trigger not in FRAMEWORK_TRIGGERS:
+        return ""
+    return "\n".join([FRAMEWORK, *(f"- {leg['name']}: {leg['caveat']}" for leg in LEGS_SCIENCE)])
