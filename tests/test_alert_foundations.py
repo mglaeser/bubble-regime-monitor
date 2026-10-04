@@ -15,10 +15,11 @@ import pytest
 from app import methodology as _M
 from app.alerts import observation as obs
 from app.alerts.canonical import canonical_json, identity_hash, is_ulid, new_ulid, sorted_hash_set
-from app.alerts.errors import PhraseSetInvalid, RulesetInvalid, sanitize
+from app.alerts.errors import PhraseSetInvalid, RulesetInvalid
 from app.alerts.gsm7 import Gsm7Error, fits_single_sms, septets
 from app.alerts.phrase_registry import validate_phrase_set
 from app.alerts.registry import instance_fingerprint, unresolved_pins, validate_ruleset
+from app.redaction import sanitize
 from tests.conftest import register_promoted
 
 RULES_PATH = "config/alert_rules.v3.2.yaml"
@@ -329,8 +330,9 @@ def test_phrase_set_rejects_non_gsm7(phrase_set):
     import json
 
     raw = json.loads(phrase_set.canonical_json)
-    raw["headlines"]["BAD"] = {"text": "Kursrückgang bestätigt 📉", "slots": []}
-    with pytest.raises(PhraseSetInvalid):
+    raw["headlines"]["BAD"] = {"text": {"de": "Kursrückgang bestätigt 📉",
+                                        "en": "Decline confirmed 📉"}, "slots": []}
+    with pytest.raises(PhraseSetInvalid, match="is not GSM-7"):
         validate_phrase_set(json.dumps(raw))
 
 
@@ -338,8 +340,9 @@ def test_phrase_set_rejects_undeclared_fact(phrase_set):
     import json
 
     raw = json.loads(phrase_set.canonical_json)
-    raw["headlines"]["BAD"] = {"text": "Wert {F_MADE_UP}.", "slots": ["F_MADE_UP"]}
-    with pytest.raises(PhraseSetInvalid):
+    raw["headlines"]["BAD"] = {"text": {"de": "Wert {F_MADE_UP}.", "en": "Value {F_MADE_UP}."},
+                               "slots": ["F_MADE_UP"]}
+    with pytest.raises(PhraseSetInvalid, match="references undeclared facts"):
         validate_phrase_set(json.dumps(raw))
 
 
@@ -988,7 +991,7 @@ def test_a_released_phrase_set_is_never_edited_in_place():
     """`phrase_set_version` is the registry's PRIMARY KEY.
 
     Queued work resolves phrases from the registry, never from disk — so a host
-    that already holds v3.2 keeps its bytes forever. Adding a fragment to a
+    that already holds v3.5 keeps its bytes forever. Adding a fragment to a
     released file therefore reaches nothing: the new code raises
     `RenderRejected` for a phrase the registered set does not contain, on every
     render, permanently, with no deploy-time error.
@@ -1007,9 +1010,9 @@ def test_a_released_phrase_set_is_never_edited_in_place():
     from app.alerts.artifacts import validate_phrase_set
 
     frozen = {
-        "config/alert_phrases.v3.2.json":
-            "cb395ca1-d90e8678-eff9f3b6-07f8b652"
-            "-cfb54628-8ae29a53-83696e26-e79820f0",
+        "config/alert_phrases.v3.5.json":
+            "25d82b6a-0f45233c-ee228ee2-f964a8cd"
+            "-ea7f40b4-3bdd48a9-8a333393-a9c96c87",
     }
     for name, grouped in frozen.items():
         phrase_set = validate_phrase_set(

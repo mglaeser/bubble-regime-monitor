@@ -28,7 +28,6 @@ from app.alerts.artifacts import load_active, load_active_for_mode, register
 from app.alerts.dto import ALERT_INPUT_SCHEMA_VERSION
 from app.alerts.engine import run_evaluation
 from app.alerts.enums import InputOrigin
-from app.alerts.errors import sanitize
 from app.alerts.input_builder import build_alert_input, serialize
 from app.alerts.models import AlertInputSnapshot
 from app.alerts.repository import load_input
@@ -36,6 +35,7 @@ from app.config import get_settings
 from app.db import session_scope
 from app.logging_conf import get_logger
 from app.models import FalsificationOutcome, Snapshot
+from app.redaction import sanitize
 
 log = get_logger(__name__)
 

@@ -30,9 +30,9 @@ from urllib.parse import urlsplit
 import httpx
 
 from app.alerts.enums import SenderOutcome
-from app.alerts.errors import sanitize
 from app.config import get_settings
 from app.logging_conf import get_logger
+from app.redaction import sanitize
 
 log = get_logger(__name__)
 
@@ -46,25 +46,20 @@ TIMEOUT = httpx.Timeout(connect=5.0, read=25.0, write=10.0, pool=5.0)
 #: one of these forever would be the loudest possible way to achieve nothing.
 _PERMANENT = frozenset({400, 401, 402, 403, 404, 405, 409, 410, 413, 415, 422})
 
-#: Legacy labels for the DEFAULT profile only. They exist because rows queued
-#: before refs carried the run's own profile say "default" or "primary".
-_PROFILE_ALIASES = frozenset({"default", "primary"})
-
 
 def _routes_here(recipient_ref: str, settings: Any) -> bool:
     """Whether this ref names the profile this deployment delivers for.
 
-    The configured profile's own name always routes. The aliases route ONLY
-    when the deployment IS the default profile — accepting "default" while
-    configured as "house" would deliver another namespace's message to house's
-    recipient, which is the cross-profile bypass this function exists to stop.
+    The configured profile's own name, and nothing else: accepting "default"
+    while configured as "house" would deliver another namespace's message to
+    house's recipient, which is the cross-profile bypass this function exists
+    to stop. The legacy "primary" label of rows queued before refs carried the
+    run's own profile is no alias any more (owner ruling 3); no code writes it.
     The dispatcher's claim query already filters by profile; this is the last
     line, and the last line must not be looser than the first.
     """
     configured = str(getattr(settings, "alerts_live_profile", "") or "default")
-    if recipient_ref == configured:
-        return True
-    return configured == "default" and recipient_ref in _PROFILE_ALIASES
+    return recipient_ref == configured
 
 
 @dataclass(frozen=True)

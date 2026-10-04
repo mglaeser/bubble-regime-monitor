@@ -17,12 +17,12 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Response
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.alerts.canonical import new_ulid, sha256_of
-from app.alerts.errors import sanitize
 from app.alerts.models import AlertSilence, ApiIdempotencyRecord
 from app.alerts.repository import utc_ms
 from app.config import get_settings
 from app.db import immediate_session_scope, session_scope
 from app.logging_conf import get_logger
+from app.redaction import sanitize
 from app.routers.alerts import ERROR_HEADERS
 from app.security import require_admin_key, require_alerts_write
 

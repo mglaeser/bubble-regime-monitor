@@ -39,14 +39,11 @@ PROTECTED: tuple[tuple[str, str], ...] = (
     ("app/methodology.py", "the code that reads the frozen methodology"),
     ("app/alerts/", "the rules that decide whether a human is woken"),
     ("config/alert_rules.v3.2.yaml", "the alert ruleset artifact"),
-    # BOTH, not the newest. v3.2 is released and frozen — hosts hold its bytes
-    # and its version is a registry primary key — so it needs separation
-    # protection more than the version still being worked on, not less.
-    # Repointing this at v3.3 quietly removed the older one from cover.
-    ("config/alert_phrases.v3.2.json", "the alert phrasing artifact (released)"),
-    ("config/alert_phrases.v3.3.json", "the alert phrasing artifact (released)"),
-    ("config/alert_phrases.v3.4.json", "the alert phrasing artifact (released)"),
-    ("config/alert_phrases.v3.5.json", "the alert phrasing artifact"),
+    # The shipped phrase set, the only one: owner ruling 3 (no backward
+    # compatibility) deleted v3.2-v3.4, kept only for compatibility. A host's
+    # registry keeps the bytes of every set it registered, so no file is
+    # needed to read them.
+    ("config/alert_phrases.v3.5.json", "the alert phrasing artifact (released)"),
 )
 
 

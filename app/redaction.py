@@ -6,9 +6,6 @@ that layer is deliberately provider- and HTTP-free, and an import from
 `app/services/compute.py` into it would invert the dependency direction that
 tests/test_alert_evaluation.py pins.
 
-`app.alerts.errors` re-exports `sanitize` so its twenty existing call sites are
-unchanged.
-
 WHY THIS EXISTS AT ALL. Four of this service's upstreams carry their API key in
 the request QUERY STRING (FRED, Alpha Vantage, Polygon, Twelve Data). httpx puts
 the full URL into HTTPStatusError's message and into its own INFO log line, so

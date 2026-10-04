@@ -13,11 +13,11 @@ from app.alerts.phrase_registry import PhraseSetInvalid, validate_phrase_set
 from app.config import get_settings
 
 ROOT = Path(__file__).resolve().parents[1]
-V34 = ROOT / "config" / "alert_phrases.v3.4.json"
 V35 = ROOT / "config" / "alert_phrases.v3.5.json"
 
 
 def _tiny(text_de, text_en=None, *, languages=None, language="de", extra_meta=None):
+    """A two-fragment set; without `text_en`, in the legacy single-language form."""
     text = text_de if text_en is None else {"de": text_de, "en": text_en}
     meta = {"phrase_set_version": "vtest", "language": language, "validator_version": "1"}
     if languages is not None:
@@ -31,15 +31,22 @@ def _tiny(text_de, text_en=None, *, languages=None, language="de", extra_meta=No
     })
 
 
-class TestLegacyForm:
-    def test_a_single_language_set_is_unchanged(self):
-        ps = validate_phrase_set(_tiny("Stufe {F_X}."), language="de")
-        assert ps.language == "de" and ps.languages == ("de",)
-        assert ps.headlines["H"].text == "Stufe {F_X}." and ps.headlines["H"].texts == (("de", "Stufe {F_X}."),)
+class TestTheLegacyFormIsRefused:
+    """Owner ruling 3 (2026-09-20): no backward compatibility, anywhere. The
+    single-language form every set before v3.5 used - a fragment's `text` one
+    string, `meta.languages` absent, German by default - is refused, never
+    read as a German-only set."""
 
-    def test_a_language_the_set_lacks_falls_back_to_its_default(self):
-        ps = validate_phrase_set(_tiny("Stufe {F_X}."), language="en")
-        assert ps.language == "de" and ps.headlines["H"].text == "Stufe {F_X}."
+    def test_a_set_in_the_legacy_form_is_refused(self):
+        with pytest.raises(PhraseSetInvalid):
+            validate_phrase_set(_tiny("Stufe {F_X}."), language="de")
+
+    @pytest.mark.parametrize("key", ["language", "languages"])
+    def test_meta_names_the_default_and_every_language(self, key):
+        raw = json.loads(_tiny("Stufe {F_X}.", "Level {F_X}.", languages=["de", "en"]))
+        del raw["meta"][key]
+        with pytest.raises(PhraseSetInvalid, match=rf"meta\.{key} must be"):
+            validate_phrase_set(json.dumps(raw), language="de")
 
 
 class TestMultilingualForm:
@@ -51,6 +58,16 @@ class TestMultilingualForm:
         assert de.sha256 == en.sha256 and de.canonical_json == en.canonical_json
         assert en.headlines["H"].texts == (("de", "Stufe {F_X}."), ("en", "Level {F_X}."))
         assert en.languages == ("de", "en") and en.worst_case_test_sha256 == de.worst_case_test_sha256
+
+    def test_a_language_the_set_lacks_falls_back_to_its_default(self):
+        raw = json.loads(_tiny("Stufe {F_X}.", "Level {F_X}.", languages=["de", "en"]))
+        raw["meta"]["languages"] = ["de"]
+        for section in ("headlines", "caveats"):
+            for entry in raw[section].values():
+                del entry["text"]["en"]
+        ps = validate_phrase_set(json.dumps(raw), language="en")
+        assert ps.language == "de" and ps.languages == ("de",)
+        assert ps.headlines["H"].text == "Stufe {F_X}." and ps.headlines["H"].texts == (("de", "Stufe {F_X}."),)
 
     def test_the_setting_selects_when_the_caller_gives_no_language(self, monkeypatch):
         raw = _tiny("Stufe {F_X}.", "Level {F_X}.", languages=["de", "en"])
@@ -66,7 +83,8 @@ class TestMultilingualForm:
         ({"de": "Stufe {F_X}.", "en": "Level {F_X}.", "fr": "Niveau."}, "undeclared ['fr']"),
         ({"de": "Stufe {F_X}.", "en": "Level."}, "same slots"),           # slots differ
         ({"de": "Stufe {F_X}.", "en": ""}, "missing ['en']"),             # empty text
-        (["Stufe"], "must be a string or a language-to-text object"),
+        (["Stufe"], "must be a language-to-text object"),
+        ("Stufe {F_X}.", "must be a language-to-text object"),          # one string: the legacy form
     ])
     def test_every_declared_language_must_be_present_and_agree(self, bad, needle):
         raw = json.loads(_tiny("x", "y", languages=["de", "en"]))
@@ -91,19 +109,6 @@ class TestMultilingualForm:
 
 
 class TestTheShippedSets:
-    def test_v35_is_v34_in_german_byte_for_byte_plus_english(self):
-        old = json.loads(V34.read_text(encoding="utf-8"))
-        new = json.loads(V35.read_text(encoding="utf-8"))
-        assert new["meta"]["languages"] == ["de", "en"] and new["meta"]["language"] == "de"
-        assert new["facts"] == old["facts"]
-        for section in ("headlines", "phrases", "next_check", "caveats"):
-            assert set(new[section]) == set(old[section]), section
-            for code, entry in old[section].items():
-                mine = new[section][code]
-                assert mine["text"]["de"] == entry["text"], code
-                assert mine["text"]["en"].strip(), code
-                assert mine.get("priority") == entry.get("priority") and mine.get("slots") == entry.get("slots"), code
-
     @pytest.mark.parametrize("language", ["de", "en"])
     def test_v35_validates_in_each_language_within_the_limit(self, language):
         ps = validate_phrase_set(V35.read_text(encoding="utf-8"), language=language)
@@ -140,13 +145,8 @@ class TestRoundFiveOn119:
         {"language": ""}, {"language": None}, {"language": 7}])
     def test_a_present_but_empty_inventory_is_malformed(self, meta):
         with pytest.raises(PhraseSetInvalid, match="meta.language"):
-            validate_phrase_set(_tiny("Stufe {F_X}.", extra_meta=meta))
-
-    def test_absent_keys_still_take_the_legacy_defaults(self):
-        raw = json.loads(_tiny("Stufe {F_X}."))
-        raw["meta"].pop("language")
-        ps = validate_phrase_set(json.dumps(raw))
-        assert ps.language == "de" and ps.languages == ("de",)
+            validate_phrase_set(_tiny("Stufe {F_X}.", "Level {F_X}.", languages=["de", "en"],
+                                      extra_meta=meta))
 
 
 class TestRoundSixOn119:
@@ -164,7 +164,7 @@ class TestRoundSixOn119:
             with pytest.raises(MessageLanguageInvalid, match="MESSAGE_LANGUAGE is malformed"):
                 validate_phrase_set(V35.read_text(encoding="utf-8"))
             with pytest.raises(PhraseSetInvalid):        # every fail-closed caller catches it
-                validate_phrase_set(V34.read_text(encoding="utf-8"))
+                validate_phrase_set(V35.read_text(encoding="utf-8"))
             # A caller that names the language never consults the setting.
             assert validate_phrase_set(V35.read_text(encoding="utf-8"), language="en").language == "en"
         finally:
@@ -210,15 +210,14 @@ class TestRoundSevenOn119:
 
     def test_the_default_language_is_linted_too(self):
         with pytest.raises(PhraseSetInvalid, match=r"\[de\]: contains forbidden vocabulary 'kaufen'"):
-            validate_phrase_set(_tiny("Jetzt kaufen: {F_X}."))
+            validate_phrase_set(_tiny("Jetzt kaufen: {F_X}.", "Level {F_X}.", languages=["de", "en"]))
 
     def test_every_fragment_of_every_shipped_set_passes_in_every_language(self):
         for path in sorted((ROOT / "config").glob("alert_phrases.v*.json")):
             raw = json.loads(path.read_text(encoding="utf-8"))
             for section in ("headlines", "phrases", "next_check", "caveats"):
                 for code, entry in (raw.get(section) or {}).items():
-                    texts = entry["text"] if isinstance(entry["text"], dict) else {"de": entry["text"]}
-                    for lang, text in texts.items():
+                    for lang, text in entry["text"].items():
                         assert honesty_lint(text) is None, (path.name, section, code, lang)
 
     @pytest.mark.parametrize("body, offends", [
@@ -255,12 +254,16 @@ class TestTheSettingReachesTheRenderPath:
 
 
 class TestReleasedArtifactsStayProtected:
-    def test_every_released_phrase_set_stays_in_the_separation_check(self):
-        # v3.4 is released and frozen - hosts hold its bytes and its version is
-        # a registry primary key - so adding v3.5 must not drop it from cover
-        # (#119 round 1, SOTA-A; the file's own comment warned about exactly this).
+    def test_the_shipped_phrase_set_is_the_only_one_and_stays_protected(self):
+        # Owner ruling 3: no file is kept for compatibility. Queued work renders
+        # from the bytes the registry stored, never from an older file, so the
+        # shipped set is the only phrase file, and it stays in the separation
+        # check and in CODEOWNERS (#119 round 1: a new version must not drop
+        # the one hosts run from cover).
+        from app.alerts.artifacts import REPO_PHRASES
+
+        shipped = sorted(path.name for path in (ROOT / "config").glob("alert_phrases.v*.json"))
+        assert shipped == [REPO_PHRASES.name]
         text = (ROOT / "scripts" / "regime" / "separation_check.py").read_text(encoding="utf-8")
-        for version in ("v3.2", "v3.3", "v3.4", "v3.5"):
-            assert f"config/alert_phrases.{version}.json" in text, version
         owners = (ROOT / ".github" / "CODEOWNERS").read_text(encoding="utf-8")
-        assert "/config/alert_phrases.v3.4.json" in owners and "/config/alert_phrases.v3.5.json" in owners
+        assert f"config/{REPO_PHRASES.name}" in text and f"/config/{REPO_PHRASES.name}" in owners
