@@ -894,6 +894,35 @@ def test_the_fallback_to_the_promoted_ruleset_never_escalates_the_mode(
     get_settings.cache_clear()
 
 
+def test_an_invalid_candidate_phrase_set_falls_back_like_an_invalid_ruleset(
+        isolated_db, tmp_path, monkeypatch):
+    """The candidate is the ruleset and the phrase set together: a phrase file
+    that fails validation falls back to the promoted pair and is reported, as
+    an invalid ruleset is. PhraseSetInvalid used to escape load_active, so the
+    alert reads answered 500 (AGENTS.md rule 3), the dispatcher and evaluation
+    raised, and the live admission gate reported a blocker although a
+    promoted pair existed."""
+    from app.alerts.artifacts import load_active_for_mode
+    from app.config import get_settings
+
+    good = _artifacts(stage=1, tmp_path=tmp_path / "good")
+    not_json = tmp_path / "phrases.json"
+    not_json.write_text("{not json", encoding="utf-8")
+    monkeypatch.setenv("ALERTS_RULES_PATH", str(tmp_path / "good" / "rules.yaml"))
+    monkeypatch.setenv("ALERTS_PHRASE_PATH", str(not_json))
+    get_settings.cache_clear()
+    try:
+        with session_scope() as session:
+            register_promoted(session, good, now=NOW)
+        with session_scope() as session:
+            loaded = load_active_for_mode(session, mode="live")
+    finally:
+        get_settings.cache_clear()
+    assert loaded.source == "registry"
+    assert loaded.phrase_set.sha256 == good.phrase_set.sha256
+    assert loaded.fallback_reason
+
+
 def test_alerting_unavailable_when_nothing_is_valid(isolated_db, tmp_path, monkeypatch):
     from app.alerts.artifacts import load_active
     from app.alerts.errors import AlertingUnavailable
