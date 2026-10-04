@@ -6,6 +6,7 @@ code's; the bare deploy goes out when the reply is not codes only."""
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -53,13 +54,13 @@ def host(monkeypatch, tmp_path):
     get_settings.cache_clear()
 
 
-def _model(monkeypatch, reply=None, error=None) -> dict[str, str]:
+def _model(monkeypatch, reply=None, error=None) -> dict[str, object]:
     import app.llm_gateway as gateway
 
-    seen: dict[str, str] = {}
+    seen: dict[str, object] = {}
 
     def _complete(*, user, system=None, deadline_s=None, **_kw):
-        seen["user"], seen["system"] = user, system or ""
+        seen["user"], seen["system"], seen["deadline_s"] = user, system or "", deadline_s
         if error:
             raise error
         return type("C", (), {"text": reply})()
@@ -190,6 +191,29 @@ def test_a_model_that_fails_sends_the_bare_deploy(host, monkeypatch):
     out = dn.announce()
     assert out["source"] == "template"
     assert sent == [f"bubblegauge deployed {TARGET[:7]} (1 commit(s)).\n" + MEDIUM]
+
+
+def test_the_models_deadline_fits_inside_the_releases_timeout(tmp_path, monkeypatch):
+    """The release runs the note under `timeout N podman exec` (deploy/release.sh):
+    the model's deadline and the send's read cap fit inside it, so a slow model
+    sends the bare deploy rather than the note being killed. And the deadline
+    bounds a slow model, not a silent one (2026-10-04, 120 s -> 240 s): the
+    gateway's read-gap timer catches a dead stream with time left for its one
+    retry."""
+    import app.llm_gateway as gateway
+    from app.config import Settings
+
+    seen = _model(monkeypatch, reply="docs")
+    dn.compose(dn.read_note(_write(tmp_path / "n")))
+    script = (Path(__file__).resolve().parents[1] / "deploy" / "release.sh").read_text()
+    outer = re.search(r'^timeout (\d+) podman exec "\$CONTAINER" python -m app\.services\.deploy_note\b',
+                      script, re.MULTILINE)
+    assert outer is not None
+    deadline = seen["deadline_s"]
+    assert isinstance(deadline, (int, float))
+    assert deadline + Settings.model_fields["imessage_timeout_s"].default < int(outer.group(1))
+    assert deadline > (gateway.DEFAULT_READ_TIMEOUT_S + gateway.RETRY_WAIT_S
+                       + gateway.RETRY_MIN_REMAINING_S)
 
 
 def test_a_failed_send_is_reported_and_kept_nowhere(host, monkeypatch, tmp_path):

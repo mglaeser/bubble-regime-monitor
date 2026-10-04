@@ -215,7 +215,11 @@ def compose(note: Note) -> tuple[str, str]:
     try:
         from app.llm_gateway import complete
 
-        chosen = areas(complete(system=SYSTEM, user=prompt(note), deadline_s=120).text)
+        # 240 s bounds a slow model, not a silent one (the read-gap timer does
+        # that, with time left for one retry), and stays inside the release's
+        # `timeout 300 podman exec` (deploy/release.sh) with the send's 30 s
+        # read cap: a slow model sends the bare deploy, never a killed note.
+        chosen = areas(complete(system=SYSTEM, user=prompt(note), deadline_s=240).text)
         if chosen:
             listed = "; ".join(AREAS[code] for code in chosen)
             head = f"bubblegauge deployed {note.target[:7]} ({note.count} commit(s)): changes to {listed}."

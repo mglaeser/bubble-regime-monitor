@@ -102,6 +102,32 @@ class TestTheModelWritesTheMessage:
         out, _ = _compose(monkeypatch, text)
         assert out.source == "generated" and out.text == text
 
+    def test_the_deadline_bounds_a_slow_model_inside_its_claim(self, monkeypatch):
+        """2026-10-04, the owner: "it should not time out during the daily digest
+        or anywhere else". The route took 12-23 s from 2026-09-28, with tails
+        past the old 60 s. The gateway's read-gap timer catches a dead stream
+        with time left for its one retry, so the deadline bounds only a live but
+        slow model; and it ends minutes inside the claim's lifetime, so the
+        reply, the checks and the claim's close fit after it."""
+        from app import llm_gateway as gateway
+        from app.message_engine import governor as gov
+
+        deadlines: list[float] = []
+
+        def complete(*, user, deadline_s, **_kw):
+            deadlines.append(deadline_s)
+            return type("C", (), {"text": REPLY})()
+
+        monkeypatch.setattr(composer, "complete", complete)
+        out = composer.compose(trigger="daily_digest", channel=Channel.IMESSAGE, priority=3,
+                               facts=dict(FACTS), lib=composer.library(), settings=_settings(),
+                               now=T0)
+        assert out.source == "generated"
+        (deadline,) = deadlines
+        assert deadline > (gateway.DEFAULT_READ_TIMEOUT_S + gateway.RETRY_WAIT_S
+                           + gateway.RETRY_MIN_REMAINING_S)
+        assert gov.CLAIM_TTL_S - deadline >= 300
+
 
 class TestTheTemplateGoesOutOtherwise:
     @pytest.mark.parametrize("reply, reason", [

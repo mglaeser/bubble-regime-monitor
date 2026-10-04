@@ -1,13 +1,17 @@
 """Minimal streaming client for an operator-configured OpenAI-compatible gateway.
 
-The model receives no tools and can take no actions.  This module sends one
+The model receives no tools and can take no actions.  This module sends a
 request to one configured model route; provider/model failover, if any, belongs
-to the gateway and is not recreated or guessed here.
+to the gateway and is not recreated or guessed here.  A request that fails
+transiently is sent once more, to the same route on the same wire, inside the
+same call and its deadline (``_transient``, 2026-10-04).
 
 The Responses API is deliberately streamed.  Some routed models can spend
 minutes reasoning before output, while the gateway emits heartbeat bytes that
-keep the connection alive.  Partial output is never returned: a successful
-completion requires a terminal ``response.completed`` event.
+keep the connection alive: the read-gap timer bounds silence, and the call's
+deadline bounds the whole call, thinking included.  Partial output is never
+returned: a successful completion requires a terminal ``response.completed``
+event.
 """
 
 from __future__ import annotations
@@ -25,13 +29,24 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 from urllib.parse import urlsplit
 
 import httpx
+from tenacity import RetryCallState, Retrying, retry_if_exception, stop_after_attempt, wait_fixed
+
+from app.logging_conf import get_logger
 
 if TYPE_CHECKING:
     from app.config import Settings
 
+log = get_logger(__name__)
+
 DEFAULT_CONNECT_TIMEOUT_S = 10.0
 DEFAULT_READ_TIMEOUT_S = 180.0
 DEFAULT_WALL_DEADLINE_S = 900.0
+# One retry for a transient failure, after a short fixed wait, and only while
+# the call's deadline leaves room for a real attempt (``_transient``).
+MAX_ATTEMPTS = 2
+RETRY_WAIT_S = 2.0
+RETRY_MIN_REMAINING_S = 30.0
+_TRANSIENT_STATUSES = frozenset({408, 409, 429})
 
 # Independent of the requested token cap: a broken or hostile peer must not be
 # able to grow one event, the aggregate wire input, or the output indefinitely.
@@ -40,7 +55,6 @@ MAX_SSE_STREAM_BYTES = 2_000_000
 MAX_SSE_LINES = 50_000
 MAX_SSE_EVENTS = 20_000
 MAX_OUTPUT_CHARS = 2_000_000
-RAW_CHUNK_BYTES = 65_536
 MIN_API_KEY_CHARS = 8
 
 # A timed-out OS resolver/socket call may outlive its caller even after close.
@@ -82,12 +96,38 @@ class GatewayProtocolError(RuntimeError):
     """The streamed response was malformed, failed, empty, or incomplete."""
 
 
+class GatewayStreamFailure(GatewayProtocolError):
+    """The stream reported a failure, or ended before its completion: an
+    upstream condition a new request may not meet.  Malformed or oversized data
+    is the same on every attempt and stays a plain GatewayProtocolError."""
+
+
 class GatewayTransportError(RuntimeError):
-    """A safe network failure carrying an exception class, never its value."""
+    """A safe network failure carrying an exception class, never its value: a
+    refused or reset connection, or a socket that timed out (the connect
+    timeout, or the read-gap timer no heartbeat reached)."""
 
 
 class GatewayTimeout(TimeoutError):
-    """The read timeout or monotonic wall deadline expired."""
+    """The call's monotonic wall deadline expired."""
+
+
+def _transient(error: BaseException) -> bool:
+    """Whether a new request may succeed where this one failed: a network
+    failure, HTTP 408, 409, 429 or 5xx, or a stream that failed or tore.  Never
+    the configuration, another status, an echo of a protected literal,
+    malformed or oversized data, or the deadline."""
+    if isinstance(error, GatewayHTTPError):
+        return (error.status_code in _TRANSIENT_STATUSES
+                or 500 <= error.status_code <= 599)
+    return isinstance(error, (GatewayTransportError, GatewayStreamFailure))
+
+
+def _log_retry(state: RetryCallState) -> None:
+    """Say that a request is sent again, by the error's class alone: never its
+    value, and never a body."""
+    error = state.outcome.exception() if state.outcome is not None else None
+    log.warning("llm_gateway_retry", error_class=type(error).__name__)
 
 
 @dataclass(frozen=True)
@@ -542,7 +582,7 @@ def _fold_responses_stream(
         elif (event_type == "error"
               or (isinstance(event_type, str)
                   and event_type.endswith((".failed", ".incomplete", ".cancelled")))):
-            raise GatewayProtocolError("LLM gateway stream reported failure")
+            raise GatewayStreamFailure("LLM gateway stream reported failure")
         # Lifecycle, reasoning, usage, and tool-shaped output events are ignored.
         # No tool schema is sent, and only output_text delta/done events are an
         # authorized source for the human-facing completion.
@@ -567,7 +607,7 @@ def _fold_responses_stream(
 
     flush()
     if not completed_seen:
-        raise GatewayProtocolError("LLM gateway stream ended before completion")
+        raise GatewayStreamFailure("LLM gateway stream ended before completion")
 
     if done_parts and not set(delta_parts).issubset(done_parts):
         raise GatewayProtocolError(
@@ -611,10 +651,12 @@ class GatewayClient:
         *,
         http_client: _StreamingClient | None = None,
         clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self.config = config
         self._http_client = http_client
         self._clock = clock
+        self._sleep = sleep
 
     @contextmanager
     def _client_scope(self) -> Iterator[_StreamingClient]:
@@ -662,9 +704,14 @@ class GatewayClient:
                     if content_encoding not in ("", "identity"):
                         raise GatewayProtocolError(
                             "LLM gateway returned compressed streaming content")
+                    # Read as the bytes arrive, so the deadline checks and the
+                    # heartbeats run while the model thinks: iter_raw with a
+                    # chunk size buffered small heartbeats until 64 KiB had
+                    # come. One read is the transport's own (64 KiB at most on
+                    # httpx's HTTP/1.1), and the line splitter's caps hold.
                     text = _fold_responses_stream(
                         _iter_sse_lines(
-                            response.iter_raw(chunk_size=RAW_CHUNK_BYTES),
+                            response.iter_raw(),
                             deadline=deadline,
                             clock=self._clock,
                         ),
@@ -680,9 +727,11 @@ class GatewayClient:
                     return Completion(text)
         except (GatewayConfigError, GatewayHTTPError, GatewayProtocolError, GatewayTimeout):
             raise
-        except (httpx.TimeoutException, TimeoutError):
-            raise GatewayTimeout("LLM gateway timed out") from None
         except Exception as exc:
+            # A socket that timed out lands here too: no connection within the
+            # connect timeout, or no byte within the read-gap timer, is a
+            # network failure like a reset. Only the call's own deadline is a
+            # GatewayTimeout, and it is never retried.
             raise GatewayTransportError(
                 f"LLM gateway transport failed ({type(exc).__name__})") from None
         finally:
@@ -725,14 +774,38 @@ class GatewayClient:
         cancellation = _Cancellation()
         outcome: queue.Queue[Completion | Exception] = queue.Queue(maxsize=1)
 
+        def attempt() -> Completion:
+            return self._perform_request(
+                payload=payload,
+                token_limit=token_limit,
+                deadline=deadline,
+                cancellation=cancellation,
+            )
+
+        def worth_another(error: BaseException) -> bool:
+            # Transient, and after the wait the deadline still leaves a real
+            # attempt: a second one that could not finish is no retry.
+            return (_transient(error) and deadline - self._clock()
+                    >= RETRY_WAIT_S + RETRY_MIN_REMAINING_S)
+
+        # One retry for a transient failure (2026-10-04), inside this call: the
+        # worker holds the slot throughout and both attempts share the call's
+        # deadline, so to the message engine's governor it is still one call -
+        # one claim, and one strike if it finally fails. It is not the
+        # technical backoff between calls that decision 27 removed
+        # (docs/MESSAGE_ENGINE.md).
+        retrying = Retrying(
+            stop=stop_after_attempt(MAX_ATTEMPTS),
+            wait=wait_fixed(RETRY_WAIT_S),
+            retry=retry_if_exception(worth_another),
+            before_sleep=_log_retry,
+            sleep=self._sleep,
+            reraise=True,
+        )
+
         def run() -> None:
             try:
-                outcome.put(self._perform_request(
-                    payload=payload,
-                    token_limit=token_limit,
-                    deadline=deadline,
-                    cancellation=cancellation,
-                ))
+                outcome.put(retrying(attempt))
             except Exception as exc:
                 outcome.put(exc)
             finally:
@@ -782,7 +855,8 @@ def complete(
     deadline_s: float | None = None,
     settings: Settings | None = None,
 ) -> Completion:
-    """Complete once through the configured route; missing config raises safely."""
+    """Complete through the configured route, asking once more after a transient
+    failure; missing config raises safely."""
     if settings is None:
         from app.config import get_settings
 
