@@ -281,3 +281,21 @@ def test_a_podman_that_ignores_sigterm_still_cannot_block_the_alert(tmp_path):
     assert res.returncode == 0, res.stderr
     assert (tmp_path / "curl-argv").exists(), "the message was never sent"
     assert elapsed < 15, f"took {elapsed:.1f}s; SIGTERM-ignoring probe was not killed"
+
+
+def test_a_down_host_reports_nothing_by_the_owners_decision():
+    """The owner, 2026-10-04, on the Healthchecks dead-man ping: "ditch this,
+    remove this from any outstanding list, documentation or reference, this is
+    not needed!" So no service pings an external monitor, and a host that is
+    down or without power reports nothing: an outage the owner accepts. What
+    still reports is the failure alarm (a failed or stuck recompute) and this
+    notifier (a failed release or watchdog run). This pins the decision, so an
+    external ping does not return without the owner."""
+    from app.config import Settings
+
+    root = SCRIPT.parents[1]
+    assert not any("healthchecks" in name or "ping_url" in name for name in Settings.model_fields)
+    assert not (root / "app" / "services" / "healthchecks.py").exists()
+    outages = (root / "docs" / "AUTO_DEPLOY.md").read_text(encoding="utf-8")
+    assert "A host that is down reports nothing" in outages
+    assert "there is no external monitor" in outages
