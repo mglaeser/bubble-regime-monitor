@@ -48,9 +48,16 @@ _LIBRARY = Path(__file__).resolve().parents[2] / "config" / "message_prompts.v1.
 #: A slot in a fallback template: "{F_NEXT_CHECK}".
 _SLOT_RE = re.compile(r"\{([A-Za-z_][A-Za-z_0-9]*)\}")
 
-#: How long one gateway call may take. Well inside the claim TTL, so a call
-#: that hangs is reaped as the technical error it is rather than lingering.
-_DEADLINE_S = 60.0
+#: How long one gateway call may take: a bound on a live but slow model, not on
+#: silence. The gateway's 180 s read-gap timer still catches a dead stream, with
+#: time left for its one retry; the deadline only bounds a model that keeps its
+#: stream alive with heartbeats while it thinks, as the CI review panel bounds
+#: silence and not thought (scripts/independent_verify.py). From 2026-09-28 the
+#: route took 12-23 s, and its tails past the old 60 s sent the template
+#: instead (the owner, 2026-10-04: "it should not time out during the daily
+#: digest"). Five minutes inside the claim's lifetime (governor.CLAIM_TTL_S,
+#: 900 s), so the reply, the checks and the claim's close fit after it.
+_DEADLINE_S = 600.0
 
 
 @dataclass(frozen=True)

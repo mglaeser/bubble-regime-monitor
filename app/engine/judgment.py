@@ -7,8 +7,9 @@ and the single biggest calming factor. Constraints in the prompt: NO probability
 language, NO investment advice, NO price targets — an observation, not advice.
 
 The gateway route is entirely operator-configured. The application sends one
-streaming Responses request to that exact route and never substitutes a model;
-any provider/model fallback is gateway-controlled and opaque to this service.
+streaming Responses request to that exact route (once more after a transient
+failure, app/llm_gateway.py) and never substitutes a model; any provider/model
+fallback is gateway-controlled and opaque to this service.
 
 Degradation: on any API error/timeout, persist the last successful text with
 stale:true and continue — never block the recompute or return a 500.

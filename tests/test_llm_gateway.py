@@ -22,6 +22,8 @@ from app.llm_gateway import (
     DEFAULT_WALL_DEADLINE_S,
     MAX_SSE_EVENT_CHARS,
     MAX_SSE_EVENTS,
+    RETRY_MIN_REMAINING_S,
+    RETRY_WAIT_S,
     Completion,
     GatewayClient,
     GatewayConfig,
@@ -99,6 +101,46 @@ class _FakeHttpClient:
     def close(self) -> None:
         if self.active_response is not None:
             self.active_response.close()
+
+
+class _BrokenStream(_Response):
+    """A stream that sends a heartbeat, then fails as its socket does."""
+
+    def __init__(self, error: Exception) -> None:
+        super().__init__()
+        self._error = error
+
+    def iter_raw(self, chunk_size: int | None = None):
+        yield b": heartbeat\n\n"
+        raise self._error
+
+
+class _ManualClock:
+    """A monotonic clock the test moves by hand."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class _FirstAttemptTakes(_FakeHttpClient):
+    """The first request uses `seconds` of the clock before its outcome."""
+
+    def __init__(self, clock: _ManualClock, seconds: float,
+                 *outcomes: _Response | Exception) -> None:
+        super().__init__(*outcomes)
+        self.clock, self.seconds = clock, seconds
+
+    def stream(self, method: str, url: str, **kwargs: object) -> _StreamContext:
+        if not self.calls:
+            self.clock.now += self.seconds
+        return super().stream(method, url, **kwargs)
+
+
+def _no_wait(_seconds: float) -> None:
+    return None
 
 
 def _config(**overrides: object) -> GatewayConfig:
@@ -648,6 +690,20 @@ class TestResponsesStreaming:
     @pytest.mark.parametrize("terminal", [
         [],
         [{"type": "response.output_text.delta", "delta": "partial"}],
+        [{"type": "error", "error": {"message": "upstream disconnected"}}],
+        [{"type": "response.failed", "response": {"status": "failed"}}],
+    ])
+    def test_torn_or_error_stream_never_returns_partial_text(self, terminal):
+        """A stream that fails or ends before its completion is asked once more
+        (2026-10-04, TestOneRetryForATransientFailure); torn twice, the call
+        fails, and the partial text never escapes."""
+        http = _FakeHttpClient(*(_Response(lines=_responses_events(*terminal))
+                                 for _ in range(2)))
+        with pytest.raises(GatewayProtocolError):
+            GatewayClient(_config(), http_client=http, sleep=_no_wait).complete(user="hello")
+        assert len(http.calls) == 2
+
+    @pytest.mark.parametrize("terminal", [
         [
             {"type": "response.output_text.delta", "delta": "partial"},
             {"type": "response.completed"},
@@ -656,17 +712,17 @@ class TestResponsesStreaming:
             {"type": "response.output_text.delta", "delta": "partial"},
             {"type": "response.completed", "response": "not-an-object"},
         ],
-        [{"type": "error", "error": {"message": "upstream disconnected"}}],
-        [{"type": "response.failed", "response": {"status": "failed"}}],
         [{"type": "response.completed", "response": {
             "status": "failed", "output_text": "must not escape"}}],
         [{"type": "response.completed", "response": {
             "status": 1, "output_text": "must not escape"}}],
     ])
-    def test_torn_or_error_stream_never_returns_partial_text(self, terminal):
-        http = _FakeHttpClient(_Response(lines=_responses_events(*terminal)))
+    def test_a_completion_that_contradicts_itself_is_final(self, terminal):
+        """A completion event without its response, or with a status other than
+        completed, is malformed data: the same on every attempt, so not retried."""
+        http = _FakeHttpClient(_Response(lines=_responses_events(*terminal)), _ok_response())
         with pytest.raises(GatewayProtocolError):
-            GatewayClient(_config(), http_client=http).complete(user="hello")
+            GatewayClient(_config(), http_client=http, sleep=_no_wait).complete(user="hello")
         assert len(http.calls) == 1
 
     def test_malformed_data_event_fails_closed(self):
@@ -698,6 +754,35 @@ class TestResponsesStreaming:
             chunks=[b"compressed bytes"], headers={"content-encoding": "gzip"}))
         with pytest.raises(GatewayProtocolError, match="compressed"):
             GatewayClient(_config(), http_client=http).complete(user="hello")
+
+    def test_the_stream_is_read_as_it_arrives(self):
+        """The gateway's heartbeats reach the worker as they come, so its own
+        deadline checks run while the model thinks: a deadline that passes
+        between two heartbeats ends the call before the completion is even read.
+        A read of 64 KiB at a time (httpx's iter_raw(chunk_size) buffers to the
+        chunk size) held a stream of small heartbeats back until it ended."""
+        clock = _ManualClock()
+        pulled: list[str] = []
+
+        def body():
+            yield b": heartbeat\n\n"
+            clock.now = 601.0                       # the deadline passes while it thinks
+            yield b": heartbeat\n\n"
+            pulled.append("completion")
+            yield "\n".join(_responses_events(
+                {"type": "response.output_text.delta", "delta": "answer"},
+                {"type": "response.completed", "response": {"id": "r-late"}},
+            )).encode() + b"\n"
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200, headers={"content-type": "text/event-stream"}, content=body())
+
+        with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+            with pytest.raises(GatewayTimeout):
+                GatewayClient(_config(), http_client=http, clock=clock).complete(
+                    user="hello", deadline_s=600.0)
+        assert pulled == []
 
 
 class TestFailureSafety:
@@ -774,19 +859,22 @@ class TestFailureSafety:
         assert gateway._GATEWAY_CLOSE_SLOT.acquire(blocking=False)
         gateway._GATEWAY_CLOSE_SLOT.release()
 
-    def test_non_success_status_does_not_retry_or_switch_wires(self):
-        http = _FakeHttpClient(_Response(status=503, body="temporarily unavailable"))
+    def test_a_transient_status_is_asked_again_on_the_same_wire_only(self):
+        # 2026-10-04: a transient failure gets one retry (TestOneRetryForATransientFailure), never another wire.
+        http = _FakeHttpClient(*(_Response(status=503, body="temporarily unavailable")
+                                 for _ in range(2)))
         with pytest.raises(GatewayHTTPError) as caught:
-            GatewayClient(_config(), http_client=http).complete(user="hello")
+            GatewayClient(_config(), http_client=http, sleep=_no_wait).complete(user="hello")
         assert caught.value.status_code == 503
-        assert len(http.calls) == 1
-        assert http.calls[0]["url"].endswith("/responses")
+        assert len(http.calls) == 2
+        assert all(call["url"].endswith("/responses") for call in http.calls)
 
-    @pytest.mark.parametrize("status", [302, 307, 400, 401, 403, 429, 503])
-    def test_every_http_failure_is_single_attempt(self, status):
+    @pytest.mark.parametrize("status", [302, 307, 400, 401, 403, 404, 422])
+    def test_every_other_http_failure_is_single_attempt(self, status):
+        # 2026-10-04: only 408, 409, 429 and 5xx are transient; every other status is final.
         http = _FakeHttpClient(_Response(status=status, body="do not retry"), _ok_response())
         with pytest.raises(GatewayHTTPError):
-            GatewayClient(_config(), http_client=http).complete(user="hello")
+            GatewayClient(_config(), http_client=http, sleep=_no_wait).complete(user="hello")
         assert len(http.calls) == 1
 
     def test_error_body_cannot_echo_the_api_key_into_logs(self):
@@ -798,18 +886,27 @@ class TestFailureSafety:
         assert "api_key" not in str(caught.value)
         assert "bad" not in str(caught.value)
 
-    def test_transport_timeout_is_normalized(self):
-        http = _FakeHttpClient(TimeoutError("socket timed out"))
-        with pytest.raises(GatewayTimeout):
-            GatewayClient(_config(), http_client=http).complete(user="hello")
+    def test_a_socket_timeout_is_a_transport_failure_not_the_deadline(self):
+        """Only the call's own deadline is a GatewayTimeout, and it is never
+        retried. A socket that times out - the connect timeout, or the read-gap
+        timer no heartbeat reached - is a network failure like a reset, asked
+        once more (2026-10-04), and normalized without its value."""
+        http = _FakeHttpClient(*(TimeoutError("socket timed out") for _ in range(2)))
+        with pytest.raises(GatewayTransportError) as caught:
+            GatewayClient(_config(), http_client=http, sleep=_no_wait).complete(user="hello")
+        assert "socket timed out" not in str(caught.value)
+        assert len(http.calls) == 2
 
     def test_transport_exception_value_cannot_leak_the_key(self):
         secret = "transport-error-secret"  # pragma: allowlist secret
-        http = _FakeHttpClient(RuntimeError(f"request headers contained {secret}"))
+        http = _FakeHttpClient(*(RuntimeError(f"request headers contained {secret}")
+                                 for _ in range(2)))
         with pytest.raises(GatewayTransportError) as caught:
-            GatewayClient(_config(api_key=secret), http_client=http).complete(user="hello")
+            GatewayClient(_config(api_key=secret), http_client=http,
+                          sleep=_no_wait).complete(user="hello")
         assert secret not in str(caught.value)
         assert "headers contained" not in str(caught.value)
+        assert len(http.calls) == 2
 
     def test_completion_output_echoing_the_exact_key_fails_closed(self):
         secret = "gateway-key-shaped-12345"  # pragma: allowlist secret
@@ -1056,3 +1153,113 @@ class TestFailureSafety:
             server_thread.join(timeout=1.0)
         assert gateway._GATEWAY_WORKER_SLOT.acquire(timeout=1.0)
         gateway._GATEWAY_WORKER_SLOT.release()
+
+
+def _events(*events: dict) -> _Response:
+    return _Response(lines=_responses_events(*events))
+
+
+class TestOneRetryForATransientFailure:
+    """2026-10-04, the owner: "it should not time out during the daily digest or
+    anywhere else". A failure a new request may not meet - a network error,
+    HTTP 408, 409, 429 or 5xx, a stream that reports failure or ends before its
+    completion - is asked once more, on the same wire, inside the same call and
+    its deadline, after a short fixed wait, as the CI review panel retries
+    (scripts/independent_verify.py). What is the same on every attempt is final."""
+
+    @pytest.mark.parametrize("first", [
+        pytest.param(_Response(status=408), id="408"),
+        pytest.param(_Response(status=409), id="409"),
+        pytest.param(_Response(status=429), id="429"),
+        pytest.param(_Response(status=500), id="500"),
+        pytest.param(_Response(status=503), id="503"),
+        pytest.param(_Response(status=504), id="504"),
+        pytest.param(httpx.ConnectError("connection refused"), id="connect"),
+        pytest.param(_BrokenStream(httpx.ReadError("connection reset")), id="reset"),
+        pytest.param(_BrokenStream(httpx.ReadTimeout("no byte for 180 s")), id="read-gap"),
+        pytest.param(_events({"type": "response.failed", "response": {"status": "failed"}}),
+                     id="response.failed"),
+        pytest.param(_events({"type": "error", "error": {"message": "upstream"}}),
+                     id="error-event"),
+        pytest.param(_events({"type": "response.incomplete"}), id="incomplete"),
+        pytest.param(_events({"type": "response.cancelled"}), id="cancelled"),
+        pytest.param(_events({"type": "response.output_text.delta", "delta": "partial"}),
+                     id="ends-before-completion"),
+    ])
+    def test_a_transient_failure_is_asked_once_more(self, first):
+        waits: list[float] = []
+        http = _FakeHttpClient(first, _ok_response("second answer"))
+        out = GatewayClient(_config(), http_client=http, sleep=waits.append).complete(
+            user="hello")
+        assert out.text == "second answer"
+        assert [call["url"] for call in http.calls] == [BASE_URL + "/responses"] * 2
+        assert http.calls[0]["json"] == http.calls[1]["json"]
+        assert waits == [RETRY_WAIT_S]
+
+    @pytest.mark.parametrize("first, raised", [
+        pytest.param(_ok_response("answer unit-test-credential"),  # pragma: allowlist secret
+                     GatewayProtocolError, id="key-echo"),
+        pytest.param(_Response(lines=["data: not-json", ""]), GatewayProtocolError,
+                     id="malformed"),
+        pytest.param(_Response(lines=["data: " + "x" * (MAX_SSE_EVENT_CHARS + 1), ""]),
+                     GatewayProtocolError, id="size-cap"),
+        pytest.param(GatewayTimeout("LLM gateway deadline exceeded"), GatewayTimeout,
+                     id="deadline"),
+        pytest.param(GatewayConfigError("LLM gateway configuration is invalid"),
+                     GatewayConfigError, id="config"),
+    ])
+    def test_a_deterministic_failure_is_final(self, first, raised):
+        waits: list[float] = []
+        http = _FakeHttpClient(first, _ok_response())
+        with pytest.raises(raised):
+            GatewayClient(_config(), http_client=http, sleep=waits.append).complete(
+                user="hello")
+        assert len(http.calls) == 1 and waits == []
+
+    def test_never_more_than_two_attempts(self):
+        waits: list[float] = []
+        http = _FakeHttpClient(*(_Response(status=503) for _ in range(3)), _ok_response())
+        with pytest.raises(GatewayHTTPError) as caught:
+            GatewayClient(_config(), http_client=http, sleep=waits.append).complete(
+                user="hello")
+        assert caught.value.status_code == 503
+        assert len(http.calls) == 2 and waits == [RETRY_WAIT_S]
+
+    def test_no_second_attempt_without_time_for_one(self):
+        """With fewer than RETRY_MIN_REMAINING_S left, a second attempt could
+        not finish: the failure is final, and the deadline stays the bound."""
+        clock = _ManualClock()
+        waits: list[float] = []
+        http = _FirstAttemptTakes(clock, 600.0 - RETRY_MIN_REMAINING_S + 1.0,
+                                  _Response(status=503), _ok_response())
+        with pytest.raises(GatewayHTTPError):
+            GatewayClient(_config(), http_client=http, clock=clock,
+                          sleep=waits.append).complete(user="hello", deadline_s=600.0)
+        assert len(http.calls) == 1 and waits == []
+
+    def test_the_retry_has_what_is_left_of_the_deadline(self):
+        """One call, one deadline: the second attempt gets the rest of it, not
+        a deadline of its own."""
+        clock = _ManualClock()
+        http = _FirstAttemptTakes(clock, 500.0, _Response(status=503), _ok_response())
+        out = GatewayClient(_config(), http_client=http, clock=clock,
+                            sleep=_no_wait).complete(user="hello", deadline_s=600.0)
+        assert out.text == "plain answer"
+        assert http.calls[1]["timeout"].read == pytest.approx(100.0)
+
+    def test_a_retry_is_logged_by_its_class_alone(self, monkeypatch):
+        import app.llm_gateway as gateway
+
+        secret = "retry-log-secret"  # pragma: allowlist secret
+        logged: list[tuple[str, dict]] = []
+
+        class _Log:
+            def warning(self, event: str, **fields: object) -> None:
+                logged.append((event, fields))
+
+        monkeypatch.setattr(gateway, "log", _Log())
+        http = _FakeHttpClient(httpx.ConnectError(f"refused; headers had {secret}"),
+                               _ok_response())
+        GatewayClient(_config(api_key=secret), http_client=http,
+                      sleep=_no_wait).complete(user="hello")
+        assert logged == [("llm_gateway_retry", {"error_class": "GatewayTransportError"})]

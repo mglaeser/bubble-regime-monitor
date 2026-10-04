@@ -309,6 +309,17 @@ the provider. A claim left in flight past `CLAIM_TTL_S` (a worker that died
 mid-call) is closed as a technical error before any decision, dated to its
 expiry rather than to the moment it was noticed (#140 round 1).
 
+2026-10-04, the owner: "it should not time out during the daily digest or
+anywhere else." A call's deadline is 600 s, not 60 s (`composer._DEADLINE_S`;
+the route took 12-23 s from 2026-09-28, with tails past 60 s): the gateway's
+180 s read-gap timer catches a dead stream, so the deadline bounds only a live
+but slow model, as the CI review panel bounds silence and not thought. Within
+that deadline the gateway sends a request that failed transiently once more (a
+network error, HTTP 408, 409, 429 or 5xx, a stream that reported failure or
+ended before its completion; `app/llm_gateway.py`), so a call is still one
+claim, and one strike if it finally fails: it is not the technical backoff
+between calls that this decision removed.
+
 ## Decision 6 — "did not ask" is not "tried and failed" (round 32)
 
 *Superseded in its mechanics by decision 27; kept as the history of why only
