@@ -106,22 +106,20 @@ def _slots_of(text: str) -> tuple[str, ...]:
 
 
 def _texts_of(entry: dict[str, Any], kind: str, code: str, languages: tuple[str, ...],
-              default_language: str, problems: list[str]) -> dict[str, str] | None:
+              problems: list[str]) -> dict[str, str] | None:
     """The fragment's text in every declared language, or None with a problem.
 
-    A fragment's `text` is either one string - the set's default language,
-    the form every set before v3.5 used - or an object keyed by language.
-    A multilingual set must carry EVERY declared language for EVERY
+    A fragment's `text` is an object keyed by language. The one-string form
+    every set before v3.5 used is refused (owner ruling 3: no backward
+    compatibility). A set must carry EVERY declared language for EVERY
     fragment: a missing translation is a message that cannot be rendered in
     the operator's language, and a fragment is reviewed as a whole.
     """
     raw = entry["text"]
-    if isinstance(raw, str):
-        texts = {default_language: raw}
-    elif isinstance(raw, dict) and raw and all(isinstance(v, str) for v in raw.values()):
+    if isinstance(raw, dict) and raw and all(isinstance(v, str) for v in raw.values()):
         texts = dict(raw)
     else:
-        problems.append(f"{kind} {code!r}: 'text' must be a string or a language-to-text object")
+        problems.append(f"{kind} {code!r}: 'text' must be a language-to-text object")
         return None
     missing = [lang for lang in languages if not texts.get(lang, "").strip()]
     extra = [lang for lang in texts if lang not in languages]
@@ -135,15 +133,14 @@ def _texts_of(entry: dict[str, Any], kind: str, code: str, languages: tuple[str,
 
 def _load_fragments(
     raw: dict[str, Any], kind: str, facts: dict[str, FactSpec], problems: list[str],
-    *, languages: tuple[str, ...] = ("de",), default_language: str = "de",
-    language: str = "de",
+    *, languages: tuple[str, ...], language: str,
 ) -> dict[str, FragmentSpec]:
     out: dict[str, FragmentSpec] = {}
     for code, entry in sorted(raw.items()):
         if not isinstance(entry, dict) or "text" not in entry:
             problems.append(f"{kind} {code!r}: missing 'text'")
             continue
-        texts = _texts_of(entry, kind, code, languages, default_language, problems)
+        texts = _texts_of(entry, kind, code, languages, problems)
         if texts is None:
             continue
         bad = False
@@ -271,14 +268,13 @@ def validate_phrase_set(raw_json: str, *, language: str | None = None) -> Valida
     version = meta.get("phrase_set_version")
     if not version:
         raise PhraseSetInvalid("phrase set has no meta.phrase_set_version")
-    # Absent keys take the legacy defaults (a German-only set); a key that
-    # is PRESENT must be well-formed. `or` conflated the two, so an explicit
-    # empty inventory was normalized to the default instead of refused
-    # (#119 round 5, SOTA-A, executed).
-    default_language = meta.get("language", "de")
+    # Both keys are required. Absent, they once took the legacy defaults - a
+    # German-only set, the single-language form owner ruling 3 deleted - so an
+    # absent key is refused like an empty one (#119 round 5).
+    default_language = meta.get("language")
     if not isinstance(default_language, str) or not default_language:
         raise PhraseSetInvalid("meta.language must be a non-empty language code")
-    declared = meta.get("languages", [default_language])
+    declared = meta.get("languages")
     if (not isinstance(declared, list) or not declared
             or any(not isinstance(lang, str) or not lang for lang in declared)):
         raise PhraseSetInvalid("meta.languages must be a non-empty list of language codes")
@@ -314,8 +310,7 @@ def validate_phrase_set(raw_json: str, *, language: str | None = None) -> Valida
 
     def load(section: str, kind: str) -> dict[str, FragmentSpec]:
         return _load_fragments(raw.get(section) or {}, kind, facts, problems,
-                               languages=languages, default_language=default_language,
-                               language=active)
+                               languages=languages, language=active)
 
     headlines = load("headlines", "headline")
     phrases = load("phrases", "phrase")

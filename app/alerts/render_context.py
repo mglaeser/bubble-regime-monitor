@@ -353,7 +353,6 @@ def build_member_context(
     headline_code: str | None = None,
     phrase_codes: tuple[str, ...] = (),
     next_check_code: str | None = None,
-    material_change_supported: bool = False,
 ) -> MemberContext:
     """Build one member's isolated fact set.
 
@@ -390,23 +389,12 @@ def build_member_context(
     facts = dict(current_facts if current_facts else trigger_facts)
     material_fact_id: str | None = None
     if condition_status == "MATERIALLY_CHANGED_BUT_ACTIVE" and deltas:
-        if material_change_supported:
-            material_fact_id = next(iter(deltas))
-            selected = deltas[material_fact_id]
-            facts["F_TRIGGER_VALUE"] = str(selected["trigger"])
-            facts["F_CURRENT_VALUE"] = str(selected["current"])
-            authorized_fact_ids = authorized_fact_ids | OPTIONAL_RUNTIME_FACT_IDS
-            caveats.append("MATERIAL_CHANGE")
-        else:
-            # Archived phrase registries predate the reviewed two-value clause.
-            # Keep their bytes usable, but never present a changed current value
-            # as though the old headline had always described it.
-            facts = dict(trigger_facts)
-            caveats.append("CONTEXT_STALE")
-            notes.append(
-                "origin phrase set cannot render trigger/current values; "
-                "trigger facts retained"
-            )
+        material_fact_id = next(iter(deltas))
+        selected = deltas[material_fact_id]
+        facts["F_TRIGGER_VALUE"] = str(selected["trigger"])
+        facts["F_CURRENT_VALUE"] = str(selected["current"])
+        authorized_fact_ids = authorized_fact_ids | OPTIONAL_RUNTIME_FACT_IDS
+        caveats.append("MATERIAL_CHANGE")
 
     if source.data_degraded and "DATA_DEGRADED" not in caveats:
         caveats.append("DATA_DEGRADED")

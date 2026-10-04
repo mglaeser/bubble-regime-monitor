@@ -471,8 +471,11 @@ def test_an_unknown_profile_is_not_routed_to_the_configured_recipient(monkeypatc
     assert result.error_code == "NO_RECIPIENT"
 
 
-def test_the_known_profiles_still_route(monkeypatch):
-    """The check is about UNKNOWN labels, not a blanket refusal."""
+def test_the_configured_profile_routes_and_the_legacy_alias_does_not(monkeypatch):
+    """The check is about UNKNOWN labels, not a blanket refusal: the
+    configured profile's own name routes. "primary", the label rows carried
+    before refs named the run's own profile, is no alias any more (owner
+    ruling 3: no backward compatibility) - no code writes it."""
     _configured(monkeypatch)
     seen: list[str] = []
 
@@ -480,10 +483,11 @@ def test_the_known_profiles_still_route(monkeypatch):
         seen.append("sent")
         return httpx.Response(202, json={"operation_id": "op", "state": "accepted"})
 
-    for ref in ("default", "primary"):
-        result = ImessageSender(_client(handler)).send("x", recipient_ref=ref)
-        assert result.outcome == SenderOutcome.CONFIRMED_SUCCESS, ref
-    assert len(seen) == 2
+    result = ImessageSender(_client(handler)).send("x", recipient_ref="default")
+    assert result.outcome == SenderOutcome.CONFIRMED_SUCCESS
+    legacy = ImessageSender(_client(handler)).send("x", recipient_ref="primary")
+    assert legacy.error_code == "NO_RECIPIENT"
+    assert len(seen) == 1
 
 
 def test_a_deployment_that_names_its_profile_something_else_still_routes(monkeypatch):
@@ -503,12 +507,12 @@ def test_a_deployment_that_names_its_profile_something_else_still_routes(monkeyp
     ok = ImessageSender(_client(handler)).send("x", recipient_ref="house")
     assert ok.outcome == SenderOutcome.CONFIRMED_SUCCESS
 
-    # and a profile that is neither an alias nor the configured one still fails
+    # and a profile that is not the configured one still fails
     other = ImessageSender(_client(handler)).send("x", recipient_ref="elsewhere")
     assert other.error_code == "NO_RECIPIENT"
 
-    # the aliases do NOT follow: "default" names the default profile, and this
-    # deployment is not it. Accepting it would deliver another namespace's
-    # message to house's recipient.
+    # "default" names the default profile, and this deployment is not it.
+    # Accepting it would deliver another namespace's message to house's
+    # recipient.
     alias = ImessageSender(_client(handler)).send("x", recipient_ref="default")
     assert alias.error_code == "NO_RECIPIENT"

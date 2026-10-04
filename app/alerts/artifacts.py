@@ -27,7 +27,12 @@ from sqlalchemy.orm import Session
 
 from app import methodology as _M
 from app.alerts.enums import ActorType, RulesetStatus
-from app.alerts.errors import AlertingUnavailable, PhraseSetInvalid, RulesetInvalid, sanitize
+from app.alerts.errors import (
+    AlertingUnavailable,
+    MessageLanguageInvalid,
+    PhraseSetInvalid,
+    RulesetInvalid,
+)
 from app.alerts.models import AlertPhraseSetRegistry, AlertRulesetRegistry
 from app.alerts.phrase_registry import (
     PHRASE_VALIDATOR_VERSION,
@@ -38,6 +43,7 @@ from app.alerts.registry import ValidatedRuleset, validate_ruleset
 from app.alerts.repository import resolve_replaced_episodes
 from app.config import get_settings
 from app.logging_conf import get_logger
+from app.redaction import sanitize
 
 log = get_logger(__name__)
 
@@ -185,13 +191,36 @@ def load_promoted(session: Session, *,
     return load_by_hash(session, row.rules_sha256, service_version=service_version)
 
 
+def registered_phrase_set(row: AlertPhraseSetRegistry) -> ValidatedPhraseSet | None:
+    """A registered phrase set rebuilt from its stored bytes, or None.
+
+    The registry keeps every set it registered; its rows are immutable audit
+    data. Bytes the validator no longer admits - the legacy single-language
+    form owner ruling 3 deleted, which a registry may still hold (production
+    holds v3.4, superseded, with nothing queued under it; read-only,
+    2026-10-04) - are not wording anything may render. They rebuild to None,
+    like a row that is gone: the promoted fallback finds nothing usable, and
+    queued work fails its render, visibly, instead of a pass that raises. A
+    malformed MESSAGE_LANGUAGE still raises: that is the setting, not the bytes.
+    """
+    try:
+        return validate_phrase_set(row.canonical_json)
+    except MessageLanguageInvalid:
+        raise
+    except PhraseSetInvalid as exc:
+        log.error("alert_registered_phrase_set_refused",
+                  version=row.phrase_set_version, error=exc.redacted())
+        return None
+
+
 def load_by_hash(session: Session, rules_sha256: str, *,
                  service_version: str | None = None) -> LoadedArtifacts | None:
     """Rebuild a registered ruleset from its stored canonical bytes.
 
     The promoted fallback is rebuilt this way, and queued work renders from
     the bytes it was planned with: those are in the database, so the file on
-    disk having moved on is irrelevant.
+    disk having moved on is irrelevant. None when the rows are gone or the
+    phrase bytes no longer validate (`registered_phrase_set`).
     """
     row = session.get(AlertRulesetRegistry, rules_sha256)
     if row is None:
@@ -199,7 +228,9 @@ def load_by_hash(session: Session, rules_sha256: str, *,
     phrase_row = session.get(AlertPhraseSetRegistry, row.phrase_set_version)
     if phrase_row is None:
         return None
-    phrase_set = validate_phrase_set(phrase_row.canonical_json)
+    phrase_set = registered_phrase_set(phrase_row)
+    if phrase_set is None:
+        return None
     ruleset = validate_ruleset(
         row.canonical_yaml,
         phrase_set=phrase_set,

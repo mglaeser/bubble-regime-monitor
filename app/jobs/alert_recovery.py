@@ -16,12 +16,12 @@ from datetime import UTC, datetime
 from typing import Any
 
 from app.alerts.enums import EvaluationRunStatus
-from app.alerts.errors import sanitize
 from app.alerts.models import AlertComponentHeartbeat
 from app.alerts.recovery import reconcile_sidecars, recover_evaluations
 from app.config import get_settings
 from app.db import session_scope
 from app.logging_conf import get_logger
+from app.redaction import sanitize
 
 log = get_logger(__name__)
 

@@ -1170,6 +1170,153 @@ def test_wrong_member_phrase_hash_is_refused_before_render_or_send(
         assert delivery.attempts == 0
 
 
+# ---------------------------------------------------------------------------
+# the legacy phrase form a registry still holds (owner ruling 3)
+# ---------------------------------------------------------------------------
+
+#: Beside the promoted pair (rules v3.2.3, phrases v3.5), production's
+#: registry holds the pair it superseded: rules v3.2.2 and phrase set v3.4, in
+#: the legacy single-language form (read-only, 2026-10-04; no delivery is
+#: queued under it). Grouped, as in test_a_released_phrase_set_is_never_edited_in_place.
+STORED_RULES_V322 = "93efd9c8-58cceff1-3b45778e-13f9496b-64990cda-9a4f169a-85abf8c6-a9978e1d"
+STORED_PHRASES_V34 = "96d915f5-1a8fb496-aded9c1d-907abe76-b5d9be96-e23b8fc1-fab525fc-567d3196"
+
+
+def _register_stored_v34(session, *, now):
+    """Register that superseded pair byte for byte; return its rules hash.
+
+    Neither file ships any more. Both are rebuilt from the shipped pair: v3.5
+    is v3.4's German byte for byte plus English (#119), and v3.2.3 differs
+    from v3.2.2 only in its version and its phrase-set pin. The digests prove
+    the rebuild exact.
+    """
+    import json
+    from pathlib import Path
+
+    import yaml
+
+    from app.alerts.canonical import canonical_json, sha256_hex
+    from app.alerts.enums import RulesetStatus
+    from app.alerts.models import AlertPhraseSetRegistry, AlertRulesetRegistry
+    from app.alerts.rulespec import RulesetDocument, canonical_document
+
+    phrases = json.loads(Path("config/alert_phrases.v3.5.json").read_text(encoding="utf-8"))
+    phrases["meta"] = {"phrase_set_version": "v3.4", "language": "de", "validator_version": "1",
+                       "note": phrases["meta"]["note"].split(" v3.5 carries")[0]}
+    for section in ("headlines", "phrases", "next_check", "caveats"):
+        for entry in phrases[section].values():
+            entry["text"] = entry["text"]["de"]
+    phrase_json = canonical_json(phrases)
+    rules_yaml = (Path("config/alert_rules.v3.2.yaml").read_text(encoding="utf-8")
+                  .replace('phrase_set: "v3.5"', 'phrase_set: "v3.4"')
+                  .replace('rule_version: "v3.2.3"', 'rule_version: "v3.2.2"'))
+    document = RulesetDocument.model_validate(yaml.safe_load(rules_yaml))
+    rules_sha = sha256_hex(canonical_json(canonical_document(document)))
+    assert sha256_hex(phrase_json) == STORED_PHRASES_V34.replace("-", "")
+    assert rules_sha == STORED_RULES_V322.replace("-", "")
+
+    session.add(AlertPhraseSetRegistry(
+        phrase_set_version="v3.4", phrase_set_sha256=sha256_hex(phrase_json),
+        canonical_json=phrase_json, validator_version="1", validated_at=now,
+        worst_case_test_sha256="w" * 64))
+    session.flush()
+    meta = document.meta
+    session.add(AlertRulesetRegistry(
+        rules_sha256=rules_sha, rule_version=meta.rule_version, canonical_yaml=rules_yaml,
+        phrase_set_version="v3.4", phrase_set_sha256=sha256_hex(phrase_json),
+        alert_input_schema_version=meta.alert_input_schema_version,
+        methodology_version=meta.methodology_version,
+        methodology_manifest_sha256=meta.methodology_manifest_sha256,
+        min_service_version=meta.min_service_version,
+        max_service_version=meta.max_service_version,
+        validated_at=now, promoted_at=now, promoted_by="tests", superseded_at=now,
+        status=RulesetStatus.SUPERSEDED))
+    session.flush()
+    return rules_sha
+
+
+def test_the_stored_legacy_pair_is_audit_data_not_wording(isolated_db):
+    """The validator refuses the legacy form, so the superseded pair stays in
+    the registry as immutable audit data and nothing rebuilds it to render:
+    load_by_hash finds nothing, as for a row that is gone. The promoted pair
+    is untouched."""
+    from app.alerts.artifacts import load_by_hash, load_promoted
+    from app.alerts.errors import PhraseSetInvalid
+    from app.alerts.models import AlertPhraseSetRegistry
+    from app.db import session_scope
+    from tests.conftest import register_promoted
+    from tests.test_alert_evaluation import _artifacts
+
+    with session_scope() as session:
+        stored = _register_stored_v34(session, now=NOW)
+        promoted = register_promoted(session, _artifacts(stage=3), now=NOW)
+
+    with session_scope() as session:
+        row = session.get(AlertPhraseSetRegistry, "v3.4")
+        assert row is not None
+        with pytest.raises(PhraseSetInvalid):
+            validate_phrase_set(row.canonical_json)
+        assert load_by_hash(session, stored) is None
+        loaded = load_promoted(session)
+        assert loaded is not None and loaded.ruleset.rules_sha256 == promoted
+        assert loaded.phrase_set.version == "v3.5"
+
+
+def test_work_queued_under_the_stored_legacy_pair_fails_its_render_and_the_pass_goes_on(
+        isolated_db):
+    """A delivery planned under the superseded legacy pair cannot be worded
+    any more. It ends RENDER_FAILED - visible, never sent, never retried -
+    and the same pass sends the work planned under the promoted pair; a
+    raise there would fail every pass while the row stayed claimable.
+
+    A TEST, because it is the one kind that reaches this rebuild: a market
+    delivery's episode was resolved when its ruleset was replaced, so the
+    dispatcher withdraws it before any phrase set is loaded (owner decision
+    D2e)."""
+    from app.alerts.canonical import new_ulid
+    from app.alerts.dispatcher import dispatch_once
+    from app.alerts.enums import TransportStatus
+    from app.alerts.models import AlertDelivery
+    from app.alerts.repository import utc_ms
+    from app.db import session_scope
+    from tests.conftest import register_promoted
+    from tests.test_alert_evaluation import _artifacts
+
+    artifacts = _artifacts(stage=3)
+    queued: dict[str, str] = {}
+    with session_scope() as session:
+        stored = _register_stored_v34(session, now=NOW)
+        promoted = register_promoted(session, artifacts, now=NOW)
+        # The legacy row first, so a raise would stop the pass before the other.
+        for label, rules_sha, created in (("legacy", stored, NOW - timedelta(minutes=1)),
+                                          ("current", promoted, NOW)):
+            delivery_id = new_ulid(utc_ms(created))
+            session.add(AlertDelivery(
+                delivery_id=delivery_id, dedupe_key=f"v1|TEST|{delivery_id}",
+                dedupe_version=1, mode="live", live_profile="default",
+                planning_rules_sha256=rules_sha, delivery_kind=DeliveryKind.TEST,
+                priority=4, transport_status=TransportStatus.PENDING,
+                planning_state=PlanningState.READY, not_before=created,
+                created_at=created, updated_at=created, attempts=0,
+                recipient_ref="default"))
+            queued[label] = delivery_id
+
+    sender = NullSender()
+    report = dispatch_once(session_scope, phrase_set=artifacts.phrase_set, mode="live",
+                           live_profile="default", sender=sender, now=NOW)
+
+    assert (report.render_failed, report.sent) == (1, 1)
+    assert [body for _ref, body in sender.sent] == [
+        artifacts.phrase_set.headlines["TEST_MESSAGE"].text]
+    with session_scope() as session:
+        legacy = session.get(AlertDelivery, queued["legacy"])
+        assert legacy is not None
+        assert legacy.transport_status == TransportStatus.RENDER_FAILED
+        assert legacy.attempts == 0
+        current = session.get(AlertDelivery, queued["current"])
+        assert current is not None and current.transport_status == TransportStatus.SENT
+
+
 def test_frozen_bundle_retry_is_cancelled_when_a_rendered_member_resolves(
         isolated_db, phrase_set):
     """Never choose stale prose over the same-render retry invariant."""

@@ -41,7 +41,7 @@ from app.alerts.enums import (
     RulesetRole,
     RulesetStatus,
 )
-from app.alerts.errors import EvaluationConflict, EvaluationDeadlineExceeded, sanitize
+from app.alerts.errors import EvaluationConflict, EvaluationDeadlineExceeded
 from app.alerts.models import AlertEvaluation, AlertEvaluationRuleset, AlertRulesetRegistry
 from app.alerts.outbox import persist_plan, planner_budget_usage
 from app.alerts.planner import PlanInputs, plan
@@ -67,6 +67,7 @@ from app.alerts.state_machine import (
     evaluate_state,
 )
 from app.logging_conf import get_logger
+from app.redaction import sanitize
 
 log = get_logger(__name__)
 

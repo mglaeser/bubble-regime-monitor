@@ -329,26 +329,21 @@ class ReminderSpec(BaseModel):
         return self
 
 
+#: Every phrase set carries all of these. MATERIAL_CHANGE was optional by
+#: archived phrase bytes, so that a delivery queued under v3.2 or v3.3 stayed
+#: renderable; owner ruling 3 (no backward compatibility) made it required.
 RUNTIME_CAVEAT_CODES: frozenset[str] = frozenset({
     "CONTEXT_STALE",
     "DATA_DEGRADED",
     "KNOWN_ISSUE",
-    "UNKNOWN_AT_RENDER",
-})
-
-# Runtime capabilities added after the first released phrase registries are
-# optional by exact archived phrase bytes.  Treating them like the original
-# closed set above would make a v3.2 queued delivery unloadable merely because
-# the running code learned a new reviewed caveat.  The dispatcher authorizes
-# one of these only when the delivery's OWN phrase set contains it.
-OPTIONAL_RUNTIME_CAVEAT_CODES: frozenset[str] = frozenset({
     "MATERIAL_CHANGE",
+    "UNKNOWN_AT_RENDER",
 })
 
 # Filled by the deterministic renderer, never by a rule or an LLM.  They are
 # deliberately not required in every rule's render contract: the originating
 # fact remains rule-authorized, while these two slots disclose its trigger and
-# current render-time values when the archived phrase set supports the feature.
+# current render-time values when the condition materially changed.
 OPTIONAL_RUNTIME_FACT_IDS: frozenset[str] = frozenset({
     "F_TRIGGER_VALUE",
     "F_CURRENT_VALUE",

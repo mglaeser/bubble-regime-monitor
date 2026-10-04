@@ -283,9 +283,11 @@ in its own transaction; it calls no provider, alters no score and cannot roll
 back a snapshot.
 
 `MESSAGE_LANGUAGE` (`en` | `de`; unset, each artifact speaks its own language)
-selects the language of every operator message. A phrase set may carry more than one language — since v3.5
+selects the language of every operator message. A phrase set may carry more than one language —
 each fragment's `text` is an object keyed by language, and `meta.languages`
-lists them — and the renderer writes the selected one; a language the promoted
+lists them — and the renderer writes the selected one. The one-string,
+German-by-default form every set before v3.5 used is refused (owner ruling 3:
+no backward compatibility). A language the promoted
 set does not carry falls back to the set's own default (`meta.language`), which
 the validation report states. Every language is held to the worst-case fit, and
 the registry stores one digest for the whole set: switching language is a
@@ -747,8 +749,9 @@ consults all four rather than the two easy ones: `STILL_FIRING` renders;
 that has cleared is worse than silence); `UNKNOWN_AT_RENDER` renders WITH the
 data-quality caveat and claims no resolution; `MATERIALLY_CHANGED_BUT_ACTIVE`
 renders trigger and current values rather than presenting stale numbers as
-now. Phrase set v3.4 provides the reviewed `MATERIAL_CHANGE` clause and its
-runtime-only `F_TRIGGER_VALUE` / `F_CURRENT_VALUE` slots. Both values are built
+now. Every phrase set carries the reviewed `MATERIAL_CHANGE` clause and its
+runtime-only `F_TRIGGER_VALUE` / `F_CURRENT_VALUE` slots: the ruleset validator
+refuses a set without them. Both values are built
 from one rule-authorized typed fact at the same reviewed display precision;
 the complete trigger view, compatible current view, and every visible delta
 remain separate in the render-context hash. Scheduling metadata such as
@@ -757,10 +760,18 @@ remain separate in the render-context hash. Scheduling metadata such as
 Current facts join a render only when their schema and methodology match the
 trigger's (17.4) — otherwise the member renders from trigger facts with
 `CONTEXT_STALE`, because mixing numbers computed two different ways into one
-comparison is worse than admitting staleness. An archived phrase set that
-predates the reviewed two-value clause remains recoverable: it keeps the
-trigger facts and adds `CONTEXT_STALE`; runtime code never mutates or
-retroactively extends its phrase bytes.
+comparison is worse than admitting staleness.
+
+Only the shipped phrase set, v3.5, is kept (owner ruling 3): v3.2-v3.4 and the
+single-language form were kept only for compatibility. A registry still keeps
+the bytes of every set it registered - immutable audit data, never changed -
+but bytes the validator no longer admits are not wording: rebuilding them
+finds nothing (`app/alerts/artifacts.py` `registered_phrase_set`), so the
+promoted fallback reports nothing usable and a delivery planned under them
+ends `RENDER_FAILED`, while the rest of the dispatch pass goes on
+(tests/test_alert_delivery.py::test_work_queued_under_the_stored_legacy_pair_fails_its_render_and_the_pass_goes_on).
+Production's registry holds one such set - v3.4, under the superseded rules
+v3.2.2 - with nothing queued under it (read-only, 2026-10-04).
 
 ## 12. Replay (the Stage 1 gate)
 

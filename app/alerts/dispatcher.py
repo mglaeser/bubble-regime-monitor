@@ -31,7 +31,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.alerts.artifacts import load_by_hash
+from app.alerts.artifacts import load_by_hash, registered_phrase_set
 from app.alerts.budgets import BUDGETED_KINDS, LIMITS, check_budget
 from app.alerts.canonical import new_ulid
 from app.alerts.enums import (
@@ -39,7 +39,7 @@ from app.alerts.enums import (
     Priority,
     RenderSource,
 )
-from app.alerts.errors import RenderRejected, sanitize
+from app.alerts.errors import RenderRejected
 from app.alerts.models import (
     AlertDelivery,
     AlertDeliveryMember,
@@ -66,7 +66,7 @@ from app.alerts.outbox import (
     release_due_holds,
     revalidate_members,
 )
-from app.alerts.phrase_registry import ValidatedPhraseSet, validate_phrase_set
+from app.alerts.phrase_registry import ValidatedPhraseSet
 from app.alerts.quiet_hours import would_be_held
 from app.alerts.render_context import (
     RenderContext,
@@ -80,13 +80,10 @@ from app.alerts.repository import (
     load_latest_compatible_input,
     utc_ms,
 )
-from app.alerts.rulespec import (
-    OPTIONAL_RUNTIME_CAVEAT_CODES,
-    OPTIONAL_RUNTIME_FACT_IDS,
-    RuleSpec,
-)
+from app.alerts.rulespec import RuleSpec
 from app.alerts.sender import Sender, default_sender
 from app.logging_conf import get_logger
+from app.redaction import sanitize
 
 log = get_logger(__name__)
 
@@ -233,10 +230,6 @@ def _build_context(
             labels=labels,
             authorized_fact_ids=allowed_fact_ids,
         )
-        material_change_supported = (
-            OPTIONAL_RUNTIME_CAVEAT_CODES <= set(phrase_set.caveats)
-            and OPTIONAL_RUNTIME_FACT_IDS <= set(phrase_set.facts)
-        )
         status = render_time_status(
             condition_state=condition_state,
             resolved=bool(episode is not None and not episode.is_open),
@@ -255,11 +248,7 @@ def _build_context(
             previous=previous,
             labels=labels,
             authorized_fact_ids=allowed_fact_ids,
-            authorized_phrase_codes=(
-                contract.authorized_codes(rule)
-                | (OPTIONAL_RUNTIME_CAVEAT_CODES
-                   if material_change_supported else frozenset())
-            ),
+            authorized_phrase_codes=contract.authorized_codes(rule),
             headline_code=contract.headline_code,
             phrase_codes=tuple(contract.allowed_phrase_codes),
             next_check_code=contract.next_check_code,
@@ -271,7 +260,6 @@ def _build_context(
             origin_phrase_set_version=member.origin_phrase_set_version,
             origin_phrase_set_sha256=member.origin_phrase_set_sha256,
             origin_rules_sha256=member.origin_rules_sha256,
-            material_change_supported=material_change_supported,
         ))
         origin_rules.append(rule)
     return RenderContext(members=contexts), origin_rules
@@ -313,7 +301,7 @@ def _phrase_set_of_ruleset(session: Any, rules_sha256: str,
         log.error("alert_planning_phrase_set_unavailable",
                   version=row.phrase_set_version)
         return None
-    return validate_phrase_set(registered.canonical_json)
+    return registered_phrase_set(registered)
 
 
 def planning_phrase_set(session: Any, delivery: AlertDelivery,
@@ -330,7 +318,8 @@ def planning_phrase_set(session: Any, delivery: AlertDelivery,
     could be verified rather than assumed.
 
     Returns None when the planned text cannot be produced — an unregistered
-    version, or one whose bytes no longer match what was recorded. That is
+    version, one whose bytes no longer match what was recorded, or bytes the
+    validator no longer admits (`registered_phrase_set`). That is
     fail-CLOSED on purpose: the previous version fell back to whatever this
     process was holding, which meant a message could go out worded differently
     from the one that was planned and reviewed. A render failure is visible and
@@ -395,7 +384,7 @@ def planning_phrase_set(session: Any, delivery: AlertDelivery,
                   delivery_id=delivery.delivery_id, version=version,
                   planned=digest[:12], registered=registered.phrase_set_sha256[:12])
         return None
-    return validate_phrase_set(registered.canonical_json)
+    return registered_phrase_set(registered)
 
 
 def _frozen_render_membership_changed(

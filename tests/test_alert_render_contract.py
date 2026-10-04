@@ -280,7 +280,6 @@ def test_material_change_keeps_trigger_current_and_delta_separate(phrase_set):
         origin_phrase_set_sha256=phrase_set.sha256,
         origin_rules_sha256="r" * 64,
         headline_code="RF4_FIRST",
-        material_change_supported=True,
     )
     assert member.trigger_facts == {"F_BREADTH": "47.5"}
     assert member.current_facts == {"F_BREADTH": "44.0"}
@@ -315,34 +314,53 @@ def test_scheduling_metadata_alone_is_not_a_material_market_change():
     ) == {}
 
 
-def test_archived_phrase_set_uses_trigger_facts_and_stale_caveat():
-    """A queued v3.3 delivery remains renderable after runtime gains v3.4."""
-    archived = validate_phrase_set(
-        Path("config/alert_phrases.v3.3.json").read_text(encoding="utf-8"))
-    assert "MATERIAL_CHANGE" not in archived.caveats
-    trigger = _input()
-    current = _with_breadth(trigger, identity="a" * 64, breadth=44.0)
-    member = build_member_context(
-        episode_id="01K00000000000000000000000",
-        rule_id="tripwire.rf4_first",
-        priority=2,
-        trigger=trigger,
-        current=current,
-        authorized_fact_ids=frozenset({"F_BREADTH"}),
-        authorized_phrase_codes=frozenset({"RF4_FIRST", "CONTEXT_STALE"}),
-        required_caveat_codes=(),
-        condition_status="MATERIALLY_CHANGED_BUT_ACTIVE",
-        origin_phrase_set_version=archived.version,
-        origin_phrase_set_sha256=archived.sha256,
-        origin_rules_sha256="r" * 64,
-        headline_code="RF4_FIRST",
-        material_change_supported=False,
-    )
-    assert member.facts == {"F_BREADTH": "47.5"}
-    assert member.current_facts == {"F_BREADTH": "44.0"}
-    assert member.fact_deltas["F_BREADTH"]["delta"] == "-3.5"
-    assert "CONTEXT_STALE" in member.required_caveat_codes
-    assert "MATERIAL_CHANGE" not in member.required_caveat_codes
+def test_a_phrase_set_without_the_material_change_clause_is_refused(phrase_set):
+    """Owner ruling 3: the clause is required, no longer optional by archived
+    bytes. A set without it - as every set before v3.4 - is refused when the
+    ruleset is validated, never rendered from trigger facts with CONTEXT_STALE
+    in its place."""
+    import json
+
+    raw = json.loads(phrase_set.canonical_json)
+    del raw["caveats"]["MATERIAL_CHANGE"]
+    for fact_id in ("F_TRIGGER_VALUE", "F_CURRENT_VALUE"):
+        del raw["facts"][fact_id]
+    lacking = validate_phrase_set(json.dumps(raw))
+    with pytest.raises(RulesetInvalid, match="caveat 'MATERIAL_CHANGE' does not exist"):
+        validate_ruleset(
+            RULES_PATH.read_text(encoding="utf-8"),
+            phrase_set=lacking,
+            phrase_set_version=lacking.version,
+            phrase_set_sha256=lacking.sha256,
+            methodology_version=_M.get_path("_meta", "methodology_version"),
+            methodology_manifest_sha256=_M.frozen_sha256(),
+            service_version="3.8.0",
+        )
+
+
+def test_a_material_change_clause_without_both_values_is_refused(phrase_set):
+    """#172 round 2, SOTA-A: once the clause is required, its meaning is too.
+    The renderer fills the trigger and the current value into MATERIAL_CHANGE;
+    a clause that shows neither - here with no slots, in both languages -
+    would announce a material change without saying what changed. It is
+    refused when the ruleset is validated."""
+    import json
+
+    raw = json.loads(phrase_set.canonical_json)
+    raw["caveats"]["MATERIAL_CHANGE"]["text"] = {
+        "de": "Wert deutlich veraendert.", "en": "Value changed materially."}
+    raw["caveats"]["MATERIAL_CHANGE"]["slots"] = []
+    slotless = validate_phrase_set(json.dumps(raw))
+    with pytest.raises(RulesetInvalid, match="caveat 'MATERIAL_CHANGE' must show"):
+        validate_ruleset(
+            RULES_PATH.read_text(encoding="utf-8"),
+            phrase_set=slotless,
+            phrase_set_version=slotless.version,
+            phrase_set_sha256=slotless.sha256,
+            methodology_version=_M.get_path("_meta", "methodology_version"),
+            methodology_manifest_sha256=_M.frozen_sha256(),
+            service_version="3.8.0",
+        )
 
 
 def test_context_hash_binds_trigger_current_and_delta_views(phrase_set):
@@ -364,7 +382,6 @@ def test_context_hash_binds_trigger_current_and_delta_views(phrase_set):
             origin_phrase_set_sha256=phrase_set.sha256,
             origin_rules_sha256="r" * 64,
             headline_code="RF4_FIRST",
-            material_change_supported=True,
         )
         return RenderContext(members=[member])
 

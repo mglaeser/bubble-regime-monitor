@@ -8,29 +8,7 @@ where a token or a phone number ends up.
 
 from __future__ import annotations
 
-# The implementation moved to app/redaction.py so the scoring and source layers
-# can redact without importing this (deliberately provider-free) alert layer.
-# Re-exported here because twenty call sites import it from this module, and
-# because the guarantee in this file's docstring is still the one being made.
-from app.redaction import MAX_STORED_MESSAGE, sanitize
-
-# Complete, not partial: mypy runs with no-implicit-reexport, so a re-exported
-# name is invisible to importers unless it is listed here — and an __all__ that
-# named only the re-exports would understate the module's surface.
-__all__ = [
-    "MAX_STORED_MESSAGE",
-    "sanitize",
-    "AlertError",
-    "AlertingUnavailable",
-    "EvaluationConflict",
-    "EvaluationDeadlineExceeded",
-    "NotEvaluable",
-    "MessageLanguageInvalid",
-    "PhraseSetInvalid",
-    "PinMissing",
-    "RenderRejected",
-    "RulesetInvalid",
-]
+from app.redaction import sanitize
 
 
 class AlertError(Exception):

@@ -27,7 +27,6 @@ from sqlalchemy import select
 
 from app.alerts.dto import ALERT_INPUT_SCHEMA_VERSION, watchdog_input_identity
 from app.alerts.enums import Evaluability, InputOrigin
-from app.alerts.errors import sanitize
 from app.alerts.input_builder import build_watchdog_input, serialize
 from app.alerts.models import AlertEpisode, AlertInputSnapshot
 from app.config import get_settings
@@ -35,6 +34,7 @@ from app.db import session_scope
 from app.engine.recompute_slots import slot_at_or_before, slot_key, slots_between
 from app.logging_conf import get_logger
 from app.models import Snapshot
+from app.redaction import sanitize
 
 log = get_logger(__name__)
 

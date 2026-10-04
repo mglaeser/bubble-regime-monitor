@@ -27,7 +27,7 @@ from app.alerts.enums import (
     EvaluationStatus,
     SuppressionReason,
 )
-from app.alerts.errors import EvaluationConflict, sanitize
+from app.alerts.errors import EvaluationConflict
 from app.alerts.models import (
     AlertConfirmationObservation,
     AlertDelivery,
@@ -41,6 +41,7 @@ from app.alerts.models import (
 )
 from app.alerts.silences import ActiveSilences
 from app.alerts.state_machine import InstanceMemory, StateDecision, flapping_projection
+from app.redaction import sanitize
 
 
 def utc_ms(moment: datetime) -> int:
