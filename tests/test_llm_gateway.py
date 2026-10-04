@@ -359,19 +359,52 @@ class TestRequestShapeAndAuth:
         assert "unit-test-credential" not in json.dumps(call["json"])  # pragma: allowlist secret
 
     def test_a_caller_may_ask_for_a_reasoning_effort_and_nothing_else(self):
-        """The Responses API's own field, `reasoning.effort`: the digest asks
-        for "low" (app/message_engine/composer.py). Unasked, the payload
-        carries no reasoning field (the test above); an effort the API does
-        not name is refused before a request is made."""
+        """The Responses API's own field, `reasoning`: the digest asks for
+        "max" (app/message_engine/composer.py; the owner, 2026-10-04: "Please
+        have reasoning on max"), and with an effort the gateway asks for the
+        reasoning summary, which streams while the model thinks. Unasked, the
+        payload carries no reasoning field (the test above); an effort the
+        route does not name is refused before a request is made."""
         http = _FakeHttpClient(_ok_response())
-        GatewayClient(_config(), http_client=http).complete(user="numbers", reasoning_effort="low")
-        assert http.calls[0]["json"]["reasoning"] == {"effort": "low"}
+        GatewayClient(_config(), http_client=http).complete(user="numbers", reasoning_effort="max")
+        assert http.calls[0]["json"]["reasoning"] == {"effort": "max", "summary": "auto"}
         assert not ({"tools", "tool_choice", "functions", "thinking", "effort",
                      "temperature"} & set(http.calls[0]["json"]))
-        for wrong in ("LOW", "max", "", True, 1):
+        for wrong in ("MAX", "ultra", "", True, 1):
             with pytest.raises(GatewayConfigError, match="effort"):
                 GatewayClient(_config(), http_client=http).complete(user="numbers", reasoning_effort=wrong)
         assert len(http.calls) == 1
+
+    def test_the_reasoning_summary_never_reaches_the_completion(self):
+        """What the route streams with a reasoning summary (measured 2026-10-04
+        on combo/SOTA): a reasoning item and its summary deltas before the
+        message. Only output_text is the completion; the summary is skipped
+        in the stream and in the terminal response alike."""
+        summary = "Weighing the band line against the flags."
+        reasoning_item = {"type": "reasoning", "id": "rs_1",
+                          "summary": [{"type": "summary_text", "text": summary}]}
+        message_item = {"type": "message", "id": "msg_1", "role": "assistant",
+                        "content": [{"type": "output_text", "text": "61/100, de-risk."}]}
+        http = _FakeHttpClient(_Response(lines=_responses_events(
+            {"type": "response.created", "response": {"id": "resp-1"}},
+            {"type": "response.output_item.added", "output_index": 0, "item": reasoning_item},
+            {"type": "response.reasoning_summary_part.added", "output_index": 0, "summary_index": 0,
+             "part": {"type": "summary_text", "text": ""}},
+            {"type": "response.heartbeat"},
+            {"type": "response.reasoning_summary_text.delta", "output_index": 0, "summary_index": 0,
+             "delta": summary},
+            {"type": "response.reasoning_summary_text.done", "output_index": 0, "summary_index": 0,
+             "text": summary},
+            {"type": "response.output_item.done", "output_index": 0, "item": reasoning_item},
+            {"type": "response.output_text.delta", "output_index": 1, "content_index": 0,
+             "delta": "61/100, de-risk."},
+            {"type": "response.output_text.done", "output_index": 1, "content_index": 0,
+             "text": "61/100, de-risk."},
+            {"type": "response.completed", "response": {"id": "resp-1", "status": "completed",
+                                                        "output": [reasoning_item, message_item]}},
+        )))
+        result = GatewayClient(_config(), http_client=http).complete(user="numbers", reasoning_effort="max")
+        assert result.text == "61/100, de-risk." and summary not in result.text
 
     def test_authorization_header_uses_bearer_form(self):
         http = _FakeHttpClient(_ok_response())

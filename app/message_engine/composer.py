@@ -59,14 +59,15 @@ _SLOT_RE = re.compile(r"\{([A-Za-z_][A-Za-z_0-9]*)\}")
 #: 900 s), so the reply, the checks and the claim's close fit after it.
 _DEADLINE_S = 600.0
 
-#: How hard the model reasons before it writes: little, as it writes from
-#: numbers and references it is given. On the configured route the model's
-#: thinking is silence - the gateway's heartbeats reach the client only with
-#: the first output - and the route gives up after about 250-300 s of it.
-#: Measured 2026-10-04 through the edge: at the route's default effort the
-#: production digest prompt waited 97 s for its first byte and the richer one
-#: of decision 28 failed at 256-303 s; at "low" they answered in 9 and 14 s.
-_EFFORT = "low"
+#: How hard the model reasons before it writes: as hard as it can (the owner,
+#: 2026-10-04: "Please have reasoning on max"). Measured that night through the
+#: edge on the digest's prompt: at "max" the route's model thinks until its
+#: token budget (LLM_MAX_TOKENS, 25,000 on the host) is nearly spent - 129-271
+#: s, up to 24,657 tokens - and at times runs out before it answers
+#: (`response.incomplete`), which the gateway's one retry covers inside the
+#: deadline. The reasoning summary the gateway asks for with an effort streams
+#: from the first second, so the read-gap timer never cuts the thinking.
+_EFFORT = "max"
 
 
 @dataclass(frozen=True)

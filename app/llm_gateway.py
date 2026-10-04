@@ -47,9 +47,14 @@ MAX_ATTEMPTS = 2
 RETRY_WAIT_S = 2.0
 RETRY_MIN_REMAINING_S = 30.0
 _TRANSIENT_STATUSES = frozenset({408, 409, 429})
-# The reasoning efforts the Responses API names (`reasoning.effort`). A call
-# that asks for none sends no reasoning field, and the route decides.
-REASONING_EFFORTS = frozenset({"minimal", "low", "medium", "high"})
+# The reasoning efforts the route names (`reasoning.effort`): the Responses
+# API's, and "xhigh" and "max" above them - the configured route's model thinks
+# the longest at "max" (measured 2026-10-04). A call that asks for none sends no
+# reasoning field, and the route decides. With an effort the gateway asks for
+# the reasoning summary too: it streams while the model thinks, where the route
+# otherwise sent nothing at all until the answer (a first byte after 97-271 s),
+# so the read-gap timer cut thought rather than a dead stream.
+REASONING_EFFORTS = frozenset({"minimal", "low", "medium", "high", "xhigh", "max"})
 
 # Independent of the requested token cap: a broken or hostile peer must not be
 # able to grow one event, the aggregate wire input, or the output indefinitely.
@@ -762,7 +767,7 @@ class GatewayClient:
             raise GatewayConfigError(
                 "LLM deadline must be positive and no greater than the wall limit")
         if reasoning_effort is not None and reasoning_effort not in REASONING_EFFORTS:
-            raise GatewayConfigError("LLM reasoning effort must be one the Responses API names")
+            raise GatewayConfigError("LLM reasoning effort must be one the route names")
 
         wall_seconds = DEFAULT_WALL_DEADLINE_S if deadline_s is None else deadline_s
         deadline = self._clock() + wall_seconds
@@ -775,7 +780,7 @@ class GatewayClient:
         if system is not None:
             payload["instructions"] = system
         if reasoning_effort is not None:
-            payload["reasoning"] = {"effort": reasoning_effort}
+            payload["reasoning"] = {"effort": reasoning_effort, "summary": "auto"}
 
         # Build all per-call synchronization before acquiring the global slot,
         # so an allocation failure cannot strand the single-flight semaphore.
