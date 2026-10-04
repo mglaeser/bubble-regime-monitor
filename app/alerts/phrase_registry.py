@@ -292,10 +292,14 @@ def validate_phrase_set(raw_json: str, *, language: str | None = None) -> Valida
     """
     try:
         raw = json.loads(raw_json)
+    except (ValueError, RecursionError) as exc:
+        # JSONDecodeError is a ValueError, and so is an integer past Python's
+        # digit limit; nesting too deep for the decoder is a RecursionError.
+        # Every caller fails closed on PhraseSetInvalid alone (#175 round 3).
+        raise PhraseSetInvalid(f"phrase set is not valid JSON: {exc}") from exc
+    try:
         # Strict: a value is what the reviewed file says, never a coercion of it.
         document = PhraseSetDocument.model_validate(raw, strict=True)
-    except json.JSONDecodeError as exc:
-        raise PhraseSetInvalid(f"phrase set is not valid JSON: {exc}") from exc
     except ValidationError as exc:
         raise PhraseSetInvalid(f"phrase set failed schema validation: {exc}") from exc
 

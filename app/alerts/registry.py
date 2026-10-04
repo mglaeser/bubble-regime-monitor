@@ -402,7 +402,10 @@ def validate_ruleset(
     """
     try:
         parsed = yaml.safe_load(raw_yaml)
-    except yaml.YAMLError as exc:
+    except (yaml.YAMLError, ValueError, RecursionError) as exc:
+        # An integer past Python's digit limit is a ValueError and nesting too
+        # deep a RecursionError, not YAMLError; callers fail closed on
+        # RulesetInvalid alone (#175 round 3, the same gap as the phrase set's).
         raise RulesetInvalid(f"ruleset is not valid YAML: {exc}") from exc
     if not isinstance(parsed, dict):
         raise RulesetInvalid("ruleset must be a YAML mapping")

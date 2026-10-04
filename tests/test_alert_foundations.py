@@ -355,6 +355,25 @@ def test_phrase_set_forbids_an_ambiguous_score_fact(phrase_set):
         validate_phrase_set(json.dumps(raw))
 
 
+@pytest.mark.parametrize("raw", [
+    '{"meta": ' + "9" * 4301 + "}",          # past Python's integer digit limit
+    "[" * 100_000 + "]" * 100_000,           # deeper than the decoder recurses
+], ids=["long-integer", "deep-nesting"])
+def test_bytes_the_decoder_refuses_are_an_invalid_phrase_set_and_ruleset(raw):
+    """#175 round 3, SOTA-A: json.loads and yaml.safe_load refuse these with
+    ValueError or RecursionError, not their own decode errors. Every caller of
+    the two validators fails closed on PhraseSetInvalid / RulesetInvalid alone
+    (load_active's fallback, artifacts.registered_phrase_set), so the decoders'
+    every refusal is translated."""
+    with pytest.raises(PhraseSetInvalid, match="not valid JSON"):
+        validate_phrase_set(raw)
+    with pytest.raises(RulesetInvalid, match="not valid YAML"):
+        validate_ruleset(raw.replace('"meta"', "meta"), phrase_set=None,
+                         phrase_set_version="v", phrase_set_sha256="0" * 64,
+                         methodology_version="m", methodology_manifest_sha256="0" * 64,
+                         service_version="3.8.0")
+
+
 @pytest.mark.parametrize("path, value", [
     (("meta",), ["v3.5"]),
     (("facts",), ["F_ASSET"]),
