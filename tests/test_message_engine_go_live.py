@@ -90,7 +90,8 @@ _ENGINE_OFF_REFUSED = {"transport", "llm_used", "chars", "message", "snapshot_co
 class TestDigestFacts:
     def test_mirrors_deterministic_report(self):
         facts = digest.digest_facts(_snapshot())
-        assert facts == {
+        headline = {name: facts[name] for name in list(facts)[:21]}
+        assert headline == {
             "median": 51, "score_scale_max": 100, "action_band": "trim", "override_fired": False,
             "override_suffix": "", "iqr_lo": 40, "iqr_hi": 61, "red_flag_count": 2, "red_flag_total": 4,
             "spy_trend": "IN", "qqq_trend": "OUT", "s1": 0.42, "s2": None, "s3": None, "s4": None,
@@ -407,7 +408,7 @@ class TestSignOff:
         out = service.deliver(trigger="daily_digest", facts=digest.digest_facts(_snapshot()), priority=3)
         assert out["status"] == "sent" and out["source"] == "fallback"
         assert sends == ["bubblegauge 51/100 trim. range 40-61. SPY IN, QQQ OUT. Flags 2/4."]
-        assert len(prompts) == 1 and "DRAFT" not in prompts[0] and "TASK: Write today's digest." in prompts[0]
+        assert len(prompts) == 1 and "DRAFT" not in prompts[0] and "TASK: Write today's digest about one point" in prompts[0]
         assert len(reads) == 1
 
 

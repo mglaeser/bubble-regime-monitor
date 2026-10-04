@@ -234,8 +234,9 @@ class Settings(BaseSettings):
     message_engine_daily_budget: int = 100
 
     # Channel length (rulings Q27/Q29/Q30). SMS_MAX_LEN already defaults to
-    # 150; iMessage counts CODE POINTS, not septets.
-    message_engine_imessage_max_chars: int = 200
+    # 150; iMessage counts CODE POINTS, not septets. 350 since the owner's
+    # request of 2026-10-04: one point per message, explained at more length.
+    message_engine_imessage_max_chars: int = 350
 
     @property
     def llm_configured(self) -> bool:

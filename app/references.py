@@ -50,6 +50,16 @@ DISCLAIMER = (
     "security. Any de-risking rule may destroy value net of costs. Use at your own risk."
 )
 
+#: The framework in one paragraph: GET /api/v1/meta/methodology serves it, and
+#: the daily digest's model reads it (app/message_engine/context.py).
+FRAMEWORK = (
+    "Three-leg hybrid: Leg 1 = hierarchical two-block weighted geometric composite "
+    "(Structural Fragility S x Dynamics/Trigger D) with VIX multiplier, non-compensatory "
+    "red-flag override, and a seeded Monte Carlo whose MEDIAN is the headline; "
+    "Leg 2 = Faber 10-month trend trigger; Leg 3 = fast volatility alarm. "
+    "The legs are NOT averaged. Action bands: < 45 hold; 45-60 trim; >= 60 or override -> de-risk."
+)
+
 
 @dataclass(frozen=True)
 class Methodology:

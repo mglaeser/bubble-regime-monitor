@@ -52,6 +52,8 @@ class TestTheMaterial:
         assert ref.name == record.name
         assert ref.what in " ".join(record.what.split())
         assert ref.why in " ".join(record.why.split())
+        assert ref.grounding == record.grounding == "judgmental"
+        assert ref.caveat and ref.caveat in " ".join(record.caveats[0].split())
         assert ref.sources == ("FINRA margin-statistics XLSX",)
 
     def test_no_trigger_without_indicators_has_material(self):
@@ -62,7 +64,7 @@ class TestTheMaterial:
     def test_every_text_is_bounded_to_whole_sentences(self):
         for trigger in context.TRIGGER_INDICATORS:
             for ref in context.references_for(trigger):
-                for text in (ref.what, ref.why):
+                for text in (ref.what, ref.why, ref.caveat):
                     assert 0 < len(text) <= context.MAX_TEXT, (trigger, ref.indicator)
         # the longest rationale in the registry is cut at a sentence
         (ref,) = [r for r in context.references_for("daily_digest") if r.indicator == "s4"]
@@ -76,24 +78,26 @@ class TestTheMaterial:
 
     def test_the_rendered_block_is_only_registry_text(self):
         """Ground rule 1, read off the RENDERED block itself: every line is
-        one of the renderer's three labels around text the registries hold,
+        one of the renderer's four labels around text the registries hold,
         whole or cut to its first sentences - nothing else, and nothing
         appended. The first version checked the references and never called
         render(), so text the renderer added would have passed (#123 round 1,
-        SOTA-A)."""
+        SOTA-A). The grounding label and the first caveat joined on the
+        owner's request of 2026-10-04 (as much as the API serves)."""
         names = {record.name: key for key, record in REGISTRY.items()}
         sources = {spec.name for spec in SOURCE_REGISTRY}
 
         def from_registry(cut: str, whole: str) -> bool:
             return " ".join(whole.split()).startswith(cut)
 
-        line_re = re.compile(r"- (?P<name>.+) \((?P<id>[A-Z0-9]+)\): (?P<what>.+)"
+        line_re = re.compile(r"- (?P<name>.+) \((?P<id>[A-Z0-9]+), (?P<grounding>[a-z-]+)\): (?P<what>.+)"
                              r"|  Why it matters: (?P<why>.+)"
+                             r"|  Caveat: (?P<caveat>.+)"
                              r"|  Sources: (?P<sources>.+)")
         for trigger in context.TRIGGER_INDICATORS:
             refs = context.references_for(trigger)
             lines = context.render(refs).splitlines()
-            assert len(lines) == 3 * len(refs), trigger
+            assert len(lines) == 3 * len(refs) + sum(1 for ref in refs if ref.caveat), trigger
             current = None
             for line in lines:
                 m = line_re.fullmatch(line)
@@ -101,9 +105,12 @@ class TestTheMaterial:
                 if m["name"] is not None:
                     current = names[m["name"]]
                     assert m["id"] == current.upper(), (trigger, line[:80])
+                    assert m["grounding"] == REGISTRY[current].grounding, (trigger, line[:80])
                     assert from_registry(m["what"], REGISTRY[current].what), (trigger, line[:80])
                 elif m["why"] is not None:
                     assert from_registry(m["why"], REGISTRY[current].why), (trigger, line[:80])
+                elif m["caveat"] is not None:
+                    assert from_registry(m["caveat"], REGISTRY[current].caveats[0]), (trigger, line[:80])
                 else:
                     assert set(m["sources"].split("; ")) <= sources, (trigger, line[:80])
 

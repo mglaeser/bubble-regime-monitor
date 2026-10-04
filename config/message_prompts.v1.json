@@ -1,8 +1,8 @@
 {
-  "version": "1.2.0",
+  "version": "1.3.0",
   "language": "en",
   "generated": "2026-08-28",
-  "status": "SIGNED 2026-10-01 mglaeser - re-signed by instruction on the leaf session (owner ruling 2026-10-01, #145 round 2): the nine entries no caller wires (weekly_digest, reminder, failure_alert_failing/recovery/stuck, breaker_notify/all_clear, test_message, host_outage) are deleted; they return with numeric facts when wired. Previously: SIGNED 2026-09-28 mglaeser - re-signed by instruction on the leaf session (owner decision D7, 2026-09-28) after the D7 data fixes: every slot names the fact it declares, every data section is headed DATA, and a task asks for one message; first signed 2026-09-19 (ruling Q34), German phrasings added 2026-09-19 under the same instruction (bilingual by MESSAGE_LANGUAGE)",
+  "status": "SIGNED 2026-10-04 mglaeser - re-signed by instruction on the leaf session (the owner's request of 2026-10-04: every message the model writes is handed as much as the API serves, references included, makes one point at more length - 350 characters on iMessage - and gives more context when something changes): the daily digest's entry declares what GET /api/v1/score serves and the change since a day and a week earlier, and asks for one point, chosen by what changed. Previously: SIGNED 2026-10-01 mglaeser - re-signed by instruction on the leaf session (owner ruling 2026-10-01, #145 round 2): the nine entries no caller wires (weekly_digest, reminder, failure_alert_failing/recovery/stuck, breaker_notify/all_clear, test_message, host_outage) are deleted; they return with numeric facts when wired. Previously: SIGNED 2026-09-28 mglaeser - re-signed by instruction on the leaf session (owner decision D7, 2026-09-28) after the D7 data fixes: every slot names the fact it declares, every data section is headed DATA, and a task asks for one message; first signed 2026-09-19 (ruling Q34), German phrasings added 2026-09-19 under the same instruction (bilingual by MESSAGE_LANGUAGE)",
   "channels": {
     "sms": {
       "max_chars": 150,
@@ -10,7 +10,7 @@
       "emoji": false
     },
     "imessage": {
-      "max_code_points": 200,
+      "max_code_points": 350,
       "emoji_max": 2,
       "emoji_allowlist": [
         "🔹",
@@ -219,7 +219,7 @@
       }
     },
     "daily_digest": {
-      "purpose": "Replaces SMS_PROMPT in app/engine/sms_report.py: the once-daily regime digest. Keeps the legacy content contract: headline score, action band, rough range, warning-flag count, SPY/QQQ long-term trend, plus one plain-words biggest driver.",
+      "purpose": "The once-daily regime digest (it replaced SMS_PROMPT in app/engine/sms_report.py): the headline score and action band, then one point - chosen by what changed since a day earlier - explained with the readings, the references and the framework (the owner's request of 2026-10-04).",
       "grounding_fields": [
         "median",
         "score_scale_max",
@@ -241,17 +241,70 @@
         "d2",
         "d3",
         "d4",
-        "judgment"
+        "judgment",
+        "range_lo",
+        "range_hi",
+        "trim_line",
+        "derisk_line",
+        "trim_line_gap",
+        "derisk_line_gap",
+        "override_required",
+        "override_floor",
+        "rf1_active",
+        "rf2_active",
+        "rf3_active",
+        "rf4_active",
+        "rf1_distance",
+        "rf2_distance",
+        "rf3_distance",
+        "rf4_distance",
+        "spy_distance_pct",
+        "qqq_distance_pct",
+        "vol_state",
+        "vol_multiplier",
+        "fragility_block",
+        "timing_block",
+        "s1_value",
+        "s2_value",
+        "s3_value",
+        "d1_value",
+        "d2_value",
+        "data_degraded",
+        "median_1d_ago",
+        "median_1d_change",
+        "band_1d_ago",
+        "override_fired_1d_ago",
+        "red_flag_count_1d_ago",
+        "rf1_active_1d_ago",
+        "rf2_active_1d_ago",
+        "rf3_active_1d_ago",
+        "rf4_active_1d_ago",
+        "spy_trend_1d_ago",
+        "qqq_trend_1d_ago",
+        "s1_1d_change",
+        "s2_1d_change",
+        "s3_1d_change",
+        "s4_1d_change",
+        "s5_1d_change",
+        "d1_1d_change",
+        "d2_1d_change",
+        "d3_1d_change",
+        "d4_1d_change",
+        "median_7d_ago",
+        "median_7d_change",
+        "band_7d_ago",
+        "red_flag_count_7d_ago"
       ],
       "context_endpoints": [
         "/api/v1/score",
+        "/api/v1/score/history",
         "/api/v1/legs/trend",
         "/api/v1/meta/methodology",
         "/api/v1/content/dashboard"
       ],
-      "prompt": "ROLE: You write the once-daily text digest for bubblegauge, a personal research monitor that scores how bubble-like US stock market conditions currently look on a 0-{score_scale_max} scale.\nTASK: Write today's digest. Lead with the headline score out of {score_scale_max} and the monitor's action band, then the single biggest driver of today's reading in a few plain words. Also fit in: the rough range around the score, the warning-flag count out of {red_flag_total}, and the long-term trend state for SPY and QQQ. If the DATA says the override fired, say the monitor's emergency override is active. The gauge sub-scores in DATA are background for choosing the biggest driver only - express the driver in ordinary words and do not print their raw sub-scores.\nHARD RULES:\n- ENGLISH only.\n- Write the SAME message as two variants. SMS variant: at most 150 characters, plain ASCII letters, digits, spaces and . , : ; - / ( ) % ' only, no emoji. IMSG variant: at most 200 Unicode code points, at most 2 emoji and only from this neutral set: 🔹 ▪️ 📌 🕒 ℹ️ (never sirens, warning signs, falling charts, or faces); emoji are optional, never required.\n- Every numeral you output must appear character-for-character in the DATA block below. Never invent, round, convert, sum, or reformat a number. If a value is missing or '?', omit it.\n- Banned: probability words (probability, chance, likely, odds), advice to the reader (buy, sell, hold/trim/de-risk as instructions), certainty claims (will crash, guaranteed, certain, definitely), price targets. The band labels hold, trim, de-risk may appear only as the monitor's own state labels exactly as given in DATA, never as something the reader should do.\n- Register: flat and factual. No exclamation marks, no urgency or reassurance wording; any weight comes from the stated facts alone.\n- Plain words for a reader with only basic financial background; no technical acronyms or statistics jargon.\n- The message must stand alone: its meaning and bottom line must be clear to someone who sees only this text.\n- No surrounding quotes, no disclaimer, no greeting, no signature.\nDATA:\nheadline score (median of the model runs): {median} out of {score_scale_max}\naction band: {action_band}\noverride fired: {override_fired}\nrough range (middle half of the model runs): {iqr_lo}-{iqr_hi}\nwarning flags active: {red_flag_count} of {red_flag_total}\nlong-term trend SPY: {spy_trend}; QQQ: {qqq_trend}\nfragility gauge sub-scores (background only, never print these values): s1={s1}, s2={s2}, s3={s3}, s4={s4}, s5={s5}\ntiming gauge sub-scores (background only, never print these values): d1={d1}, d2={d2}, d3={d3}, d4={d4}\nplain-language note you may draw on: {judgment}\nOUTPUT: reply with exactly one line and nothing else, in exactly this form:\nSMS: <sms body> || IMSG: <imessage body>\nNeither body may contain '|' or a line break.",
+      "prompt": "ROLE: You write the once-daily text digest for bubblegauge, a personal research monitor that scores how bubble-like US stock market conditions currently look on a 0-{score_scale_max} scale.\nTASK: Write today's digest about one point, and explain it. Choose the point in this order: a change since a day earlier in the action band, the override, a warning flag or a long-term trend state; else a clear move of the headline score since a day or a week earlier; else the single biggest driver of today's reading, or a band line or warning-flag threshold the reading sits close to. Open with the headline score out of {score_scale_max} and the action band. Then explain the point with its context: what changed, from what to what, and which indicators moved it (the sub-score changes in DATA show which); what those indicators measure and why that matters (REFERENCES); and where it leaves the reading against the band lines, the flags' thresholds and the trend rule (FRAMEWORK). Where it helps, name a reading by its own value, such as the valuation ratio or the share of stocks above their 200-day average. If the override fired, say that the monitor's emergency override is active. Never print the sub-scores or their changes; say in plain words what they show. Use the room the length below gives to explain, without padding.\nDATA:\nheadline score (median of the model runs): {median} out of {score_scale_max}\naction band: {action_band}; override fired: {override_fired}\nrough range (middle half of the model runs): {iqr_lo}-{iqr_hi}; wide range (5th to 95th percentile of the runs): {range_lo}-{range_hi}\nband lines: trim from {trim_line}, de-risk from {derisk_line}; the headline minus each line: {trim_line_gap} and {derisk_line_gap}\nwarning flags active: {red_flag_count} of {red_flag_total}; at {override_required} or more active flags the override fires and holds the score at {override_floor} or above\nflag 1, the explosive-price test reads explosive and is not set aside as contested: active {rf1_active}; its reading minus its threshold: {rf1_distance} (test statistic)\nflag 2, the semiconductors' two-year run-up beyond the market reaches 150 percentage points: active {rf2_active}; reading minus threshold: {rf2_distance} percentage points\nflag 3, high-yield credit spreads more than 100 basis points above their three-year low: active {rf3_active}; reading minus threshold: {rf3_distance} basis points\nflag 4, fewer than half of S&P 500 members above their 200-day average while the index is near its high: active {rf4_active}; that share minus 50 percent: {rf4_distance} percentage points\nlong-term trend (price against its 10-month average): SPY {spy_trend}, {spy_distance_pct} percent from its average; QQQ {qqq_trend}, {qqq_distance_pct} percent from its average\nvolatility term structure (VIX against the 3-month VIX): {vol_state}; its multiplier on the timing block: {vol_multiplier}\nfragility block {fragility_block} and timing block {timing_block}, each out of 100; the score combines the two\nreadings: valuation ratio (Shiller CAPE) {s1_value}; top-10 share of the S&P 500 {s2_value} percent; semiconductors' two-year run-up beyond the market {s3_value} percentage points; S&P 500 members above their 200-day average {d1_value} percent; margin debt growth over a year {d2_value} percent\nsome data degraded: {data_degraded}\na day earlier: headline {median_1d_ago}, change {median_1d_change}; action band {band_1d_ago}; override fired {override_fired_1d_ago}; warning flags active {red_flag_count_1d_ago} (flag 1 {rf1_active_1d_ago}, flag 2 {rf2_active_1d_ago}, flag 3 {rf3_active_1d_ago}, flag 4 {rf4_active_1d_ago}); trend SPY {spy_trend_1d_ago}, QQQ {qqq_trend_1d_ago}\na week earlier: headline {median_7d_ago}, change {median_7d_change}; action band {band_7d_ago}; warning flags active {red_flag_count_7d_ago}\nfragility gauge sub-scores, 0 to 1 (background only, never print these values): s1={s1}, s2={s2}, s3={s3}, s4={s4}, s5={s5}; their change since a day earlier: s1 {s1_1d_change}, s2 {s2_1d_change}, s3 {s3_1d_change}, s4 {s4_1d_change}, s5 {s5_1d_change}\ntiming gauge sub-scores, 0 to 1 (background only, never print these values): d1={d1}, d2={d2}, d3={d3}, d4={d4}; their change since a day earlier: d1 {d1_1d_change}, d2 {d2_1d_change}, d3 {d3_1d_change}, d4 {d4_1d_change}\nplain-language note you may draw on: {judgment}",
       "fallback": "bubblegauge {median}/{score_scale_max} {action_band}{override_suffix}. range {iqr_lo}-{iqr_hi}. SPY {spy_trend}, QQQ {qqq_trend}. Flags {red_flag_count}/{red_flag_total}.",
-      "notes": "Supersedes SMS_PROMPT (app/engine/sms_report.py). SMS cap tightens 160 -> 150 per Q27; iMessage variant is new per Q28/Q31. Fallback mirrors deterministic_report(): {override_suffix} is the literal ' OVERRIDE' when override_fired else empty; single ASCII template satisfies both channel caps. score_scale_max (100) and red_flag_total (4) are injected so the digits of '62/100' and '2/4' are verbatim-grounded. The unicode escapes in the emoji allowlist line should be materialized as the literal emoji (bar chart, calendar, magnifier, stopwatch, wrench, check mark) when the template is committed.",
+      "notes": "Fallback mirrors deterministic_report(): {override_suffix} is the literal ' OVERRIDE' when override_fired else empty; one ASCII template fits both channels. score_scale_max (100) and red_flag_total (4) are injected so the digits of '62/100' and '2/4' are verbatim-grounded. Since 2026-10-04 the facts also carry what GET /api/v1/score serves and the snapshots a day and a week earlier (app/services/digest.py), and the iMessage cap is 350.",
       "translations": {
         "de": {
           "fallback": "bubblegauge {median}/{score_scale_max} {action_band}{override_suffix}. Spanne {iqr_lo}-{iqr_hi}. SPY {spy_trend}, QQQ {qqq_trend}. Flaggen {red_flag_count}/{red_flag_total}."

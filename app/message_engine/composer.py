@@ -59,6 +59,15 @@ _SLOT_RE = re.compile(r"\{([A-Za-z_][A-Za-z_0-9]*)\}")
 #: 900 s), so the reply, the checks and the claim's close fit after it.
 _DEADLINE_S = 600.0
 
+#: How hard the model reasons before it writes: little, as it writes from
+#: numbers and references it is given. On the configured route the model's
+#: thinking is silence - the gateway's heartbeats reach the client only with
+#: the first output - and the route gives up after about 250-300 s of it.
+#: Measured 2026-10-04 through the edge: at the route's default effort the
+#: production digest prompt waited 97 s for its first byte and the richer one
+#: of decision 28 failed at 256-303 s; at "low" they answered in 9 and 14 s.
+_EFFORT = "low"
+
 
 @dataclass(frozen=True)
 class Composed:
@@ -169,15 +178,23 @@ _CONTROL_RE = re.compile(
 #: number, a structure - is no fact: the template shows a dash and the
 #: prompt leaves it out.
 _TRENDS = frozenset({"IN", "OUT", "unknown", "?"})
+_DIGEST_BANDS = frozenset(ACTION_BANDS) | {"suppressed (block degraded)", "de-risk (data degraded)"}
 WORDS: dict[str, frozenset[str]] = {
     # the digest: the snapshot's band - the whole of its producer's range,
     # action_band_with_override's three bands and the two degraded displays
     # compute.py folds the coverage gate into; neither the bare "suppressed"
-    # state nor any other word is a band of it - and legs.faber_state's trend
-    "action_band": frozenset(ACTION_BANDS) | {"suppressed (block degraded)", "de-risk (data degraded)"},
+    # state nor any other word is a band of it - and legs.faber_state's trend,
+    # today and in the earlier snapshots it is compared with
+    "action_band": _DIGEST_BANDS,
+    "band_1d_ago": _DIGEST_BANDS,
+    "band_7d_ago": _DIGEST_BANDS,
     "override_suffix": frozenset({"", " OVERRIDE"}),
     "spy_trend": _TRENDS,
     "qqq_trend": _TRENDS,
+    "spy_trend_1d_ago": _TRENDS,
+    "qqq_trend_1d_ago": _TRENDS,
+    # the VIX term structure, v_vix.state's three states
+    "vol_state": frozenset({"contango", "flat", "backwardation"}),
     # the alert contract's facts the entries declare as words
     # (app/alerts/render_context.py): the band states, the asset, the next
     # check. The other facts an entry declares there are numbers by their
@@ -193,7 +210,12 @@ WORDS: dict[str, frozenset[str]] = {
     "F_NEXT_CHECK": frozenset(f"{hour:02d}:00" for hour in RECOMPUTE_SLOT_HOURS),
 }
 JUDGMENT = "judgment"
-JUDGMENT_MAX = 180
+#: The judgment's own cap (app/engine/judgment.py writes at most 300
+#: characters), so the model reads the whole note: at 180, 24 of production's
+#: last 60 notes reached it cut mid-sentence (2026-10-04). Its prompt carries
+#: computed numbers only (AGENTS.md ground rule 1), so the note holds no
+#: upstream or user text at any length.
+JUDGMENT_MAX = 300
 
 
 def typed(name: str, value: object) -> object | None:
@@ -273,11 +295,12 @@ _LANGUAGE_NAMES = {"en": "English", "de": "German"}
 
 #: What every message is: the same for each trigger.
 _SYSTEM = (
-    "You write one short message for the owner of bubblegauge, a personal research monitor of how "
-    "bubble-like US stock market conditions look. The owner reads every message and interprets it "
-    "for themselves. Say plainly what the numbers below show and, using the references, what they "
-    "mean. Use the numbers exactly as given and invent none. This is research, not advice: do not "
-    "tell the reader to buy, sell or hold anything."
+    "You write one message for the owner of bubblegauge, a personal research monitor of how "
+    "bubble-like US stock market conditions look. The message makes one point and explains it. The "
+    "owner reads every message and interprets it for themselves. Say plainly what the numbers below "
+    "show and, using the references and the framework, what they mean. Use the numbers exactly as "
+    "given and invent none. This is research, not advice: do not tell the reader to buy, sell or "
+    "hold anything."
 )
 
 
@@ -312,7 +335,8 @@ def prompt_for(trigger: str, entry: dict[str, Any], facts: dict[str, object],
                channel: Channel, settings: Settings) -> str:
     """What the model is given: the system, the trigger's role, task and data
     from the library with the numbers filled in, every fact the entry
-    declares by name, the references, and how to write the message.
+    declares by name, the references and, for the digest, the framework, and
+    how to write the message.
 
     ONLY THE DECLARED FACTS, TYPED (typed_facts): the entry's
     `grounding_fields` are the numbers its message is about, so a fact the
@@ -324,6 +348,7 @@ def prompt_for(trigger: str, entry: dict[str, Any], facts: dict[str, object],
                 for name, body in _SECTION_RE.findall(entry.get("prompt", ""))}
     numbers = "\n".join(f"  {name} = {value}" for name, value in sorted(shown.items()))
     references = context_material.render(context_material.references_for(trigger))
+    framework = context_material.framework_for(trigger)
     language = settings.message_language or LIBRARY_LANGUAGE
     # THE LENGTH AND THE ALPHABET AS THE CHECK COUNTS THEM: septets and GSM-7
     # on SMS, code points and the message alphabet on iMessage (#126 round 5,
@@ -342,6 +367,7 @@ def prompt_for(trigger: str, entry: dict[str, Any], facts: dict[str, object],
         f"ALL NUMBERS (name = value):\n{numbers}" if numbers else "",
         ("REFERENCES - what the indicators measure and where their data comes from:\n"
          f"{references}") if references else "",
+        f"FRAMEWORK - how the monitor reads its numbers:\n{framework}" if framework else "",
         (f"WRITE: one message in {_LANGUAGE_NAMES.get(language, language)}, for this channel only and "
          f"without naming a channel, plain text without links or phone numbers, {length}. Reply with the "
          f"message only."),
@@ -432,7 +458,8 @@ def compose(*, trigger: str, channel: Channel,
     moment = now or datetime.now(UTC)
     started = monotonic()
     try:
-        answer = complete(user=prompt, deadline_s=_DEADLINE_S, settings=settings).text
+        answer = complete(user=prompt, deadline_s=_DEADLINE_S, reasoning_effort=_EFFORT,
+                          settings=settings).text
     except Exception as exc:  # noqa: BLE001 - the promise is "never raises"
         failed_at = moment + timedelta(seconds=monotonic() - started)
         _close(claim_id, gov.Outcome.TECHNICAL_ERROR, type(exc).__name__, failed_at)

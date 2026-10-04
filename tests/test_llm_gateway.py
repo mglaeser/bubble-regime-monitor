@@ -358,6 +358,21 @@ class TestRequestShapeAndAuth:
         assert "unit-test-credential" not in call["url"]  # pragma: allowlist secret
         assert "unit-test-credential" not in json.dumps(call["json"])  # pragma: allowlist secret
 
+    def test_a_caller_may_ask_for_a_reasoning_effort_and_nothing_else(self):
+        """The Responses API's own field, `reasoning.effort`: the digest asks
+        for "low" (app/message_engine/composer.py). Unasked, the payload
+        carries no reasoning field (the test above); an effort the API does
+        not name is refused before a request is made."""
+        http = _FakeHttpClient(_ok_response())
+        GatewayClient(_config(), http_client=http).complete(user="numbers", reasoning_effort="low")
+        assert http.calls[0]["json"]["reasoning"] == {"effort": "low"}
+        assert not ({"tools", "tool_choice", "functions", "thinking", "effort",
+                     "temperature"} & set(http.calls[0]["json"]))
+        for wrong in ("LOW", "max", "", True, 1):
+            with pytest.raises(GatewayConfigError, match="effort"):
+                GatewayClient(_config(), http_client=http).complete(user="numbers", reasoning_effort=wrong)
+        assert len(http.calls) == 1
+
     def test_authorization_header_uses_bearer_form(self):
         http = _FakeHttpClient(_ok_response())
         GatewayClient(_config(), http_client=http).complete(user="hello")
