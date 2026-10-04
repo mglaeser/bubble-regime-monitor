@@ -4,8 +4,9 @@ Every indicator's WHAT / HOW / WHY / references / caveats live here as data.
 Indicator module docstrings quote this registry; the /api/v1/indicators/{id}
 endpoint serves it verbatim.
 
-EPISTEMIC GUARDRAILS (verbatim, required in every scoring module docstring,
-every scoring API response `meta` block, and the README):
+EPISTEMIC GUARDRAILS (verbatim; the one full copy in the code. Every scoring
+API response's `meta` block carries their short form, EPISTEMIC_CAVEATS below,
+and the README carries them in full):
 
 1. NOT-A-PROBABILITY. The headline is a 0-100 regime heuristic = structured
    expert judgment; it is uncalibrated and is not investment advice.
