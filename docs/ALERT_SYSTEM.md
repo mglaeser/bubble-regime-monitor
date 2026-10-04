@@ -223,10 +223,10 @@ currently ask for, and should not be added without deciding that it should.
 
 ## 6. Priorities, budgets and quiet hours
 
-| class | channel | quiet hours | budget | default cooldown |
+| class | channel | quiet hours | budget | cooldown (each rule sets its own; stage 3) |
 |---|---|---|---|---|
-| P1 | immediate SMS | **ignored** | **exempt** | 48h |
-| P2 | bundled SMS | `[07:00, 22:00)` Europe/Berlin | non-P1 caps | 24h |
+| P1 | immediate, by iMessage or SMS | **ignored** | **exempt** | 48h; `structure.s3_tier_150` 30 days, `constellation.falsification_event` none |
+| P2 | bundled, by iMessage or SMS | `[07:00, 22:00)` Europe/Berlin | non-P1 caps | 6h to 30 days |
 | P3 | API / log only (weekly digest deleted, D2a) | n/a | none | n/a |
 | P4 | API / log only | n/a | none | n/a |
 

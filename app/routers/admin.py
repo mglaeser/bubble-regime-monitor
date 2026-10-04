@@ -186,12 +186,17 @@ def refresh_status(_: None = Depends(require_admin_key)) -> dict[str, Any]:
 @router.post(
     "/send-sms",
     summary="Send the daily digest now (X-API-Key required)",
-    description=("Builds the tiny LLM report from the latest snapshot and sends it over "
-                 "the configured transport — iMessage when IMESSAGE_ENABLED is set, "
-                 "otherwise sipgate SMS. Bypasses the schedule gate but still requires "
-                 "that transport's credentials + a recipient. The response names the "
-                 "transport that actually carried it. Path kept as /send-sms so existing "
-                 "operator scripts and bookmarks keep working."),
+    description=("Builds the daily digest from the latest snapshot and sends it over "
+                 "the configured transport — iMessage when IMESSAGE_ENABLED is set and "
+                 "the proxy URL, key and recipient are all configured, otherwise sipgate "
+                 "SMS when SMS_ENABLED is set. With the message engine off the digest is "
+                 "the template, no model is called, and it goes out even with both "
+                 "switches off, over whichever transport has credentials and a recipient "
+                 "(iMessage first). With the engine on it goes through the message engine "
+                 "(docs/MESSAGE_ENGINE.md) and needs the configured transport, like the "
+                 "scheduled run. The response names the transport that actually carried "
+                 "it. Path kept as /send-sms so existing operator scripts and bookmarks "
+                 "keep working."),
 )
 def send_sms_now(_: None = Depends(require_admin_key)) -> dict[str, Any]:
     from app.services.digest import send_daily_digest

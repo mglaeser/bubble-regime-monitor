@@ -1,5 +1,5 @@
 """APScheduler: full recompute every 4 hours (02/06/10/14/18/22 UTC), an
-optional once-daily SMS digest, plus the on-demand run via
+optional once-daily digest (iMessage or SMS), plus the on-demand run via
 POST /api/v1/admin/refresh."""
 
 from __future__ import annotations

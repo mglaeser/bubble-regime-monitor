@@ -6,18 +6,23 @@ or may not have reached the provider". Treating the second as the first
 produces duplicate SMS; treating it as success loses alerts. So this sender
 returns four outcomes and the dispatcher treats each differently:
 
-    CONFIRMED_SUCCESS               2xx. Delivered as far as we can know.
-    DEFINITE_TRANSIENT_NOT_ACCEPTED The request provably never landed
-                                    (connect failure, 429, clear 5xx). Retry.
+    CONFIRMED_SUCCESS               sipgate's 204, or the proxy's 202 with an
+                                    accepted send operation. Delivered as far
+                                    as we can know.
+    DEFINITE_TRANSIENT_NOT_ACCEPTED The request provably never landed (no
+                                    connection, 429, another unlisted 4xx).
+                                    Retry.
     DEFINITE_PERMANENT_REJECTION    Validation/auth/config. Never retry.
-    AMBIGUOUS_AFTER_TRANSMISSION    The bytes may have reached the provider and
-                                    the response was lost. NEVER auto-retried.
+    AMBIGUOUS_AFTER_TRANSMISSION    The bytes may have reached the provider (a
+                                    lost response, a 3xx, a 5xx). NEVER
+                                    auto-retried.
 
 Exactly-once delivery is not promised, and this file does not pretend
 otherwise. It makes the uncertainty visible instead.
 
-The legacy daily digest keeps using `app/notify/sipgate.py` until the Stage 4
-cutover; this is the alert dispatcher's sender.
+The daily digest, the failure alarm and the deploy note send through
+`app/notify/` (`imessage.py`, `sipgate.py`), whose result is only ok or not;
+this is the alert dispatcher's sender.
 """
 
 from __future__ import annotations

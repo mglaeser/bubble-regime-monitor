@@ -54,10 +54,11 @@ class Settings(BaseSettings):
     def effective_sec_ua(self) -> str:
         return self.sec_edgar_ua or self.sec_user_agent
 
-    # Daily SMS digest via the sipgate REST API v2 (POST /sessions/sms).
-    # Auth is a Personal Access Token (token ID + token, scope
-    # sessions:sms:write). Sent once a day at SMS_DAILY_HOUR:SMS_DAILY_MINUTE
-    # UTC; disabled unless SMS_ENABLED=true and credentials are present.
+    # The SMS transport, the sipgate REST API v2 (POST /sessions/sms), for the
+    # daily digest, the failure alarm and the alerts when iMessage is not
+    # chosen (daily_digest_transport below). Auth is a Personal Access Token
+    # (token ID + token, scope sessions:sms:write). The digest goes out once a
+    # day at SMS_DAILY_HOUR:SMS_DAILY_MINUTE UTC over the chosen transport.
     sms_enabled: bool = False
     sipgate_token_id: str = ""       # Personal Access Token ID (Basic-auth username)
     sipgate_token: str = ""          # Personal Access Token (Basic-auth password)
