@@ -12,12 +12,10 @@ when the committed Stage-1 rollout leaves them empty. An operator checking
 
 from __future__ import annotations
 
-import base64
-import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy import and_, exists, or_, select
 
@@ -46,18 +44,6 @@ from app.security import READ_RATE_LIMIT, limiter, require_admin_key
 router = APIRouter(prefix="/api/v1/alerts", tags=["alerts"])
 
 MAX_PAGE = 500
-CURSOR_VERSION = "v2"
-CURSOR_TTL = timedelta(hours=24)
-
-
-class CursorError(ValueError):
-    """A sanitized cursor refusal that an endpoint renders as RFC 9457."""
-
-    def __init__(self, status: int, title: str, detail: str) -> None:
-        super().__init__(detail)
-        self.status = status
-        self.title = title
-        self.detail = detail
 
 
 def problem(status: int, title: str, detail: str, *, type_: str = "about:blank",
@@ -88,71 +74,41 @@ def problem(status: int, title: str, detail: str, *, type_: str = "about:blank",
     )
 
 
-def _encode_cursor(payload: dict[str, Any]) -> str:
-    document = dict(payload)
-    document["v"] = CURSOR_VERSION
-    document["issued_at"] = datetime.now(UTC).isoformat()
-    raw = json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
-    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+def _next_cursor(at: datetime, row_id: str) -> str:
+    """The position of a page's last row, `<RFC 3339 time>~<id>` (owner
+    decision D3b, 2026-10-03): a plain keyset position, not a capability - no
+    signature, no expiry, no binding to a listing or a filter. The time holds
+    no "~" (iso() writes digits, "-", ":", "T", "." and "Z"), so the first "~"
+    ends it; an id, a Crockford ULID, holds none either."""
+    return f"{iso(at)}~{row_id}"
 
 
-def _cursor_datetime(value: object, *, field: str) -> datetime:
-    if not isinstance(value, str):
-        raise CursorError(422, "Malformed cursor", f"cursor {field} must be a timestamp")
+def _after(timestamp_column: Any, id_column: Any, cursor: str) -> Any:
+    """The rows strictly after the position `cursor` names, newest first.
+
+    The cursor only positions: the namespace comes from the settings and the
+    filters from the request, never from the cursor, so a cursor from another
+    listing, filter or namespace cannot widen what a read returns. One that
+    names no position - no "~", no id, a time `datetime.fromisoformat` refuses
+    or no UTC instant can hold - is refused at the boundary with a 422, as
+    FastAPI refuses a malformed `limit`, never a 500 (AGENTS.md rule 3). A time
+    without an offset is UTC, as iso() reads one; any other offset is moved to
+    UTC, because the column holds the UTC wall clock and a time is bound to
+    SQLite without its offset.
+    """
+    moment, _, row_id = cursor.partition("~")
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise CursorError(
-            422, "Malformed cursor", f"cursor {field} is not an RFC 3339 timestamp"
-        ) from exc
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
-
-
-def _decode_cursor(
-    cursor: str,
-    *,
-    resource: str,
-    mode: str,
-    live_profile: str,
-    filters: dict[str, object] | None = None,
-) -> dict[str, Any]:
-    padded = cursor + "=" * (-len(cursor) % 4)
-    try:
-        raw = base64.b64decode(padded, altchars=b"-_", validate=True)
-        payload = json.loads(raw)
-    except Exception as exc:
-        raise CursorError(
-            422, "Malformed cursor", "cursor is not valid opaque pagination data"
-        ) from exc
-    if not isinstance(payload, dict):
-        raise CursorError(422, "Malformed cursor", "cursor payload must be an object")
-    if payload.get("v") != CURSOR_VERSION:
-        raise CursorError(
-            410, "Cursor expired", "cursor version is no longer supported")
-    issued_at = _cursor_datetime(payload.get("issued_at"), field="issued_at")
-    now = datetime.now(UTC)
-    if issued_at > now + timedelta(minutes=5):
-        raise CursorError(422, "Malformed cursor", "cursor issue time is in the future")
-    if now - issued_at > CURSOR_TTL:
-        raise CursorError(410, "Cursor expired", "cursor is older than 24 hours")
-    if payload.get("resource") != resource:
-        raise CursorError(422, "Cursor query mismatch", "cursor belongs to another resource")
-    if (payload.get("mode"), payload.get("live_profile")) != (mode, live_profile):
-        raise CursorError(
-            422, "Cursor namespace mismatch",
-            "cursor belongs to another alert mode or live profile",
-        )
-    for key, value in (filters or {}).items():
-        if payload.get(key) != value:
-            raise CursorError(
-                422, "Cursor query mismatch",
-                f"cursor was issued for a different {key} filter",
-            )
-    if not isinstance(payload.get("sort_id"), str) or not payload["sort_id"]:
-        raise CursorError(422, "Malformed cursor", "cursor sort_id is missing")
-    payload["sort_at_parsed"] = _cursor_datetime(
-        payload.get("sort_at"), field="sort_at")
-    return payload
+        if not row_id:
+            raise ValueError("no id")
+        at = datetime.fromisoformat(moment)
+        at = (at if at.tzinfo else at.replace(tzinfo=UTC)).astimezone(UTC)
+    except (ValueError, OverflowError) as exc:
+        raise HTTPException(
+            status_code=422,
+            detail="cursor must be a next_cursor value: <RFC 3339 time>~<id>",
+            # the directives the cursor's problem() answer carried
+            headers={"Cache-Control": "no-store", "Vary": "X-API-Key"}) from exc
+    return or_(timestamp_column < at, and_(timestamp_column == at, id_column < row_id))
 
 
 def _cache(response: Response, *, max_age: int) -> None:
@@ -163,20 +119,6 @@ def _cache(response: Response, *, max_age: int) -> None:
 def _no_store(response: Response) -> None:
     response.headers["Cache-Control"] = "private, no-store"
     response.headers["Vary"] = "X-API-Key"
-
-
-def _cursor_problem(exc: CursorError) -> JSONResponse:
-    return problem(exc.status, exc.title, exc.detail)
-
-
-def _before_cursor(timestamp_column: Any, id_column: Any, payload: dict[str, Any]) -> Any:
-    return or_(
-        timestamp_column < payload["sort_at_parsed"],
-        and_(
-            timestamp_column == payload["sort_at_parsed"],
-            id_column < payload["sort_id"],
-        ),
-    )
 
 
 def _mode() -> tuple[str, str]:
@@ -320,14 +262,7 @@ def get_episodes(request: Request, response: Response,
     if open_only:
         conditions.append(AlertEpisode.is_open.is_(True))
     if cursor:
-        try:
-            cursor_payload = _decode_cursor(
-                cursor, resource="episodes", mode=mode, live_profile=profile,
-                filters={"open_only": open_only})
-        except CursorError as exc:
-            return _cursor_problem(exc)
-        conditions.append(_before_cursor(
-            AlertEpisode.opened_at, AlertEpisode.episode_id, cursor_payload))
+        conditions.append(_after(AlertEpisode.opened_at, AlertEpisode.episode_id, cursor))
     with session_scope() as session:
         rows = session.execute(
             select(AlertEpisode).where(*conditions)
@@ -337,11 +272,7 @@ def get_episodes(request: Request, response: Response,
     items = [episode_projection(row) for row in rows]
     payload = {
         "items": items,
-        "next_cursor": _encode_cursor({
-            "resource": "episodes", "mode": mode, "live_profile": profile,
-            "open_only": open_only, "sort_at": iso(rows[-1].opened_at),
-            "sort_id": rows[-1].episode_id,
-        })
+        "next_cursor": _next_cursor(rows[-1].opened_at, rows[-1].episode_id)
         if len(rows) == limit else None,
     }
     _cache(response, max_age=30)
@@ -432,13 +363,7 @@ def get_events(request: Request, response: Response,
     mode, profile = _mode()
     conditions = [_event_namespace(mode, profile)]
     if cursor:
-        try:
-            cursor_payload = _decode_cursor(
-                cursor, resource="events", mode=mode, live_profile=profile)
-        except CursorError as exc:
-            return _cursor_problem(exc)
-        conditions.append(_before_cursor(
-            AlertEvent.occurred_at, AlertEvent.event_id, cursor_payload))
+        conditions.append(_after(AlertEvent.occurred_at, AlertEvent.event_id, cursor))
     with session_scope() as session:
         rows = session.execute(
             select(AlertEvent).where(*conditions)
@@ -447,10 +372,7 @@ def get_events(request: Request, response: Response,
         ).scalars().all()
     payload = {
         "items": [_event_projection(row) for row in rows],
-        "next_cursor": _encode_cursor({
-            "resource": "events", "mode": mode, "live_profile": profile,
-            "sort_at": iso(rows[-1].occurred_at), "sort_id": rows[-1].event_id,
-        })
+        "next_cursor": _next_cursor(rows[-1].occurred_at, rows[-1].event_id)
         if len(rows) == limit else None,
     }
     _cache(response, max_age=30)
@@ -480,13 +402,7 @@ def get_deliveries(request: Request, response: Response,
         AlertDelivery.live_profile == profile,
     ]
     if cursor:
-        try:
-            cursor_payload = _decode_cursor(
-                cursor, resource="deliveries", mode=mode, live_profile=profile)
-        except CursorError as exc:
-            return _cursor_problem(exc)
-        conditions.append(_before_cursor(
-            AlertDelivery.created_at, AlertDelivery.delivery_id, cursor_payload))
+        conditions.append(_after(AlertDelivery.created_at, AlertDelivery.delivery_id, cursor))
     with session_scope() as session:
         rows = session.execute(
             select(AlertDelivery).where(*conditions).order_by(
@@ -495,10 +411,8 @@ def get_deliveries(request: Request, response: Response,
         ).scalars().all()
     payload = {
         "items": [_delivery_projection(r) for r in rows],
-        "next_cursor": _encode_cursor({
-            "resource": "deliveries", "mode": mode, "live_profile": profile,
-            "sort_at": iso(rows[-1].created_at), "sort_id": rows[-1].delivery_id,
-        }) if len(rows) == limit else None,
+        "next_cursor": _next_cursor(rows[-1].created_at, rows[-1].delivery_id)
+        if len(rows) == limit else None,
     }
     _cache(response, max_age=30)
     return payload
