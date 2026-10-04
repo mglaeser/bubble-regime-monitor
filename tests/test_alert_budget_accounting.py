@@ -217,36 +217,47 @@ def test_current_lease_is_not_double_counted():
     assert usage.reserved == 0
 
 
-def test_dispatch_reserves_headroom_for_an_earlier_ready_delivery():
-    """A later worker cannot spend the queue head's remaining budget slot."""
+def test_dispatch_reserves_rows_in_flight_and_no_queued_row():
+    """The dispatch recheck counts confirmed sends plus every OTHER row a
+    worker holds (LEASED or SENDING). A queued READY row reserves nothing,
+    whatever its rank (re-evaluation A8): it spends no budget until it is
+    claimed, and from its claim to its outcome it is in flight here.
+    Pinned against the production caps, 5 per 24 h and 8 per 168 h."""
+    from app.alerts import budgets
     from app.alerts.outbox import dispatch_budget_usage
 
     episode_id = _prepare_graph()
     with session_scope() as session:
         episode = session.get(AlertEpisode, episode_id)
         assert episode is not None
-        for offset in (timedelta(hours=1), timedelta(hours=2)):
+        for sent_ago in (timedelta(hours=1), timedelta(hours=2), timedelta(hours=3),
+                         timedelta(days=2), timedelta(days=3), timedelta(days=4)):
             _add_delivery(
                 session,
                 episode,
                 status=TransportStatus.SENT,
                 planning_state=PlanningState.NONE,
-                sent_at=NOW - offset,
+                sent_at=NOW - sent_ago,
             )
-        _add_delivery(
-            session,
-            episode,
-            status=TransportStatus.PENDING,
-            created_at=NOW - timedelta(minutes=10),
-        )
-        current = _add_delivery(
-            session,
-            episode,
-            status=TransportStatus.LEASED,
-            created_at=NOW - timedelta(minutes=5),
-        )
+        # Queued and due, and ranked BEFORE the current row in the claim order.
+        earlier = NOW - timedelta(minutes=10)
+        _add_delivery(session, episode, status=TransportStatus.PENDING, created_at=earlier)
+        _add_delivery(session, episode, status=TransportStatus.RETRY_DUE, created_at=earlier)
+        # Another worker's lease.
+        _add_delivery(session, episode, status=TransportStatus.LEASED, created_at=earlier)
+        current = _add_delivery(session, episode, status=TransportStatus.LEASED)
         session.flush()
-        usage = dispatch_budget_usage(
+        before = dispatch_budget_usage(
+            session,
+            mode="shadow",
+            live_profile="default",
+            now=NOW,
+            current_delivery_id=current,
+        )
+        # Another request goes on the wire.
+        _add_delivery(session, episode, status=TransportStatus.SENDING, created_at=earlier)
+        session.flush()
+        after = dispatch_budget_usage(
             session,
             mode="shadow",
             live_profile="default",
@@ -254,47 +265,8 @@ def test_dispatch_reserves_headroom_for_an_earlier_ready_delivery():
             current_delivery_id=current,
         )
 
-    assert (usage.sent_24h, usage.reserved) == (2, 1)
-    assert check_budget(2, usage, LIMITS).reason == "cap_24h"
-
-
-def test_dispatch_does_not_reserve_for_a_later_ready_delivery():
-    """Queue reservations are ordered, so the head can still make progress."""
-    from app.alerts.outbox import dispatch_budget_usage
-
-    episode_id = _prepare_graph()
-    with session_scope() as session:
-        episode = session.get(AlertEpisode, episode_id)
-        assert episode is not None
-        for offset in (timedelta(hours=1), timedelta(hours=2)):
-            _add_delivery(
-                session,
-                episode,
-                status=TransportStatus.SENT,
-                planning_state=PlanningState.NONE,
-                sent_at=NOW - offset,
-            )
-        same_created_at = NOW - timedelta(minutes=5)
-        current = _add_delivery(
-            session,
-            episode,
-            status=TransportStatus.LEASED,
-            created_at=same_created_at,
-        )
-        _add_delivery(
-            session,
-            episode,
-            status=TransportStatus.PENDING,
-            created_at=same_created_at,
-        )
-        session.flush()
-        usage = dispatch_budget_usage(
-            session,
-            mode="shadow",
-            live_profile="default",
-            now=NOW,
-            current_delivery_id=current,
-        )
-
-    assert (usage.sent_24h, usage.reserved) == (2, 0)
-    assert check_budget(2, usage, LIMITS).allowed is True
+    assert (before.sent_24h, before.sent_168h, before.reserved) == (3, 6, 1)
+    assert check_budget(2, before, budgets.LIMITS).allowed is True
+    assert after.reserved == 2
+    assert after.with_reservation() == (budgets.LIMITS.cap_24h, budgets.LIMITS.cap_168h)
+    assert check_budget(2, after, budgets.LIMITS).reason == "cap_24h"

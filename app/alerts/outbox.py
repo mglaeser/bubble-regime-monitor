@@ -21,13 +21,12 @@ from collections.abc import Collection
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import and_, case, func, or_, select, update
+from sqlalchemy import case, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.alerts.budgets import (
     BUDGETED_KINDS,
     DISPATCH_IN_FLIGHT_STATUSES,
-    DISPATCH_ORDERED_READY_STATUSES,
     PLANNER_RESERVED_STATUSES,
     BudgetDecision,
     BudgetUsage,
@@ -370,6 +369,11 @@ def claim(session: Session, delivery_id: str, *, owner: str, now: datetime,
     exclusive: a second worker's UPDATE matches zero rows. The live condition
     (`_admitted`) is part of the same UPDATE, so what the listing admitted is
     judged again in the statement that takes the lease (#153 round 5).
+
+    The won row comes back from that same statement (UPDATE ... RETURNING,
+    SQLite 3.35+, which the boot's migrations already need: 0021 and 0022 use
+    the native DROP COLUMN of the same release). There is no rowcount route:
+    a database without RETURNING refuses the statement and the claim raises.
     """
     statement = (
         update(AlertDelivery)
@@ -388,19 +392,9 @@ def claim(session: Session, delivery_id: str, *, owner: str, now: datetime,
                 # append-only attempt event remains the durable audit record.
                 request_started_at=None,
                 updated_at=now)
+        .returning(AlertDelivery.delivery_id)
     )
-    dialect = session.get_bind().dialect
-    if bool(getattr(dialect, "update_returning", False)):
-        # Prefer the row identity returned by the same conditional UPDATE.  It
-        # is stronger than trusting driver rowcount semantics and is available
-        # on the SQLite version required by the service.  The fallback below
-        # remains for older/alternate dialects and is exercised separately.
-        result = session.execute(statement.returning(AlertDelivery.delivery_id))
-        return result.scalar_one_or_none() == delivery_id
-
-    result = session.execute(statement)
-    rowcount = getattr(result, "rowcount", None)
-    return isinstance(rowcount, int) and rowcount == 1
+    return session.execute(statement).scalar_one_or_none() == delivery_id
 
 
 def release(session: Session, delivery: AlertDelivery, *, now: datetime) -> None:
@@ -708,60 +702,34 @@ def dispatch_budget_usage(
     now: datetime,
     current_delivery_id: str,
 ) -> BudgetUsage:
-    """Authoritative usage with deterministic queued-slot reservations.
+    """Authoritative usage: confirmed sends plus every OTHER row in flight.
 
-    Every other in-flight request reserves headroom.  READY queued work also
-    reserves it, but only when it ranks before this delivery in the exact
-    claim order.  Counting every queued row would deadlock the head of the
-    queue; counting none lets later workers double-spend its final slot.
+    It counts the SENT market deliveries of both windows and reserves a slot
+    for each other budgeted delivery a worker holds (LEASED or SENDING),
+    never the current one. That alone keeps the caps: a row spends budget
+    only after its claim, and from its claim to its outcome it is in flight,
+    so of the rows that are sent, the one checked last counted all the
+    others. Two overlapping dispatchers (the scheduler's and `bubblegauge
+    alerts dispatch --once`) cannot both spend the last slot.
+
+    Queued READY rows reserve nothing (re-evaluation A8). The reservation for
+    READY rows ranked before this one in the claim order went. The one
+    scheduled dispatcher takes the queue in that order, so such a row was
+    one the pass had already passed or one made READY after the pass listed
+    its rows - or, in live mode, one the claim never admits (`_admitted`),
+    which held a slot for as long as it stayed queued. It never guarded the
+    caps, only which row got the last slot. The accepted cost: a P2 that
+    becomes READY mid-pass can lose the last slot to the row being checked;
+    it is then held for budget and rechecked 30 minutes later
+    (BUDGET_RECHECK_INTERVAL).
     """
-    usage = _budget_usage(
+    return _budget_usage(
         session,
         mode=mode,
         live_profile=live_profile,
         now=now,
         reserved_statuses=DISPATCH_IN_FLIGHT_STATUSES,
         exclude_delivery_id=current_delivery_id,
-    )
-    current = session.get(AlertDelivery, current_delivery_id)
-    if current is None:
-        raise ValueError(f"current delivery {current_delivery_id!r} does not exist")
-
-    live_member_exists = select(AlertDeliveryMember.delivery_id).where(
-        AlertDeliveryMember.delivery_id == AlertDelivery.delivery_id,
-        AlertDeliveryMember.dropped_at.is_(None),
-    ).exists()
-    ranks_before_current = or_(
-        AlertDelivery.priority < current.priority,
-        and_(
-            AlertDelivery.priority == current.priority,
-            AlertDelivery.created_at < current.created_at,
-        ),
-        and_(
-            AlertDelivery.priority == current.priority,
-            AlertDelivery.created_at == current.created_at,
-            AlertDelivery.delivery_id < current.delivery_id,
-        ),
-    )
-    earlier_ready = int(session.execute(
-        select(func.count()).select_from(AlertDelivery).where(
-            AlertDelivery.mode == mode,
-            AlertDelivery.live_profile == live_profile,
-            AlertDelivery.priority > 1,
-            AlertDelivery.delivery_kind.in_(sorted(BUDGETED_KINDS)),
-            AlertDelivery.transport_status.in_(
-                sorted(DISPATCH_ORDERED_READY_STATUSES)),
-            AlertDelivery.planning_state == PlanningState.READY,
-            (AlertDelivery.not_before.is_(None)) | (AlertDelivery.not_before <= now),
-            AlertDelivery.delivery_id != current_delivery_id,
-            live_member_exists,
-            ranks_before_current,
-        )
-    ).scalar_one())
-    return BudgetUsage(
-        sent_24h=usage.sent_24h,
-        sent_168h=usage.sent_168h,
-        reserved=usage.reserved + earlier_ready,
     )
 
 
