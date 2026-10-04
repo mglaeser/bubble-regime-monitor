@@ -194,79 +194,31 @@ def build_red_flag_meta(
     booleans come from the already-evaluated `red_flags`.
     """
     values = red_flags.as_dict()
-    facts: dict[str, RedFlagFact] = {}
+
+    def fact(flag_id: str, *, available: bool, fireable: bool, distance: float | None,
+             unit: str, period_start: str | None, period_end: str | None,
+             stale: bool | None) -> RedFlagFact:
+        active = values[FLAG_IDS[flag_id]]
+        return RedFlagFact(
+            flag_id=flag_id,
+            source_key=FLAG_IDS[flag_id],
+            active=active,
+            fireable=fireable,
+            state=_flag_state(active=active, fireable=fireable, available=available),
+            distance_to_threshold=_round_or_none(distance),
+            unit=unit,
+            period_start=period_start,
+            period_end=period_end,
+            published_at=None,          # no vendor publication timestamp is available
+            observed_at=observed_at,
+            data_state=_data_state(available=available, stale=stale),
+        )
 
     # rf1 — GSADF explosive AND non-contested. Contested is a GOVERNANCE block:
     # the statistic may be computable while the flag can never fire.
     rf1_available = gsadf_available and gsadf_stat is not None and gsadf_cv95 is not None
-    facts["rf1"] = RedFlagFact(
-        flag_id="rf1",
-        source_key=FLAG_IDS["rf1"],
-        active=values[FLAG_IDS["rf1"]],
-        fireable=rf1_available and not gsadf_contested,
-        state=_flag_state(
-            active=values[FLAG_IDS["rf1"]],
-            fireable=rf1_available and not gsadf_contested,
-            available=rf1_available,
-        ),
-        distance_to_threshold=(
-            _round_or_none(gsadf_stat - gsadf_cv95)
-            if gsadf_stat is not None and gsadf_cv95 is not None
-            else None
-        ),
-        unit="stat",
-        period_start=None,          # GSADF is a window statistic; its start is not published
-        period_end=gsadf_as_of,
-        published_at=None,          # no vendor publication timestamp is available
-        observed_at=observed_at,
-        data_state=_data_state(available=rf1_available, stale=gsadf_stale),
-    )
-
-    # rf2 — semiconductor 2-yr net-of-market run-up >= 150 pp.
-    facts["rf2"] = RedFlagFact(
-        flag_id="rf2",
-        source_key=FLAG_IDS["rf2"],
-        active=values[FLAG_IDS["rf2"]],
-        fireable=semi_runup_pp is not None,
-        state=_flag_state(
-            active=values[FLAG_IDS["rf2"]],
-            fireable=semi_runup_pp is not None,
-            available=semi_runup_pp is not None,
-        ),
-        distance_to_threshold=(
-            _round_or_none(semi_runup_pp - _SEMI_RUNUP_GE_PP) if semi_runup_pp is not None else None
-        ),
-        unit="pp",
-        period_start=None,
-        period_end=semis_as_of,
-        published_at=None,
-        observed_at=observed_at,
-        data_state=_data_state(available=semi_runup_pp is not None, stale=semis_stale),
-    )
-
     # rf3 — HY OAS widened > 100 bps above its trailing tights.
     rf3_available = hy_oas_bps is not None and hy_oas_tight_bps is not None
-    facts["rf3"] = RedFlagFact(
-        flag_id="rf3",
-        source_key=FLAG_IDS["rf3"],
-        active=values[FLAG_IDS["rf3"]],
-        fireable=rf3_available,
-        state=_flag_state(
-            active=values[FLAG_IDS["rf3"]], fireable=rf3_available, available=rf3_available
-        ),
-        distance_to_threshold=(
-            _round_or_none((hy_oas_bps - hy_oas_tight_bps) - _HY_OAS_WIDEN_GT_BPS)
-            if rf3_available
-            else None
-        ),
-        unit="bps",
-        period_start=hy_oas_as_of,   # daily observation: its economic period is that day
-        period_end=hy_oas_as_of,
-        published_at=None,
-        observed_at=observed_at,
-        data_state=_data_state(available=rf3_available, stale=hy_oas_stale),
-    )
-
     # rf4 — breadth < 50% while the index sits within 2% of its ATH.
     #
     # TWO LEGS, and fireability needs BOTH. `index_within_2pct_of_ath` is a
@@ -281,26 +233,32 @@ def build_red_flag_meta(
     # `override_fireable_universe_count`, so overstating it understates how
     # close the non-compensatory override is to firing.
     rf4_available = breadth_pct is not None and near_ath_available
-    facts["rf4"] = RedFlagFact(
-        flag_id="rf4",
-        source_key=FLAG_IDS["rf4"],
-        active=values[FLAG_IDS["rf4"]],
-        fireable=rf4_available,
-        state=_flag_state(
-            active=values[FLAG_IDS["rf4"]],
-            fireable=rf4_available,
-            available=rf4_available,
-        ),
-        distance_to_threshold=(
-            _round_or_none(breadth_pct - _BREADTH_LT_PCT) if breadth_pct is not None else None
-        ),
-        unit="pct",
-        period_start=breadth_as_of,
-        period_end=breadth_as_of,
-        published_at=None,
-        observed_at=observed_at,
-        data_state=_data_state(available=rf4_available, stale=breadth_stale),
-    )
+    facts = {
+        # GSADF is a window statistic; its start is not published.
+        "rf1": fact("rf1", available=rf1_available,
+                    fireable=rf1_available and not gsadf_contested,
+                    distance=(gsadf_stat - gsadf_cv95
+                              if gsadf_stat is not None and gsadf_cv95 is not None else None),
+                    unit="stat", period_start=None, period_end=gsadf_as_of, stale=gsadf_stale),
+        # rf2 — semiconductor 2-yr net-of-market run-up >= 150 pp.
+        "rf2": fact("rf2", available=semi_runup_pp is not None,
+                    fireable=semi_runup_pp is not None,
+                    distance=(semi_runup_pp - _SEMI_RUNUP_GE_PP
+                              if semi_runup_pp is not None else None),
+                    unit="pp", period_start=None, period_end=semis_as_of, stale=semis_stale),
+        # A daily observation: its economic period is that day.
+        "rf3": fact("rf3", available=rf3_available, fireable=rf3_available,
+                    distance=((hy_oas_bps - hy_oas_tight_bps) - _HY_OAS_WIDEN_GT_BPS
+                              if hy_oas_bps is not None and hy_oas_tight_bps is not None
+                              else None),
+                    unit="bps", period_start=hy_oas_as_of, period_end=hy_oas_as_of,
+                    stale=hy_oas_stale),
+        # The distance needs breadth alone; fireability needs both legs.
+        "rf4": fact("rf4", available=rf4_available, fireable=rf4_available,
+                    distance=breadth_pct - _BREADTH_LT_PCT if breadth_pct is not None else None,
+                    unit="pct", period_start=breadth_as_of, period_end=breadth_as_of,
+                    stale=breadth_stale),
+    }
 
     return {
         "contract_version": ALERT_CONTRACT_VERSION,
