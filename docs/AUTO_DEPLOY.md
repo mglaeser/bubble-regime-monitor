@@ -129,18 +129,10 @@ socket, then scheduled none - while `systemctl` kept working over D-Bus
 (2026-10-02). The repair is `systemctl --user daemon-reexec` and a restart
 of `bubblegauge.service`.
 
-## The dead-man's switch
 
-Set `HEALTHCHECKS_PING_URL` in `.env` to a Healthchecks check's ping URL
-(`https://hc-ping.com/<uuid>`). The service pings it after every successful
-recompute, and nothing after a failed one, which the failure alarm reports at
-once. Configure the check with
-a **4 h period** (the recompute cadence) and a **1 h grace**; Healthchecks then
-alerts on its own channels when the pings stop, which covers the one outage
-the service cannot report itself.
+## Outages
 
-A check alerts only once it has been pinged: until then it is "New", and a
-host lost before the first successful recompute would alert nobody. So after
-setting the URL and restarting the service, prime the check with a recompute
-(`POST /api/v1/admin/refresh`, or the next 4-hourly slot) and confirm in
-Healthchecks that it shows **Up** before relying on it.
+The service reports a failed or stuck recompute itself (the failure alarm),
+and the host reports a failed release or watchdog run (the host notices,
+`deploy/notify-outage.sh`). A host that is down reports nothing: by the
+owner's decision (2026-10-04) there is no external monitor.

@@ -147,13 +147,12 @@ def run_recompute_guarded() -> None:
             # The attempt this run IS, so a wedged run already reported by the
             # watchdog is not counted a second time when it finally gives up.
             notify_recompute_outcome(failure, attempt=str(_last.get("started_at") or ""))
-            # The dead-man's switch (owner decision D6): one report per run,
-            # under the same lock as the alarm. Only a success pings, so the
-            # order of pings cannot matter; the call returns within a deadline
-            # and never raises.
-            from app.services.healthchecks import ping
-
-            ping(failure)
+            # No external dead-man ping follows, by the owner's decision of
+            # 2026-10-04 on the Healthchecks ping: "ditch this, remove this
+            # from any outstanding list, documentation or reference, this is
+            # not needed!" A host that is down or without power reports
+            # nothing, and the owner accepts that (docs/AUTO_DEPLOY.md,
+            # Outages; pinned in tests/test_host_outage_notifier.py).
         finally:
             recompute_lock.release()
 

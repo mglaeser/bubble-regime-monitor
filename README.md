@@ -156,11 +156,6 @@ and leaves the database as it was), so `podman-compose up -d --build` stays
 valid for a local run. To apply migrations locally without a container:
 `make migrate`.
 
-A **Healthchecks** dead-man's switch (`HEALTHCHECKS_PING_URL`) is pinged after
-every successful recompute, so an outage the service cannot report itself
-(host, container or scheduler gone, or no recompute succeeding any more) still
-reaches you.
-
 ## Status & spec UI
 
 A self-contained status dashboard is served at **`/`** (and `/status`) on the same port as the API. It reflects the live service and — because scientific correctness is the leading design goal — foregrounds a **science audit**: a severity-ranked list of everything currently unclear, incomplete, contested, proxied, judgmental, or deviating from the written spec (unverified citations, the contested GSADF, ETF index proxies, the documented d1 breadth-anchor deviation, FRED truncation, stale/dropped indicators, coverage degradation, price-provider cooldowns, and **live success/failure of every external source pull**). It also shows each indicator's methodology and scientific sources, links to the interactive API docs (Swagger `/docs`, ReDoc `/redoc`, `/openapi.json`), and shows a worked example.
@@ -244,7 +239,6 @@ Everything bubblegauge sends to a person, by itself or on request. Times are UTC
 | `ALERTS_MODE` (`disabled`, `shadow`, `live`) | `disabled` | Every alert, the recompute-outage and test alerts included. `shadow` evaluates and records but sends nothing. `live` sends only while the loaded ruleset and phrase set are the promoted ones, and only alerts planned under a ruleset that was promoted and not revoked. |
 | `ALERT_INPUT_CAPTURE` | on | Whether each recompute's input is captured for the alerts (the ruleset's `capture.enabled` can turn it off too). Off, no recompute is evaluated, so no alert comes from one; the recompute-outage and test alerts still can. |
 | `FAILURE_ALERTS_ENABLED` | on | The failure alarm, the stuck alarm and the all-clear. |
-| `HEALTHCHECKS_PING_URL` | empty | The dead-man's switch: no pings while it is empty. |
 | Silences (`POST /api/v1/alerts/silences`) | none | A silenced rule, instance or bucket gets no alert, and its queued alerts are withdrawn. |
 
 ### What it sends by itself
@@ -260,7 +254,6 @@ Everything bubblegauge sends to a person, by itself or on request. Times are UTC
 | **Failure alarm, all-clear** | A recompute that raises or writes no snapshot opens one outage record and alarms at once; while the outage lasts, a failure repeats the alarm once `FAILURE_ALERT_REPEAT_H` (24 h) has passed. A recompute holding its lock for `FAILURE_ALERT_STUCK_AFTER_H` (4 h), checked at :05/:35, counts as a failure. The first success after an announced outage sends the all-clear. | The outage record: failures, since when, the newest score's age, the latest error (redacted, at most 90 characters). | Fixed English text (System-failure alerts, above). | The digest's transport. At most 150 characters. Exempt from admission: it reports breakage. | Not delivered: the record stays open, and the next failure (for the all-clear, the next success) sends again. |
 | **Deploy note** | Once per release, after the new container answers on main's commit (`deploy/release.sh`). Never on a restart, a reboot or a hand rollback. | What the release wrote into the image: the commit range, the merged commits' titles and descriptions, the changed paths. | The model may only name up to three areas from a closed list of ten, and the note prints each area's fixed phrase. The last line, `Score logic: high / medium / low / very low - <reason>`, is computed from the changed files. | iMessage only, when enabled and configured, and with live admission. | A reply that is not area codes only, or a failed call: the commit and its commit count, with the same last line. No note without live admission, or when the release cannot name the commit the last container ran. A note that is not sent is not sent later. |
 | **Host notices** | The release unit fails: at once, then at most once an hour while it keeps failing. The alert-watchdog unit fails (container not running, or the watchdog crashed or hung): with every failed 30-minute run. | The failed unit, the container's state, the host, the time. | Fixed English text from `deploy/notify-outage.sh`. | iMessage only, from the host straight to the proxy, with the host's own settings (`~/.config/bubblegauge/imessage.env`). Exempt from admission: they report breakage. | curl retries a transient error twice; any 2xx counts as sent. |
-| **Dead-man's switch** | The service pings `HEALTHCHECKS_PING_URL` after every successful recompute, never after a failed one; Healthchecks alerts when the pings stop. | The ping alone. | Healthchecks' own notification. | The check's own channels. | Off while the URL is empty. A refused ping is logged, not retried. |
 
 ### On request (admin key, or the CLI in the container)
 
