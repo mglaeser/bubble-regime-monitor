@@ -942,8 +942,9 @@ def health_projection(
             "live mode: active ruleset does not match the promoted artifact"
         )
 
-    # The daily digest is the owner's standing message, governed by its
-    # transports alone (owner decision D2c removed its retirement switch).
+    # The daily digest is the owner's standing message; its transport is
+    # chosen by its switches alone (owner decision D2c removed its retirement
+    # switch).
     # A digest without a transport is named whatever the alerts do: health
     # makes no promise about what else reaches the owner.
     no_digest_transport = settings.daily_digest_transport == "none"

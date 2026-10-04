@@ -15,7 +15,10 @@ watchdog/recovery and retention
 are implemented and tested. They are not permission to send: a deployment
 delivers only with `ALERTS_MODE=live`, and live mode runs only the promoted
 artifact (section 11a2). The separate daily digest sends through its
-configured transport, governed by its transport switches alone. See [Rollout status and remaining evidence](#rollout-status-and-remaining-evidence).
+configured transport, chosen by its transport switches alone, and, like the
+deploy note, only while the ruleset and phrase set the service loads are the
+promoted ones, whatever `ALERTS_MODE` says (admission, docs/MESSAGE_ENGINE.md
+decision 5). See [Rollout status and remaining evidence](#rollout-status-and-remaining-evidence).
 
 ---
 
@@ -327,7 +330,7 @@ limit are retired settings (`ALERTS_READ_API_KEY`,
 `ALERTS_READ_TOKEN_IS_PUBLIC`, `ALERTS_PUBLIC_READ_RATE_LIMIT`): one left in an
 environment opens nothing and is named, as `DAILY_SMS_ENABLED` is below.
 
-The daily digest is governed by its transport switches alone:
+The daily digest's transport is chosen by its switches alone:
 `IMESSAGE_ENABLED` selects iMessage when it is configured, and iMessage wins
 when both configured transports are on; otherwise `SMS_ENABLED` selects
 sipgate; there is no send-failure fallback. It has no retirement switch: the
@@ -577,10 +580,12 @@ variant, or a file a host places at `ALERTS_RULES_PATH` - is refused by `alerts
 validate --promote` (exit 1) and by `POST /api/v1/admin/alerts/promote` (409),
 and runs in shadow mode only
 (tests/test_alert_promotion.py::test_the_cli_promotes_only_the_shipped_bytes_the_replay_gate_checks).
-`ALERTS_MODE=live` is the delivery switch, set by hand on the host. In live mode the evaluation, the dispatch job and the message engine
+`ALERTS_MODE=live` is the delivery switch, set by hand on the host. In live mode the evaluation and the dispatch job
 load through `load_active_for_mode`, which refuses a candidate that is not the
 promoted artifact: the dispatch job raises before it constructs a sender, and
-its heartbeat turns health critical.
+its heartbeat turns health critical. The digest, engine on or off, and the
+deploy note ask the same check in every mode, right before the wire
+(admission, docs/MESSAGE_ENGINE.md decision 5).
 
 There is no stage floor and no evidence check at promotion or at runtime
 (owner decision D2d, 2026-10-03): the CI replay gate is the evidence - `python

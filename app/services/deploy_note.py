@@ -33,6 +33,12 @@ line is the code's: a class computed from which files changed, so nothing the
 commits say can talk it down, and the only text in the note about the score.
 A reply that is not codes only, or a model that fails, sends the bare deploy -
 the commit and how many commits it carries - with the code's line.
+
+Like every information message, the note passes admission right before the
+wire (ruling Q25; the owner, 2026-10-04; docs/MESSAGE_ENGINE.md decision 5):
+when the ruleset and phrase set the new image loads are not the promoted ones,
+nothing is sent, and the entry exits 1, so the release journals the note as not
+sent.
 """
 
 from __future__ import annotations
@@ -45,7 +51,9 @@ from pathlib import Path
 from typing import Any
 
 from app.config import get_settings
+from app.db import session_scope
 from app.logging_conf import get_logger
+from app.message_engine import gate
 from app.redaction import sanitize
 
 log = get_logger(__name__)
@@ -241,6 +249,13 @@ def announce() -> dict[str, Any]:
         if not (settings.imessage_enabled and settings.imessage_configured):
             return {"status": "skipped", "reason": "iMessage is not enabled"}
         text, source = compose(note)
+        # ADMISSION, after the model call and right before the wire.
+        with session_scope() as session:
+            blockers = gate.admission_blockers(session)
+        if blockers:
+            log.warning("deploy_note_refused", target=note.target, blockers=blockers)
+            return {"status": "refused", "source": source, "target": note.target,
+                    "message": text, "blockers": blockers}
         from app.notify.imessage import send_imessage
 
         result = send_imessage(text)
@@ -254,12 +269,13 @@ def announce() -> dict[str, Any]:
 
 def main() -> int:
     """`python -m app.services.deploy_note`: 0 when the note went out or there
-    is nothing to send, 1 when it was not sent - the release says so and goes on."""
+    is nothing to send, 1 when it was not sent - failed or refused - the
+    release says so and goes on."""
     import json
 
     outcome = announce()
     print(json.dumps({k: v for k, v in outcome.items() if k != "message"}))
-    return 1 if outcome["status"] == "failed" else 0
+    return 0 if outcome["status"] in ("sent", "skipped") else 1
 
 
 if __name__ == "__main__":

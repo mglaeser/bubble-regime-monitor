@@ -36,7 +36,9 @@ def _write(path: Path, *, files=("docs/AUTO_DEPLOY.md",),
 
 
 @pytest.fixture()
-def host(monkeypatch, tmp_path):
+def unpromoted_host(monkeypatch, tmp_path, isolated_db):
+    """A host with iMessage configured and a database of its own, in which
+    nothing is promoted."""
     from app.config import get_settings
 
     note = tmp_path / "deploy-note"
@@ -52,6 +54,20 @@ def host(monkeypatch, tmp_path):
     monkeypatch.setattr(imessage, "send_imessage", lambda text: sent.append(text) or _Result())
     yield note, sent
     get_settings.cache_clear()
+
+
+@pytest.fixture()
+def host(unpromoted_host):
+    """...and the ruleset and phrase set it loads promoted: the deploy note
+    passes admission, like every information message (ruling Q25; the owner,
+    2026-10-04)."""
+    from app.alerts.artifacts import load_active
+    from app.db import session_scope
+    from tests.conftest import register_promoted
+
+    with session_scope() as session:
+        register_promoted(session, load_active(session))
+    return unpromoted_host
 
 
 def _model(monkeypatch, reply=None, error=None) -> dict[str, object]:
@@ -252,6 +268,50 @@ def test_the_module_entry_says_what_happened(host, monkeypatch, capsys):
     assert dn.main() == 0 and _last_json(capsys)["status"] == "sent"
     monkeypatch.setattr(imessage, "send_imessage", lambda text: sent.append(text) or _Result(ok=False))
     assert dn.main() == 1 and _last_json(capsys)["status"] == "failed"
+
+
+#: What admission says when nothing is promoted (app/alerts/artifacts.py).
+_NOTHING_PROMOTED = "live mode requires a PROMOTED ruleset and the registry has none"
+
+
+def test_without_admission_nothing_is_sent_and_nothing_announced(unpromoted_host, monkeypatch,
+                                                                  capsys, tmp_path):
+    """Ruling Q25, extended by the owner on 2026-10-04: the deploy note passes
+    admission, like every information message. Nothing promoted: nothing is
+    sent, and the note is not announced as sent - the outcome is a refusal
+    naming its blocker, the entry exits 1 so the release journals "deploy note
+    not sent", and nothing is kept, so it is not sent later either."""
+    note_path, sent = unpromoted_host
+    _write(note_path)
+    _model(monkeypatch, reply="docs")
+    before = sorted(p.name for p in tmp_path.iterdir())
+    assert dn.main() == 1
+    line = _last_json(capsys)
+    assert line["status"] == "refused" and line["blockers"] == [_NOTHING_PROMOTED]
+    assert sent == [] and sorted(p.name for p in tmp_path.iterdir()) == before
+
+
+def test_admission_is_asked_after_the_model(host, monkeypatch):
+    """Right before the wire, not before the model call (decision 5): the call
+    can take four minutes, and a deployment no longer admitted when it returns
+    sends nothing - here a ruleset deployed meanwhile and never promoted."""
+    import app.llm_gateway as gateway
+    from app.alerts.errors import AlertingUnavailable
+
+    note_path, sent = host
+    _write(note_path)
+
+    def _unpromoted(_session, *, mode, **_kw):
+        raise AlertingUnavailable("live mode refuses an unpromoted ruleset")
+
+    def _complete(**_kw):
+        monkeypatch.setattr("app.alerts.artifacts.load_active_for_mode", _unpromoted)
+        return type("C", (), {"text": "docs"})()
+
+    monkeypatch.setattr(gateway, "complete", _complete)
+    out = dn.announce()
+    assert out["status"] == "refused" and out["blockers"] == ["live mode refuses an unpromoted ruleset"]
+    assert out["source"] == "generated" and sent == []
 
 
 @pytest.mark.parametrize("plant", ["zero", "fifo", "directory"])
