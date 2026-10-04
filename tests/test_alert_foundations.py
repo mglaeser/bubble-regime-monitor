@@ -355,6 +355,67 @@ def test_phrase_set_forbids_an_ambiguous_score_fact(phrase_set):
         validate_phrase_set(json.dumps(raw))
 
 
+@pytest.mark.parametrize("raw", [
+    "x: !!bool maybe",       # KeyError
+    "x: !!int nope",         # ValueError
+    "x: !!timestamp nope",   # AttributeError
+])
+def test_a_tagged_scalar_the_loader_refuses_is_an_invalid_ruleset(raw):
+    """#175 round 4, SOTA-A: yaml.safe_load refuses a malformed tagged scalar
+    with KeyError, ValueError or AttributeError - not YAMLError. The contract
+    is the loader's: whatever it refuses, by whichever exception, is an
+    invalid ruleset."""
+    with pytest.raises(RulesetInvalid, match="not valid YAML"):
+        validate_ruleset(raw, phrase_set=None, phrase_set_version="v",
+                         phrase_set_sha256="0" * 64, methodology_version="m",
+                         methodology_manifest_sha256="0" * 64, service_version="3.8.0")
+
+
+@pytest.mark.parametrize("raw", [
+    '{"meta": ' + "9" * 4301 + "}",          # past Python's integer digit limit
+    "[" * 100_000 + "]" * 100_000,           # deeper than the decoder recurses
+], ids=["long-integer", "deep-nesting"])
+def test_bytes_the_decoder_refuses_are_an_invalid_phrase_set_and_ruleset(raw):
+    """#175 round 3, SOTA-A: json.loads and yaml.safe_load refuse these with
+    ValueError or RecursionError, not their own decode errors. Every caller of
+    the two validators fails closed on PhraseSetInvalid / RulesetInvalid alone
+    (load_active's fallback, artifacts.registered_phrase_set), so the decoders'
+    every refusal is translated."""
+    with pytest.raises(PhraseSetInvalid, match="not valid JSON"):
+        validate_phrase_set(raw)
+    with pytest.raises(RulesetInvalid, match="not valid YAML"):
+        validate_ruleset(raw.replace('"meta"', "meta"), phrase_set=None,
+                         phrase_set_version="v", phrase_set_sha256="0" * 64,
+                         methodology_version="m", methodology_manifest_sha256="0" * 64,
+                         service_version="3.8.0")
+
+
+@pytest.mark.parametrize("path, value", [
+    (("meta",), ["v3.5"]),
+    (("facts",), ["F_ASSET"]),
+    (("phrases",), ["REGIME_UNCHANGED"]),
+    (("caveats", "DATA_DEGRADED", "priority"), None),
+    (("caveats", "DATA_DEGRADED", "priority"), "first"),
+    (("headlines", "BAND_TO_DERISK", "slots"), 5),
+    (("headlines", "BAND_TO_DERISK", "slots"), None),
+])
+def test_a_wrongly_typed_shape_is_an_invalid_phrase_set(phrase_set, path, value):
+    """Every caller fails closed on PhraseSetInvalid alone (load_active,
+    artifacts.registered_phrase_set). The structure is a schema (A10): a
+    shape the hand-written checks did not foresee raised AttributeError,
+    TypeError or ValueError past them instead."""
+    import json
+
+    raw = json.loads(phrase_set.canonical_json)
+    *parents, key = path
+    node = raw
+    for parent in parents:
+        node = node[parent]
+    node[key] = value
+    with pytest.raises(PhraseSetInvalid):
+        validate_phrase_set(json.dumps(raw))
+
+
 def test_median_and_point_score_are_separate_facts(phrase_set):
     assert "F_HEADLINE_MEDIAN" in phrase_set.facts
     assert "F_POINT_SCORE" in phrase_set.facts
@@ -973,6 +1034,14 @@ def test_live_admission_binds_the_phrase_set_and_not_only_the_rules(isolated_db)
 # a released phrase set is frozen
 # ---------------------------------------------------------------------------
 
+#: The canonical digest of every shipped phrase set, grouped (see
+#: test_a_released_phrase_set_is_never_edited_in_place).
+FROZEN_PHRASE_SETS = {
+    "config/alert_phrases.v3.5.json":
+        "25d82b6a-0f45233c-ee228ee2-f964a8cd"
+        "-ea7f40b4-3bdd48a9-8a333393-a9c96c87",
+}
+
 
 def test_every_phrase_file_declares_the_version_in_its_name():
     """A file called v3.3 that declares v3.2 would register under the wrong key."""
@@ -1009,12 +1078,7 @@ def test_a_released_phrase_set_is_never_edited_in_place():
 
     from app.alerts.artifacts import validate_phrase_set
 
-    frozen = {
-        "config/alert_phrases.v3.5.json":
-            "25d82b6a-0f45233c-ee228ee2-f964a8cd"
-            "-ea7f40b4-3bdd48a9-8a333393-a9c96c87",
-    }
-    for name, grouped in frozen.items():
+    for name, grouped in FROZEN_PHRASE_SETS.items():
         phrase_set = validate_phrase_set(
             Path(name).read_text(encoding="utf-8"))
         assert phrase_set.sha256 == grouped.replace("-", ""), (
@@ -1022,3 +1086,25 @@ def test_a_released_phrase_set_is_never_edited_in_place():
             "version is a registry primary key, and hosts already hold these "
             "bytes, so the change would reach nothing while breaking every "
             "render that needs it. Add a NEW version file instead.")
+
+
+def test_the_shipped_set_validates_to_its_frozen_bytes_in_every_language():
+    """The structure is a pydantic schema (A10); the identity is still the
+    file's own. In every language the set declares, the shipped file and the
+    bytes a registry row stores validate to the canonical form of the file -
+    never of a model dump, whose defaults would move the hash - and to the
+    frozen digest."""
+    import json
+    from pathlib import Path
+
+    from app.alerts.canonical import sha256_hex
+
+    for name, grouped in FROZEN_PHRASE_SETS.items():
+        text = Path(name).read_text(encoding="utf-8")
+        canonical = canonical_json(json.loads(text))
+        for language in json.loads(text)["meta"]["languages"]:
+            for stored in (text, canonical):
+                phrase_set = validate_phrase_set(stored, language=language)
+                assert phrase_set.language == language
+                assert phrase_set.canonical_json == canonical
+                assert phrase_set.sha256 == sha256_hex(canonical) == grouped.replace("-", "")

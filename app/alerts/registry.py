@@ -402,7 +402,13 @@ def validate_ruleset(
     """
     try:
         parsed = yaml.safe_load(raw_yaml)
-    except yaml.YAMLError as exc:
+    except Exception as exc:  # noqa: BLE001 - the loader's refusal, whatever its type
+        # The loader is the contract: text it refuses is not a ruleset,
+        # whichever exception it refuses it with. Beside YAMLError it raises
+        # KeyError (`!!bool maybe`), ValueError (`!!int nope`, an integer
+        # past Python's digit limit), AttributeError (`!!timestamp nope`) and
+        # RecursionError (#175 rounds 3 and 4). Callers fail closed on
+        # RulesetInvalid alone.
         raise RulesetInvalid(f"ruleset is not valid YAML: {exc}") from exc
     if not isinstance(parsed, dict):
         raise RulesetInvalid("ruleset must be a YAML mapping")
