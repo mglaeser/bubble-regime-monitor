@@ -128,8 +128,9 @@ converge, and 57 review rounds on #121 and 20 on #124 showed it.
   failure, a paced or budgeted-out call, a disabled engine
   or a P1 - each sends the owner's template with the current numbers.
 - **What stays**: the governor's pacing, budget and breaker (the cost of
-  calling the model), the attempt rows, the library sign-off, provenance,
-  and the admission gate. They are not gates on the content. Nor is the
+  calling the model), the attempt rows, the library sign-off, provenance
+  (until 2026-10-04, re-evaluation E7: decision 15), and the admission
+  gate. They are not gates on the content. Nor is the
   entry check: a library entry whose fields are not of their type - a
   template or prompt that is not text, fact names that are not a list of
   names (a falsy "" or {} included),
@@ -226,6 +227,11 @@ the normal planner/dispatcher path unchanged.
 Implemented in `app/message_engine/gate.py`. Three things about it are load
 bearing, each pinned by a test in `tests/test_message_engine_go_live.py`
 (`TestAdmission`):
+
+2026-10-04, re-evaluation E7: `emit` went; `engine_delivery.deliver` asks
+`gate.admission_blockers`, which takes no priority, after the compose and
+right before the wire, and the tests named below drive `deliver`
+(`test_admission_is_asked_after_the_compose` pins the order).
 
 **It is checked immediately before the wire, not once per compose.** `emit`
 asks, right before the transport: admission can turn false in the gap - a new
@@ -455,6 +461,10 @@ by editing the line to begin with `SIGNED` in a reviewed PR: data, never
 code. Until then `compose()` is inert (no model call, no attempt row, only
 the bare event line) and `gate.emit` refuses to put anything of the
 engine's on a wire, even when admitted. An unreadable library is unsigned.
+2026-10-04, re-evaluation E7: `engine_delivery.deliver` checks the sign-off
+once, before anything is composed, so an unsigned or unreadable library
+composes nothing (no model call, no attempt row, no bare event line) and
+sends nothing; `compose()` no longer checks it, and `gate.emit` is gone.
 
 ## Decision 15 — provenance is proved, not declared
 
@@ -466,6 +476,12 @@ composer's `_issue` with a key drawn at import; the gate checks it FIRST,
 before the channel, the signature and admission, and its refusal logs
 nothing of the object (round 14) — until a `Composed` is proved the
 composer's, every field of it is the caller's string.
+2026-10-04, re-evaluation E7: the token, `issued` and `gate.emit` went.
+`emit` had one caller, `engine_delivery.deliver`, which sends only what it
+composed in the same call, so a token minted and checked within that call
+proved nothing; no function takes a `Composed` to the wire now, and an
+import pin keeps every other module out of the engine
+(`tests/test_message_engine.py::TestRoundOneOn145::test_only_the_daily_digest_reaches_the_engine`).
 
 ## Decision 16 — a fact is typed (AMENDED by D7)
 
@@ -483,6 +499,10 @@ the composer derives none.
 A `Composed` is fitted and validated for ONE channel. A sender names its
 channel; the gate refuses a sender that does not match the `Composed`'s, or
 names none (#112 round 13). The `Composed`'s channel is bound by its token.
+2026-10-04, re-evaluation E7: `deliver` composes for the channel
+`transport_for` resolved and sends on that channel, to its recipient, in
+the same call, so the sender that named its channel, this check and the
+token's binding went.
 
 ## Decision 18 — when a render overflows, the facts give way first (SUPERSEDED by D7)
 
@@ -506,6 +526,9 @@ can be an identifier (#112 rounds 6, 7). The name is echoed only when it is
 a key of the library; otherwise the line and the record say "unknown". No
 log line carries a caller-supplied string: a fact that is not a scalar is
 logged by its kind, an unissued `Composed` not at all (rounds 11, 14).
+2026-10-04, re-evaluation E7: with the token gone no `Composed` is unissued;
+`deliver` logs the composer's label, and its refusal before composing (an
+unsigned library) logs no trigger at all.
 
 ## Decision 21 — the contract's fact ids fill the slots
 

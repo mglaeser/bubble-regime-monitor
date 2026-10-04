@@ -16,14 +16,11 @@ attempt (app/message_engine/governor.py).
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 import json
 import math
 import re
-import secrets
 import unicodedata
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from time import monotonic
@@ -58,17 +55,9 @@ _DEADLINE_S = 60.0
 
 @dataclass(frozen=True)
 class Composed:
-    """What the engine produced, and how.
-
-    PROVENANCE IS PROVED, NOT DECLARED. `gate.emit` takes a Composed rather
-    than text so that the composer's product is the only thing it puts on a
-    wire - but the class is public, and a Composed built by hand carried
-    any text past every control the composer applies (#112 round 6, SOTA-A,
-    executed). The token is a keyed digest over the fields, minted only by
-    `_issue` with a key this process draws at import; `issued()` is the
-    gate's check. Building the object is still a deliberate act of the
-    codebase, not a message.
-    """
+    """What the engine produced, and how. Its one consumer is
+    `app.services.engine_delivery.deliver`, which composes and sends it in
+    one call; why no token proves where it came from is said there."""
 
     text: str
     #: generated | fallback | deterministic
@@ -77,29 +66,6 @@ class Composed:
     channel: str
     #: Why the model's text was not used, when it was not.
     reason: str | None = None
-    #: Minted by `_issue`; see the class docstring.
-    token: str = field(default="", repr=False, compare=False)
-
-
-_PROVENANCE_KEY = secrets.token_bytes(32)
-
-
-def _digest(text: str, source: str, trigger: str, channel: str) -> str:
-    parts = "\x1f".join((text, source, trigger, channel)).encode("utf-8")
-    return hmac.new(_PROVENANCE_KEY, parts, hashlib.sha256).hexdigest()
-
-
-def _issue(*, text: str, source: str, trigger: str, channel: str,
-           reason: str | None = None) -> Composed:
-    """A Composed the gate will accept: the composer's own product."""
-    return Composed(text=text, source=source, trigger=trigger, channel=channel,
-                    reason=reason, token=_digest(text, source, trigger, channel))
-
-
-def issued(composed: Composed) -> bool:
-    """Did this process's composer produce exactly this Composed?"""
-    expected = _digest(composed.text, composed.source, composed.trigger, composed.channel)
-    return hmac.compare_digest(composed.token, expected)
 
 
 def _bare_event(trigger: str, channel: Channel, reason: str, *, known: bool) -> Composed:
@@ -119,9 +85,9 @@ def _bare_event(trigger: str, channel: Channel, reason: str, *, known: bool) -> 
     """
     label = re.sub(r"[^A-Za-z0-9_.\-]+", "", trigger)[:40] if known else ""
     label = label or "unknown"
-    return _issue(text=f"bubblegauge: {label} fired.",
-                  source="deterministic", trigger=label, channel=channel.value,
-                  reason=reason)
+    return Composed(text=f"bubblegauge: {label} fired.",
+                    source="deterministic", trigger=label, channel=channel.value,
+                    reason=reason)
 
 
 def library() -> dict[str, Any]:
@@ -141,8 +107,8 @@ def library_sign_off(lib: dict[str, Any] | None = None) -> str | None:
     could have sent unsigned content (#112 round 2, SOTA-A, executed). The
     owner signs by editing the status to begin with "SIGNED" ("SIGNED
     <date> <who>") in a reviewed PR - never a code change - and until then
-    `compose()` is inert and `gate.emit` refuses. A library with no status
-    is unsigned too.
+    `engine_delivery.deliver` composes nothing and sends nothing. A library
+    with no status is unsigned too.
     """
     if lib is None:
         try:
@@ -392,6 +358,10 @@ def compose(*, trigger: str, channel: Channel,
     governor on a short transaction of its own, so the claim is durable before
     the model is called and no lock is held across the call. Callers must not
     hold an open write transaction while calling this.
+
+    The library's sign-off is the caller's to check BEFORE calling this:
+    `engine_delivery.deliver`, the one caller, composes nothing from a
+    library the owner has not signed (decision 14).
     """
     settings = settings or get_settings()
     moment = now or datetime.now(UTC)
@@ -403,10 +373,6 @@ def compose(*, trigger: str, channel: Channel,
     except Exception as exc:  # noqa: BLE001 - the promise is "never raises"
         return _bare_event(trigger, channel,
                            f"prompt library unreadable: {type(exc).__name__}", known=False)
-    unsigned = library_sign_off(lib)
-    if unsigned is not None:
-        # INERT until the owner signs: no model call, no attempt row.
-        return _bare_event(trigger, channel, unsigned, known=trigger in prompts)
     entry = prompts.get(trigger)
     if entry is None:
         return _bare_event(trigger, channel, "trigger not in library", known=False)
@@ -427,8 +393,8 @@ def compose(*, trigger: str, channel: Channel,
     if short is not None:
         # The engine switched off, or a P1 that must arrive: no model, no
         # database work.
-        return _issue(text=fallback, source="deterministic", trigger=trigger,
-                      channel=channel.value, reason=short.reason)
+        return Composed(text=fallback, source="deterministic", trigger=trigger,
+                        channel=channel.value, reason=short.reason)
     try:
         # The caller's instant, if it gave one; otherwise the governor reads
         # the clock itself once it holds the lock (#140 round 5).
@@ -463,7 +429,7 @@ def compose(*, trigger: str, channel: Channel,
             # The reaper already closed this claim: the call outran its TTL.
             return _fallback(trigger, channel, priority, fallback,
                              "reply arrived after the claim expired", finished, asked=True)
-        return _issue(text=text, source="generated", trigger=trigger, channel=channel.value)
+        return Composed(text=text, source="generated", trigger=trigger, channel=channel.value)
     _close(claim_id, gov.Outcome.FORMAT_REJECTED, problem, finished)
     return _fallback(trigger, channel, priority, fallback, f"rejected: {problem}", finished,
                      asked=True)
@@ -503,5 +469,5 @@ def _fallback(trigger: str, channel: Channel, priority: int,
         # Recording is bookkeeping; the text is the promise. A locked database
         # loses this row, never the message.
         pass
-    return _issue(text=text, source="fallback", trigger=trigger,
-                  channel=channel.value, reason=reason)
+    return Composed(text=text, source="fallback", trigger=trigger,
+                    channel=channel.value, reason=reason)

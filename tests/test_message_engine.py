@@ -41,11 +41,6 @@ def _settings(**overrides) -> Settings:
     return Settings(_env_file=None, **base)
 
 
-@pytest.fixture(autouse=True)
-def _signed(monkeypatch):
-    monkeypatch.setattr(composer, "library_sign_off", lambda lib=None: None)
-
-
 def _compose(monkeypatch, reply, *, trigger="daily_digest", channel=Channel.IMESSAGE, facts=None,
              now=T0, priority=3, **over):
     prompts: list[str] = []
@@ -76,7 +71,6 @@ class TestTheModelWritesTheMessage:
     def test_a_reply_that_passes_the_basic_checks_is_sent_as_written(self, monkeypatch):
         out, prompts = _compose(monkeypatch, f"  {REPLY}\n")
         assert out.source == "generated" and out.text == REPLY and len(prompts) == 1
-        assert composer.issued(out)
         assert _outcomes() == {"ok"}
 
     def test_the_prompt_carries_the_task_every_number_and_the_references(self, monkeypatch):
@@ -134,11 +128,6 @@ class TestTheTemplateGoesOutOtherwise:
     def test_a_disabled_engine_never_asks_the_model(self, monkeypatch):
         out, prompts = _compose(monkeypatch, REPLY, message_engine_enabled=False)
         assert out.source == "deterministic" and out.text == _template() and prompts == []
-
-    def test_an_unsigned_library_sends_the_bare_event(self, monkeypatch):
-        monkeypatch.setattr(composer, "library_sign_off", lambda lib=None: "library unsigned")
-        out, prompts = _compose(monkeypatch, REPLY)
-        assert out.source == "deterministic" and out.text == "bubblegauge: daily_digest fired." and prompts == []
 
     def test_an_unknown_trigger_sends_the_bare_event(self, monkeypatch):
         out, prompts = _compose(monkeypatch, REPLY, trigger="NOT_A_TRIGGER")
