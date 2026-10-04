@@ -292,10 +292,12 @@ def validate_phrase_set(raw_json: str, *, language: str | None = None) -> Valida
     """
     try:
         raw = json.loads(raw_json)
-    except (ValueError, RecursionError) as exc:
-        # JSONDecodeError is a ValueError, and so is an integer past Python's
-        # digit limit; nesting too deep for the decoder is a RecursionError.
-        # Every caller fails closed on PhraseSetInvalid alone (#175 round 3).
+    except Exception as exc:  # noqa: BLE001 - the decoder's refusal, whatever its type
+        # The decoder is the contract: bytes it refuses are not a phrase set,
+        # whichever exception it refuses them with (JSONDecodeError, a
+        # ValueError past Python's integer digit limit, RecursionError for
+        # nesting it cannot follow - #175 rounds 3 and 4). Every caller fails
+        # closed on PhraseSetInvalid alone.
         raise PhraseSetInvalid(f"phrase set is not valid JSON: {exc}") from exc
     try:
         # Strict: a value is what the reviewed file says, never a coercion of it.
@@ -378,6 +380,7 @@ def validate_phrase_set(raw_json: str, *, language: str | None = None) -> Valida
         next_checks=next_checks,
         caveats=caveats,
         worst_case=worst_case,
+        # No field has a default (A10): the validator passes every one.
         language=active,
         languages=languages,
         worst_case_by_language=by_language,

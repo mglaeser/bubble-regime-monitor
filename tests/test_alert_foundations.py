@@ -356,6 +356,22 @@ def test_phrase_set_forbids_an_ambiguous_score_fact(phrase_set):
 
 
 @pytest.mark.parametrize("raw", [
+    "x: !!bool maybe",       # KeyError
+    "x: !!int nope",         # ValueError
+    "x: !!timestamp nope",   # AttributeError
+])
+def test_a_tagged_scalar_the_loader_refuses_is_an_invalid_ruleset(raw):
+    """#175 round 4, SOTA-A: yaml.safe_load refuses a malformed tagged scalar
+    with KeyError, ValueError or AttributeError - not YAMLError. The contract
+    is the loader's: whatever it refuses, by whichever exception, is an
+    invalid ruleset."""
+    with pytest.raises(RulesetInvalid, match="not valid YAML"):
+        validate_ruleset(raw, phrase_set=None, phrase_set_version="v",
+                         phrase_set_sha256="0" * 64, methodology_version="m",
+                         methodology_manifest_sha256="0" * 64, service_version="3.8.0")
+
+
+@pytest.mark.parametrize("raw", [
     '{"meta": ' + "9" * 4301 + "}",          # past Python's integer digit limit
     "[" * 100_000 + "]" * 100_000,           # deeper than the decoder recurses
 ], ids=["long-integer", "deep-nesting"])
