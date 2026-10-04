@@ -162,3 +162,26 @@ class TestRecipientMasking:
         from app.notify.sipgate import _mask_recipient
 
         assert _mask_recipient("") == "(none)"
+
+
+class TestHistoryBoundsAreUTCInstants:
+    """A-25 for a bound with an offset. It names an instant, and the columns
+    hold UTC (app/models.py:TZDateTime): one before year 1 or after 9999 in
+    UTC is not a time any row can have, refused at the boundary, not a 500
+    when the query binds it. Last in this file, so the baselined lines above
+    keep their numbers."""
+
+    _client = TestHistoryInputValidation._client
+
+    @pytest.mark.parametrize("query", ["from=0001-01-01T00:00:00%2B01:00",
+                                       "to=9999-12-31T23:00:00-05:00"])
+    def test_a_bound_no_utc_instant_can_hold_is_422_not_500(self, isolated_db, query):
+        r = self._client().get(f"/api/v1/score/history?{query}")
+        assert r.status_code == 422, f"expected 422, got {r.status_code}"
+
+    @pytest.mark.parametrize("query", ["from=2026-01-01T00:00:00%2B02:00",
+                                       # 9999-12-31T04:00Z, whose +1 day overflows
+                                       "to=9999-12-30T23:00:00-05:00"])
+    def test_a_bound_with_an_offset_still_accepted(self, isolated_db, query):
+        r = self._client().get(f"/api/v1/score/history?{query}")
+        assert r.status_code == 200, f"expected 200, got {r.status_code}"

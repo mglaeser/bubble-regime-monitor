@@ -183,8 +183,6 @@ def _last_snapshot_age() -> str | None:
             ).scalars().first()
         if computed_at is None:
             return None
-        if computed_at.tzinfo is None:     # SQLite hands back naive datetimes
-            computed_at = computed_at.replace(tzinfo=UTC)
         return _compact_age(datetime.now(UTC) - computed_at)
     except Exception as exc:
         log.warning("failure_alert_snapshot_age_unavailable", error=str(exc)[:200])

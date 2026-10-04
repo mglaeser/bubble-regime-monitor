@@ -640,7 +640,7 @@ def test_mark_sent_cools_exactly_the_render_represented_members(isolated_db):
 
     delivered_by_episode = {member.episode_id: member.delivered for member in members}
     assert delivered_by_episode == {episode_ids[0]: True, episode_ids[1]: False}
-    assert states[0].last_sent_at.replace(tzinfo=UTC) == now
+    assert states[0].last_sent_at == now
     assert states[0].next_notification_generation == 2
     assert states[1].last_sent_at is None
     assert states[1].next_notification_generation == 1

@@ -54,8 +54,6 @@ def recover_evaluations(session: Session, *, now: datetime | None = None) -> Rec
 
     for row in rows:
         lease = row.lease_until
-        if lease is not None and lease.tzinfo is None:
-            lease = lease.replace(tzinfo=UTC)
         if lease is not None and lease > now:
             report.in_progress.append(row.evaluation_id)
             continue

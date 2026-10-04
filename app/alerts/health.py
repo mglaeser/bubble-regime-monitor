@@ -43,16 +43,10 @@ from app.config import configured_environment, retired_env_keys
 
 
 def iso(moment: datetime | None) -> str | None:
-    """RFC 3339 with a Z suffix. SQLite hands back naive datetimes."""
+    """RFC 3339 with a Z suffix."""
     if moment is None:
         return None
-    if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=UTC)
     return moment.astimezone(UTC).isoformat().replace("+00:00", "Z")
-
-
-def _aware(moment: datetime) -> datetime:
-    return moment.replace(tzinfo=UTC) if moment.tzinfo is None else moment
 
 
 def _p95(values: list[int]) -> int | None:
@@ -514,8 +508,8 @@ _CLOCK_SKEW_TOLERANCE_S = 60
 
 #: The schema this build expects. Health reports a FAULT when the live
 #: database is on any other revision, so this moves in the same PR as a
-#: migration - 0024 drops the weekly digest's storage (D2a).
-_ALERT_SCHEMA_REVISION = "0024"
+#: migration - 0025 rewrites raw datetime text into the storage form (A12).
+_ALERT_SCHEMA_REVISION = "0025"
 _REQUIRED_PARTIAL_INDEXES = frozenset({
     "uq_alert_input_snapshot_id",
     "uq_alert_episode_open",
@@ -769,7 +763,7 @@ def health_projection(
                 evaluator_faults.append(
                     "latest evaluator run has no completion timestamp")
             else:
-                finished_at = _aware(latest_evaluation.finished_at)
+                finished_at = latest_evaluation.finished_at
                 evaluator_age = (health_now - finished_at).total_seconds()
                 if evaluator_age < -_CLOCK_SKEW_TOLERANCE_S:
                     evaluator_faults.append(
@@ -781,7 +775,7 @@ def health_projection(
                         "latest evaluator committed "
                         f"{int(evaluator_age)}s ago, over the "
                         f"{_EVALUATOR_MAX_SILENCE_S}s limit")
-                if finished_at < _aware(latest_evaluation.started_at):
+                if finished_at < latest_evaluation.started_at:
                     evaluator_faults.append(
                         "latest evaluator completion precedes its start")
 
@@ -867,7 +861,7 @@ def health_projection(
         )
     ).all()
     p1_latencies_ms = [
-        max(0, int((_aware(attempted) - _aware(created)).total_seconds() * 1000))
+        max(0, int((attempted - created).total_seconds() * 1000))
         for created, attempted in p1_latency_rows
         if created is not None and attempted is not None
     ]

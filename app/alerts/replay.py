@@ -666,8 +666,7 @@ def _collect_deliveries(session: Session, summary: ReplaySummary) -> None:
         elif str(row.delivery_kind) in {str(k) for k in BUDGETED_KINDS}:
             created = row.created_at
             if created is not None:
-                non_p1_moments.append(
-                    created if created.tzinfo else created.replace(tzinfo=UTC))
+                non_p1_moments.append(created)
 
     summary.deliveries_by_kind = dict(sorted(by_kind.items()))
     summary.max_non_p1_24h = _max_in_window(non_p1_moments, WINDOW_24H)
@@ -734,10 +733,6 @@ def _collect_band_excursions(summary: ReplaySummary,
         summary.band_excursion_months = round(span.days / 30.44, 2)
 
 
-def _aware_utc(moment: datetime) -> datetime:
-    return (moment if moment.tzinfo else moment.replace(tzinfo=UTC)).astimezone(UTC)
-
-
 def _activated_episodes(session: Session) -> list[ActivatedEpisode]:
     """Read recall evidence before the isolated replay database is disposed."""
     from app.alerts.models import AlertEpisode
@@ -750,7 +745,7 @@ def _activated_episodes(session: Session) -> list[ActivatedEpisode]:
         ActivatedEpisode(
             rule_id=str(row.rule_id),
             priority=int(row.priority),
-            activated_at=_aware_utc(row.activated_at),
+            activated_at=row.activated_at,
         )
         for row in rows
         if row.activated_at is not None

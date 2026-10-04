@@ -67,8 +67,6 @@ def evaluate_outage(*, last_snapshot_at: datetime | None, now: datetime) -> Watc
     if last_snapshot_at is None:
         return WatchdogVerdict(False, 0, None, None,
                                "no snapshot has ever been written; nothing to miss yet")
-    if last_snapshot_at.tzinfo is None:
-        last_snapshot_at = last_snapshot_at.replace(tzinfo=UTC)
 
     missed = slots_between(last_snapshot_at, now)
     if len(missed) < MISSED_SLOT_THRESHOLD:

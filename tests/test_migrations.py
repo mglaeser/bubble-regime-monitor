@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -439,7 +441,7 @@ def test_admin_atomicity_migration_upgrade_downgrade_upgrade(tmp_path):
     # Bump this in the same PR that adds a migration — that is the point of
     # pinning it rather than reading `head`, which would pass vacuously.
     assert connection.execute(
-        "select version_num from alembic_version").fetchone() == ("0024",)
+        "select version_num from alembic_version").fetchone() == ("0025",)
     connection.close()
 
 
@@ -532,7 +534,7 @@ def test_the_evidence_stamp_drop_round_trips_and_keeps_the_immutability_trigger(
             connection.execute(
                 "update alert_ruleset_registry set canonical_yaml = 'changed'")
         assert connection.execute(
-            "select version_num from alembic_version").fetchone() == ("0024",)
+            "select version_num from alembic_version").fetchone() == ("0025",)
     finally:
         connection.close()
 
@@ -803,7 +805,7 @@ def test_the_inheritance_drop_resets_inherited_state_and_round_trips(tmp_path):
         command.upgrade(cfg, "head")
 
     _run_with_db(db, _cycle)
-    assert _read("select version_num from alembic_version") == [("0024",)]
+    assert _read("select version_num from alembic_version") == [("0025",)]
 
 
 def _delivery_and_memory_shape(db: str) -> dict[str, object]:
@@ -953,7 +955,7 @@ def test_the_manual_retry_drop_round_trips_and_keeps_the_delivery_triggers(tmp_p
         command.upgrade(cfg, "head")
 
     _run_with_db(db, _cycle)
-    assert _read("select version_num from alembic_version") == [("0024",)]
+    assert _read("select version_num from alembic_version") == [("0025",)]
 
 
 def _sqlite_master(db: str) -> set[tuple]:
@@ -1034,6 +1036,90 @@ def test_0024_cancels_a_weekly_digest_still_queued(tmp_path):
     _run_with_db(db, _cycle)
 
 
+def test_0025_rewrites_the_raw_datetime_text_earlier_migrations_wrote(tmp_path):
+    """#173 round 1, SOTA-A: SQLite compares stored text, so a column compares
+    by instant only when its rows are in SQLAlchemy's storage form; an equal
+    instant spelled `+00:00` or with a three-digit fraction falls outside
+    `>=` and `==`. 0007 wrote snapshots.expected_recompute_slot raw as
+    `... HH:MM:SS+00:00` (production: 125 rows, read-only 2026-10-04), and
+    0024 wrote alert_delivery.updated_at with a three-digit fraction. At 0024
+    a query bounded at the row's own instant misses it; 0025 rewrites both to
+    the storage form, and the same query finds it."""
+    from datetime import UTC, datetime
+
+    from sqlalchemy import select
+
+    from app.db import session_scope
+    from app.models import Snapshot
+
+    db = str(tmp_path / "raw-text.db")
+    phrases = hashlib.sha256(b"the phrase set").hexdigest()
+    rules = hashlib.sha256(b"the ruleset").hexdigest()
+    slot = datetime(2026, 7, 11, 22, 0, tzinfo=UTC)
+
+    def _slot_matches() -> tuple[list[int], list[int]]:
+        with session_scope() as session:
+            return (session.scalars(select(Snapshot.id).where(
+                        Snapshot.expected_recompute_slot >= slot)).all(),
+                    session.scalars(select(Snapshot.id).where(
+                        Snapshot.expected_recompute_slot == slot)).all())
+
+    def _cycle():
+        from alembic import command
+
+        from app.db_migrate import _alembic_config
+
+        cfg = _alembic_config()
+        command.upgrade(cfg, "0024")
+        with session_scope() as session:
+            snap = Snapshot(
+                computed_at=slot, service_version="test", median=50.0, iqr_lo=45.0,
+                iqr_hi=55.0, band5=40.0, band95=60.0, point_score=50.0,
+                action_band="hold", block_s={}, block_d={}, trend_states={},
+                fast_alarm={}, data_freshness={})
+            session.add(snap)
+            session.flush()
+            snapshot_id = snap.id
+        connection = sqlite3.connect(db)
+        connection.execute("update snapshots set expected_recompute_slot = "
+                           "'2026-07-11 22:00:00+00:00' where id = ?", (snapshot_id,))
+        connection.execute(
+            "insert into alert_phrase_set_registry (phrase_set_version, phrase_set_sha256, "
+            "canonical_json, validator_version, validated_at, worst_case_test_sha256) "
+            "values ('v9.9', ?, '{}', '1', '2026-10-01 10:00:00.000000', ?)",
+            (phrases, phrases))
+        connection.execute(
+            "insert into alert_ruleset_registry (rules_sha256, rule_version, "
+            "canonical_yaml, phrase_set_version, phrase_set_sha256, "
+            "alert_input_schema_version, methodology_version, "
+            "methodology_manifest_sha256, min_service_version, max_service_version, "
+            "validated_at, status) values (?, 'v9.9.9', 'meta: {}', 'v9.9', ?, 1, 'm', ?, "
+            "'3.8.0', '3.99.99', '2026-10-01 10:00:00.000000', 'VALIDATED')",
+            (rules, phrases, phrases))
+        connection.execute("drop trigger alert_delivery_insert_requires_member")
+        connection.execute(
+            "insert into alert_delivery (delivery_id, dedupe_key, dedupe_version, mode, "
+            "live_profile, planning_rules_sha256, delivery_kind, priority, "
+            "transport_status, planning_state, created_at, updated_at, attempts, "
+            "recipient_ref) values ('01M0RAWTEXT000000000000000', 'k', 1, 'live', "
+            "'default', ?, 'TEST', 4, 'SENT', 'NONE', '2026-10-01 10:00:00.000000', "
+            "'2026-10-03 22:42:51.123', 1, 'default')", (rules,))
+        connection.commit()
+        connection.close()
+        assert _slot_matches() == ([], []), "at 0024 the raw text misses its own instant"
+
+        command.upgrade(cfg, "0025")
+
+        connection = sqlite3.connect(db)
+        stored = (connection.execute("select expected_recompute_slot from snapshots").fetchone(),
+                  connection.execute("select updated_at from alert_delivery").fetchone())
+        connection.close()
+        assert stored == (("2026-07-11 22:00:00.000000",), ("2026-10-03 22:42:51.123000",))
+        assert _slot_matches() == ([snapshot_id], [snapshot_id])
+
+    _run_with_db(db, _cycle)
+
+
 def test_the_weekly_digest_storage_is_dropped_and_restored_exactly(tmp_path):
     """Owner decision D2a: the weekly digest is deleted, and 0024 drops what it
     stored - the alert_digest_item table with its indexes, the DIGEST branch
@@ -1105,7 +1191,7 @@ def test_the_weekly_digest_storage_is_dropped_and_restored_exactly(tmp_path):
         command.upgrade(cfg, "head")
 
     _run_with_db(db, _cycle)
-    assert _read("select version_num from alembic_version") == [("0024",)]
+    assert _read("select version_num from alembic_version") == [("0025",)]
 
 
 def test_the_weekly_digest_migration_refuses_to_drop_its_items(tmp_path):
@@ -1482,3 +1568,106 @@ class TestTheUpgradeIsOneTransaction:
         # told to Alembic for SQLite only: another dialect keeps Alembic's own
         # knowledge of whether its DDL is transactional
         assert "transactional_ddl=True if is_sqlite else None" in env
+
+
+#: One instant, spelled three ways below: 12:00 in Berlin (CEST) is 10:00 UTC.
+_INSTANT = datetime(2026, 8, 15, 10, 0, tzinfo=UTC)
+_BERLIN = ZoneInfo("Europe/Berlin")
+
+
+class TestADateTimeColumnIsUTC:
+    """A DateTime column takes an instant and gives the same instant back,
+    aware UTC (A12). Aware in any zone, aware UTC, or naive - a naive value is
+    UTC, as the code has always assumed - it is stored as the naive UTC wall
+    clock every existing row holds, so nothing is migrated, and a query bound
+    with an aware time compares instants, not wall clocks."""
+
+    def test_a_datetime_column_reads_back_aware_utc_at_the_instant_it_was_given(
+            self, isolated_db):
+        from sqlalchemy import select
+
+        from app.db import session_scope
+        from app.models import SourceHealth
+
+        given = {"berlin": _INSTANT.astimezone(_BERLIN), "utc": _INSTANT,
+                 "naive": _INSTANT.replace(tzinfo=None)}
+        with session_scope() as session:
+            session.add_all(SourceHealth(source=name, ok=True, checked_at=at)
+                            for name, at in given.items())
+        with session_scope() as session:
+            read = dict(session.execute(
+                select(SourceHealth.source, SourceHealth.checked_at)).tuples().all())
+        for name in given:
+            assert read[name].utcoffset() == timedelta(0), (name, read[name])
+            assert read[name] == _INSTANT, (name, read[name])
+        connection = sqlite3.connect(isolated_db)
+        stored = dict(connection.execute("select source, checked_at from source_health"))
+        connection.close()
+        assert stored == dict.fromkeys(given, "2026-08-15 10:00:00.000000")
+
+    def test_rows_already_stored_read_back_at_the_same_instant(self, isolated_db):
+        """No data migration: every spelling an existing row holds reads back
+        aware UTC at the instant it was written."""
+        from sqlalchemy import select
+
+        from app.db import session_scope
+        from app.models import SourceHealth
+
+        spellings = {
+            "orm": "2026-08-15 10:00:00.000000",        # every ORM write so far
+            "raw_bind": "2026-08-15 10:00:00+00:00",    # pysqlite's adapter (migration 0007)
+            "sql_now": "2026-08-15 10:00:00.000",       # strftime('%f') (migrations 0022, 0024)
+        }
+        connection = sqlite3.connect(isolated_db)
+        connection.executemany("insert into source_health (source, ok, checked_at) "
+                               "values (?, 1, ?)", spellings.items())
+        connection.commit()
+        connection.close()
+        with session_scope() as session:
+            read = dict(session.execute(
+                select(SourceHealth.source, SourceHealth.checked_at)).tuples().all())
+        for name in spellings:
+            assert read[name].utcoffset() == timedelta(0), (name, read[name])
+            assert read[name] == _INSTANT, (name, read[name])
+
+    def test_a_query_bound_with_an_aware_time_compares_instants(self, isolated_db):
+        from sqlalchemy import select
+
+        from app.db import session_scope
+        from app.models import SourceHealth
+
+        with session_scope() as session:
+            session.add_all([
+                SourceHealth(source="before", ok=True,
+                             checked_at=_INSTANT - timedelta(minutes=30)),
+                SourceHealth(source="after", ok=True,
+                             checked_at=_INSTANT + timedelta(minutes=30)),
+            ])
+        bound = _INSTANT.astimezone(_BERLIN)
+        with session_scope() as session:
+            at_or_after = session.execute(select(SourceHealth.source).where(
+                SourceHealth.checked_at >= bound)).scalars().all()
+            before = session.execute(select(SourceHealth.source).where(
+                SourceHealth.checked_at < bound)).scalars().all()
+        assert (at_or_after, before) == (["after"], ["before"])
+
+    def test_every_datetime_column_reads_back_aware_utc(self):
+        """Every DATETIME column of every model module, not one table's: a
+        value bound through the column's type and read back through it."""
+        from sqlalchemy import create_engine, literal, select
+
+        from app.models import Base
+
+        engine = create_engine("sqlite://")
+        columns = [column for table in Base.metadata.sorted_tables for column in table.columns
+                   if column.type.compile(dialect=engine.dialect) == "DATETIME"]
+        assert columns, "no DATETIME column found"
+        wrong = []
+        with engine.connect() as connection:
+            for column in columns:
+                read = connection.execute(select(
+                    literal(_INSTANT.astimezone(_BERLIN), column.type))).scalar_one()
+                if read.utcoffset() != timedelta(0) or read != _INSTANT:
+                    wrong.append(f"{column.table.name}.{column.name}: {read!r}")
+        engine.dispose()
+        assert not wrong, "not aware UTC at the instant given:\n  " + "\n  ".join(wrong)

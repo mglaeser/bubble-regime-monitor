@@ -337,7 +337,7 @@ class TestRoundFiveOn140:
         assert decision.may_ask and claim is not None
         with session_scope() as s:
             stamped = s.get(MessageEngineAttempt, claim).started_at
-        assert stamped >= (called + timedelta(seconds=0.4)).replace(tzinfo=None), (called, stamped)
+        assert stamped >= called + timedelta(seconds=0.4), (called, stamped)
 
 
 class TestRoundSixOn140:

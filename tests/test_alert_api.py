@@ -157,7 +157,7 @@ def test_health_reports_mode_artifacts_and_sqlite(client):
     assert str(payload["sqlite"]["journal_mode"]).lower() == "wal"
     assert payload["sqlite"]["returning"]["insert"] is True
     assert payload["sqlite"]["returning"]["update"] is True
-    assert payload["schema"]["revision"] == "0024"
+    assert payload["schema"]["revision"] == "0025"
     assert payload["schema"]["quick_check"] == "ok"
     assert payload["schema"]["foreign_key_violations"] == 0
     assert payload["schema"]["missing_required_triggers"] == []
@@ -1564,7 +1564,7 @@ def test_send_test_queues_an_audited_memberless_test_delivery(client):
     the audit trail; counting it against the caps would spend the operator's
     budget on proving the wire.
     """
-    from datetime import UTC, timedelta
+    from datetime import timedelta
 
     from sqlalchemy import select
 
@@ -1605,8 +1605,6 @@ def test_send_test_queues_an_audited_memberless_test_delivery(client):
     # dispatcher.  This is deliberately one integrated assertion: a manually
     # seeded TEST could pass while the endpoint's exact memberless shape is
     # cancelled before render.
-    if delivery_created_at.tzinfo is None:
-        delivery_created_at = delivery_created_at.replace(tzinfo=UTC)
     with open("config/alert_phrases.v3.5.json", encoding="utf-8") as fh:
         phrase_set = validate_phrase_set(fh.read())
     sender = NullSender()

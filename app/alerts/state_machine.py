@@ -395,10 +395,6 @@ def _candidate_expired(memory: InstanceMemory, now: datetime) -> bool:
     if memory.candidate_expires_at is None:
         return False
     expiry = memory.candidate_expires_at
-    if expiry.tzinfo is None:
-        from datetime import UTC
-
-        expiry = expiry.replace(tzinfo=UTC)
     return now >= expiry
 
 

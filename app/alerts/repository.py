@@ -48,12 +48,6 @@ def utc_ms(moment: datetime) -> int:
     return int(moment.timestamp() * 1000)
 
 
-def _aware(moment: datetime | None) -> datetime | None:
-    if moment is None:
-        return None
-    return moment.replace(tzinfo=UTC) if moment.tzinfo is None else moment
-
-
 # ---------------------------------------------------------------------------
 # inputs
 # ---------------------------------------------------------------------------
@@ -144,7 +138,7 @@ def load_memories(
                 candidate_started_input=row.candidate_started_input,
                 candidate_from_state=row.candidate_from_state,
                 candidate_target_state=row.candidate_target_state,
-                candidate_expires_at=_aware(row.candidate_expires_at),
+                candidate_expires_at=row.candidate_expires_at,
                 candidate_ttl_policy=row.candidate_ttl_policy,
                 current_episode_id=row.current_episode_id,
                 confirmed_keys=confirmed,
@@ -473,8 +467,8 @@ def load_notification_memories(
     ).scalars().all()
     return {
         row.instance_fingerprint: NotificationMemory(
-            last_sent_at=_aware(row.last_sent_at),
-            last_reminder_at=_aware(row.last_reminder_at),
+            last_sent_at=row.last_sent_at,
+            last_reminder_at=row.last_reminder_at,
             reminder_count=row.reminder_count,
             next_notification_generation=row.next_notification_generation,
         )

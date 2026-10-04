@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -20,11 +20,7 @@ router = APIRouter(prefix="/api/v1/score", tags=["score"])
 
 
 def _iso_utc(dt: datetime) -> str:
-    """Timezone-aware UTC ISO-8601 (SQLite returns naive datetimes)."""
-    from datetime import UTC
-
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=UTC)
+    """Timezone-aware UTC ISO-8601."""
     return dt.isoformat()
 
 
@@ -33,12 +29,16 @@ def _parse_date_bound(value: str | None, field: str) -> datetime | None:
 
     A-25: `datetime.fromisoformat` raises ValueError on garbage; unguarded it
     surfaced as an HTTP 500 on a public endpoint. Validation belongs at the
-    boundary, and a bad client value is a 422, never a server error."""
+    boundary, and a bad client value is a 422, never a server error. A bound
+    with an offset is the UTC instant it names, as the column compares it
+    (app/models.py:TZDateTime), so one no UTC instant can hold is refused
+    here rather than overflowing when the query binds it."""
     if value is None:
         return None
     try:
-        return datetime.fromisoformat(value)
-    except ValueError as exc:
+        bound = datetime.fromisoformat(value)
+        return bound.astimezone(UTC) if bound.utcoffset() is not None else bound
+    except (ValueError, OverflowError) as exc:
         raise HTTPException(
             status_code=422,
             detail=f"{field} must be an ISO-8601 date (e.g. 2026-01-31); got {value!r}",

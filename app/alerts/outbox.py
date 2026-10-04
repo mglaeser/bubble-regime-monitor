@@ -18,7 +18,7 @@ to say it". Three things it has to get right:
 from __future__ import annotations
 
 from collections.abc import Collection
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import and_, case, func, or_, select, update
@@ -66,12 +66,6 @@ log = get_logger(__name__)
 WINDOW_24H = timedelta(hours=24)
 WINDOW_168H = timedelta(hours=168)
 BUDGET_RECHECK_INTERVAL = timedelta(minutes=30)
-
-
-def _aware(moment: datetime | None) -> datetime | None:
-    if moment is None:
-        return None
-    return moment.replace(tzinfo=UTC) if moment.tzinfo is None else moment
 
 
 # ---------------------------------------------------------------------------
@@ -274,14 +268,14 @@ def release_due_holds(
 
         hold = PlanningState(delivery.planning_state)
         if hold == PlanningState.HELD_QUIET:
-            due_at = _aware(delivery.not_before)
+            due_at = delivery.not_before
             key = "quiet"
         else:
-            due_at = _aware(delivery.budget_recheck_at)
+            due_at = delivery.budget_recheck_at
             # Recover pre-release-mechanism rows after the same bounded
             # interval rather than stranding them forever.
             if due_at is None:
-                updated_at = _aware(delivery.updated_at)
+                updated_at = delivery.updated_at
                 due_at = updated_at + BUDGET_RECHECK_INTERVAL if updated_at else None
             key = "budget"
         if due_at is None or due_at > now:
@@ -440,7 +434,7 @@ def recover_leases(session: Session, *, now: datetime) -> dict[str, int]:
         )
     ).scalars().all()
     for row in rows:
-        if (_aware(row.lease_until) or now) > now:
+        if (row.lease_until or now) > now:
             continue
         if row.transport_status == TransportStatus.LEASED and row.request_started_at is None:
             row.transport_status = TransportStatus.RETRY_DUE
