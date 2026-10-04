@@ -232,9 +232,9 @@ currently ask for, and should not be added without deciding that it should.
 
 Quiet hours use IANA rules, so the release time moves with DST; exactly 22:00
 is held. The non-P1 budget is 2 per rolling 168h in quiet regimes, hard-capped
-at 3/24h and 6/168h. **P1 is never held by either** — enforced by the ruleset
-loader *and* by a CHECK constraint on `alert_delivery`, so a future planner bug
-cannot even persist the mistake.
+at 5/24h and 8/168h (`app/alerts/budgets.py` `LIMITS`). **P1 is never held by
+either** — enforced by the ruleset loader *and* by a CHECK constraint on
+`alert_delivery`, so a future planner bug cannot even persist the mistake.
 
 ---
 

@@ -84,10 +84,11 @@ class Settings(BaseSettings):
     # is a defect, not a fallback, and a silent downgrade to SMS would hide the
     # proxy being down precisely when the operator needs to know.
     #
-    # Shares SMS_DAILY_HOUR/MINUTE and SMS_MAX_LEN — the schedule and the body
-    # are transport-independent. The proxy accepts 4000 Unicode code points,
-    # so the 160-char ASCII cap is now a self-imposed SMS-era limit rather
-    # than a physical one; raising it is a product decision, not a migration.
+    # Shares SMS_DAILY_HOUR/MINUTE and SMS_MAX_LEN — the schedule and the
+    # engine-off body are transport-independent. The proxy accepts 4000
+    # Unicode code points, so the 150-char ASCII cap is a self-imposed SMS-era
+    # limit there rather than a physical one; with the message engine on, the
+    # iMessage text is held to MESSAGE_ENGINE_IMESSAGE_MAX_CHARS instead.
     imessage_enabled: bool = False
     imessage_api_base_url: str = ""  # origin only, e.g. https://messages.example.com
     imessage_api_key: str = ""       # scoped `messages:send` key, `imp_` prefix

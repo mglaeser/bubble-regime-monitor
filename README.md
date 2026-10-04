@@ -206,7 +206,7 @@ SIPGATE_RECIPIENT=+49151...        # E.164
 SMS_DAILY_HOUR=8                   # UTC hour (default 08:00)
 ```
 
-The 160-character ASCII cap is an SMS constraint: one GSM-7 segment, ASCII-coerced so a stray Unicode character cannot halve the limit. It still applies over iMessage, where the proxy would accept 4000 Unicode code points — the shared cap keeps the digest identical across transports, and raising it is a product decision rather than part of the migration.
+The engine-off digest is capped at 150 characters (`SMS_MAX_LEN`), inside one 160-septet GSM-7 segment, and ASCII-coerced so a stray Unicode character cannot halve the limit. The same cap applies over iMessage, where the proxy would accept 4000 Unicode code points, so that digest is identical on both transports. With the engine on, the digest is held to its channel instead: 150 GSM-7 septets over SMS, 200 characters over iMessage (`MESSAGE_ENGINE_IMESSAGE_MAX_CHARS`).
 
 ### System-failure alerts
 
@@ -230,6 +230,70 @@ There is **one outage record** (since 2026-09-28): the first failure sends at on
 **Why it defaults on.** It can only reach a transport and recipient you already configured, so it adds no destination; with both transports off it does nothing but log. This exists because between 2026-08-06 and 2026-08-18 every scheduled recompute failed and nothing said so: `/healthz` returned `ok`, `/readyz` listed all eighteen sources green (source health is only persisted *by* a successful snapshot, so it was replaying the last good run), the science audit counted zero errors because it has no snapshot-age flag, and the daily digest kept sending the same twelve-day-old score. A monitor you have to remember to switch on is a monitor that is off.
 
 Test either digest without waiting for the schedule: `curl -X POST -H "X-API-Key:<key>" localhost:8000/api/v1/admin/send-sms` — the path is unchanged so existing operator scripts keep working, and the response names the `transport` that actually carried it. Example body: `bubblegauge 41/100 hold. IQR 34-47. SPY IN, QQQ IN. Flags 0/4.` (since v3.6.0 the digest carries no disclaimer tag; the research-only framing lives on the status/spec pages)
+
+## Every message the service sends
+
+Everything bubblegauge sends to a person, by itself or on request. Times are UTC unless marked. The transports are set up as in the digest section above; the release and the deploy note are described in `docs/AUTO_DEPLOY.md`, the alerts in `docs/ALERT_SYSTEM.md`, the message engine in `docs/MESSAGE_ENGINE.md`.
+
+### What decides whether anything goes out
+
+| Setting | Default | What it decides |
+|---|---|---|
+| `IMESSAGE_ENABLED` with the proxy's URL, key and recipient; `SMS_ENABLED` with the sipgate token and recipient | off | The transport of the digest, the failure alarm and the alerts: iMessage when it is enabled and configured, else SMS when it is enabled. With neither, no digest is scheduled (logged at boot), the failure alarm only logs, and a live alert is recorded as `NO_TRANSPORT_CONFIGURED`. The deploy note needs iMessage. |
+| `MESSAGE_ENGINE_ENABLED` | off | Whether the model writes the digest. On, the digest also needs the owner's signed prompt library and live admission (the alert ruleset and phrase set the service loads are the promoted ones), whatever `ALERTS_MODE` says. If either is missing, no digest goes out. |
+| `ALERTS_MODE` (`disabled`, `shadow`, `live`) | `disabled` | Every alert, the recompute-outage and test alerts included. `shadow` evaluates and records but sends nothing. `live` sends only while the loaded ruleset and phrase set are the promoted ones, and only alerts planned under a ruleset that was promoted and not revoked. |
+| `ALERT_INPUT_CAPTURE` | on | Whether each recompute's input is captured for the alerts (the ruleset's `capture.enabled` can turn it off too). Off, no recompute is evaluated, so no alert comes from one; the recompute-outage and test alerts still can. |
+| `FAILURE_ALERTS_ENABLED` | on | The failure alarm, the stuck alarm and the all-clear. |
+| `HEALTHCHECKS_PING_URL` | empty | The dead-man's switch: no pings while it is empty. |
+| Silences (`POST /api/v1/alerts/silences`) | none | A silenced rule, instance or bucket gets no alert, and its queued alerts are withdrawn. |
+
+### What it sends by itself
+
+| Message | When | Built from | How the text is made | Channel and limits | When something fails |
+|---|---|---|---|---|---|
+| **Daily digest**, engine off | Daily at `SMS_DAILY_HOUR`:`SMS_DAILY_MINUTE` (default 08:00), when a transport is chosen. | The newest snapshot: score, band, override, interquartile range, red flags, SPY and QQQ trend. | A fixed English template. No model. | The transport. ASCII, at most 150 characters (`SMS_MAX_LEN`). | The failure is logged. No retry. |
+| **Daily digest**, engine on | As above. | As above, plus the nine indicator sub-scores, the snapshot's model judgment (at most 180 characters) and the repository's references for the indicators. | The model writes it from the library entry `daily_digest`, in `MESSAGE_LANGUAGE` (default English), when the governor allows a call: one at a time, 300 s apart, 100 per UTC day, none for 24 h after 5 failed calls in a row (an unconfigured gateway counts as failed). Basic checks: visible text, no control character, the channel's characters, no link or phone number, the length. | The transport. 150 GSM-7 septets on SMS, 200 characters on iMessage. | No call, a failed call or a failed check: the owner's template with the current numbers. A malformed library entry, or a template that fails a check: `bubblegauge: daily_digest fired.` An unsigned library or no live admission: nothing. No retry. |
+| **Alert, P1**: 7 rules at stage 3 (band to de-risk, override fires, SPY trend out at high risk, persistent breadth flag, semiconductor run-up past 150 pp, execution armed, falsification event) | Every recompute (scheduled, or `POST /api/v1/admin/refresh`) is evaluated; a dispatcher pass every 20 s sends up to 5 queued alerts. The :15/:45 job re-runs an abandoned evaluation, twice at most. | The facts the rule declares, from the newest captured recompute input at send time. Caveats when data is degraded or stale, when the condition is unknown at send time, or when it moved since it fired (then trigger and current values). | Reviewed fixed phrases (`config/alert_phrases.v3.5.json`) in `MESSAGE_LANGUAGE`, else German. No model. | The transport. GSM-7, at most 160 septets, on both channels. Sent at once and alone: no quiet hours, no budget. Cooldown 48 h (semiconductor tier 30 days, falsification event none). | No connection, 429 or another unlisted 4xx: retried after 30 s per attempt (at most 5 minutes), without limit. A listed 4xx, an unexpected 2xx or no transport: final. A 3xx, a 5xx or a lost answer: `UNKNOWN`, never sent again. A text that fails its own checks: not sent. |
+| **Alert, P2**: 19 rules at stage 3 (band moves, override resolves, SPY and QQQ trend out and back in, breadth flag on and all-clear, credit stress, margin rollover, VIX backwardation, semiconductor run-up past 100 pp, data-quality and coverage notices, the recompute outage) | As P1. | As P1. | As P1. The alerts of one root cause in one evaluation share a message, which names up to three and counts the rest. | As P1, but held outside 07:00–22:00 Europe/Berlin, and at most 5 per 24 h and 8 per 7 days (rolling); over the cap, held and re-checked every 30 minutes. Cooldown 6 h to 30 days per rule. | As P1. |
+| **Alert reminder** | At most one per rule instance: at the first evaluation 48 h after its alert that still finds the condition firing (six of the seven P1 rules; no P2 rule has one). | As P1. | The rule's phrases again. | As P1. | As P1. |
+| **Recompute-outage alert** (the P2 rule `ops.recompute_outage`) | Two scheduled recomputes missed and 90 minutes past the second. Checked by the host's watchdog timer every 30 minutes and in the app at :10/:40. | The number of missed slots. | `Kein Rechenlauf seit {n} Slots.` / `No compute run for {n} slots.` | As P2. | As P2. No all-clear: once a recompute lands, the next check closes it without a message. |
+| **Failure alarm, all-clear** | A recompute that raises or writes no snapshot opens one outage record and alarms at once; while the outage lasts, a failure repeats the alarm once `FAILURE_ALERT_REPEAT_H` (24 h) has passed. A recompute holding its lock for `FAILURE_ALERT_STUCK_AFTER_H` (4 h), checked at :05/:35, counts as a failure. The first success after an announced outage sends the all-clear. | The outage record: failures, since when, the newest score's age, the latest error (redacted, at most 90 characters). | Fixed English text (System-failure alerts, above). | The digest's transport. At most 150 characters. | Not delivered: the record stays open, and the next failure (for the all-clear, the next success) sends again. |
+| **Deploy note** | Once per release, after the new container answers on main's commit (`deploy/release.sh`). Never on a restart, a reboot or a hand rollback. | What the release wrote into the image: the commit range, the merged commits' titles and descriptions, the changed paths. | The model may only name up to three areas from a closed list of ten, and the note prints each area's fixed phrase. The last line, `Score logic: high / medium / low / very low - <reason>`, is computed from the changed files. | iMessage only, when enabled and configured. No other switch. | A reply that is not area codes only, or a failed call: the commit and its commit count, with the same last line. No note when the release cannot name the commit the last container ran. A note that is not sent is not sent later. |
+| **Host notices** | The release unit fails: at once, then at most once an hour while it keeps failing. The alert-watchdog unit fails (container not running, or the watchdog crashed or hung): with every failed 30-minute run. | The failed unit, the container's state, the host, the time. | Fixed English text from `deploy/notify-outage.sh`. | iMessage only, from the host straight to the proxy, with the host's own settings (`~/.config/bubblegauge/imessage.env`). | curl retries a transient error twice; any 2xx counts as sent. |
+| **Dead-man's switch** | The service pings `HEALTHCHECKS_PING_URL` after every successful recompute, never after a failed one; Healthchecks alerts when the pings stop. | The ping alone. | Healthchecks' own notification. | The check's own channels. | Off while the URL is empty. A refused ping is logged, not retried. |
+
+### On request (admin key, or the CLI in the container)
+
+| Request | What goes out |
+|---|---|
+| `POST /api/v1/admin/send-sms` | The daily digest now. With the engine off it goes out even when both transport switches are off, over whichever transport has credentials and a recipient (iMessage first); with the engine on it needs the chosen transport, like the scheduled run. |
+| `POST /api/v1/admin/refresh` | A recompute, and with it whatever a recompute sends: alerts, the failure alarm or the all-clear, the ping. |
+| `POST /api/v1/admin/alerts/send-test` | A P4 test alert, `bubblegauge Testnachricht.` / `bubblegauge test message.`, sent by the next dispatcher pass, exempt from quiet hours and the budget. It reaches a phone only in `live`. |
+| `POST /api/v1/admin/alerts/evaluate` with `shadow=false` | One evaluation in `ALERTS_MODE` (409 while disabled); in `live` its alerts are sent as above. |
+| `bubblegauge alerts dispatch --once` · `watchdog --once` (CLI) | One dispatcher pass; one outage check, which can raise the recompute-outage alert. `bubblegauge alerts evaluate` always runs in shadow and sends nothing. |
+
+### Never sent
+
+| What | Why |
+|---|---|
+| P3 alerts (17 rules, none active at stage 3) | API and log only since their weekly digest was deleted (owner decision D2a). |
+| P4 alerts (3 rules at stage 3) | API and log only, by design. |
+| 61 of the 90 rules | Disabled, each with a recorded reason: 47 belong to stages 5–7; of the 14 that name stage 3, two wait on unresolved pins, one is held back for its latch, and eleven are ops checks that another component raises or whose input is not available yet. |
+| An alert whose send was ambiguous (`UNKNOWN`) | It may have arrived, so nothing sends it again, by hand or automatically (owner decision D2f). |
+| A queued alert whose condition cleared, that a silence covers, or whose ruleset a promotion replaced | Withdrawn before the send; a replaced ruleset's open episodes resolve as `RULESET_REPLACED` (owner decision D2e). |
+| A notice that the model's breaker opened | None exists: while the breaker is open, the digest goes out as the template. |
+| The prompt library's 22 alert entries | No caller: alerts use the reviewed phrase set, never a model. |
+
+### SMS and iMessage
+
+| | SMS (sipgate) | iMessage (imessage-proxy) |
+|---|---|---|
+| Chosen when | `SMS_ENABLED` with the token and recipient, and iMessage not chosen | `IMESSAGE_ENABLED` with URL, key and recipient; it wins when both are on |
+| Length | Digest: 150 characters with the engine off, 150 GSM-7 septets with it on (`^ { } \ [ ~ ] \| €` count two). Failure alarm: 150 characters. Alerts: 160 septets. | Digest: 150 characters with the engine off, 200 with it on. Failure alarm: 150 characters. Alerts: 160 GSM-7 septets, the same text as by SMS. |
+| Characters | Engine-on digest and alerts: GSM-7. Engine-off digest: ASCII. | Engine-on digest: printable ASCII and Latin-1, a few typographic marks, five allowed emoji. Alerts: GSM-7. Engine-off digest: ASCII. |
+| Sent only here | – | The deploy note, the host notices. |
+| Counts as sent | Alerts: 204 exactly; another 2xx is final, a 3xx or 5xx is `UNKNOWN`, a 429 or unlisted 4xx is retried. Digest and failure alarm: any 2xx. | 202 with an accepted send operation; for alerts the other statuses as by SMS. Host notices: any 2xx. |
+| Duplicates | – | An alert sends its delivery id as `Idempotency-Key`, the same on every retry. The digest, the failure alarm, the deploy note and the host notices use a fresh key per send. |
 
 ## Falsification criteria
 
