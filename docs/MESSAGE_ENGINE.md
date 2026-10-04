@@ -224,6 +224,20 @@ or evidence read. The mode is "live" whatever `ALERTS_MODE` says, because an
 engine send is a real send in every mode. Rule-backed triggers continue through
 the normal planner/dispatcher path unchanged.
 
+2026-10-04, the owner: Q25 reaches every information message, not only the
+engine's. The digest with the engine off (`app/services/digest.py`, scheduled
+and forced by `POST /api/v1/admin/send-sms`) and the deploy note
+(`app/services/deploy_note.py`, after its model call) ask
+`gate.admission_blockers` right before the wire too; a refusal sends nothing
+and says so. The failure, stuck and all-clear alarm
+(`app/services/failure_alert.py`) and the host notices
+(`deploy/notify-outage.sh`) are Q25's P1-style exemptions: they exist to report
+breakage, and admission depends on the app and its database, so a gate there
+would silence the alarm about the thing that broke
+(`tests/test_failure_alert.py::TestTheAlarmNeedsNoAdmission`). They exempt
+messages, not a priority: whatever the engine writes passes admission at every
+priority (below).
+
 Implemented in `app/message_engine/gate.py`. Three things about it are load
 bearing, each pinned by a test in `tests/test_message_engine_go_live.py`
 (`TestAdmission`):

@@ -9,10 +9,14 @@ The check is `load_active_for_mode(session, mode="live")`: the ruleset and
 phrase set this deployment loads must be the promoted ones. Since owner
 decision D2d that is the whole runtime check - the CI replay gate is the
 evidence, and nothing here reads it. The mode is "live" whatever ALERTS_MODE
-says, because an engine send is a real send in every mode.
+says, because each of these sends is a real send in every mode.
 
-The caller is `app.services.engine_delivery.deliver`, which asks this after
-the compose and right before the wire (decision 5). It takes no priority: a
+Every information message asks this right before the wire (decision 5; the
+owner, 2026-10-04): `app.services.engine_delivery.deliver` after the compose,
+the engine-off digest (`app.services.digest`) and the deploy note
+(`app.services.deploy_note`, after its model call). The failure alarm and the
+host notices are the defined exemptions: they report breakage, and this check
+needs the app and its database. It takes no priority: a
 P1 is exempt from pacing, budget and breaker because those govern phrasing,
 and admission is not phrasing - it is whether this deployment may put bytes
 on a wire at all.

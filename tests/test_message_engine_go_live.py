@@ -81,6 +81,10 @@ _NOTHING_PROMOTED = "live mode requires a PROMOTED ruleset and the registry has 
 _COMMON = {"engine", "trigger", "transport", "source", "compose_reason", "chars", "message", "status"}
 _REFUSED = _COMMON | {"blockers"}
 _SENT = _COMMON | {"transport_status", "operation_id", "error"}
+#: The engine-off digest's refusal: the digest's own fields, and the status
+#: and blockers of the engine's refusal.
+_ENGINE_OFF_REFUSED = {"transport", "llm_used", "chars", "message", "snapshot_computed_at",
+                       "status", "blockers"}
 
 
 class TestDigestFacts:
@@ -124,6 +128,7 @@ class TestEngineOff:
         with session_scope() as s:
             s.add(_snapshot())
             s.commit()
+        _admitted()
         calls: list[str] = []
         prompts: list[str] = []
         monkeypatch.setattr(judgment, "run_completion",
@@ -137,6 +142,56 @@ class TestEngineOff:
         assert out["status"] == "sent" and out["message"] == template and calls == [template]
         assert out["llm_used"] is False and "engine" not in out
         assert prompts == []
+
+    @staticmethod
+    def _wire(monkeypatch) -> list[str]:
+        """Both transports, recorded: a refusal sends by neither."""
+        sends: list[str] = []
+        ok = type("R", (), {"ok": True, "status_code": 202, "operation_id": "op", "error": None})()
+        monkeypatch.setattr(digest, "send_imessage", lambda body, **_kw: sends.append(body) or ok)
+        monkeypatch.setattr(digest, "send_sms", lambda body, **_kw: sends.append(body) or ok)
+        return sends
+
+    @pytest.mark.parametrize("force", [False, True], ids=["scheduled", "forced"])
+    def test_nothing_promoted_sends_nothing(self, monkeypatch, imessage_env, force):
+        """Ruling Q25, extended by the owner on 2026-10-04: the digest with the
+        engine off passes admission too, scheduled and forced alike, right
+        before the wire (decision 5). Nothing promoted: nothing is sent, by
+        either transport, and the refusal names its blocker in the shape the
+        engine's refusal has - a refusal, never a fall-through."""
+        with session_scope() as s:
+            s.add(_snapshot())
+        sends = self._wire(monkeypatch)
+        out = digest.send_daily_digest(force=force)
+        assert out["status"] == "refused" and out["blockers"] == [_NOTHING_PROMOTED]
+        assert sends == [] and set(out) == _ENGINE_OFF_REFUSED
+
+    def test_the_forced_send_answers_the_refusal(self, monkeypatch, imessage_env):
+        """POST /api/v1/admin/send-sms is the forced send: the refusal is its
+        answer, never an HTTP 500 (AGENTS.md rule 3)."""
+        from fastapi.testclient import TestClient
+
+        from app.main import app
+        from tests.conftest import TEST_ADMIN_KEY
+
+        with session_scope() as s:
+            s.add(_snapshot())
+        sends = self._wire(monkeypatch)
+        response = TestClient(app, raise_server_exceptions=False).post(
+            "/api/v1/admin/send-sms", headers={"X-API-Key": TEST_ADMIN_KEY})
+        assert response.status_code == 200, response.text
+        assert response.json()["data"]["blockers"] == [_NOTHING_PROMOTED] and sends == []
+
+    @pytest.mark.parametrize("force", [False, True], ids=["scheduled", "forced"])
+    def test_a_promoted_deployment_sends_the_template(self, monkeypatch, imessage_env, force):
+        from app.engine.sms_report import deterministic_report
+
+        with session_scope() as s:
+            s.add(_snapshot())
+        _admitted()
+        sends = self._wire(monkeypatch)
+        out = digest.send_daily_digest(force=force)
+        assert out["status"] == "sent" and sends == [deterministic_report(_snapshot(), get_settings().sms_max_len)]
 
 
 class TestEngineOn:

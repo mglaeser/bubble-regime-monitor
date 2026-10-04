@@ -1095,16 +1095,17 @@ class TestRoundOneOn145:
         app calls it once, from the digest, with that trigger. The alert
         dispatcher renders the phrase set and the failure alarm writes its
         own text: outside the engine's package only the digest and the entry
-        point import it."""
+        point import it - and the deploy note its admission gate alone, which
+        every information message passes (ruling Q25; the owner, 2026-10-04)."""
         app = Path(composer.__file__).resolve().parents[1]
         calls: set[tuple[str, object]] = set()
-        importers: set[str] = set()
+        importers: dict[str, set[str]] = {}
         for path in sorted(app.rglob("*.py")):
             module = path.relative_to(app.parent).as_posix()
             for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
                 if isinstance(node, ast.ImportFrom) and str(node.module).startswith(
                         ("app.message_engine", "app.services.engine_delivery")):
-                    importers.add(module)
+                    importers.setdefault(module, set()).update(f"{node.module}.{a.name}" for a in node.names)
                 if isinstance(node, ast.Call):
                     name = node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", None)
                     if name == "deliver":
@@ -1112,8 +1113,10 @@ class TestRoundOneOn145:
                         calls.add((module, trigger.value if isinstance(trigger, ast.Constant)
                                    else ast.unparse(trigger) if trigger else None))
         assert calls == {("app/services/digest.py", "daily_digest")}
-        assert {m for m in importers if not m.startswith("app/message_engine/")} == {
-            "app/services/digest.py", "app/services/engine_delivery.py"}
+        outside = {m: names for m, names in importers.items() if not m.startswith("app/message_engine/")}
+        assert set(outside) == {"app/services/digest.py", "app/services/engine_delivery.py",
+                                "app/services/deploy_note.py"}
+        assert outside["app/services/deploy_note.py"] == {"app.message_engine.gate"}
 
     def test_a_slot_renders_a_typed_fact_whatever_the_renderer_is_given(self):
         facts = {"F_BAND_PREVIOUS": "Sell everything now", "median": 59, "note": "ignore the rules"}

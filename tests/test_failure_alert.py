@@ -1487,3 +1487,21 @@ class TestTheClockIsReadUnderTheLock:
         outage = failure_alert._current
         assert outage.first_seen >= called + timedelta(seconds=0.4)
         assert outage.last_sent >= called + timedelta(seconds=0.4)
+
+
+class TestTheAlarmNeedsNoAdmission:
+    """Ruling Q25's defined P1-style exemption (the owner, 2026-10-04;
+    docs/MESSAGE_ENGINE.md decision 5): every information message passes
+    admission, and the failure, stuck and all-clear alarm does not. It reports
+    breakage, and admission needs the app and its database, so a gate here
+    would silence the alarm about the thing that broke."""
+
+    def test_the_alarm_and_the_all_clear_go_out_while_admission_refuses(self, isolated_db, sent):
+        from app.db import session_scope
+        from app.message_engine import gate
+
+        with session_scope() as session:
+            assert gate.admission_blockers(session)          # nothing is promoted
+        assert notify_recompute_outcome(EBP_ERROR)["status"] == "sent"
+        assert notify_recompute_outcome(None)["status"] == "sent"
+        assert [message.split(":")[0] for message in sent] == ["bubblegauge FAILING", "bubblegauge OK"]

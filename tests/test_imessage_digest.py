@@ -832,6 +832,17 @@ class TestExactlyOneTransportSends:
     app.services.digest, not in the notify modules, because digest.py imports
     both senders at module level."""
 
+    @pytest.fixture(autouse=True)
+    def _promoted(self, isolated_db):
+        """A promoted deployment: every digest passes admission (ruling Q25;
+        the owner, 2026-10-04), and these tests are about the transport."""
+        from app.alerts.artifacts import load_active
+        from app.db import session_scope
+        from tests.conftest import register_promoted
+
+        with session_scope() as session:
+            register_promoted(session, load_active(session))
+
     def test_imessage_path_sends_once_and_never_touches_sipgate(
             self, isolated_db, imessage_env, monkeypatch):
         import app.services.digest as digest

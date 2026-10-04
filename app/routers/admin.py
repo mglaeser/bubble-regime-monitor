@@ -194,9 +194,11 @@ def refresh_status(_: None = Depends(require_admin_key)) -> dict[str, Any]:
                  "switches off, over whichever transport has credentials and a recipient "
                  "(iMessage first). With the engine on it goes through the message engine "
                  "(docs/MESSAGE_ENGINE.md) and needs the configured transport, like the "
-                 "scheduled run. The response names the transport that actually carried "
-                 "it. Path kept as /send-sms so existing operator scripts and bookmarks "
-                 "keep working."),
+                 "scheduled run. Either way it needs admission (docs/MESSAGE_ENGINE.md "
+                 "decision 5): without it nothing is sent, and the response is the "
+                 "refusal with its blockers. The response names the transport that "
+                 "actually carried it. Path kept as /send-sms so existing operator "
+                 "scripts and bookmarks keep working."),
 )
 def send_sms_now(_: None = Depends(require_admin_key)) -> dict[str, Any]:
     from app.services.digest import send_daily_digest

@@ -10,6 +10,7 @@ from app.config import configured_environment, get_settings, near_miss_env_keys
 from app.db import session_scope
 from app.engine.sms_report import deterministic_report
 from app.logging_conf import get_logger
+from app.message_engine import gate
 from app.models import Snapshot
 from app.notify.imessage import send_imessage
 from app.notify.sipgate import send_sms
@@ -91,7 +92,10 @@ def send_daily_digest(*, force: bool = False) -> dict[str, Any]:
 
     Returns a structured status dict (never raises). `force=True` bypasses the
     enabled switches (used by the admin test endpoint) but still requires
-    credentials + a recipient on whichever transport is selected.
+    credentials + a recipient on whichever transport is selected. Engine on or
+    off, scheduled or forced, it passes admission right before the wire (ruling
+    Q25, docs/MESSAGE_ENGINE.md decision 5): a refusal is status "refused"
+    with its blockers, and nothing is sent.
 
     Exactly one transport carries the message. When both switches are on,
     iMessage wins and sipgate is not called — sending the same digest twice is
@@ -143,6 +147,15 @@ def send_daily_digest(*, force: bool = False) -> dict[str, Any]:
         "message": body,
         "snapshot_computed_at": computed_at.isoformat(),
     }
+
+    # ADMISSION, right before the wire, as on the engine path: every
+    # information message passes it (the owner, 2026-10-04). A refusal is a
+    # refusal, by neither transport.
+    with session_scope() as session:
+        blockers = gate.admission_blockers(session)
+    if blockers:
+        log.warning("daily_digest_refused", transport=transport, blockers=blockers)
+        return {**common, "status": "refused", "blockers": blockers}
 
     if transport == "imessage":
         result = send_imessage(body)

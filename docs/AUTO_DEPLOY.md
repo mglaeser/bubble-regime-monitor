@@ -61,8 +61,10 @@ slots (02/06/10/14/18/22 UTC).
 
 ### The deploy note
 
-After each release the new image sends one iMessage, when iMessage is enabled:
-the commit, how many commits it carries, the areas the deploy changes, and a
+After each release the new image sends one iMessage, when iMessage is enabled
+and admission holds - the alert ruleset and phrase set the image loads are the
+promoted ones (docs/MESSAGE_ENGINE.md decision 5), so a release that ships
+ones not yet promoted sends no note: the commit, how many commits it carries, the areas the deploy changes, and a
 last line the code computes from the changed files, never the model - `Score
 logic: high | medium | low | very low - <reason>`: high when scoring code and
 the pinned golden fixture changed together, medium when scoring code changed
