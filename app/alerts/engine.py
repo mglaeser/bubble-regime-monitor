@@ -131,8 +131,6 @@ def claim_evaluation(
         if existing.status == EvaluationRunStatus.COMMITTED:
             return existing, False
         lease = existing.lease_until
-        if lease is not None and lease.tzinfo is None:
-            lease = lease.replace(tzinfo=UTC)
         if existing.status == EvaluationRunStatus.STARTED and lease and lease > now:
             return existing, False
         existing.status = EvaluationRunStatus.STARTED

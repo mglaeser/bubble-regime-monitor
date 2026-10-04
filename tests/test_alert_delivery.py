@@ -949,7 +949,7 @@ def test_automatic_retry_preserves_append_only_attempt_timestamps(isolated_db):
             "delivery_retry_due",
             "delivery_lease_recovered",
         ]
-        assert events[0].occurred_at == first_start.replace(tzinfo=None)
+        assert events[0].occurred_at == first_start
         assert "attempt=1" in (events[0].detail_redacted or "")
 
 
@@ -1046,9 +1046,9 @@ def test_a_test_delivery_dispatches_its_reviewed_fragment(isolated_db):
     with session_scope() as session:
         delivery = session.get(AlertDelivery, delivery_id)
         assert delivery.transport_status == TransportStatus.SENT
-        assert delivery.request_started_at.replace(tzinfo=UTC) == request_started
-        assert delivery.sent_at.replace(tzinfo=UTC) == provider_finished
-        assert delivery.updated_at.replace(tzinfo=UTC) == provider_finished
+        assert delivery.request_started_at == request_started
+        assert delivery.sent_at == provider_finished
+        assert delivery.updated_at == provider_finished
 
 
 def test_dispatcher_executes_a_nonzero_headline_member_index(

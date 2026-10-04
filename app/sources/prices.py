@@ -107,8 +107,6 @@ def _health_ok(provider: str) -> bool:
         if row is None or row.cooldown_until is None:
             return True
         until = row.cooldown_until
-        if until.tzinfo is None:
-            until = until.replace(tzinfo=UTC)
         return datetime.now(UTC) >= until
     except Exception:
         return True  # health store must never block a fetch

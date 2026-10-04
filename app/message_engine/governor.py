@@ -88,11 +88,6 @@ class Decision:
     reason: str | None = None
 
 
-def _naive_utc(moment: datetime) -> datetime:
-    """The attempt table stores naive UTC."""
-    return moment.astimezone(UTC).replace(tzinfo=None) if moment.tzinfo else moment
-
-
 def short_circuit(priority: int, settings: Settings) -> Decision | None:
     """The refusals that need no database: the engine off, or a P1."""
     if not settings.message_engine_enabled:
@@ -112,7 +107,7 @@ def refusal(session: Session, *, settings: Settings, now: datetime) -> str | Non
     not a window of the newest N: a window has an order, and at a tie the
     order is unknowable (#140 round 7).
     """
-    moment = _naive_utc(now)
+    moment = now.astimezone(UTC)
     attempt = MessageEngineAttempt
     # One call at a time: the floor alone let a call running past it - the
     # half-open probe above all - admit another (#140 round 1, SOTA-A, SOTA-C).
@@ -168,7 +163,7 @@ def reserve(*, trigger: str, channel: str, priority: int, settings: Settings,
         lifetime = timedelta(seconds=CLAIM_TTL_S)
         for expired in session.execute(select(MessageEngineAttempt).where(
                 MessageEngineAttempt.outcome == Outcome.IN_FLIGHT.value,
-                MessageEngineAttempt.started_at < _naive_utc(moment) - lifetime)).scalars():
+                MessageEngineAttempt.started_at < moment - lifetime)).scalars():
             # It failed when its lifetime ended, not when it was noticed: a
             # claim abandoned days ago must not restart the cooldown now (#140
             # round 1, SOTA-A).
@@ -180,7 +175,7 @@ def reserve(*, trigger: str, channel: str, priority: int, settings: Settings,
         if reason is not None:
             return Decision(False, reason), None
         row = MessageEngineAttempt(trigger=trigger, channel=channel, priority=priority,
-                                   started_at=_naive_utc(moment),
+                                   started_at=moment,
                                    outcome=Outcome.IN_FLIGHT.value, iteration=1)
         session.add(row)
         session.flush()
@@ -198,7 +193,7 @@ def resolve(claim_id: int, *, outcome: Outcome, reason: str | None,
     values: dict[str, object] = {
         "outcome": outcome.value,
         "failure_reason": (reason or "")[:200] or None,
-        "finished_at": _naive_utc(finished_at),
+        "finished_at": finished_at,
     }
     if text is not None:
         values.update(message=text, source=source, code_points=len(text))
@@ -208,7 +203,7 @@ def resolve(claim_id: int, *, outcome: Outcome, reason: str | None,
             .where(MessageEngineAttempt.id == claim_id)
             .where(MessageEngineAttempt.outcome == Outcome.IN_FLIGHT.value)
             .where(MessageEngineAttempt.started_at
-                   >= _naive_utc(finished_at) - timedelta(seconds=CLAIM_TTL_S))
+                   >= finished_at - timedelta(seconds=CLAIM_TTL_S))
             .values(**values))
         return int(getattr(result, "rowcount", 0) or 0) == 1
 
@@ -218,11 +213,10 @@ def record_fallback(*, trigger: str, channel: str, priority: int, text: str,
                     scope: SessionScope = immediate_session_scope) -> int:
     """Record that the template went out, and why. Audit only: it decides
     nothing, because only calls pace, spend and strike."""
-    stamp = _naive_utc(moment)
     with scope() as session:
         row = MessageEngineAttempt(
             trigger=trigger, channel=channel, priority=priority,
-            started_at=stamp, finished_at=stamp,
+            started_at=moment, finished_at=moment,
             outcome=(Outcome.FALLBACK_USED if asked else Outcome.NOT_ASKED).value,
             failure_reason=(reason or "")[:200] or None,
             message=text, source="fallback", code_points=len(text))

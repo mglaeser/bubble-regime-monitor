@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -1482,3 +1484,106 @@ class TestTheUpgradeIsOneTransaction:
         # told to Alembic for SQLite only: another dialect keeps Alembic's own
         # knowledge of whether its DDL is transactional
         assert "transactional_ddl=True if is_sqlite else None" in env
+
+
+#: One instant, spelled three ways below: 12:00 in Berlin (CEST) is 10:00 UTC.
+_INSTANT = datetime(2026, 8, 15, 10, 0, tzinfo=UTC)
+_BERLIN = ZoneInfo("Europe/Berlin")
+
+
+class TestADateTimeColumnIsUTC:
+    """A DateTime column takes an instant and gives the same instant back,
+    aware UTC (A12). Aware in any zone, aware UTC, or naive - a naive value is
+    UTC, as the code has always assumed - it is stored as the naive UTC wall
+    clock every existing row holds, so nothing is migrated, and a query bound
+    with an aware time compares instants, not wall clocks."""
+
+    def test_a_datetime_column_reads_back_aware_utc_at_the_instant_it_was_given(
+            self, isolated_db):
+        from sqlalchemy import select
+
+        from app.db import session_scope
+        from app.models import SourceHealth
+
+        given = {"berlin": _INSTANT.astimezone(_BERLIN), "utc": _INSTANT,
+                 "naive": _INSTANT.replace(tzinfo=None)}
+        with session_scope() as session:
+            session.add_all(SourceHealth(source=name, ok=True, checked_at=at)
+                            for name, at in given.items())
+        with session_scope() as session:
+            read = dict(session.execute(
+                select(SourceHealth.source, SourceHealth.checked_at)).tuples().all())
+        for name in given:
+            assert read[name].utcoffset() == timedelta(0), (name, read[name])
+            assert read[name] == _INSTANT, (name, read[name])
+        connection = sqlite3.connect(isolated_db)
+        stored = dict(connection.execute("select source, checked_at from source_health"))
+        connection.close()
+        assert stored == dict.fromkeys(given, "2026-08-15 10:00:00.000000")
+
+    def test_rows_already_stored_read_back_at_the_same_instant(self, isolated_db):
+        """No data migration: every spelling an existing row holds reads back
+        aware UTC at the instant it was written."""
+        from sqlalchemy import select
+
+        from app.db import session_scope
+        from app.models import SourceHealth
+
+        spellings = {
+            "orm": "2026-08-15 10:00:00.000000",        # every ORM write so far
+            "raw_bind": "2026-08-15 10:00:00+00:00",    # pysqlite's adapter (migration 0007)
+            "sql_now": "2026-08-15 10:00:00.000",       # strftime('%f') (migrations 0022, 0024)
+        }
+        connection = sqlite3.connect(isolated_db)
+        connection.executemany("insert into source_health (source, ok, checked_at) "
+                               "values (?, 1, ?)", spellings.items())
+        connection.commit()
+        connection.close()
+        with session_scope() as session:
+            read = dict(session.execute(
+                select(SourceHealth.source, SourceHealth.checked_at)).tuples().all())
+        for name in spellings:
+            assert read[name].utcoffset() == timedelta(0), (name, read[name])
+            assert read[name] == _INSTANT, (name, read[name])
+
+    def test_a_query_bound_with_an_aware_time_compares_instants(self, isolated_db):
+        from sqlalchemy import select
+
+        from app.db import session_scope
+        from app.models import SourceHealth
+
+        with session_scope() as session:
+            session.add_all([
+                SourceHealth(source="before", ok=True,
+                             checked_at=_INSTANT - timedelta(minutes=30)),
+                SourceHealth(source="after", ok=True,
+                             checked_at=_INSTANT + timedelta(minutes=30)),
+            ])
+        bound = _INSTANT.astimezone(_BERLIN)
+        with session_scope() as session:
+            at_or_after = session.execute(select(SourceHealth.source).where(
+                SourceHealth.checked_at >= bound)).scalars().all()
+            before = session.execute(select(SourceHealth.source).where(
+                SourceHealth.checked_at < bound)).scalars().all()
+        assert (at_or_after, before) == (["after"], ["before"])
+
+    def test_every_datetime_column_reads_back_aware_utc(self):
+        """Every DATETIME column of every model module, not one table's: a
+        value bound through the column's type and read back through it."""
+        from sqlalchemy import create_engine, literal, select
+
+        from app.models import Base
+
+        engine = create_engine("sqlite://")
+        columns = [column for table in Base.metadata.sorted_tables for column in table.columns
+                   if column.type.compile(dialect=engine.dialect) == "DATETIME"]
+        assert columns, "no DATETIME column found"
+        wrong = []
+        with engine.connect() as connection:
+            for column in columns:
+                read = connection.execute(select(
+                    literal(_INSTANT.astimezone(_BERLIN), column.type))).scalar_one()
+                if read.utcoffset() != timedelta(0) or read != _INSTANT:
+                    wrong.append(f"{column.table.name}.{column.name}: {read!r}")
+        engine.dispose()
+        assert not wrong, "not aware UTC at the instant given:\n  " + "\n  ".join(wrong)

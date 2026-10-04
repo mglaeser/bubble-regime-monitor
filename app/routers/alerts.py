@@ -552,8 +552,7 @@ def get_silences(request: Request, response: Response,
             "starts_at": iso(row.starts_at),
             "ends_at": iso(row.ends_at),
             "comment": row.comment,
-            "active": row.starts_at.replace(tzinfo=UTC) <= now
-            if row.starts_at.tzinfo is None else row.starts_at <= now,
+            "active": row.starts_at <= now,
         } for row in rows]}
     _cache(response, max_age=30)
     return payload

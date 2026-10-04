@@ -39,8 +39,6 @@ SEVERITY_RANK = {"error": 0, "warn": 1, "info": 2}
 def _iso(dt: datetime | None) -> str | None:
     if dt is None:
         return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=UTC)
     return dt.isoformat()
 
 
@@ -130,8 +128,6 @@ def _providers_block() -> list[dict[str, Any]]:
     out = []
     for r in rows:
         until = r.cooldown_until
-        if until is not None and until.tzinfo is None:
-            until = until.replace(tzinfo=UTC)
         cooling = until is not None and now < until
         out.append({
             "provider": r.provider, "consecutive_failures": r.consecutive_failures,

@@ -154,8 +154,7 @@ def delete_silence(response: Response, silence_id: str,
                                 headers=ERROR_HEADERS)
         # Expire rather than delete: the audit trail of what was silenced, by
         # whom and when must survive.
-        row.ends_at = max(now, row.starts_at if row.starts_at.tzinfo
-                          else row.starts_at.replace(tzinfo=UTC))
+        row.ends_at = max(now, row.starts_at)
     return {"silence_id": silence_id, "ended": True}
 
 

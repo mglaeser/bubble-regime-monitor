@@ -115,8 +115,6 @@ def test_missed_quiet_release_is_advanced_instead_of_sending_at_night():
         assert delivery.hold_reason_code == "quiet_hours"
         release_at = delivery.not_before
         assert release_at is not None
-        if release_at.tzinfo is None:
-            release_at = release_at.replace(tzinfo=UTC)
         assert release_at == datetime(2026, 8, 25, 5, 0, tzinfo=UTC)
         assert "delivery_quiet_hold_advanced" in actions
 
@@ -218,8 +216,6 @@ def test_budget_hold_rechecks_and_reholds_when_cap_remains_full(monkeypatch):
         assert delivery.planning_state == PlanningState.HELD_BUDGET
         recheck_at = delivery.budget_recheck_at
         assert recheck_at is not None
-        if recheck_at.tzinfo is None:
-            recheck_at = recheck_at.replace(tzinfo=UTC)
         assert recheck_at == NOW + timedelta(minutes=30)
         assert delivery.dispatch_budget_snapshot["allowed"] is False
         assert delivery.dispatch_budget_snapshot["reason"] == "cap_24h"
@@ -402,8 +398,6 @@ def test_wire_time_quiet_boundary_reholds_without_persisting_a_render():
         assert delivery.hold_reason_code == "quiet_hours"
         release_at = delivery.not_before
         assert release_at is not None
-        if release_at.tzinfo is None:
-            release_at = release_at.replace(tzinfo=UTC)
         assert release_at == datetime(2026, 8, 25, 5, 0, tzinfo=UTC)
         assert renders == [], "a body is final only after every pre-wire gate passes"
         assert "delivery_held_quiet" in actions
@@ -487,9 +481,9 @@ def test_wire_clock_rollback_into_quiet_hours_reholds_without_sending():
         assert delivery is not None
         assert delivery.transport_status == TransportStatus.PENDING
         assert delivery.planning_state == PlanningState.HELD_QUIET
-        assert delivery.not_before == datetime(2026, 8, 25, 5, 0)
-        assert delivery.updated_at >= pass_start.replace(tzinfo=None)
-        assert held_event.occurred_at >= pass_start.replace(tzinfo=None)
+        assert delivery.not_before == datetime(2026, 8, 25, 5, 0, tzinfo=UTC)
+        assert delivery.updated_at >= pass_start
+        assert held_event.occurred_at >= pass_start
         assert renders == [], "a refused wire attempt must not freeze a body"
 
 
@@ -522,10 +516,6 @@ def test_wire_clock_regression_cannot_precede_the_dispatch_pass():
         request_started_at = delivery.request_started_at
         sent_at = delivery.sent_at
         assert request_started_at is not None and sent_at is not None
-        if request_started_at.tzinfo is None:
-            request_started_at = request_started_at.replace(tzinfo=UTC)
-        if sent_at.tzinfo is None:
-            sent_at = sent_at.replace(tzinfo=UTC)
         assert request_started_at == NOW
         assert sent_at == NOW
 

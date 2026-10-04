@@ -26,7 +26,7 @@ inside the same atomic apply as the state changes.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 
 from app.alerts.budgets import BudgetDecision, BudgetLimits, BudgetUsage, check_budget
 from app.alerts.canonical import sha256_of
@@ -178,8 +178,6 @@ def _cooldown_active(rule: RuleSpec, memory: NotificationMemory, now: datetime) 
     if memory.last_sent_at is None or rule.cooldown_seconds <= 0:
         return False
     last = memory.last_sent_at
-    if last.tzinfo is None:
-        last = last.replace(tzinfo=UTC)
     return now < last + timedelta(seconds=rule.cooldown_seconds)
 
 
@@ -414,8 +412,6 @@ def reminder_intent(
     reference = memory.last_reminder_at or memory.last_sent_at
     if reference is None:
         return None
-    if reference.tzinfo is None:
-        reference = reference.replace(tzinfo=UTC)
     if inputs.now < reference + timedelta(seconds=policy.after_seconds or 0):
         return None
 

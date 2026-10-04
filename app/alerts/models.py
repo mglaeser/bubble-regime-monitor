@@ -15,7 +15,8 @@ they are the guarantees the whole design rests on:
   * a non-TEST delivery always has at least one member — enforced by trigger,
     since SQLite has no deferred cross-table constraint.
 
-Every datetime is stored as aware UTC and returned as RFC 3339 `Z`.
+Every datetime is a TZDateTime (app/models.py): stored as UTC, read back
+aware UTC, and returned as RFC 3339 `Z`.
 """
 
 from __future__ import annotations
@@ -28,7 +29,6 @@ from sqlalchemy import (
     JSON,
     Boolean,
     CheckConstraint,
-    DateTime,
     ForeignKey,
     Index,
     Integer,
@@ -55,7 +55,7 @@ from app.alerts.enums import (
     SilenceMatcherKind,
     TransportStatus,
 )
-from app.models import Base
+from app.models import Base, TZDateTime
 
 ULID_LEN = 26
 SHA_LEN = 64
@@ -85,7 +85,7 @@ class AlertPhraseSetRegistry(Base):
     phrase_set_sha256: Mapped[str] = mapped_column(String(SHA_LEN), unique=True, nullable=False)
     canonical_json: Mapped[str] = mapped_column(Text, nullable=False)
     validator_version: Mapped[str] = mapped_column(String(32), nullable=False)
-    validated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    validated_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False)
     worst_case_test_sha256: Mapped[str] = mapped_column(String(SHA_LEN), nullable=False)
     created_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
@@ -111,10 +111,10 @@ class AlertRulesetRegistry(Base):
     methodology_manifest_sha256: Mapped[str] = mapped_column(String(SHA_LEN), nullable=False)
     min_service_version: Mapped[str] = mapped_column(String(16), nullable=False)
     max_service_version: Mapped[str] = mapped_column(String(16), nullable=False)
-    validated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    promoted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    validated_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False)
+    promoted_at: Mapped[datetime | None] = mapped_column(TZDateTime, nullable=True)
     promoted_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    superseded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    superseded_at: Mapped[datetime | None] = mapped_column(TZDateTime, nullable=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False,
                                         default=RulesetStatus.VALIDATED)
 
@@ -135,7 +135,7 @@ class AlertCalibrationRegistry(Base):
     artifact_sha256: Mapped[str] = mapped_column(String(SHA_LEN), unique=True, nullable=False)
     canonical_json: Mapped[str] = mapped_column(Text, nullable=False)
     metric: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
-    validated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    validated_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False)
     rules_sha256: Mapped[str | None] = mapped_column(
         ForeignKey("alert_ruleset_registry.rules_sha256"), nullable=True)
     code_revision: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -156,8 +156,8 @@ class AlertInputSnapshot(Base):
     snapshot_id: Mapped[int | None] = mapped_column(
         ForeignKey("snapshots.id"), nullable=True)
     origin: Mapped[str] = mapped_column(String(16), nullable=False)
-    built_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True, nullable=False)
-    computed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    built_at: Mapped[datetime] = mapped_column(TZDateTime, index=True, nullable=False)
+    computed_at: Mapped[datetime | None] = mapped_column(TZDateTime, nullable=True)
     alert_input_schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
     methodology_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
     methodology_sha256: Mapped[str | None] = mapped_column(String(SHA_LEN), nullable=True)
@@ -200,11 +200,11 @@ class AlertEvaluation(Base):
     evaluator_version: Mapped[str] = mapped_column(String(32), nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
     attempt_count: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
-    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_until: Mapped[datetime | None] = mapped_column(TZDateTime, nullable=True)
     last_heartbeat_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True)
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+        TZDateTime, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(TZDateTime, nullable=True)
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     rules_evaluated: Mapped[int | None] = mapped_column(Integer, nullable=True)
     plan_applied: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
@@ -281,12 +281,12 @@ class AlertRuleState(Base):
     candidate_target_state: Mapped[str | None] = mapped_column(String(16), nullable=True)
     candidate_started_input: Mapped[str | None] = mapped_column(String(SHA_LEN), nullable=True)
     candidate_expires_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True)
+        TZDateTime, nullable=True)
     candidate_ttl_policy: Mapped[str | None] = mapped_column(String(64), nullable=True)
     candidate_ttl_basis: Mapped[str | None] = mapped_column(String(255), nullable=True)
     flap_projection: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
-    last_fired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_fired_at: Mapped[datetime | None] = mapped_column(TZDateTime, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False)
 
     __table_args__ = (
         CheckConstraint(_enum_check("condition_state", ConditionState),
@@ -318,7 +318,7 @@ class AlertConfirmationObservation(Base):
 
     source_revision_key: Mapped[str] = mapped_column(String(SHA_LEN), nullable=False)
     computation_fingerprint: Mapped[str] = mapped_column(String(SHA_LEN), nullable=False)
-    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False)
     confirmation_role: Mapped[str] = mapped_column(String(16), nullable=False)
     fresh_at_evaluation: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
@@ -342,12 +342,12 @@ class AlertInstanceNotificationState(Base):
     instance_fingerprint: Mapped[str] = mapped_column(String(SHA_LEN), primary_key=True)
 
     rule_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
-    last_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_sent_at: Mapped[datetime | None] = mapped_column(TZDateTime, nullable=True)
     last_reminder_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True)
+        TZDateTime, nullable=True)
     reminder_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     next_notification_generation: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False)
 
     __table_args__ = (
         CheckConstraint("reminder_count >= 0", name="ck_alert_notif_reminder_count"),
@@ -379,9 +379,9 @@ class AlertEpisode(Base):
     is_open: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     suppression_reasons: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
 
-    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    opened_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False)
+    activated_at: Mapped[datetime | None] = mapped_column(TZDateTime, nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(TZDateTime, nullable=True)
     resolution_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     #: The input this episode's transition was decided AGAINST, resolved once
@@ -394,7 +394,7 @@ class AlertEpisode(Base):
     trigger_input_identity: Mapped[str] = mapped_column(
         ForeignKey("alert_input_snapshot.input_identity"), nullable=False)
     candidate_expires_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True)
+        TZDateTime, nullable=True)
     escalation_of_episode_id: Mapped[str | None] = mapped_column(
         ForeignKey("alert_episode.episode_id"), nullable=True)
     created_evaluation_id: Mapped[str] = mapped_column(
@@ -435,7 +435,7 @@ class AlertEvent(Base):
     __tablename__ = "alert_event"
 
     event_id: Mapped[str] = mapped_column(String(ULID_LEN), primary_key=True)
-    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False,
+    occurred_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False,
                                                   index=True)
     causation_type: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
     causation_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -487,27 +487,27 @@ class AlertDelivery(Base):
                                                 default=PlanningState.NONE)
     hold_reason_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
     budget_recheck_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True)
+        TZDateTime, nullable=True)
     planning_budget_snapshot: Mapped[dict[str, Any] | None] = mapped_column(
         JSON, nullable=True)
     dispatch_budget_snapshot: Mapped[dict[str, Any] | None] = mapped_column(
         JSON, nullable=True)
     dispatch_budget_checked_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True)
-    not_before: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+        TZDateTime, nullable=True)
+    not_before: Mapped[datetime | None] = mapped_column(TZDateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False)
 
     attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     lease_owner: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_until: Mapped[datetime | None] = mapped_column(TZDateTime, nullable=True)
     request_started_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True)
+        TZDateTime, nullable=True)
     provider_correlation_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     last_http_status: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     last_error_message_redacted: Mapped[str | None] = mapped_column(String(512), nullable=True)
-    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True,
+    sent_at: Mapped[datetime | None] = mapped_column(TZDateTime, nullable=True,
                                                      index=True)
     cancel_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
@@ -555,8 +555,8 @@ class AlertDeliveryMember(Base):
     origin_rules_sha256: Mapped[str] = mapped_column(String(SHA_LEN), nullable=False)
     origin_phrase_set_version: Mapped[str] = mapped_column(String(64), nullable=False)
     origin_phrase_set_sha256: Mapped[str] = mapped_column(String(SHA_LEN), nullable=False)
-    included_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    dropped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    included_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False)
+    dropped_at: Mapped[datetime | None] = mapped_column(TZDateTime, nullable=True)
     drop_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
     delivered: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
@@ -592,12 +592,12 @@ class AlertRender(Base):
     validation_results: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     final_message: Mapped[str] = mapped_column(Text, nullable=False)
     gsm7_septets: Mapped[int] = mapped_column(Integer, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False)
     #: Set once, by retention, when `final_message` is emptied. The row stays:
     #: provenance, septet count and validation results are metadata and outlive
     #: the message text (H-07). NULL means the body is still present.
     body_redacted_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True)
+        TZDateTime, nullable=True)
 
     __table_args__ = (
         CheckConstraint("gsm7_septets BETWEEN 0 AND 160", name="ck_alert_render_septets"),
@@ -619,12 +619,12 @@ class AlertSilence(Base):
     silence_id: Mapped[str] = mapped_column(String(ULID_LEN), primary_key=True)
     matcher_kind: Mapped[str] = mapped_column(String(24), nullable=False)
     matcher_value: Mapped[str] = mapped_column(String(255), nullable=False)
-    starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False,
+    starts_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False,
                                                 index=True)
-    ends_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    ends_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False, index=True)
     comment: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_by_redacted: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False)
 
     __table_args__ = (
         CheckConstraint("ends_at > starts_at", name="ck_alert_silence_window"),
@@ -643,8 +643,8 @@ class ApiIdempotencyRecord(Base):
     request_sha256: Mapped[str] = mapped_column(String(SHA_LEN), nullable=False)
     response_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
     status_code: Mapped[int] = mapped_column(Integer, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False,
+    created_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False,
                                                  index=True)
 
 
@@ -654,7 +654,7 @@ class AlertComponentHeartbeat(Base):
     __tablename__ = "alert_component_heartbeat"
 
     component: Mapped[str] = mapped_column(String(32), primary_key=True)
-    last_heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_heartbeat_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     detail_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
 

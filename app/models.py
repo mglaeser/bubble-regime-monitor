@@ -2,14 +2,41 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 
 from sqlalchemy import DDL, JSON, Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text, event
+from sqlalchemy.engine import Dialect
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.types import TypeDecorator
 
 
 class Base(DeclarativeBase):
     pass
+
+
+class TZDateTime(TypeDecorator[datetime]):
+    """Every DateTime column: SQLAlchemy's TypeDecorator recipe "Store
+    Timezone Aware Timestamps as Timezone Naive UTC".
+
+    SQLite keeps no offset, so the column holds the naive UTC wall clock, as
+    the rows always have: an aware value is moved to UTC before it is bound,
+    and a naive one is taken as UTC (the recipe refuses it; this code has
+    always meant UTC). What comes back is aware UTC, so no caller re-stamps a
+    value read from the database. A row whose text carries an offset
+    (migration 0007's raw bind) keeps its instant."""
+
+    impl = DateTime
+    cache_ok = True
+
+    def process_bind_param(self, value: datetime | None, dialect: Dialect) -> datetime | None:
+        if value is not None and value.utcoffset() is not None:
+            value = value.astimezone(UTC).replace(tzinfo=None)
+        return value
+
+    def process_result_value(self, value: datetime | None, dialect: Dialect) -> datetime | None:
+        if value is None:
+            return None
+        return value.replace(tzinfo=UTC) if value.utcoffset() is None else value.astimezone(UTC)
 
 
 class Snapshot(Base):
@@ -18,7 +45,7 @@ class Snapshot(Base):
     __tablename__ = "snapshots"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    computed_at: Mapped[datetime] = mapped_column(TZDateTime, index=True)
     service_version: Mapped[str] = mapped_column(String(16))
     median: Mapped[float] = mapped_column(Float)
     iqr_lo: Mapped[float] = mapped_column(Float)
@@ -55,7 +82,7 @@ class Snapshot(Base):
     prev_snapshot_id: Mapped[int | None] = mapped_column(
         ForeignKey("snapshots.id"), nullable=True, index=True)
     expected_recompute_slot: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True, index=True)
+        TZDateTime, nullable=True, index=True)
     alert_contract_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     # hold | trim | de-risk — the band implied by the MC median alone.
@@ -92,7 +119,7 @@ class IndicatorReading(Base):
     fallback_used: Mapped[bool] = mapped_column(Boolean, default=False)
     dropped: Mapped[bool] = mapped_column(Boolean, default=False)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
-    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    timestamp: Mapped[datetime] = mapped_column(TZDateTime)
 
     snapshot: Mapped[Snapshot] = relationship(back_populates="readings")
 
@@ -105,7 +132,7 @@ class SourceHealth(Base):
     ok: Mapped[bool] = mapped_column(Boolean)
     latency_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
     http_status: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    checked_at: Mapped[datetime] = mapped_column(TZDateTime, index=True)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
@@ -147,8 +174,8 @@ class ProviderHealth(Base):
 
     provider: Mapped[str] = mapped_column(String(32), primary_key=True)
     consecutive_failures: Mapped[int] = mapped_column(Integer, default=0)
-    cooldown_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    cooldown_until: Mapped[datetime | None] = mapped_column(TZDateTime, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(TZDateTime)
 
 
 class DailyClose(Base):
@@ -164,7 +191,7 @@ class DailyClose(Base):
     date: Mapped[date] = mapped_column(Date, primary_key=True)
     close: Mapped[float] = mapped_column(Float)
     provider: Mapped[str] = mapped_column(String(24), default="polygon")
-    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    fetched_at: Mapped[datetime] = mapped_column(TZDateTime)
 
 
 class FalsificationOutcome(Base):
@@ -180,7 +207,7 @@ class FalsificationOutcome(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     criterion: Mapped[str] = mapped_column(Text)
-    tripped_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    tripped_at: Mapped[datetime] = mapped_column(TZDateTime)
     detail: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
@@ -228,7 +255,7 @@ class DashboardFeed(Base):
     __tablename__ = "dashboard_feed"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    computed_at: Mapped[datetime] = mapped_column(TZDateTime, index=True)
     payload: Mapped[str] = mapped_column(Text)  # JSON: {anchor_month, anchor_partial, series, metrics}
 
 
@@ -273,8 +300,8 @@ class MessageEngineAttempt(Base):
     channel: Mapped[str] = mapped_column(String(16))
     #: 1..4; a P1 never waits for this engine (docs/MESSAGE_ENGINE.md).
     priority: Mapped[int] = mapped_column(Integer)
-    started_at: Mapped[datetime] = mapped_column(DateTime, index=True)
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(TZDateTime, index=True)
+    finished_at: Mapped[datetime | None] = mapped_column(TZDateTime, nullable=True)
     #: ok | format_rejected | content_rejected | technical_error | budget_skipped
     outcome: Mapped[str] = mapped_column(String(32), index=True)
     #: Which iteration within one compose (1-based), so a re-ask is visible.
