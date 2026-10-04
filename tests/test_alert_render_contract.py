@@ -338,6 +338,31 @@ def test_a_phrase_set_without_the_material_change_clause_is_refused(phrase_set):
         )
 
 
+def test_a_material_change_clause_without_both_values_is_refused(phrase_set):
+    """#172 round 2, SOTA-A: once the clause is required, its meaning is too.
+    The renderer fills the trigger and the current value into MATERIAL_CHANGE;
+    a clause that shows neither - here with no slots, in both languages -
+    would announce a material change without saying what changed. It is
+    refused when the ruleset is validated."""
+    import json
+
+    raw = json.loads(phrase_set.canonical_json)
+    raw["caveats"]["MATERIAL_CHANGE"]["text"] = {
+        "de": "Wert deutlich veraendert.", "en": "Value changed materially."}
+    raw["caveats"]["MATERIAL_CHANGE"]["slots"] = []
+    slotless = validate_phrase_set(json.dumps(raw))
+    with pytest.raises(RulesetInvalid, match="caveat 'MATERIAL_CHANGE' must show"):
+        validate_ruleset(
+            RULES_PATH.read_text(encoding="utf-8"),
+            phrase_set=slotless,
+            phrase_set_version=slotless.version,
+            phrase_set_sha256=slotless.sha256,
+            methodology_version=_M.get_path("_meta", "methodology_version"),
+            methodology_manifest_sha256=_M.frozen_sha256(),
+            service_version="3.8.0",
+        )
+
+
 def test_context_hash_binds_trigger_current_and_delta_views(phrase_set):
     trigger = _input()
 

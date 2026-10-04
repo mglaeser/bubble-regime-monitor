@@ -271,6 +271,17 @@ def _check_render_contracts(
     if phrase_set is None:
         return ()
 
+    # MATERIAL_CHANGE is a required runtime caveat (owner ruling 3), and the
+    # renderer fills the trigger and the current value into it. A clause that
+    # shows neither would announce a material change without saying what
+    # changed (#172 round 2), so it must carry both slots; their facts must
+    # then be declared, as for every slot.
+    material = phrase_set.caveats.get("MATERIAL_CHANGE")
+    if material is not None and not OPTIONAL_RUNTIME_FACT_IDS <= set(material.slots):
+        problems.append(
+            f"caveat 'MATERIAL_CHANGE' must show {sorted(OPTIONAL_RUNTIME_FACT_IDS)}, "
+            "the trigger and current value it announces")
+
     for rule in sms_rules:
         contract = rule.render
         prefix = f"{rule.rule_id}: render"
