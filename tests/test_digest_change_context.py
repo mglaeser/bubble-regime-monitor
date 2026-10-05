@@ -207,18 +207,19 @@ class TestTheLengthAndThePrompt:
         assert "at most 350 characters" in prompt
         assert checks.basic_check("x" * 350, channel=Channel.IMESSAGE, max_chars=350) is None
 
-    def test_the_model_is_asked_for_low_reasoning_effort(self, monkeypatch):
-        """The richer prompt at the route's default effort failed after 256-303
-        s of silent thinking, the old one waited 97 s; at "low" they answered
-        in 14 and 9 s (2026-10-04, through the edge). A message written from
-        given numbers needs little reasoning, and it must arrive."""
+    def test_the_model_is_asked_for_the_most_reasoning(self, monkeypatch):
+        """The owner, 2026-10-04: "Please have reasoning on max"; shown that
+        1 of 3 max digests sent the template and each took 4.5-10 minutes,
+        the owner chose "max, as asked" (2026-10-05). The gateway asks for
+        the reasoning summary with it, so the stream carries the thinking
+        (tests/test_llm_gateway.py)."""
         asked: list[dict] = []
         monkeypatch.setattr(composer, "complete",
                             lambda **kw: asked.append(kw) or type("C", (), {"text": "61/100, de-risk."})())
         out = composer.compose(trigger="daily_digest", channel=Channel.IMESSAGE, priority=3,
                                facts=digest.digest_facts(_snapshot()), lib=composer.library(),
                                settings=Settings(_env_file=None, message_engine_enabled=True))
-        assert out.source == "generated" and asked[0]["reasoning_effort"] == "low"
+        assert out.source == "generated" and asked[0]["reasoning_effort"] == "max"
 
     def test_the_prompt_asks_for_one_point_chosen_by_what_changed(self):
         sections = dict(composer._SECTION_RE.findall(_entry()["prompt"]))

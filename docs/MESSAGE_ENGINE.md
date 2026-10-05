@@ -622,14 +622,24 @@ the daily digest alone, so the digest is what changed:
   leaves the reading against the band lines, the thresholds and the trend
   rule. iMessage holds 350 code points (`MESSAGE_ENGINE_IMESSAGE_MAX_CHARS`);
   SMS stays one GSM-7 segment of 150 septets, and the template is unchanged.
-- **The effort.** The model is asked for low reasoning effort
-  (`composer._EFFORT`, the Responses API's `reasoning.effort`): it writes
-  from numbers it is given. On the configured route its thinking is
-  silence - the gateway's heartbeats reach the client only with the first
-  output - and the route gives up after about 250-300 s of it. Measured on
-  2026-10-04 through the edge: at the route's default effort the production
-  prompt waited 97 s for its first byte and the richer one failed at 256-303
-  s; at low effort they answered in 9 and 14 s.
+- **The effort.** The model reasons as hard as it can (`composer._EFFORT =
+  "max"`; the owner, 2026-10-04: "Please have reasoning on max"). With an
+  effort the gateway also asks for the reasoning summary, and that summary
+  streams from the first second. Without it, the configured route sent
+  nothing at all until the answer: production's prompt waited 97 s for a
+  first byte, the richer one 227-303 s, so the 180 s read-gap timer cut
+  thought rather than a dead stream. Measured on 2026-10-04 through the edge
+  on the digest's prompt, with the summary: the first byte after 0.8 s, a
+  byte at least every 4 s. At "max" the model thinks until its token budget
+  (`LLM_MAX_TOKENS`, 25,000 on the host) is nearly spent, 129-271 s and up
+  to 24,657 tokens. At times it runs out before it answers
+  (`response.incomplete`), and the gateway's one retry covers that inside
+  the 600 s deadline. Three German digests at "max" on production's data:
+  one answered in 266 s, one on its retry in 578 s, and one ran out of
+  budget twice, so the template went out. "xhigh" answered twice in 77-122
+  s. Shown those numbers, the owner chose "max, as asked" (2026-10-05) over
+  "xhigh" and over a bigger token budget: the deepest thinking, with the
+  template on some days and the digest arriving 4-10 minutes after the hour.
 - **Not the other messages.** The alerts render reviewed fixed phrases and
   have no model path (`tests/test_alert_delivery.py::test_the_alert_system_has_no_model_path`),
   the failure alarm and the host notices are fixed text by design (they
