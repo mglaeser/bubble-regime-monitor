@@ -634,7 +634,12 @@ the daily digest alone, so the digest is what changed:
   (`LLM_MAX_TOKENS`, 25,000 on the host) is nearly spent, 129-271 s and up
   to 24,657 tokens. At times it runs out before it answers
   (`response.incomplete`), and the gateway's one retry covers that inside
-  the 600 s deadline.
+  the 600 s deadline. Three German digests at "max" on production's data:
+  one answered in 266 s, one on its retry in 578 s, and one ran out of
+  budget twice, so the template went out. "xhigh" answered twice in 77-122
+  s. Shown those numbers, the owner chose "max, as asked" (2026-10-05) over
+  "xhigh" and over a bigger token budget: the deepest thinking, with the
+  template on some days and the digest arriving 4-10 minutes after the hour.
 - **Not the other messages.** The alerts render reviewed fixed phrases and
   have no model path (`tests/test_alert_delivery.py::test_the_alert_system_has_no_model_path`),
   the failure alarm and the host notices are fixed text by design (they

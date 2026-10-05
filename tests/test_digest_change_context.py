@@ -208,9 +208,11 @@ class TestTheLengthAndThePrompt:
         assert checks.basic_check("x" * 350, channel=Channel.IMESSAGE, max_chars=350) is None
 
     def test_the_model_is_asked_for_the_most_reasoning(self, monkeypatch):
-        """The owner, 2026-10-04: "Please have reasoning on max". The gateway
-        asks for the reasoning summary with it, so the stream carries the
-        thinking (tests/test_llm_gateway.py)."""
+        """The owner, 2026-10-04: "Please have reasoning on max"; shown that
+        1 of 3 max digests sent the template and each took 4.5-10 minutes,
+        the owner chose "max, as asked" (2026-10-05). The gateway asks for
+        the reasoning summary with it, so the stream carries the thinking
+        (tests/test_llm_gateway.py)."""
         asked: list[dict] = []
         monkeypatch.setattr(composer, "complete",
                             lambda **kw: asked.append(kw) or type("C", (), {"text": "61/100, de-risk."})())

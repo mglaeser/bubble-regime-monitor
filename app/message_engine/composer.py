@@ -67,6 +67,10 @@ _DEADLINE_S = 600.0
 #: (`response.incomplete`), which the gateway's one retry covers inside the
 #: deadline. The reasoning summary the gateway asks for with an effort streams
 #: from the first second, so the read-gap timer never cuts the thinking.
+#: Three German digests at "max" on production's data: one in 266 s, one on
+#: its retry in 578 s, one out of budget twice, so the template went out;
+#: "xhigh" answered twice in 77-122 s. Shown those numbers, the owner chose
+#: "max, as asked" over "xhigh" and over a bigger token budget (2026-10-05).
 _EFFORT = "max"
 
 
