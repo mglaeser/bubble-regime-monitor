@@ -34,6 +34,9 @@ LABEL=org.opencontainers.image.revision
 # A boot, its migration included, has five minutes: the unit's TimeoutStartSec,
 # its health start period and this wait agree (the tests shorten it).
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-300}"
+# A container the unit restarts by itself is back within this (the tests
+# shorten it): the unit's RestartSec, 10 s, plus a start.
+RESTART_WAIT="${RESTART_WAIT:-60}"
 
 die() { printf '\nERROR: %s\n' "$*" >&2; exit 1; }
 trap 'die "release failed at line $LINENO"' ERR
@@ -95,9 +98,28 @@ TARGET="$(git rev-parse "$REMOTE")"
 # Restart= boots it again, and the alarms report it. The release probes
 # nothing here - the probe on this path was where #143's rounds 3, 29 and 37
 # came from - and releases nothing it would only restart.
-[[ "$TARGET" != "$(running)" ]] || exit 0
+#
+# A container its unit is restarting is waited for, a minute at most, before
+# the comparison: after a kill, `podman run --rm` leaves no container at all
+# for the unit's RestartSec (10 s) plus the start, and with none to read the
+# release took the commit that was coming back for a new one. On the host,
+# 2026-11-01: health kill 02:02:51, container removed 02:02:56, this tick and
+# systemd's restart both 02:03:06, the container back 02:03:17 (26 s after
+# the kill), "==> Releasing 9f79c7a (running: 9f79c7a)", a rebuild, and a
+# second restart at 02:04:15, 58 s into the boot. The six restarts of that
+# night left no container for 11.5 to 38.2 s each, against the minute here.
+# This is no health probe come back: the restart is systemd's, already under
+# way, and the wait asks one thing - is there a container to read - and then
+# compares once. A running container ends it at the first look, so the quiet
+# path waits for nothing. A service that stays down is released as before,
+# the minute later (#147 round 3), and what comes back is compared like any
+# running container, so a crash loop on an older commit still gets its fix.
+# Read once: what is compared is what the line below names.
+back_by=$((SECONDS + RESTART_WAIT))
+until carried="$(running)"; [[ -n "$carried" ]] || (( SECONDS >= back_by )); do sleep 1; done
+[[ "$TARGET" != "$carried" ]] || exit 0
 
-printf '\n==> Releasing %s (running: %s)\n' "${TARGET:0:7}" "$(running | cut -c1-7)"
+printf '\n==> Releasing %s (running: %s)\n' "${TARGET:0:7}" "${carried:0:7}"
 # The checkout follows, fast-forward only, and git refuses rather than
 # overwrite anything of the host's: a diverged checkout, a local edit, an
 # untracked file - and, with --no-overwrite-ignore, an ignored one. Git treats

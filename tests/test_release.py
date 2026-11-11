@@ -32,7 +32,11 @@ _SHIMS = {
     "podman": r"""#!/usr/bin/env bash
 echo "podman ${*//$'\n'/ }" >> "$CALLS"   # one line per call, a multi-line argument folded
 case "$1 $2" in
-  "container inspect") [[ -f "$SHIM_STATE/label" ]] || exit 1              # no container: inspect fails
+  "container inspect") # the unit restarts its container: none exists for the next $(<gap) looks
+                       if [[ -s "$SHIM_STATE/gap" ]] && (( $(<"$SHIM_STATE/gap") > 0 )); then
+                         echo $(( $(<"$SHIM_STATE/gap") - 1 )) > "$SHIM_STATE/gap"; exit 1
+                       fi
+                       [[ -f "$SHIM_STATE/label" ]] || exit 1              # no container: inspect fails
                        # exited: inspect answers; a template that asks for a running one empties
                        if [[ "$*" == *".State.Running"* && -f "$SHIM_STATE/stopped" ]]; then :; else cat "$SHIM_STATE/label"; fi ;;
   "build "*) [[ "$BUILD_FAILS" != "1" ]] || exit 1           # the tag after -t, the context last
@@ -154,7 +158,7 @@ def release(tmp_path):
         runtime.mkdir(exist_ok=True)
         environ = {**os.environ, "HOME": str(home), "PATH": f"{shims}:{os.environ['PATH']}", "CALLS": str(calls),
                    "SHIM_STATE": str(state), "RUNTIME_DIRECTORY": str(runtime), "HEALTH_TIMEOUT": "2",
-                   "STATE_DIRECTORY": str(kept),
+                   "STATE_DIRECTORY": str(kept), "RESTART_WAIT": "0",    # with no container, no wait
                    **(env or {})}
         result = subprocess.run([exec_start], cwd=workdir, env=environ,  # noqa: S603
                                 capture_output=True, text=True, timeout=120)
@@ -232,6 +236,49 @@ def test_a_release_when_the_label_differs(release):
     code, calls = release(running=old)
     assert code == 0 and any(c.startswith("podman build") for c in calls)
     assert (release.state / "label").read_text().strip() == target
+
+
+class TestATickWhileTheUnitRestarts:
+    """docs/AUTO_DEPLOY.md, "The contract": after the switch the service is
+    systemd's - Restart=always every ten seconds - and a tick that falls into
+    such a restart waits for the container, a minute at most, before it
+    compares: `podman run --rm` leaves none in between. On the host,
+    2026-11-01: health kill 02:02:51, the tick 02:03:06, the container back
+    02:03:17 - "==> Releasing 9f79c7a (running: 9f79c7a)", a rebuild, and a
+    second restart at 02:04:15, 58 s into the boot. The six restarts of that
+    night left no container for 11.5 to 38.2 s each."""
+
+    def test_a_tick_while_the_unit_restarts_its_container_releases_nothing(self, release):
+        target = release.advance()
+        (release.state / "gap").write_text("2")       # no container for two looks, then Restart= brought it back
+        code, calls = release(running=target, env={"RESTART_WAIT": "30"})
+        assert code == 0 and "Releasing" not in release.output
+        assert not any(c.startswith(_RELEASING) for c in calls), calls
+
+    def test_the_wait_covers_the_units_restart(self):
+        """A minute against the unit's RestartSec of ten seconds plus a start."""
+        script = (ROOT / "deploy/release.sh").read_text()
+        service = _directives((ROOT / "deploy/quadlet/bubblegauge.container").read_text())["[Service]"]
+        assert "RestartSec=10s" in service and 'RESTART_WAIT="${RESTART_WAIT:-60}"' in script
+
+    def test_a_service_that_stays_down_is_released_after_the_wait(self, release):
+        """#147 round 3 stands: a stopped service is started on main's commit,
+        the wait later."""
+        target = release.advance()
+        (release.state / "stopped").write_text("")
+        code, calls = release(running=target, env={"RESTART_WAIT": "2"})
+        assert code == 0 and "systemctl --user restart bubblegauge.service" in calls
+
+    def test_a_restart_into_another_commit_is_still_a_release(self, release):
+        """A crash loop on an older commit does not keep its fix out: what
+        comes back is compared like any running container, and the line names
+        what was compared."""
+        old = release.main()
+        target = release.advance()
+        (release.state / "gap").write_text("1")
+        code, _ = release(running=old, env={"RESTART_WAIT": "30"})
+        assert code == 0 and f"==> Releasing {target[:7]} (running: {old[:7]})" in release.output
+        assert (release.state / "label").read_text().strip() == target
 
 
 def test_the_build_context_is_the_commits_export(release):

@@ -44,7 +44,11 @@ the service unit's, not the release's: stopping the release ends its build,
 and stopping the service ends a boot in flight, with an uncommitted
 migration rolled back. After the switch the service is
 systemd's: `Restart=always` every ten seconds without limit, and the health
-check kills a container that stops answering. Nothing rolls back: a release
+check kills a container that stops answering. A tick that falls into such a
+restart waits for the container, a minute at most, before it compares:
+`podman run --rm` leaves none in between, and with none to read the release
+took the commit that was coming back for a new one (2026-11-01). A service
+that stays down is released after that minute. Nothing rolls back: a release
 that answers nothing after the switch is what main says to run, and the next
 commit fixes it. The hand rollback, valid while the schema has not moved (the
 five newest commit tags are kept):
