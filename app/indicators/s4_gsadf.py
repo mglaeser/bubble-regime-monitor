@@ -37,11 +37,12 @@ WHAT/HOW/WHY/references/caveats: see app.references.REGISTRY["s4"]; summary:
     invariant to that choice. The mapping below is statistic-agnostic;
     compute.py selects which statistic and which CV pair it receives.
 
-    Mapping: stat > cv95 AND non-contested -> 1.0; > cv90 -> 0.5;
-    contested-or-stale-or-DATA-MISSING -> 0.25; tested-and-not-explosive -> 0.05.
+    Mapping: stat > cv95 AND non-contested -> 1.0; > cv90 -> 0.5; a contested
+    rejection, or a statistic that could not be computed -> 0.25;
+    tested-and-not-explosive -> 0.05.
     The 0.05 floor is ONLY for a successfully executed test that finds no
     explosiveness; if R/Rscript is unavailable or the series is missing, the
-    contested/stale floor 0.25 applies with a provenance note (never crash).
+    0.25 floor applies with a provenance note (never crash).
 
 CAVEAT (verbatim): The CONTESTED flag is currently permanent because of
 Chen-Chen-Huang (2026): under hump-shaped GPT fundamentals the test
@@ -114,17 +115,28 @@ SUB_NULL: float = _M.get_path("indicators", "s4", "sub_null")
 
 
 def sub_score(stat: float | None, cv90: float | None, cv95: float | None,
-              contested: bool, stale: bool = False, asymmetric: bool = False) -> float:
+              contested: bool, asymmetric: bool = False) -> float:
     """Map a right-tailed statistic against its simulated finite-sample CVs.
 
     `stat`/`cv90`/`cv95` must be the SAME family: the endpoint BSADF against the
     endpoint BSADF CVs (the scored path), or the GSADF sup against the GSADF CVs.
     Mixing them compares a statistic to the wrong null distribution.
 
-    contested-or-stale caps the sub-score at 0.25 regardless of the statistic
-    (controlled by the manual GSADF_CONTESTED config flag). Data-missing also
-    floors at 0.25: the 0.05 floor is reserved for a successfully executed
-    test that finds no explosiveness."""
+    Contested caps the sub-score at 0.25 (the manual GSADF_CONTESTED config
+    flag; with `asymmetric` only a rejection, see below). A statistic that
+    could not be computed also floors at 0.25: the 0.05 floor is reserved for a
+    successfully executed test that finds no explosiveness.
+
+    Staleness is not an argument. A stale S4 keeps its measurement and loses
+    its weight in the coverage gate (compute._coverage_gate), like every
+    indicator. A `stale` parameter that capped the sub-score at 0.25 stood
+    here and in the registry text; compute_snapshot, the only caller, never
+    passed it, and 0 of 615 production readings (2026-07-11 .. 2026-11-10)
+    were past the 35-day SLA. It was removed as dead code (AGENTS.md: delete
+    before you add; audit 2026-11-11, ind-s-5) rather than wired: wired, it
+    would have been a second staleness mechanism beside the gate, replacing a
+    measurement by 0.25 where every other indicator's stale reading costs
+    coverage."""
     # Require a finite statistic AND both CVs finite and correctly ordered
     # (cv90 < cv95) — a NaN/inf or a missing/degenerate CV must floor at the
     # contested 0.25, never fall through to a comparison (v3.7.4/G-04).
@@ -133,10 +145,6 @@ def sub_score(stat: float | None, cv90: float | None, cv95: float | None,
     if (stat is None or cv95 is None or cv90 is None
             or not (math.isfinite(stat) and math.isfinite(cv90) and math.isfinite(cv95))
             or cv90 >= cv95):
-        return SUB_CONTESTED_OR_STALE
-    if stale:
-        # Staleness is about DATA AGE, not about the test's size properties, so
-        # the asymmetry below does not apply to it.
         return SUB_CONTESTED_OR_STALE
     if contested:
         # ASYMMETRIC CONTESTED — SHIPPED since v4.1 (gsadf.contested_rule =

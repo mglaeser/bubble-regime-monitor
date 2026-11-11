@@ -106,7 +106,7 @@ The ladder below is statistic-agnostic; `gsadf.statistic` selects what `stat` is
 |---|---|---|
 | Explosive & non-contested (`stat > cv95`) | `1.0` | `s4_gsadf.py` |
 | `stat > cv90` | `0.5` | `s4_gsadf.py` |
-| Contested REJECTION / stale / data-missing / degenerate CV / unknown rule | `SUB_CONTESTED_OR_STALE = 0.25` | `s4_gsadf.py` |
+| Contested REJECTION / data-missing / degenerate CV / unknown rule (a stale reading is not floored: it keeps its measurement and loses its weight in the coverage gate) | `SUB_CONTESTED_OR_STALE = 0.25` | `s4_gsadf.py` |
 | Contested NON-rejection (`stat <= cv90`) under `contested_rule = "asymmetric"` | `SUB_NULL = 0.05` | `s4_gsadf.py` |
 | Tested-and-not-explosive | `0.05` | `s4_gsadf.py` |
 | COMPUTED gate | finite `stat`, finite `cv90 < cv95`, else FLOOR (0.25, quality 0.0) | `s4_gsadf.py`/`compute.py` (G-04) |

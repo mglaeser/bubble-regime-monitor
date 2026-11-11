@@ -529,7 +529,7 @@ def gather_inputs() -> RawInputs:
     # NASDAQ100 free on the key this service already holds, from 1986 against the
     # proxy's 1999. Switching to it is a source substitution (PIN C, CONDITIONAL
     # HOLD), not made here.
-    # R subprocess degrades to the contested/stale 0.25 floor.
+    # R subprocess degrades to the 0.25 floor.
     ndx = _track(raw, "price_NDX", lambda: _closes("NDX"))
     if ndx:
         import math
@@ -938,8 +938,10 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
                                            note="run-up unavailable; dropped, Block S renormalized")
 
     # ---- S4 GSADF ----
-    # Mapping: explosive p<0.05 non-contested -> 1.0; p<0.10 -> 0.5;
-    # contested-or-stale-or-DATA-MISSING -> 0.25; tested-and-not-explosive -> 0.05.
+    # Mapping: explosive p<0.05 non-contested -> 1.0; p<0.10 -> 0.5; a
+    # contested rejection, or a statistic that could not be computed -> 0.25;
+    # tested-and-not-explosive -> 0.05. Staleness is not part of the mapping: a
+    # stale S4 loses its weight in _coverage_gate, like every indicator.
     # asymmetric= is deliberately NOT bound to a setting: see app/config.py. It
     # defaults False, so this call is byte-equivalent to the pre-branch one.
     s4_stat, s4_cv90, s4_cv95 = scored_s4_statistic(raw)
@@ -957,7 +959,7 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         and (s4_cv90 or 0.0) < (s4_cv95 or 0.0)
     if not _s4_ok:
         # v3.3.2 FLOOR semantics: the 0.25 stays in the aggregation (that is the
-        # documented contested/stale policy constant, unchanged), but quality=0.0
+        # documented contested-floor policy constant, unchanged), but quality=0.0
         # tells the coverage gate — and the reader — that NOTHING was measured
         # this run. A floored s4 must not report itself as a full-quality reading.
         s4_state, s4_quality = "FLOOR", 0.0

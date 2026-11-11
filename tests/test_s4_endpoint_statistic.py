@@ -297,12 +297,44 @@ class TestTheContestedRuleIsAFrozenConstant:
         extra = compute_snapshot(_raw_diverging()).indicators["s4"].extra
         assert extra["s4_statistic"]["contested_rule"] == "asymmetric"
 
-    def test_staleness_still_caps_regardless(self):
-        # Staleness is DATA AGE, not a size property, so the asymmetry must not
-        # apply to it.
-        from app.indicators.s4_gsadf import sub_score
-        assert sub_score(END_1986, END_CV90, END_CV95, contested=True,
-                         stale=True, asymmetric=True) == 0.25
+
+class TestStalenessIsAnsweredInTheCoverageGate:
+    """A stale S4 keeps its measurement and loses its weight in the coverage
+    gate, like every other indicator. The mapping had a `stale` argument that
+    capped the sub-score at 0.25, and the registry declared it; no caller ever
+    passed it, and none of the 615 production readings (2026-07-11 ..
+    2026-11-10) was past the 35-day SLA."""
+
+    def test_the_s4_mapping_takes_no_staleness_argument(self):
+        import inspect
+
+        from app.references import REGISTRY
+        assert "stale" not in inspect.signature(s4_gsadf_module().sub_score).parameters
+        # the registry no longer declares the leg, and says what happens instead
+        how = REGISTRY["s4"].how
+        assert "-or-stale" not in how
+        assert "loses its weight in the coverage gate" in how
+
+    def test_a_stale_s4_keeps_its_measurement_and_loses_its_coverage_weight(self):
+        from datetime import UTC, datetime, timedelta
+
+        from app.references import REGISTRY
+
+        def _snapshot(days_old: int):
+            raw = make_golden_raw_inputs()
+            # a non-rejection: 1.04 against the live endpoint CVs of T=332
+            raw.bsadf_stat, raw.bsadf_cv90, raw.bsadf_cv95 = 1.04, 1.1393, 1.378
+            raw.gsadf_as_of = (datetime.now(UTC).date() - timedelta(days=days_old)).isoformat()
+            return compute_snapshot(raw, mc_samples=2000)
+
+        fresh, stale = _snapshot(0), _snapshot(100)
+        s4 = stale.indicators["s4"]
+        assert (s4.stale, s4.state, s4.value) == (True, "COMPUTED", 1.04)
+        assert s4.sub_score == fresh.indicators["s4"].sub_score == s4_gsadf_module().SUB_NULL
+        assert stale.point_score == fresh.point_score
+        assert fresh.indicators["s4"].stale is False
+        assert (fresh.coverage["S"]["coverage"] - stale.coverage["S"]["coverage"]
+                == pytest.approx(REGISTRY["s4"].weight))
 
 
 class TestFailClosed:
