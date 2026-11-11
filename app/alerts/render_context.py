@@ -359,7 +359,8 @@ def build_member_context(
     Uses current values only when they are compatible with the trigger;
     otherwise it falls back to trigger values and adds `CONTEXT_STALE` to the
     required caveats. Silently mixing the two would produce a message whose
-    numbers came from two different methodologies.
+    numbers came from two different methodologies. A fact the current input
+    lacks is the trigger's, with the same caveat.
     """
     notes: list[str] = []
     caveats = list(required_caveat_codes)
@@ -386,9 +387,23 @@ def build_member_context(
         trigger=trigger, current=current, previous=previous, labels=labels,
         authorized_fact_ids=authorized_fact_ids,
     )
-    facts = dict(current_facts if current_facts else trigger_facts)
+    # Per fact, not all or nothing: a reading the current sidecar lacks (a
+    # dropped indicator, AGENTS.md invariant 4) is the trigger's, and the
+    # message says so. Taking the trigger's facts only when the current view
+    # was EMPTY left the headline slot unfillable whenever one fact was missing
+    # beside another (F_NEXT_CHECK is always there), and the delivery ended
+    # RENDER_FAILED for good: no alert at all.
+    facts = {**trigger_facts, **current_facts}
+    lacks_a_fact = use_current and bool(trigger_facts.keys() - current_facts.keys())
+    if lacks_a_fact:
+        caveats.append("CONTEXT_STALE")
     material_fact_id: str | None = None
-    if condition_status == "MATERIALLY_CHANGED_BUT_ACTIVE" and deltas:
+    # A stale member carries no material-change clause, as when the current
+    # input is incompatible or absent: the ruleset validator proves the stale
+    # and the material-change caveats each alone to fit one message, never
+    # both (registry._check_render_contracts). The deltas stay in the context.
+    if condition_status == "MATERIALLY_CHANGED_BUT_ACTIVE" and deltas \
+            and not lacks_a_fact:
         material_fact_id = next(iter(deltas))
         selected = deltas[material_fact_id]
         facts["F_TRIGGER_VALUE"] = str(selected["trigger"])

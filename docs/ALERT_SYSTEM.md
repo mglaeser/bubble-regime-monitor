@@ -784,6 +784,13 @@ older reading, up to 27.5 days older than the trigger: 445 of production's 490
 recompute sidecars were `PARTIAL` (a month label dated after the run), 45
 `EVALUABLE`, none `NOT_EVALUABLE` (read-only, 2026-11-11).
 
+A fact the current sidecar lacks (an indicator the recompute dropped) is the
+trigger's, also with `CONTEXT_STALE`; the render does not fail for it
+(`app/alerts/render_context.py` `build_member_context`,
+tests/test_alert_fact_fallback.py). A stale member carries no material-change
+clause, whichever way it became stale: the ruleset validator proves the stale
+and the material-change caveats each alone to fit one message, not both.
+
 Only the shipped phrase set, v3.5, is kept (owner ruling 3): v3.2-v3.4 and the
 single-language form were kept only for compatibility. A registry still keeps
 the bytes of every set it registered - immutable audit data, never changed -
