@@ -14,8 +14,11 @@ def configure_logging(level: str = "INFO") -> None:
     # included — and FRED, Alpha Vantage, Polygon and Twelve Data all carry
     # their API key in that query string. The service runs containerised, so
     # those lines land in the container's journal, which the operator reads on
-    # a failed release. One line closes all four providers on
-    # both the success and the failure path.
+    # a failed release. This line closes httpx's own request log line for
+    # all four providers, on the success and on the failure path. The text
+    # of an HTTP status error is a second channel, and this line does not
+    # reach it: app.http_client.require_success raises that error without
+    # the query string.
     logging.getLogger("httpx").setLevel(logging.WARNING)
     structlog.configure(
         processors=[

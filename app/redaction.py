@@ -7,11 +7,18 @@ that layer is deliberately provider- and HTTP-free, and an import from
 tests/test_alert_evaluation.py pins.
 
 WHY THIS EXISTS AT ALL. Four of this service's upstreams carry their API key in
-the request QUERY STRING (FRED, Alpha Vantage, Polygon, Twelve Data). httpx puts
-the full URL into HTTPStatusError's message and into its own INFO log line, so
-any provider error text is a credential-bearing string. Before this module was
-applied at the gather chokepoint, a FRED 4xx wrote the key verbatim into
-SourceHealth.note, and GET /readyz — unauthenticated — returned it.
+the request QUERY STRING (FRED, Alpha Vantage, Polygon, Twelve Data). httpx's
+own raise_for_status put the full URL into HTTPStatusError's message, and httpx
+writes it into its own INFO log line, so any provider error text was a
+credential-bearing string. Before this module was applied at the gather
+chokepoint, a FRED 4xx wrote the key verbatim into SourceHealth.note, and
+GET /readyz — unauthenticated — returned it.
+
+Both are ended where they begin, not by this module: the status error is
+raised by app.http_client.require_success, whose text has no query string, and
+the httpx logger is held at WARNING in app/logging_conf.py. What is left for
+redaction is what a text can still carry: a recipient, an e-mail address, a
+credential that a provider or a proxy echoes in its answer.
 """
 
 from __future__ import annotations
