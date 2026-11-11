@@ -384,10 +384,12 @@ v4 change affecting an override input.
   driving `pool.imap` over per-window fit tasks (`lppls.py:656–658`). The project
   runs this via `mp_compute_nested_fits(workers=LPPLS_WORKERS, …)`
   (`d4_lppls.py:210`) inside an isolated subprocess (`compute_confidence_isolated`).
-- On Linux (default `fork` start method) forked workers inherit the parent's
-  `random` state at fork time; Python does **not** auto-reseed `random` per worker.
-  Whether that yields reproducible *or* pathologically correlated draws across
-  `workers > 1` is exactly what the empirical probe settles.
+- On Linux (default `fork` start method) a forked worker starts as a copy of the
+  parent, but CPython re-seeds the stdlib `random` from the OS in every forked
+  child: `random.py` registers `os.register_at_fork(after_in_child=_inst.seed)`.
+  *(Corrected 2026-11. Until then this bullet said that Python does not re-seed
+  `random` per worker. The re-seed, not the Pool, is why the parent seed in the
+  probe below had no effect at any worker count.)*
 
 ### Empirical probe
 
@@ -439,7 +441,10 @@ Achieving D4 reproducibility requires one of:
   (e.g. `random.seed(base_seed + worker_index)`), which **lppls 0.6.24 does not
   expose** through `mp_compute_nested_fits` — it would need a wrapper around, or a
   vendored patch of, the package; and even then a fixed `workers` count and fixed
-  task→worker assignment are required for bit-stability; or
+  task→worker assignment are required for bit-stability *(corrected 2026-11: it
+  needs neither a wrapper nor a patch. A hook registered with
+  `os.register_at_fork(after_in_child=...)` before the call seeds the worker the
+  package forks; see the resolution below)*; or
 - running the fits **in-process without a Pool** (the package's non-`mp`
   `compute_nested_fits` path) with a single parent seed — slower, and must be
   re-probed to confirm it is actually deterministic; or
@@ -452,6 +457,76 @@ do **not** add a bare `lppls_seed` constant; if reproducibility is required, sco
 proper seeded-`Pool`-initializer wrapper (fixed `workers`, re-probed for
 bit-stability) as its own v4 workstream, or formally adopt and document D4
 non-determinism. Bring the chosen path back for approval before any implementation.
+
+### Resolution (2026-11): the forked worker is seeded
+
+The probe's measurement stands: a seed set in the parent does nothing. Its
+remedy does not: the worker the package forks can be seeded from outside the
+package. A hook registered with
+`os.register_at_fork(after_in_child=lambda: random.seed(seed))` before
+`mp_compute_nested_fits` runs in the forked worker, after CPython's own re-seed.
+`workers` is 1 and the scan is one task, so one worker draws every starting
+point in a fixed order. `app/indicators/d4_lppls.py` does this with the frozen
+`monte_carlo.seed` (20260711), and `tests/test_d4_reproducible.py` pins that two
+recomputes of the same closes give the same result.
+
+**Repeated runs, before and after.** Production configuration (window 750, 144
+fits, `workers` 1); input: production's 750 QQQ closes ending 2026-11-09; every
+run its own process (`python -m app.indicators.d4_lppls`); measured 2026-11-11.
+
+| Run | D4 | qualifying / positive windows |
+|---|---|---|
+| unseeded 1 | 0.2080 | 26 / 125 |
+| unseeded 2 | 0.1818 | 22 / 121 |
+| unseeded 3 | 0.1597 | 19 / 119 |
+| unseeded 4 | 0.2080 | 26 / 125 |
+| unseeded 5 | 0.2033 | 25 / 123 |
+| unseeded 6 | 0.1935 | 24 / 124 |
+| **seeded** 1, 2 and 3 | 0.1626 | 20 / 123; the result line is byte-identical in all three |
+
+The seeded Pool path equals the seeded single-process reference
+(`random.seed(seed)` + `compute_nested_fits`, no Pool) in 144 of 144 fits, bit
+for bit in tc, m, a, b and c.
+
+**Production before the seed** (615 snapshots, 2026-07-11 to 2026-11-10). D4
+differed in 399 of the 407 consecutive snapshot pairs in which every other
+sub-score, the VIX multiplier and D4's `as_of` were the same. The standard
+deviation of D4 on the same closes was 0.017 (600 readings, pooled). On those
+pairs the headline moved by a median of 0.19 points, 0.61 at the 90th
+percentile and 1.73 at most. Of the 16 changes between the trim and de-risk
+bands, 11 had D4 as the only moved input.
+
+**The relevel at deploy.** The seeded reading at the last ten endpoints of
+production's cached closes, beside production's unseeded readings of the same
+closes (a dash: production never fitted that endpoint):
+
+| Endpoint | seeded, 20260711 | production, unseeded: n, min, mean, max | seeded − mean | another seed (1) |
+|---|---|---|---|---|
+| 2026-10-27 | 0.1491 (17/114) | — | | 0.1552 (18/116) |
+| 2026-10-28 | 0.1429 (16/112) | — | | 0.1754 (20/114) |
+| 2026-10-29 | 0.1786 (20/112) | 18, 0.1081, 0.1744, 0.2124 | +0.004 | 0.1624 (19/117) |
+| 2026-10-30 | 0.1930 (22/114) | 6, 0.1504, 0.1893, 0.2288 | +0.004 | 0.1525 (18/118) |
+| 2026-11-02 | 0.1802 (20/111) | 18, 0.1622, 0.2032, 0.2566 | −0.023 | 0.1754 (20/114) |
+| 2026-11-03 | 0.1983 (23/116) | — | | 0.2119 (25/118) |
+| 2026-11-04 | 0.1696 (19/112) | — | | 0.2114 (26/123) |
+| 2026-11-05 | 0.1638 (19/116) | 18, 0.1417, 0.2017, 0.2362 | −0.038 | 0.1984 (25/126) |
+| 2026-11-06 | 0.1417 (17/120) | 6, 0.1575, 0.1835, 0.2049 | −0.042 | 0.2080 (26/125) |
+| 2026-11-09 | 0.1626 (20/123) | 6, 0.1855, 0.2043, 0.2320 | −0.042 | 0.1969 (25/127) |
+
+One unit of D4 moved the headline by 17 points in November (34 snapshot pairs
+in which only D4 changed), so the last four endpoints put the relevel at about
+−0.4 to −0.7 headline points, once, at the first recompute after the deploy.
+The last median in this evidence is 48.86 (2026-11-10 22:00 UTC, trim; the
+band lines are 45 and 60).
+
+**What the seed leaves.** The pinned draw is one of many. A second seed on the
+same ten endpoints differs from the pinned one by 0.034 rms, which is a
+standard deviation of 0.024 for one draw (about 0.4 headline points), and that
+offset persists from day to day. Under one seed the reading still moves with
+every new close: 0.021 rms from one endpoint to the next under 20260711, 0.018
+under the other seed, both smaller than the 0.034 by which two independent
+redraws of the same closes differ. The seed removes the redraw on unchanged
+closes, not the estimator's spread.
 
 ---
 

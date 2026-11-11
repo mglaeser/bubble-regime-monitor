@@ -13,7 +13,7 @@
 3. **Never HTTP 500 on data failure.** Upstream failures degrade (fallback chain → drop-and-renormalize with a provenance note) or return 503, never 500. Validate all client input at the boundary (audit A-25).
 4. **Never a neutral placeholder for a failed indicator.** Drop it and renormalize its block (see `app/services/compute.py`, `app/indicators/d4_lppls.py`).
 5. **Secrets fail closed.** Never weaken the admin-key guard (`app/security.py`); never commit `.env`.
-6. **Reproducibility is pinned.** The Monte Carlo seed (`MC_SEED=20260711`) and golden fixtures (`tests/test_golden_fixture.py`) are the acceptance gate for the deterministic score. A change that moves them must update them deliberately and explain why.
+6. **Reproducibility is pinned.** The Monte Carlo seed (`MC_SEED=20260711`) and golden fixtures (`tests/test_golden_fixture.py`) are the acceptance gate for the deterministic score. A change that moves them must update them deliberately and explain why. The LPPLS fit (D4) draws its starting points from the same seed, set in its fit worker, so the same closes give the same D4 (`tests/test_d4_reproducible.py`).
 
 ## The guideline: simple, and library-first (the owner, 2026-09-26)
 

@@ -38,6 +38,11 @@ WHAT/HOW/WHY/references/caveats: see app.references.REGISTRY["d4"]; summary:
     were evaluated, 0.5 below that (partial history), 0.0 when nothing was
     computed. quality feeds the coverage gate, never the score itself.
 
+    REPRODUCIBLE (operator PIN G): the fit's random starting points come from
+    the methodology's pinned seed, set in the forked fit worker. The same
+    closes give the same result. One seeded draw still differs from another
+    seed's by about 0.02 (sd): that is the estimator's spread, not removed.
+
 CAVEAT (verbatim): LPPLS has documented false-alarm / too-early behavior; one
 published evaluation reports ~90% recall but ~29% precision (it fires often
 in ordinary bull markets). It is also computationally heavy. Treat the
@@ -49,6 +54,8 @@ EPISTEMIC GUARDRAILS: the five, verbatim, are in app/references.py.
 from __future__ import annotations
 
 import math
+import os
+import random
 
 from app import methodology as _M
 
@@ -73,6 +80,14 @@ LPPLS_INNER_INCREMENT = _M.get_path("indicators", "d4", "inner_increment")      
 LPPLS_MAX_SEARCHES = _M.get_path("indicators", "d4", "max_searches")
 LPPLS_MIN_WINDOWS_FULL_QUALITY = _M.get_path("indicators", "d4", "min_windows_full_quality")  # 100
 MIN_CLOSES = _M.get_path("indicators", "d4", "min_closes")
+# The fit's seed is the methodology's one pinned seed (AGENTS.md ground rule 6,
+# operator PIN G). It has no key of its own: the promoted alert ruleset pins
+# the byte hash of frozen_methodology.json (config/alert_rules.v3.2.yaml,
+# methodology_manifest_sha256), so a new key would refuse every alert until a
+# new ruleset is promoted, for a number that is already frozen. The MC_SEED
+# environment setting moves the Monte Carlo's seed only; the fit reads the
+# artifact.
+LPPLS_SEED = _M.get_path("monte_carlo", "seed")
 # dt bands (trading days) for the multi-scale diagnostics; long extends to the
 # scan maximum so every fitted window belongs to exactly one band.
 LPPLS_BANDS: tuple[tuple[str, int, int], ...] = tuple(
@@ -186,6 +201,25 @@ def compute_confidence(daily_closes: list[float]) -> dict:
     price = np.log(arr)
     model = lppls_mod.LPPLS(observations=np.array([time_idx, price]))
 
+    # lppls draws every fit's starting point with the stdlib `random`
+    # (lppls.py:207), inside the worker its Pool forks, and CPython re-seeds
+    # `random` from the OS in every forked child (random.py registers
+    # after_in_child=_inst.seed). Seeding here in the parent therefore does
+    # nothing; this hook runs in the child after CPython's own, because hooks
+    # run in the order they were registered.
+    # Without it the same 750 closes gave readings from 0.160 to 0.208 in six
+    # runs (2026-11-11, production's closes of 2026-11-09), and in production
+    # D4 differed in 399 of 407 consecutive snapshots in which no other input
+    # had changed. With it the reading is 0.1626 (20 of 123 windows) each
+    # time, and all 144 fits equal the seeded single-process reference
+    # (random.seed + compute_nested_fits) bit for bit.
+    # The hook lasts as long as its process. In production that is the fit's
+    # own subprocess (compute_confidence_isolated): one call, then exit; the
+    # service process never registers it. A second call in one process
+    # registers it again, to the same effect. It needs the fork start method,
+    # the default on Linux under the image's Python 3.12; under another start
+    # method it would not run, and tests/test_d4_reproducible.py would fail.
+    os.register_at_fork(after_in_child=lambda: random.seed(LPPLS_SEED))
     # Step 1: raw nested fits (start times shrink toward t2). filter config is
     # stored on the model here but qualification happens in compute_indicators.
     res = model.mp_compute_nested_fits(

@@ -10,7 +10,7 @@
 > 1. All six Tiingo series failed (`only 61 rows`) — a ≥100-row guard meant for GSADF's long-history calibration; the feed now passes `min_rows=24`. Capture #2 shows all six populated.
 > 2. `XAG/USD` needs a paid Twelve Data plan (XAU/USD is free) — on the free tier `silver_spot` **permanently** serves the labeled SLV-close fallback (`source: tiingo:SLV`, note "NOT spot"), the 1A-detectable behavior; `gold_silver_ratio` declares its `mixed` basis. Confirmed live in capture #2.
 >
-> Known run-to-run property (documented, not a bug): `lppls_confidence` uses random-restart fits and moves between recomputes (0.294 → 0.253 across captures); consume it with its `detail.state`/bands, not as a stable constant.
+> `lppls_confidence` between recomputes: the two captures differ (0.294 → 0.253 on the same `as_of`) because the fit's random starting points were unseeded then. They now come from the methodology's pinned seed (`monte_carlo.seed`), so recomputes of the same closes give the same value and it moves only with a new close (`tests/test_d4_reproducible.py`). Consume it with its `detail.state`/bands.
 
 ---
 

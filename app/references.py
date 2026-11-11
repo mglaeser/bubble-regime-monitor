@@ -494,7 +494,11 @@ REGISTRY: dict[str, Methodology] = {
             "States: VALID / VALID_ZERO (a computed zero ENTERS the aggregation) / "
             "INSUFFICIENT_DATA / FLOOR (timeout/crash: row retained with quality=0.0, value "
             "EXCLUDED from the aggregation and Block D renormalized — an uncomputed indicator "
-            "never masquerades as a zero, and NEVER a neutral placeholder — that was a v1 error)."
+            "never masquerades as a zero, and NEVER a neutral placeholder — that was a v1 error). "
+            "The fit's random starting points are drawn from the methodology's pinned seed "
+            "(monte_carlo.seed), set in the fit worker, so the same closes give the same "
+            "confidence; a different seed would give a level about 0.02 (sd) away, which is the "
+            "estimator's own spread."
         ),
         why=(
             "The Johansen-Ledoit-Sornette LPPLS model formalizes a bubble as faster-than-exponential "

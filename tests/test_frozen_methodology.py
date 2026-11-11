@@ -161,6 +161,8 @@ def test_indicator_constants_are_the_artifact():
     assert d3_hyperscaler_fcf.GATE_OFF_CAP == M.get_path("indicators", "d3", "gate_off_cap")
     assert d4_lppls.FILTER_CONDITIONS == M.as_dict("indicators", "d4", "filter_conditions")
     assert d4_lppls.MIN_CLOSES == M.get_path("indicators", "d4", "min_closes")
+    # the LPPLS fit has no seed of its own: it draws from the one frozen seed
+    assert d4_lppls.LPPLS_SEED == M.get_path("monte_carlo", "seed")
     assert v_vix.MULTIPLIERS == M.as_dict("indicators", "v", "multipliers")
 
 
