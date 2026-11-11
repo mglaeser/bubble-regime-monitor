@@ -233,7 +233,10 @@ REGISTRY: dict[str, Methodology] = {
             "Compute in R via exuber (JSS 103(10)): radf(y, lag = 0) with minimum window "
             "r0 = 0.01 + 1.8/sqrt(T) (the exuber default psy_minw). Finite-sample critical values "
             "from radf_mc_cv(n = length(y), nrep = 2000) after set.seed(20260711), cached as RDS "
-            "under GSADF_CV_CACHE (default /data/cv_cache), keyed by n. NEVER hard-code the blog value "
+            "under GSADF_CV_CACHE (default /data/cv_cache), keyed by n. The series is the month-end "
+            "closes of completed months (QQQ proxy, last 360); the month in progress is not in the "
+            "fit, so the reading changes once a month and carries the date of the last completed "
+            "month. NEVER hard-code the blog value "
             "1.49 — that is a SADF critical value, not GSADF; the simulated GSADF 95% CV is "
             "~1.9-2.3 depending on T (measured with exuber 1.1.0, nrep=2000, seed 20260711: "
             "T=331 -> cv90 1.9312 / cv95 2.2007; T=487 -> cv90 2.0034 / cv95 2.2604). "
@@ -1016,7 +1019,17 @@ CHANGELOG: list[dict[str, str]] = [
         "CAVEATS OF RECORD: on the SCORED (nominal) instrument the live endpoint is 1.1315 against "
         "cv90 1.1393 — a non-rejection by 0.7 percent of the critical value, so one data revision "
         "moves 1.48 points; and Chen et al. measure the SUPREMUM, so endpoint-level size distortion "
-        "is ASSUMED, not shown. Both are recorded in the frozen artifact.",
+        "is ASSUMED, not shown. Both are recorded in the frozen artifact. "
+        "2026-11, SCORE-SHIFTING ON DEPLOY (service version, frozen artifact and methodology "
+        "version unchanged; no frozen constant moves): s4 is fitted on the month-end closes of "
+        "COMPLETED months and dated by the last of them. The vendor's monthly series ends with the "
+        "month in progress under the label of that month's last business day; fitted and dated on "
+        "that row, s4 carried a future date on 528 of 615 snapshots (stale, 0.07 of Block S "
+        "coverage counted as lost) and fell at every month turn (-0.0425, -0.0146, -0.0413), which "
+        "on 2026-11-02 crossed cv90 (1.1684 -> 1.1271 against 1.1393). On the stored series the "
+        "completed-month reading differs on 43 snapshots, all of November 2026: s4 0.05 -> 0.25, "
+        "point score +1.37 .. +1.56 (the latest 48.81 -> 50.21), action band unchanged at 'trim'. "
+        "THE RISE IS A CORRECTED INPUT, NOT MARKET DETERIORATION. s4 then changes once a month.",
     },
 ]
 

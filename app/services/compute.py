@@ -238,7 +238,7 @@ class RawInputs:
     semis_as_of: str | None = None
 
     gsadf_stat: float | None = None
-    gsadf_as_of: str | None = None   # last month of the QQQ series GSADF ran on
+    gsadf_as_of: str | None = None   # last completed month of the QQQ series the test ran on
     gsadf_cv90: float | None = None
     gsadf_cv95: float | None = None
     gsadf_note: str | None = None
@@ -534,19 +534,14 @@ def gather_inputs() -> RawInputs:
     if ndx:
         import math
 
-        # GSADF needs a long monthly history to calibrate (PSY tables start at
-        # T=100); fetch QQQ monthly from 1999 (T~329), falling back to the
-        # shorter recompute series if the long fetch is unavailable.
-        try:
-            gsadf_pairs = price_src.fetch_tiingo_monthly("NDX")
-            gsadf_monthly = [c for _, c in gsadf_pairs]
-            raw.gsadf_as_of = gsadf_pairs[-1][0] if gsadf_pairs else None
+        gsadf_pairs, long_history_error = _s4_months(ndx.value, today)
+        gsadf_monthly = [c for _, c in gsadf_pairs]
+        raw.gsadf_as_of = gsadf_pairs[-1][0] if gsadf_pairs else None
+        if long_history_error is None:
             gsadf_src_note = f"Nasdaq-100 via QQQ proxy (Tiingo monthly 1999+, T={len(gsadf_monthly)})"
-        except Exception as exc:
-            gsadf_monthly = legs.monthly_closes(ndx.value)
-            raw.gsadf_as_of = ndx.provenance.as_of
+        else:
             gsadf_src_note = (f"Nasdaq-100 via QQQ proxy (short series T={len(gsadf_monthly)}; "
-                              f"long history unavailable: {str(exc)[:80]})")
+                              f"long history unavailable: {long_history_error})")
         out = run_gsadf([math.log(v) for v in gsadf_monthly[-_M.get_path("gsadf", "series_months_max"):]],
                         timeout_s=get_settings().gsadf_timeout_s)
         if out:
@@ -745,6 +740,49 @@ def scored_s4_statistic(raw: RawInputs) -> tuple[float | None, float | None, flo
     if s4_gsadf.SCORED_STATISTIC == "bsadf_endpoint":
         return raw.bsadf_stat, raw.bsadf_cv90, raw.bsadf_cv95
     return raw.gsadf_stat, raw.gsadf_cv90, raw.gsadf_cv95
+
+
+def _s4_months(ndx_daily: list[tuple[str, float]],
+               today: str) -> tuple[list[tuple[str, float]], str | None]:
+    """The month-end rows S4 is fitted on, oldest first, and why the long
+    history was not used (None when it was).
+
+    COMPLETED MONTHS ONLY: a row is in the fit when its month is strictly
+    earlier than the month of `today`, the rule legs.month_end_faber uses.
+    `today` is the UTC date; the UTC month turns at 19:00 or 20:00 New York
+    time, after the close of the month's last session. Tiingo's monthly
+    resample ends with the month in progress: the latest daily close under the
+    label of that month's last business day (2026-11-30 on 2026-11-10). Fitted
+    and dated on that row, production 2026-07-11 .. 2026-11-10:
+      - the date lay in the future on 528 of 615 snapshots, so S4 read stale,
+        0.07 of Block S coverage counted as lost and 445 of 491 alert sidecars
+        were PARTIAL (period_label_future:s4);
+      - at each month turn a one-day month lowered the endpoint statistic
+        (-0.0425, -0.0146, -0.0413). On 2026-11-02 that crossed cv90 1.1393
+        (1.1684 -> 1.1271): S4 0.25 -> 0.05, point score 49.31 instead of
+        50.72. The critical values are simulated for equal steps.
+    On the stored series the completed-month reading differs on 43 snapshots,
+    all of November 2026: S4 0.05 -> 0.25, point score +1.37 .. +1.56 (the
+    latest 48.81 -> 50.21), no band threshold crossed. S4 then moves once a
+    month, with the first recompute of the next one.
+
+    A completed month is at most 33 days old on any day of the next one (SLA
+    35). Not checked here: that the vendor has printed the month's final close.
+    A feed that stops shows on S4's date when the SLA runs out, and on the
+    daily series of the same vendor within its own 3 days.
+    """
+    from app.sources import prices as price_src  # local, as in gather_inputs
+
+    try:
+        # PSY tables start at T=100; QQQ monthly from 1999 gives T~330.
+        rows = price_src.fetch_tiingo_monthly("NDX")
+        error = None
+    except Exception as exc:
+        # The shorter daily series stands in: the last bar of each month, under
+        # its own date.
+        rows = list({d[:7]: (d, c) for d, c in ndx_daily}.values())
+        error = str(exc)[:80]
+    return [(d, c) for d, c in rows if d[:7] < today[:7]], error
 
 
 def _closed_months(daily: list[tuple[str, float]]) -> frozenset[str]:
