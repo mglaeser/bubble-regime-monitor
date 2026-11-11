@@ -108,6 +108,8 @@ Red-flag count 0 → override not fired. **Deterministic point score 52.43; MC m
 | LPPLS (D4) | `lppls==0.6.24` (pinned; maintenance-inactive) | **drop + renormalize Block D** | 3d |
 | VIX curve (V) | CBOE delayed quotes | FRED `VIXCLS`/`VIX3M` | 2d |
 
+The daily price series (SPY, QQQ, SMH: S3, D4, the trend legs, realized variance, the near-high leg) are fetched once per NYSE session, by the first recompute after the session's UTC day (02:00 UTC). The stored series answers the other runs, and every run while all providers fail.
+
 ## API
 
 Base path `/api/v1`; every response is `{"data": ..., "meta": ...}` with the five epistemic caveats in `meta`. Each per-indicator object carries `as_of`, `age_days`, and `stale` (true past the source's freshness SLA), plus provenance (`data_source`, `fallback_used`, `dropped`, `note`). Reads rate-limited 60/min/IP; `READ_ENDPOINTS_PUBLIC` toggles key requirement; admin refresh requires `X-API-Key`.
