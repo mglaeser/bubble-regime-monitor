@@ -8,7 +8,7 @@ chain is deleted, in the repository and on the host.
 
 | Piece | File | What it does |
 |---|---|---|
-| The service | `deploy/quadlet/bubblegauge.container` | A Podman Quadlet unit: systemd starts the container at boot (with linger), restarts it when it dies, and kills it when it stops answering `/healthz` (podman's own health check). It runs `localhost/bubblegauge:latest`. |
+| The service | `deploy/quadlet/bubblegauge.container` | A Podman Quadlet unit: systemd starts the container at boot (with linger), restarts it when it dies, and kills it when it stops answering `/healthz` five checks in a row (podman's own health check). It runs `localhost/bubblegauge:latest`. |
 | The release | `deploy/release.sh`, installed as `~/.local/bin/bubblegauge-release`, via `deploy/systemd/bubblegauge-release.service` | One comparison and no memory: the commit the running container carries (its OCI revision label; a stopped container carries none) against `origin/main`. Different: build main's commit from an export, point `:latest` at the image, restart the service - the new image migrates the database as it boots, one transaction - and wait for `/healthz`. Equal: nothing - a container that runs main's commit and does not answer is the service unit's to kill and restart, not the release's. |
 | The schedule | `deploy/systemd/bubblegauge-release.timer` | Five minutes after the last release ended, and two minutes after boot. |
 | The alarm | `deploy/systemd/bubblegauge-notify-failed@.service` | A failed release is reported once over iMessage through the host's notifier, then at most once an hour while it persists. |
@@ -38,7 +38,12 @@ the service unit's, not the release's: stopping the release ends its build,
 and stopping the service ends a boot in flight, with an uncommitted
 migration rolled back. After the switch the service is
 systemd's: `Restart=always` every ten seconds without limit, and the health
-check kills a container that stops answering. Nothing rolls back: a release
+check kills a container that stops answering. The app has five seconds to
+answer (curl's `--max-time`); podman's own clock around the probe is thirty,
+and five checks in a row must fail, so a wedged app is killed within five
+minutes and a slow host is not taken for one: at five seconds and three
+retries a stalled host got the working service killed six times in the night
+of 2026-10-31. Nothing rolls back: a release
 that answers nothing after the switch is what main says to run, and the next
 commit fixes it. The hand rollback, valid while the schema has not moved (the
 five newest commit tags are kept):
@@ -116,7 +121,13 @@ systemctl --user stop bubblegauge-release.timer          # before stopping the s
 ```
 
 A changed unit file or release script is reinstalled by hand (the install
-lines) and `daemon-reload`ed: what runs on the host changes only by hand.
+lines) and `daemon-reload`ed: what runs on the host changes only by hand. A
+changed container unit applies from the service's next start (`systemctl
+--user restart bubblegauge.service`, outside the recompute slots like a
+merge): its settings are `podman run` flags, and the running container keeps
+the ones it started with. What it has:
+`podman container inspect -f '{{.Config.Healthcheck.Timeout}} {{.Config.Healthcheck.Retries}}' bubblegauge`
+prints `30s 5`.
 To check a release: the running container's revision label is `origin/main`
 (`podman container inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' bubblegauge`
 against `git rev-parse origin/main`), `/healthz` answers 200, and
@@ -134,5 +145,7 @@ of `bubblegauge.service`.
 
 The service reports a failed or stuck recompute itself (the failure alarm),
 and the host reports a failed release or watchdog run (the host notices,
-`deploy/notify-outage.sh`). A host that is down reports nothing: by the
+`deploy/notify-outage.sh`). A restart of the service - by the health check,
+by hand or at boot - has no message of its own: the six kills in the night of
+2026-10-31 left no line in the host notices. A host that is down reports nothing: by the
 owner's decision (2026-10-04) there is no external monitor.

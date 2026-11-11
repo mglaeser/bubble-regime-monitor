@@ -609,6 +609,35 @@ class TestTheUnits:
         assert "StartLimitIntervalSec=0" in unit["[Unit]"]
         assert not any(line.startswith("Exec") for line in service)     # no shell of our own in the unit
 
+    def test_a_slow_host_does_not_get_an_answering_app_killed(self):
+        """The health check is for an app that stops answering /healthz (the
+        unit's comment, docs/AUTO_DEPLOY.md), and the app's bound is curl's
+        --max-time. HealthTimeout is another clock: podman's, around its whole
+        exec - conmon, the runtime, curl - and read after the exec returns, so
+        on a slow host it fails the probe of an app that answers. At 5s and
+        three retries the host's stall in the night of 2026-10-31 had 141 of 795
+        probes fail on that clock and six kills of a working service; at 30s,
+        podman's default, 2 of the 795 fail, never two in a row (the numbers
+        are at the unit's HealthTimeout line)."""
+        container = _directives((ROOT / "deploy/quadlet/bubblegauge.container").read_text())["[Container]"]
+
+        def value(key: str) -> str:
+            return next(line.split("=", 1)[1] for line in container if line.startswith(key + "="))
+
+        app_bound = int(value("HealthCmd").split("--max-time ")[1].split()[0])
+        timeout = int(value("HealthTimeout").removesuffix("s"))
+        interval = int(value("HealthInterval").removesuffix("s"))
+        retries = int(value("HealthRetries"))
+        assert app_bound == 5           # the app answers within five seconds, or the probe fails
+        assert timeout > app_bound      # podman's clock is not the one that decides
+        assert timeout == 30            # podman's default, not a number of ours
+        assert retries == 5             # a stall passes, a wedge lasts: five failed checks in a row
+        # a wedged app is still killed within the five minutes a boot has, even
+        # when each of the five probes takes podman's whole thirty seconds (curl
+        # ends at five) and the interval lies between them: 270 s
+        assert retries * timeout + (retries - 1) * interval <= 300
+        assert "HealthOnFailure=kill" in container
+
     def test_the_script_names_what_the_units_name(self):
         script = (ROOT / "deploy/release.sh").read_text()
         assert "CONTAINER=bubblegauge\n" in script and "SERVICE=bubblegauge.service\n" in script
