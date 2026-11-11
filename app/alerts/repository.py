@@ -25,6 +25,7 @@ from app.alerts.enums import (
     ConditionState,
     DeliveryKind,
     EpisodeStatus,
+    Evaluability,
     EvaluationStatus,
     SuppressionReason,
 )
@@ -624,27 +625,41 @@ def resolve_predecessor(session: Session, alert_input: AlertInput) -> AlertInput
 
 def load_latest_compatible_input(session: Session, *, like: AlertInput,
                                  ) -> AlertInput | None:
-    """The newest EVALUABLE sidecar, only if compatible with `like` (17.4).
+    """The newest sidecar of the trigger's origin, if compatible with `like` (17.4).
 
     Current facts may join a render only when the schema version and the
     methodology are the ones the trigger was evaluated under — otherwise the
     message would mix numbers computed two different ways and present them as
-    one comparison.  Deliberately inspect the newest row *before* applying the
-    compatibility check: selecting the newest compatible historical row would
-    silently return the trigger when a newer methodology exists, making stale
-    context look current. Incompatible or absent means the caller renders from
-    trigger facts alone, with CONTEXT_STALE.
+    one comparison.  Deliberately inspect the newest row *before* applying any
+    check: selecting the newest row that passes one would silently return an
+    older reading and make stale context look current. Incompatible, not
+    evaluable or absent means the caller renders from trigger facts alone,
+    with CONTEXT_STALE.
+
+    Eligibility is no filter. The README promises an alert "from the newest
+    captured recompute input at send time", the evaluator decides on PARTIAL
+    inputs, and the message about a decision is worded from what was decided
+    on. Selecting `EVALUABLE` rows here worded 20 of the 21 alerts sent from
+    2026-09-22 to 2026-11-10 from a sidecar that was not the newest, up to
+    27.5 days older than their trigger (445 of 490 recompute sidecars were
+    PARTIAL, a month label dated after the run; none NOT_EVALUABLE): 10 named
+    a wrong value or band, 17 a wrong next run. The first move to de-risk, on
+    2026-09-25, went out as "Stufe trim erreicht".
+
+    Same origin, because a comparison of trigger and current needs like with
+    like: a watchdog sidecar carries no market fact and a recompute sidecar no
+    missed-slot count. The watchdog's sidecars of one outage share
+    `computed_at` (the last snapshot's), hence the second sort key.
     """
     row = session.execute(
         select(AlertInputSnapshot)
-        .where(
-            AlertInputSnapshot.evaluation_eligibility == "EVALUABLE",
-        )
+        .where(AlertInputSnapshot.origin == str(like.origin))
         .order_by(func.coalesce(AlertInputSnapshot.computed_at,
-                                AlertInputSnapshot.built_at).desc())
+                                AlertInputSnapshot.built_at).desc(),
+                  AlertInputSnapshot.built_at.desc())
         .limit(1)
     ).scalars().first()
-    if row is None:
+    if row is None or row.evaluation_eligibility == Evaluability.NOT_EVALUABLE:
         return None
     candidate = AlertInput.model_validate(json.loads(row.payload))
     if candidate.schema_version != like.schema_version \
