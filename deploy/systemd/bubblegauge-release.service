@@ -7,6 +7,11 @@
 # build and the smoke boot keeps its database; systemd creates it with the
 # unit and removes it when the unit ends, success or failure, whatever podman
 # wrote into it (executed on the host, #148 round 2) - so not preserved.
+# The state directory (for a user unit ~/.local/state/bubblegauge-release,
+# handed to the script as $STATE_DIRECTORY) outlives the run and holds one
+# empty file, `fetched`: the time of the last fetch from origin that
+# succeeded. A fetch that fails is not a failed release; an hour without a
+# good one is, and git keeps no such time (deploy/release.sh, at the fetch).
 # ExecStart is the copy of deploy/release.sh installed by hand, not the
 # checkout's file, which every release fast-forwards: what runs on the host
 # changes only by hand (docs/AUTO_DEPLOY.md, #147 round 6).
@@ -21,6 +26,7 @@ Type=oneshot
 WorkingDirectory=%h/playground/bubble-regime-monitor
 ExecStart=%h/.local/bin/bubblegauge-release
 RuntimeDirectory=bubblegauge-release
+StateDirectory=bubblegauge-release
 TimeoutStartSec=3600
 
 [Install]

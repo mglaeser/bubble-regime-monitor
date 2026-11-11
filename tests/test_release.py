@@ -2,12 +2,13 @@
 (owner decision D6, re-cut on 2026-10-02 after #143's forty review rounds).
 
 The contract, pinned here and stated in docs/AUTO_DEPLOY.md: one comparison
-and no memory. The commit the running container carries is compared with
-origin/main; when they differ, main's commit is built from an export,
-tagged :latest and restarted - the new image migrates as it boots - and
-the release waits for /healthz. A release that fails exits non-zero and is tried
-again at the next tick; nothing rolls back, and a release main cannot run is
-fixed forward.
+and no memory of a release. The commit the running container carries is
+compared with origin/main; when they differ, main's commit is built from an
+export, tagged :latest and restarted - the new image migrates as it boots -
+and the release waits for /healthz. A release that fails exits non-zero and is
+tried again at the next tick; a fetch that fails is not a release that fails,
+and only an hour without a good one is reported; nothing rolls back, and a
+release main cannot run is fixed forward.
 
 git is real: a bare origin and a clone in tmp_path, so fetch, rev-parse, the
 fast-forward and the archive are git's own. podman, systemctl and curl are
@@ -18,6 +19,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -119,6 +121,8 @@ def release(tmp_path):
     state = tmp_path / "state"
     state.mkdir()
     runtime = tmp_path / "runtime"
+    kept = tmp_path / "kept"            # the unit's StateDirectory=: systemd makes it, and it outlives the run
+    kept.mkdir()
     calls = tmp_path / "calls.log"
 
     def commit(path: str, content: str, mode: int = 0o644, force: bool = False) -> str:
@@ -150,6 +154,7 @@ def release(tmp_path):
         runtime.mkdir(exist_ok=True)
         environ = {**os.environ, "HOME": str(home), "PATH": f"{shims}:{os.environ['PATH']}", "CALLS": str(calls),
                    "SHIM_STATE": str(state), "RUNTIME_DIRECTORY": str(runtime), "HEALTH_TIMEOUT": "2",
+                   "STATE_DIRECTORY": str(kept),
                    **(env or {})}
         result = subprocess.run([exec_start], cwd=workdir, env=environ,  # noqa: S603
                                 capture_output=True, text=True, timeout=120)
@@ -162,12 +167,18 @@ def release(tmp_path):
     run.seed = seed  # type: ignore[attr-defined]
     run.state = state  # type: ignore[attr-defined]
     run.runtime = runtime  # type: ignore[attr-defined]
+    run.kept = kept  # type: ignore[attr-defined]
     run.main = lambda: _git("rev-parse", "origin/main", cwd=checkout)  # type: ignore[attr-defined]
     return run
 
 
 def _index(calls: list[str], prefix: str) -> int:
     return next(i for i, c in enumerate(calls) if c.startswith(prefix))
+
+
+# What a release calls, from the build to the health probe: a tick that
+# releases nothing makes none of these calls.
+_RELEASING = ("podman build", "podman run", "podman tag", "systemctl --user restart", "curl")
 
 
 def test_nothing_to_do_when_the_running_container_carries_mains_commit(release):
@@ -390,6 +401,77 @@ def test_the_five_newest_commit_tags_stay(release):
     assert set(rmi.split()[2:]) == {f"{IMAGE}:old3", f"{IMAGE}:old2", f"{IMAGE}:old1"}
 
 
+class TestAFetchThatFails:
+    """docs/AUTO_DEPLOY.md, "The contract": a fetch that fails is not a release
+    that fails - nothing was being released and the service is untouched, so
+    the tick says so and ends, and the next one tries again. What is reported
+    is a failure that lasts: no fetch has succeeded for an hour, so merges do
+    not deploy. On the host, 2026-10-05 to 11-10: 18 of about 10,300 ticks
+    failed, every one at the fetch (GitHub refused the deploy key for single
+    attempts), with main unmoved and the service up; each failed the unit, and
+    seven notices "bubblegauge-release failed ... Alert delivery may be down"
+    reached the owner. The oldest good fetch at any of the 18 was 27 minutes."""
+
+    @staticmethod
+    def _origin_refuses(release) -> None:
+        _git("remote", "set-url", "origin", str(release.checkout.parent / "gone.git"), cwd=release.checkout)
+
+    @staticmethod
+    def _last_good_fetch_was(release, minutes_ago: int) -> None:
+        when = time.time() - minutes_ago * 60
+        os.utime(release.kept / "fetched", (when, when))
+
+    def test_a_fetch_that_fails_is_not_a_failed_release(self, release):
+        target = release.advance()
+        assert release(running=target)[0] == 0                 # a quiet tick: the fetch succeeds
+        self._origin_refuses(release)
+        code, calls = release(running=target)
+        assert code == 0 and "the next tick tries again" in release.output
+        assert not any(c.startswith(_RELEASING) for c in calls), calls
+
+    def test_no_fetch_for_an_hour_is_a_failed_release(self, release):
+        """A revoked deploy key, a host key that changed: merges do not deploy,
+        and the unit's OnFailure= says so - at once, then hourly (the notifier)."""
+        target = release.advance()
+        assert release(running=target)[0] == 0
+        self._origin_refuses(release)
+        self._last_good_fetch_was(release, minutes_ago=59)
+        assert release(running=target)[0] == 0
+        self._last_good_fetch_was(release, minutes_ago=61)
+        code, calls = release(running=target)
+        assert code != 0 and "merges do not deploy" in release.output
+        assert "bubblegauge.service is untouched" in release.output
+        assert not any(c.startswith(_RELEASING) for c in calls), calls
+
+    def test_a_fetch_that_fails_does_not_count_as_a_good_one(self, release):
+        """The hour runs from the last fetch that SUCCEEDED: a tick that fails
+        every five minutes must not keep the report away for good."""
+        target = release.advance()
+        assert release(running=target)[0] == 0
+        self._origin_refuses(release)
+        self._last_good_fetch_was(release, minutes_ago=30)
+        before = (release.kept / "fetched").stat().st_mtime
+        assert release(running=target)[0] == 0
+        assert (release.kept / "fetched").stat().st_mtime == before
+
+    def test_a_host_that_never_reached_origin_reports_it_at_once(self, release):
+        self._origin_refuses(release)
+        code, calls = release(running=release.main())
+        assert code != 0 and "merges do not deploy" in release.output
+        assert not any(c.startswith(_RELEASING) for c in calls), calls
+
+    def test_a_fetch_that_fails_releases_nothing_from_the_last_known_head(self, release):
+        """What origin's head is, is not known on such a tick: a commit fetched
+        earlier and not yet released (its build failed) waits for a tick that
+        reaches origin."""
+        old = release.main()
+        release.advance()
+        assert release(running=old, env={"BUILD_FAILS": "1"})[0] != 0     # fetched, not released
+        self._origin_refuses(release)
+        code, calls = release(running=old)
+        assert code == 0 and not any(c.startswith(_RELEASING) for c in calls), calls
+
+
 class TestTheDeployNote:
     """The release writes what it changes into the image's build context, so
     each image carries its own note, from the commit the last container
@@ -569,6 +651,8 @@ class TestTheUnits:
         # removed when the unit ends, success or failure, with the smoke boot's
         # database in it: nothing of a run outlives it (#148 round 2)
         assert not any(line.startswith("RuntimeDirectoryPreserve=") for line in unit["[Service]"])
+        # the one thing that outlives a run: the time of the last good fetch
+        assert "StateDirectory=bubblegauge-release" in unit["[Service]"]
         assert "OnFailure=bubblegauge-notify-failed@%N.service" in unit["[Unit]"]
         # the copy installed by hand, run in the checkout - never the checkout's file
         assert "ExecStart=%h/.local/bin/bubblegauge-release" in unit["[Service]"]
