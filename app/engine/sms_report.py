@@ -20,6 +20,7 @@ content.
 
 from __future__ import annotations
 
+from app.engine.aggregate import headline
 from app.models import Snapshot
 
 # Minimal transliteration so a stray Unicode char cannot silently halve the
@@ -53,7 +54,7 @@ def deterministic_report(snap: Snapshot, limit: int) -> str:
     spy = trend.get("SPY", {}).get("faber_10mo", "?")
     qqq = trend.get("QQQ", {}).get("faber_10mo", "?")
     override = " OVERRIDE" if snap.override_fired else ""
-    core = (f"bubblegauge {round(snap.median)}/100 {snap.action_band}{override}. "
+    core = (f"bubblegauge {headline(snap.median)}/100 {snap.action_band}{override}. "
             f"range {round(snap.iqr_lo)}-{round(snap.iqr_hi)}. "
             f"SPY {spy}, QQQ {qqq}. Flags {snap.red_flag_count}/4.")
     return _clip_to_sms(core, limit)

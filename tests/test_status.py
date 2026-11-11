@@ -188,7 +188,8 @@ class TestOpenApiExample:
         oa = client.get("/openapi.json").json()
         assert "/api/v1/status" in oa["paths"]
         ex = oa["paths"]["/api/v1/score"]["get"]["responses"]["200"]["content"]["application/json"]["example"]
-        assert ex["data"]["headline_median"] == 53
+        # The golden median is 52.5605: the whole points reached.
+        assert ex["data"]["headline_median"] == 52
         # root HTML page is hidden from the machine schema
         assert "/" not in oa["paths"]
 

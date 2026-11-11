@@ -197,6 +197,29 @@ def action_band(score: float) -> str:
     return "hold"
 
 
+def headline(median: float) -> int:
+    """The whole-number headline every surface publishes (the score API, the
+    status page, the daily digest and its template, the judgment prompt): the
+    whole points the median has reached.
+
+    The band lines are whole numbers and the rule is "at or above"
+    (action_band), so the floor is the one whole number that is at or above a
+    line exactly when the median is: the number shown never names a band line
+    the score has not reached. The nearest whole number did. From 59.5 up it
+    published 60 beside the band "trim", against the published rule "de-risk
+    from 60": on 47 of the 615 production snapshots up to 2026-11-10 (all at
+    the 60 line) and in 7 of the 54 daily digests sent, two of which told the
+    reader the score sat "exactly on the de-risk line" (2026-10-06, median
+    59.996; 2026-10-12, median 59.698).
+
+    What the convention costs: 59.7 reads 59. The floor is one lower than the
+    nearest whole number on 286 of those 615 snapshots and the same on the
+    other 329. No band, alert or stored value moves, since all of them read
+    the unrounded median (tests/test_headline_whole_number.py).
+    """
+    return math.floor(median)
+
+
 def action_band_with_override(score: float, red_flags: RedFlags) -> str:
     if red_flags.override_fired:
         return "de-risk"

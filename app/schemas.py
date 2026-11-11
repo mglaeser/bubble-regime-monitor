@@ -53,7 +53,8 @@ class IndicatorPayload(BaseModel):
 class ScoreData(BaseModel):
     headline_median: int = Field(..., description=(
         "Monte Carlo distribution MEDIAN of the 0-100 regime heuristic. "
-        "NOT a probability — structured expert judgment, uncalibrated."))
+        "NOT a probability — structured expert judgment, uncalibrated. "
+        "In whole points reached (59.7 reads 59)."))
     iqr: tuple[float, float] = Field(..., description="25th-75th percentile of the MC distribution")
     band_5_95: tuple[float, float] = Field(..., description="5th-95th percentile of the MC distribution")
     point_score: float = Field(..., description="Deterministic score at baseline weights/anchors (alpha=0.5)")

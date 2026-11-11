@@ -20,6 +20,7 @@ from sqlalchemy import select
 
 from app.config import get_settings
 from app.db import session_scope
+from app.engine.aggregate import headline
 from app.engine.recompute_slots import schedule_display
 from app.models import DashboardFeed, ProviderHealth, Snapshot, SourceHealth
 from app.references import (
@@ -269,7 +270,7 @@ def build_status() -> dict[str, Any]:
         if snap is not None:
             snap_summary = {
                 "computed_at": _iso(snap.computed_at),
-                "headline_median": round(snap.median), "point_score": round(snap.point_score, 2),
+                "headline_median": headline(snap.median), "point_score": round(snap.point_score, 2),
                 "iqr": [round(snap.iqr_lo, 2), round(snap.iqr_hi, 2)],
                 "band_5_95": [round(snap.band5, 2), round(snap.band95, 2)],
                 "action_band": snap.action_band, "override_fired": snap.override_fired,

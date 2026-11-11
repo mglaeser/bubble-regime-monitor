@@ -1235,12 +1235,13 @@ KNOWN_ISSUES: list[dict[str, str]] = [
 # ---------------------------------------------------------------------------
 # SCORE_EXAMPLE — the single, shared worked example of GET /api/v1/score
 # (golden-fixture-shaped). Used by the OpenAPI response example AND the status
-# page, so the two can never drift.
+# page, so the two can never drift. The golden median is 52.5605, so the
+# headline reads 52: the whole points reached (app.engine.aggregate.headline).
 # ---------------------------------------------------------------------------
 
 SCORE_EXAMPLE: dict = {
     "data": {
-        "headline_median": 53, "iqr": [50, 55], "band_5_95": [47, 58], "point_score": 52.43,
+        "headline_median": 52, "iqr": [50, 55], "band_5_95": [47, 58], "point_score": 52.43,
         "action_band": "trim", "override_fired": False, "red_flag_count": 0,
         "red_flag_detail": {"gsadf_explosive_noncontested": False, "semi_runup_ge_150pp": False,
                             "hy_oas_widen_gt_100bps": False, "breadth_lt_50_near_ath": False},
