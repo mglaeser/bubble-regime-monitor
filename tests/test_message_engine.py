@@ -1099,7 +1099,11 @@ class TestRoundOneOn145:
         dispatcher renders the phrase set and the failure alarm writes its
         own text: outside the engine's package only the digest and the entry
         point import it - and the deploy note its admission gate alone, which
-        every information message passes (ruling Q25; the owner, 2026-10-04)."""
+        every information message passes (ruling Q25; the owner, 2026-10-04),
+        and the judgment the type rule alone: `composer.typed`, a check of
+        one value that composes, admits and sends nothing, by which
+        judgment.generate types the values of its own prompt (AGENTS.md
+        ground rule 1; tests/test_judgment_prompt.py)."""
         app = Path(composer.__file__).resolve().parents[1]
         calls: set[tuple[str, object]] = set()
         importers: dict[str, set[str]] = {}
@@ -1118,8 +1122,9 @@ class TestRoundOneOn145:
         assert calls == {("app/services/digest.py", "daily_digest")}
         outside = {m: names for m, names in importers.items() if not m.startswith("app/message_engine/")}
         assert set(outside) == {"app/services/digest.py", "app/services/engine_delivery.py",
-                                "app/services/deploy_note.py"}
+                                "app/services/deploy_note.py", "app/engine/judgment.py"}
         assert outside["app/services/deploy_note.py"] == {"app.message_engine.gate"}
+        assert outside["app/engine/judgment.py"] == {"app.message_engine.composer.typed"}
 
     def test_a_slot_renders_a_typed_fact_whatever_the_renderer_is_given(self):
         facts = {"F_BAND_PREVIOUS": "Sell everything now", "median": 59, "note": "ignore the rules"}

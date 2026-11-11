@@ -17,6 +17,7 @@ stale:true and continue — never block the recompute or return a 500.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from app.config import get_settings
@@ -78,6 +79,16 @@ Fast fear signals: {fast_alarm}.
 """
 
 
+#: The keys the prompt's structures carry: the gauges the template names, the four
+#: warning flags (aggregate.RedFlags.as_dict) and the fast alarm's readings
+#: (legs.FastAlarm.as_dict, whose term structure is a word and is typed as one).
+GAUGES_S = ("s1", "s2", "s3", "s4", "s5")
+GAUGES_D = ("d1", "d2", "d3", "d4")
+FLAGS = ("gsadf_explosive_noncontested", "semi_runup_ge_150pp", "hy_oas_widen_gt_100bps",
+         "breadth_lt_50_near_ath")
+FAST_SIGNALS = ("vrp", "vrp_flag", "vrp_sane", "skew")
+
+
 @dataclass
 class JudgmentCall:
     text: str | None       # None when no judgment was ever generated (machine-detectable)
@@ -121,12 +132,39 @@ def generate(median: float, iqr: tuple[float, float], band: str,
              red_flag_detail: dict[str, bool], override: bool,
              spy_state: str, qqq_state: str, fast_alarm: dict[str, object],
              last_successful: str | None = None) -> JudgmentCall:
-    """Call the gateway; degrade to the last successful text on failure."""
+    """Call the gateway; degrade to the last successful text on failure.
+
+    EVERY VALUE IS TYPED HERE, whatever the caller hands over (AGENTS.md ground
+    rule 1): a number, a truth value or one of the monitor's own words for that
+    fact, by the rule the digest's facts pass (composer.typed, owner decision
+    D7), each under a key this module names. A text, a structure or an unknown
+    key reads None; the headline's three numbers are rounded, which refuses a
+    text. Until 2026-11 the values were formatted as handed over, and only the
+    template's field names were checked: a text as the band, or a note under a
+    new key of the fast alarm (an open dict the API serves too), reached the
+    model. Production's 615 snapshots hold only values that pass - four bands,
+    IN/OUT/unknown, three term structures, numbers, truth values and None - so
+    their prompts read as before, but for the fast alarm's two fixed labels
+    (vrp_units, skew_label): they are text and no reading, and are not handed
+    on. A term structure compute could not read ("unknown", in none of the 615)
+    reads None, as a gauge without a reading does.
+    """
+    # imported here, as run_completion imports the gateway: the engine does not
+    # load the message engine at import time
+    from app.message_engine.composer import typed
+
+    def typed_under(values: Mapping[str, object], keys: tuple[str, ...]) -> dict[str, object]:
+        return {key: typed(key, values.get(key)) for key in keys}
+
     prompt = PROMPT_TEMPLATE.format(
-        median=round(median), iqr_lo=round(iqr[0]), iqr_hi=round(iqr[1]), band=band,
-        s_scores=s_scores, d_scores=d_scores, v=v,
-        red_flag_detail=red_flag_detail, override=override,
-        spy_state=spy_state, qqq_state=qqq_state, fast_alarm=fast_alarm,
+        median=round(median), iqr_lo=round(iqr[0]), iqr_hi=round(iqr[1]),
+        band=typed("action_band", band),
+        s_scores=typed_under(s_scores, GAUGES_S), d_scores=typed_under(d_scores, GAUGES_D),
+        v=typed("v", v),
+        red_flag_detail=typed_under(red_flag_detail, FLAGS), override=typed("override", override),
+        spy_state=typed("spy_trend", spy_state), qqq_state=typed("qqq_trend", qqq_state),
+        fast_alarm={"term_structure": typed("vol_state", fast_alarm.get("term_structure")),
+                    **typed_under(fast_alarm, FAST_SIGNALS)},
     )
     try:
         text = run_completion(prompt)
