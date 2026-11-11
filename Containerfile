@@ -36,4 +36,7 @@ RUN mkdir -p /data
 # fight the bind-mount ownership.
 ENV TZ=UTC PYTHONUNBUFFERED=1
 EXPOSE 8000
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# --no-access-log: uvicorn's error log (startup, shutdown, the traceback of a
+# request or a boot that failed) is on; its access log would add a line per
+# request with the client's address - 2,880 a day from the health check alone.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]
