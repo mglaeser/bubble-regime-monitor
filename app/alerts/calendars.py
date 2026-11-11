@@ -49,6 +49,16 @@ def is_trading_day(day: date) -> bool:
     return day.weekday() < 5 and day not in us_market_holidays(day.year)
 
 
+def trading_days_after(start: date, end: date) -> int:
+    """NYSE sessions after `start`, up to and including `end`: the age, on
+    `end`, of a daily market reading dated `start`. 0 when `end` is not after
+    `start`. The same count as the library's get_working_days_count(start + 1
+    day, end) (pinned in tests/test_freshness_sessions.py), taken over this
+    module's one calendar, so a reversed span is 0 instead of being swapped."""
+    return sum(is_trading_day(start + timedelta(days=n))
+               for n in range(1, (end - start).days + 1))
+
+
 def next_trading_day(day: date) -> date:
     cursor = day + timedelta(days=1)
     for _ in range(15):        # the longest real closure run is far shorter

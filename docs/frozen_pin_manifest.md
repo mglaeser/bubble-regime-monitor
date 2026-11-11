@@ -212,7 +212,7 @@ A dropped OR stale indicator = fully lost weight. `stale is None` (unknown date)
 |---|---|---|---|---|---|---|---|---|---|
 | 35 | 3 | 3 | 35 | 45 | 3 | 75 | 100 | 3 | 2 |
 
-s5 = 45 and ages from the reference **month-END** (v3.7.6/C-04). Source: `compute.py`.
+s2, s3, d1 and d4 count NYSE sessions since `as_of` (`compute.py:SESSION_AGED`); the others count calendar days. s5 = 45 and ages from the reference **month-END** (v3.7.6/C-04). Source: `compute.py`.
 
 ## 10. Quality values (fidelity to construct, not fallback position)
 
