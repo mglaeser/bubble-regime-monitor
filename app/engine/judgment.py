@@ -25,6 +25,21 @@ from app.redaction import sanitize
 
 log = get_logger(__name__)
 
+# THE GAUGES ARE NAMED IN THE TEMPLATE'S OWN WORDS. Until 2026-11 the model was handed
+# {'s1': 0.97, ...} with no word on what a code measures, and asked for "the ONE
+# biggest thing" in plain words. From 2026-10-16 22:00 UTC to 2026-11-10, 50 of
+# production's 145 judgments computed with no warning flag active said so instead of
+# answering, 21 of them as a question back ("What does each reading measure? I need
+# those meanings to name the biggest bubble warning ... without guessing."); 0 of the 6
+# computed with a flag active did (a flag's key names its measure). The text is served
+# by /api/v1/score and is the digest's one free-text fact: the digest's model was
+# handed such a note on 14 of those 25 mornings.
+# The names are template text, not a field: the interpolated fields are the same twelve
+# numbers and enums (AGENTS.md ground rule 1,
+# tests/test_audit_v331.py::TestPromptIsNumbersOnly). One line per indicator of the
+# registry's two blocks, the plain-word form of what app/references.py says it measures
+# (s5 is read two years back; d2's "rollover" is the borrowing falling from its peak;
+# d3's gate caps the reading); tests/test_judgment_prompt.py holds that each has its line.
 PROMPT_TEMPLATE = """You are writing a one-line note for a research bubble-regime monitor, for a
 COMPLETE NON-EXPERT with no finance background — write it so a smart 15-year-old
 could follow it.
@@ -44,8 +59,19 @@ Rules:
 
 Readings (context for you — do NOT quote these codes or labels back to the reader):
 Headline: {median} out of 100 (rough range {iqr_lo}-{iqr_hi}); status: {band}.
+Each gauge below reads from 0 to 1; the higher, the more bubble-like. None means no reading today.
 "How deep a fall could be" gauges: {s_scores}.
-"Is a turn near" gauges: {d_scores}. Fear-gauge multiplier: {v}.
+  s1 = how pricey shares are compared with their own history and with interest rates
+  s2 = how much of the market's value sits in its ten biggest companies
+  s3 = how far chip makers' shares have outrun the rest of the market over two years
+  s4 = a statistical test for tech and chip share prices climbing at an ever faster, runaway pace (prone to false alarms)
+  s5 = how little extra interest lenders asked of risky companies about two years ago (very relaxed lending then reads high)
+"Is a turn near" gauges: {d_scores}.
+  d1 = how few companies are still climbing (many climbing together reads low)
+  d2 = people borrowing money to buy shares: how fast that borrowing has grown in a year, and whether it has begun to fall from its peak
+  d3 = how much of their incoming cash the biggest cloud companies spend on building out (kept low unless that spending has stopped turning into sales growth and spare cash)
+  d4 = a pattern test for tech share prices speeding up toward a breaking point (prone to early and false alarms)
+Fear-gauge multiplier: {v} (1.0 = calm; above 1.0 = near-term fear has risen close to or above longer-term fear, which scales the combined "turn near" reading up).
 Warning flags tripped: {red_flag_detail}. Emergency override tripped: {override}.
 Long-term trend (still in the market?): SPY {spy_state}, QQQ {qqq_state}.
 Fast fear signals: {fast_alarm}.
