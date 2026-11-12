@@ -14,7 +14,10 @@ import sys
 from pathlib import Path
 
 import pytest
+from fastapi import APIRouter, Depends, FastAPI
+from starlette.applications import Starlette
 
+from app import security
 from scripts.regime import authz_coverage, findings_gate, separation_check
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -107,31 +110,145 @@ class TestSeparationCheck:
         assert separation_check.uncovered(text) == []
 
 
+def _open() -> dict:
+    return {}
+
+
+def _served_application():
+    """The application as `create_app` builds it: a copy a test may add routes to."""
+    from app.main import create_app
+
+    return create_app()
+
+
+def _bare_application(*routers: APIRouter) -> FastAPI:
+    application = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+    for router in routers:
+        application.include_router(router)
+    return application
+
+
 class TestAuthzCoverage:
-    def test_a_non_auth_dependency_does_not_count(self):
-        src = "@router.get('/a')\ndef h(x=Depends(get_db)): pass\n"
-        assert authz_coverage.routes_in(src) == [("GET", "/a", False)]
+    """The gate's claim (scripts/regime/authz_coverage.py): every route the
+    application serves carries an authorisation dependency or is declared
+    public, and none becomes public quietly. SECURITY.md: the admin routes and
+    every alert route take the key; the other reads are public.
 
-    def test_a_decorator_in_a_string_is_not_a_route(self):
-        assert authz_coverage.routes_in("s = '@router.get(\"/a\")'\n") == []
+    The gate read the decorators in app/routers/*.py and keyed a route by the
+    decorator's path. Executed on 9f79c7a, each of these passed it (exit 0)
+    while the route answered 200 without a key: a POST registered on the
+    application in app/main.py; a keyless GET "/status" in the admin router,
+    served at /api/v1/admin/status and taken for the allowlisted "GET /status";
+    and POST /api/v1/admin/send-sms moved to the read dependency, which lets
+    everyone in while READ_ENDPOINTS_PUBLIC is true (the default). The first
+    three tests below make these three kinds of change to the application the
+    gate judges.
 
-    def test_every_route_is_authorised_or_declared(self):
-        uncovered, stale, total = authz_coverage.scan()
-        assert uncovered == [], f"unauthorised, undeclared routes: {uncovered}"
-        assert stale == [], f"allowlist entries for routes that no longer exist: {stale}"
-        assert total > 0
+    Two tests left with their subject: that a decorator inside a string is no
+    route (no source is parsed any more), and that the public list and the
+    in-handler list do not overlap (the second list is gone; the reason stands
+    in the gate)."""
 
-    def test_public_and_in_handler_lists_do_not_overlap(self):
-        # A route filed as both public and authenticated would let a future
-        # edit remove the real check while the entry still reads as covered.
-        overlap = authz_coverage.PUBLIC_ALLOWLIST.keys() & authz_coverage.IN_HANDLER_AUTH.keys()
-        assert not overlap, overlap
+    def _blocked(self, monkeypatch, capsys, application) -> str:
+        """Run the gate on `application` as the served one; it must block."""
+        import app.main
+
+        monkeypatch.setattr(app.main, "app", application)
+        assert authz_coverage.main([]) == 1, "the gate passed"
+        return capsys.readouterr().err
+
+    def test_a_route_registered_on_the_application_is_seen(self, monkeypatch, capsys):
+        application = _served_application()
+        application.add_api_route("/api/v1/admin/open", _open, methods=["POST"])
+        assert "POST /api/v1/admin/open" in self._blocked(monkeypatch, capsys, application)
+
+    def test_a_route_is_judged_at_the_path_it_is_served_at(self, monkeypatch, capsys):
+        # "GET /status" is declared public: the status page. The same decorator
+        # path under the admin prefix is another route.
+        assert "GET /status" in authz_coverage.PUBLIC_ALLOWLIST
+        router = APIRouter(prefix="/api/v1/admin")
+        router.get("/status")(_open)
+        application = _served_application()
+        application.include_router(router)
+        assert "GET /api/v1/admin/status" in self._blocked(monkeypatch, capsys, application)
+
+    def test_the_read_dependency_does_not_authorise_a_write(self, monkeypatch, capsys):
+        application = _served_application()
+        application.add_api_route("/api/v1/score/recompute", _open, methods=["POST"],
+                                  dependencies=[Depends(security.require_read_access)])
+        assert "POST /api/v1/score/recompute" in self._blocked(monkeypatch, capsys, application)
+
+    def test_the_read_dependency_does_not_authorise_an_operator_path(self):
+        read = [Depends(security.require_read_access)]
+        application = _bare_application()
+        application.add_api_route("/api/v1/admin/refresh/status", _open, dependencies=read)
+        application.add_api_route("/api/v1/alerts/renders/{render_id}", _open, dependencies=read)
+        application.add_api_route("/api/v1/score", _open, dependencies=read)
+        application.add_api_route("/api/v1/alerts/health", _open,
+                                  dependencies=[Depends(security.require_admin_key)])
+        uncovered, under_authorised, _, total = authz_coverage.scan(application, {})
+        assert under_authorised == ["GET /api/v1/admin/refresh/status",
+                                    "GET /api/v1/alerts/renders/{render_id}"]
+        assert uncovered == [] and total == 4
+
+    def test_every_served_route_is_authorised_or_declared(self):
+        from app.main import app as application
+
+        uncovered, under_authorised, stale, _ = authz_coverage.scan(application)
+        assert uncovered == [], f"served without authorisation and not declared public: {uncovered}"
+        assert under_authorised == [], f"only the read dependency on a write or an operator path: {under_authorised}"
+        assert stale == [], f"declared public, served nowhere: {stale}"
+        # Every operation FastAPI's schema lists must be among the routes
+        # judged: what the gate makes of a walked route (its path, its methods)
+        # cannot drop one from the judgement unnoticed.
+        judged = {key for key, _ in authz_coverage.served(application)}
+        in_schema = {f"{method.upper()} {path}"
+                     for path, operations in application.openapi()["paths"].items() for method in operations}
+        assert in_schema and in_schema <= judged, sorted(in_schema - judged)
+
+    def test_add_api_route_on_a_router_is_seen(self):
+        router = APIRouter(prefix="/api/v1/meta")
+        router.add_api_route("/dump", _open, methods=["GET"])
+        assert authz_coverage.scan(_bare_application(router), {})[0] == ["GET /api/v1/meta/dump"]
+
+    def test_a_mounted_application_is_not_silently_public(self):
+        application = _bare_application()
+        application.mount("/static", Starlette())
+        assert authz_coverage.scan(application, {})[0] == ["* /static"]
+
+    def test_a_dependency_that_is_not_an_authorisation_does_not_count(self):
+        def require_admin_key() -> None:
+            """Another function under the guard's name: not the guard."""
+
+        application = _bare_application()
+        application.add_api_route("/a", _open, dependencies=[Depends(_open)])
+        application.add_api_route("/b", _open, dependencies=[Depends(require_admin_key)])
+        application.add_api_route("/c", _open, dependencies=[Depends(security.require_admin_key)])
+        assert authz_coverage.scan(application, {})[0] == ["GET /a", "GET /b"]
+
+    def test_a_stale_allowlist_entry_blocks(self, monkeypatch, capsys):
+        # An entry for a route that is not served is a standing permission the
+        # next route at that path inherits.
+        monkeypatch.setitem(authz_coverage.PUBLIC_ALLOWLIST, "GET /api/v1/gone",
+                            "a route that is not served any more")
+        assert "GET /api/v1/gone" in self._blocked(monkeypatch, capsys, _served_application())
 
     def test_every_declared_exception_carries_a_reason(self):
-        for name, table in (("PUBLIC_ALLOWLIST", authz_coverage.PUBLIC_ALLOWLIST),
-                            ("IN_HANDLER_AUTH", authz_coverage.IN_HANDLER_AUTH)):
-            for key, reason in table.items():
-                assert reason and len(reason) > 20, f"{name}[{key!r}] has no substantive reason"
+        for key, reason in authz_coverage.PUBLIC_ALLOWLIST.items():
+            assert reason and len(reason) > 20, f"PUBLIC_ALLOWLIST[{key!r}] has no substantive reason"
+
+    def test_the_documentation_routes_are_public_by_decision(self):
+        """FastAPI serves the schema and its two viewers on every application
+        unless told otherwise. They answered 200 without a key and stood in no
+        list; the status page links all three (README.md, "Status & spec UI"),
+        so they are declared, each with its reason, not switched off."""
+        from app.main import app as application
+
+        documentation = {"GET /openapi.json", "GET /docs", "GET /docs/oauth2-redirect", "GET /redoc"}
+        assert documentation <= authz_coverage.PUBLIC_ALLOWLIST.keys(), \
+            sorted(documentation - authz_coverage.PUBLIC_ALLOWLIST.keys())
+        served = dict(authz_coverage.served(application))
+        assert all(served[key] == frozenset() for key in documentation)
 
 
 class TestStrictModeIsActuallyReachable:
