@@ -447,6 +447,40 @@ def _track(raw: RawInputs, source: str, fn: Any) -> Any:
         return None
 
 
+def _track_closes(raw: RawInputs, source: str, canonical: str) -> Any:
+    """One daily price series through `_track`.
+
+    When every provider failed and the cache answered, the series is kept (it
+    is dated by its last bar, and that age is what the freshness SLA reads)
+    and the pull is recorded as the failure it was, with the chain's note.
+    The adapter's flag and note used to stop here: with Tiingo, Twelve Data
+    and Alpha Vantage all failing, GET /readyz and the status page listed the
+    price pulls as ok, HTTP 200, no note. The same case for HY OAS is
+    recorded this way already: FRED fails, the stored history is served, the
+    pull is not ok (below).
+
+    The note quotes the providers' errors. Provider error text can hold a
+    credential (Alpha Vantage's request URL carries its key) and GET /readyz
+    serves the note without authentication, so it passes `sanitize` like
+    every other gather failure.
+
+    Production shows no such outage: to 2026-11-10, 2452 price pulls, and the
+    provider health table holds one row, Tiingo with no failure. No stored
+    row and no score changes."""
+    from app.sources import prices as price_src
+
+    result = _track(raw, source, lambda: price_src.get_daily_closes(canonical))
+    # `fallback_used` on a price result means exactly this: no provider
+    # answered and the cache did (app/sources/prices.py). A provider further
+    # down the chain answering is a successful pull.
+    if result is not None and result.provenance.fallback_used:
+        raw.source_health[-1].update(   # the entry `_track` has just appended
+            ok=False, http_status=None, note=sanitize(result.provenance.note, limit=400))
+        log.warning("price_chain_served_stale_cache", source=source,
+                    as_of=result.provenance.as_of)
+    return result
+
+
 def gather_inputs() -> RawInputs:
     """Fetch all upstream sources with per-source circuit breakers.
 
@@ -489,11 +523,8 @@ def gather_inputs() -> RawInputs:
     # SPX->SPY); proxy substitutions are flagged in the note.
     from app.sources import prices as price_src
 
-    def _closes(canonical: str):
-        return price_src.get_daily_closes(canonical)
-
     # SPY (also the ATH gate) and QQQ.
-    spy = _track(raw, "price_SPY", lambda: _closes("SPY"))
+    spy = _track_closes(raw, "price_SPY", "SPY")
     if spy:
         raw.spy_daily = spy.value
         raw.spy_daily_closes = [c for _, c in spy.value]
@@ -505,15 +536,15 @@ def gather_inputs() -> RawInputs:
             pass
         closes = raw.spy_daily_closes
         raw.index_within_2pct_of_ath = closes[-1] >= _NEAR_ATH_FRAC * max(closes)
-    qqq = _track(raw, "price_QQQ", lambda: _closes("QQQ"))
+    qqq = _track_closes(raw, "price_QQQ", "QQQ")
     if qqq:
         raw.qqq_daily = qqq.value
         raw.qqq_daily_closes = [c for _, c in qqq.value]
 
     # SMH/SPY 2-yr run-up via the price chain (SOXX as SMH substitute).
-    semis = _track(raw, "price_SMH", lambda: _closes("SMH"))
+    semis = _track_closes(raw, "price_SMH", "SMH")
     if semis is None:
-        semis = _track(raw, "price_SOXX", lambda: _closes("SOXX"))
+        semis = _track_closes(raw, "price_SOXX", "SOXX")
         raw.semis_symbol = "SOXX"
         raw.semis_fallback = True
     if semis:
@@ -530,7 +561,7 @@ def gather_inputs() -> RawInputs:
     # proxy's 1999. Switching to it is a source substitution (PIN C, CONDITIONAL
     # HOLD), not made here.
     # R subprocess degrades to the contested/stale 0.25 floor.
-    ndx = _track(raw, "price_NDX", lambda: _closes("NDX"))
+    ndx = _track_closes(raw, "price_NDX", "NDX")
     if ndx:
         import math
 
