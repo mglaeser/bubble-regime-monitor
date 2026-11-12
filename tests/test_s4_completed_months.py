@@ -68,8 +68,7 @@ def test_the_month_in_progress_is_not_in_the_fit(monkeypatch):
     today = date(2026, 11, 10)
     monkeypatch.setattr(prices, "fetch_tiingo_monthly",
                         lambda symbol: _vendor_monthly(today))
-    rows, error = compute._s4_months([], today.isoformat())
-    assert error is None
+    rows = compute._s4_months(today.isoformat())
     assert rows[-1] == ("2026-10-30", 100.0 + 331)       # October, the 332nd month
     assert len(rows) == 332                              # production fitted T=333
     assert all(label[:7] < "2026-11" for label, _ in rows)
@@ -81,7 +80,7 @@ def test_s4_is_never_dated_after_the_day_it_is_computed_and_stays_inside_its_sla
     for today in _every_day(date(2026, 1, 1), date(2027, 12, 31)):
         monkeypatch.setattr(prices, "fetch_tiingo_monthly",
                             lambda symbol, today=today: _vendor_monthly(today))
-        rows, _ = compute._s4_months([], today.isoformat())
+        rows = compute._s4_months(today.isoformat())
         as_of = date.fromisoformat(rows[-1][0])
         assert as_of <= today, f"{today}: S4 dated {as_of}"
         assert (today - as_of).days <= sla, f"{today}: S4 {(today - as_of).days} days old"
@@ -93,27 +92,14 @@ def test_s4_changes_once_a_month(monkeypatch):
     for today in _every_day(date(2026, 11, 1), date(2026, 11, 30)):
         monkeypatch.setattr(prices, "fetch_tiingo_monthly",
                             lambda symbol, today=today: _vendor_monthly(today))
-        rows, _ = compute._s4_months([], today.isoformat())
+        rows = compute._s4_months(today.isoformat())
         fits.add(tuple(rows))
     assert len(fits) == 1
     # and the first day of December fits one month more: November, now complete
     monkeypatch.setattr(prices, "fetch_tiingo_monthly",
                         lambda symbol: _vendor_monthly(date(2026, 12, 1)))
-    rows, _ = compute._s4_months([], "2026-12-01")
+    rows = compute._s4_months("2026-12-01")
     assert len(rows) == len(next(iter(fits))) + 1 and rows[-1][0] == "2026-11-30"
-
-
-def test_the_short_series_keeps_the_same_contract(monkeypatch):
-    """Without the long history the daily series stands in: its completed
-    months, each under the date of its own last bar."""
-    def _down(symbol):
-        raise RuntimeError("tiingo monthly QQQ: HTTP 429")
-    monkeypatch.setattr(prices, "fetch_tiingo_monthly", _down)
-    daily = [("2026-09-29", 1.0), ("2026-09-30", 2.0), ("2026-10-01", 3.0),
-             ("2026-10-30", 4.0), ("2026-11-02", 5.0), ("2026-11-10", 6.0)]
-    rows, error = compute._s4_months(daily, "2026-11-10")
-    assert rows == [("2026-09-30", 2.0), ("2026-10-30", 4.0)]
-    assert error == "tiingo monthly QQQ: HTTP 429"
 
 
 def test_the_gather_step_fits_and_dates_s4_on_completed_months(isolated_db, monkeypatch):
@@ -127,11 +113,15 @@ def test_the_gather_step_fits_and_dates_s4_on_completed_months(isolated_db, monk
     assert len(vendor) == len(completed) + 1     # the vendor's last row is the open month
 
     daily = [(today.isoformat(), vendor[-1][1])]
+    real_track = compute._track
     monkeypatch.setattr(
         compute, "_track",
         lambda raw, source, fn: (
             SourceResult(daily, Provenance(source="tiingo:QQQ", as_of=daily[-1][0]))
-            if source == "price_NDX" else None))
+            if source == "price_NDX"
+            # the monthly history is a tracked source of its own: run it for real
+            else real_track(raw, source, fn) if source == "price_NDX_monthly"
+            else None))
     monkeypatch.setattr(prices, "fetch_tiingo_monthly", lambda symbol: vendor)
     fitted: list[list[float]] = []
 
