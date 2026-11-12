@@ -39,8 +39,8 @@ DNS=8.8.8.8
 DropCapability=ALL
 NoNewPrivileges=true
 # The health check is podman's: a container that stops answering /healthz -
-# alive and wedged, which Restart= never sees - is killed after three failed
-# checks, and Restart= boots it again. Healthy is a 200 and nothing else: curl's
+# alive and wedged, which Restart= never sees - is killed after five failed
+# checks in a row, and Restart= boots it again. Healthy is a 200 and nothing else: curl's
 # --fail refuses 400 and above and a broken transfer, the comparison refuses a
 # 3xx, and curl's exit is kept (a pipe to grep lost it, so a 200 with a cut body
 # read healthy). Straight to the loopback, no proxy from the environment and no
@@ -50,8 +50,28 @@ NoNewPrivileges=true
 # check answers healthy on the live app and unhealthy on a dead port).
 HealthCmd=c=$$(curl -q -fsS --noproxy '*' --max-time 5 -o /dev/null -w '%%{http_code}' http://127.0.0.1:8000/healthz) && [ x$$c = x200 ]
 HealthInterval=30s
-HealthTimeout=5s
-HealthRetries=3
+# The app's bound is curl's --max-time 5. HealthTimeout is another clock:
+# podman's, around its whole exec (conmon, the runtime, curl), read after the
+# exec returns - it ends no probe (podman 4.9.3 on the host: timed-out probes
+# ran up to 129 s) - so on a slow host it fails the probe of an app that
+# answers. At 5s and three retries the host's stall from 2026-10-31 23:24 UTC
+# got a working service killed six times between 23:30 and 04:15 (host
+# journal, which ends at 07:00): 141 of its 795 probes failed on that clock
+# (0 of the 105 before the stall, the slowest 2.7 s), and 146 of 789 of the
+# unrelated container beside it, while the app's own 20-second job ran 1,361
+# of 1,368 times (the seven it missed fall in the six restarts), 47 of them
+# more than 5 s late; the 02:02:51 kill came 2.7 s after the 02:00 recompute
+# finished. Replayed on those probes, 30s - podman's default - fails 2 of the
+# 795, never two in a row. Five retries and not three, because the replay
+# cannot see a probe where curl itself ran into its 5 s: with the app counted
+# as silent whenever one of its ticks in the 25 s after a probe's start was
+# more than 5 s late, the longest failing run at 30s is two, which leaves
+# three retries a margin of one probe and five a margin of three. A stall
+# passes and a wedge lasts: a wedged app is still killed, 145 s after its
+# first failing probe starts when each ends at curl's 5 s (75 s at three
+# retries), 270 s when each takes podman's 30.
+HealthTimeout=30s
+HealthRetries=5
 HealthStartPeriod=300s
 HealthOnFailure=kill
 
