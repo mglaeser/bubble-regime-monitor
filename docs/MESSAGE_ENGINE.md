@@ -46,8 +46,9 @@ converge, and 57 review rounds on #121 and 20 on #124 showed it.
   characters, its own cap (180 until decision 28).
   Each word domain is the whole of its producer's range, pinned there
   (`tests/test_message_engine.py::TestRoundThreeOn145`): the digest's band
-  is `action_band_with_override`'s three bands and compute.py's two
-  degraded displays, nothing else; the other facts an alert entry declares
+  is `action_band_with_override`'s three bands and compute.py's degraded
+  display, "suppressed (block degraded)", nothing else (a fired override on
+  degraded data reads "de-risk"); the other facts an alert entry declares
   are numbers by their builders in `render_context.py` (the evidence
   values from "number" and "count" source specs); the phrase set's
   MATERIAL_CHANGE slots are the alert renderer's and no entry declares them.

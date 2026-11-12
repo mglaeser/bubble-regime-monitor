@@ -36,8 +36,12 @@ def test_a03_override_wins_band_when_degraded(isolated_db):
     data = compute_snapshot(_override_and_degraded_raw(), mc_samples=2_000, mc_seed=1)
     assert data.override_fired is True
     assert data.coverage["degraded"] is True
-    # The fired safety override must NOT be masked as "suppressed".
-    assert data.action_band == "de-risk (data degraded)"
+    # The fired safety override must NOT be masked as "suppressed": the band
+    # is de-risk, the word every reader of the band has copy for
+    # (tests/test_band_display_copy.py). The degradation stays beside it.
+    assert data.action_band == "de-risk"
+    assert data.band_state.effective_action_state == "de-risk"
+    assert data.band_state.data_degraded is True
 
 
 def test_a03_degraded_without_override_still_suppressed(isolated_db):
