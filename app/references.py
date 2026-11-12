@@ -1211,7 +1211,11 @@ KNOWN_ISSUES: list[dict[str, str]] = [
      "detail": "Chen-Chen-Huang (2026) show GSADF-type tests spuriously reject the no-bubble "
      "null 93-100% of the time under hump-shaped GPT fundamentals; since v4.1 a contested "
      "REJECTION is capped at 0.25 while a contested NON-rejection is released to 0.05, and S4 "
-     "carries a low weight.", "ref": "indicator s4"},
+     "carries a low weight. While the flag stands, red flag 1 cannot fire, so the override "
+     "(3 of the 4 red flags) needs all three remaining flags at once; every snapshot carries "
+     "the two counts (override_required_count 3; override_fireable_universe_count 3, or less "
+     "when another flag's input is missing).",
+     "ref": "indicator s4"},
     {"id": "index-proxy", "severity": "info", "category": "data-substitution",
      "title": "Stock indices served via ETF proxies",
      "detail": "No free data tier serves raw index levels, so Nasdaq-100 uses QQQ and S&P 500 "
@@ -1249,15 +1253,36 @@ KNOWN_ISSUES: list[dict[str, str]] = [
      "detail": "If the price chain falls through to Alpha Vantage, closes are split/dividend "
      "unadjusted (acceptable for short-window ETF math; flagged in provenance).",
      "ref": "sources.prices"},
-    {"id": "gsadf-wb-cv", "severity": "info", "category": "calibration",
-     "title": "GSADF now uses extended history + wild-bootstrap CVs (verify on host)",
-     "detail": "v3.3.0 feeds an extended Tiingo monthly history (QQQ from 1999, T~329, past the "
-     "PSY T=100 tabulation floor) and switched exuber to wild-bootstrap critical values "
-     "(radf_wb_cv, Harvey et al. 2016; robust to the serial-correlation oversizing of "
-     "Pedersen-Schutte 2020). s4 is still capped at the contested 0.25, so this does not move "
-     "the headline — it only makes the displayed statistic honest. The R path degrades to the "
-     "0.25 floor if exuber errors; smoke-test on the host after deploy.",
-     "ref": "indicator s4"},
+    # No entry describes the GSADF critical values. The one that stood here
+    # ("gsadf-wb-cv") said exuber uses wild-bootstrap values and that S4 is
+    # "still capped at the contested 0.25". Neither is the case: r/gsadf.R calls
+    # radf_mc_cv (cached Monte Carlo values, since v3.3.1; REGISTRY["s4"].how
+    # describes them), and under the asymmetric contested rule the newest
+    # production reading is 0.05, its note "(cached MC CVs)" (2026-11-10).
+    #
+    # The two entries below are deviations every snapshot already declares in
+    # its payload (services/compute.py: S5_PROVISIONAL_LAG, ATH_PROVENANCE; in
+    # production 533 of 615 snapshots carry each stamp, every one since
+    # 2026-07-29).
+    {"id": "s5-positional-lag", "severity": "warn", "category": "documented-deviation",
+     "title": "S5 reads 'two years ago' by counting observations, not by the calendar",
+     "detail": "The t-2yr lookup steps back a fixed number of observations (24 monthly ones on "
+     "the excess-bond-premium and Baa-proxy tiers, 504 daily rows on the HY-OAS tier), so a gap "
+     "in a series shifts the horizon and the tiers do not mean the same two years. Every S5 "
+     "payload says so: s5_lag = provisional_positional, known_defects C-01, C-02, C-03. "
+     "Calendar anchoring moves the score and the golden fixture and is deferred to S5 v4 by "
+     "operator decision (docs/PINS_DECISION_MEMO.md, H).",
+     "ref": "indicator s5"},
+    {"id": "ath-window-high", "severity": "info", "category": "data-substitution",
+     "title": "Red flag 4 measures 'near the all-time high' against the high of the cached window",
+     "detail": "The high is the maximum of the dividend-ADJUSTED SPY closes the price layer "
+     "holds (at most 900 rows, about 3.5 years), not the all-time high of the S&P 500 price "
+     "index, which is the intended basis (docs/PINS_DECISION_MEMO.md, F): a window that no "
+     "longer contains the record high understates it. Until an approved long-history source "
+     "exists every snapshot labels the basis: _ath_provenance ath_basis = "
+     "adjusted_spy_provider_window_max, ath_history_complete = false (operator decision "
+     "PIN-F, 2026-07-23).",
+     "ref": "red flag 4"},
 ]
 
 
