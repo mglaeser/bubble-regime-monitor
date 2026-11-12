@@ -1603,6 +1603,21 @@ def run_recompute() -> int | None:
         log.error("recompute_impossible", error=str(exc))
         return None
     snap_id = persist_snapshot(data, raw)
+    # Alert system: directly after the snapshot commits, before anything that
+    # waits on a disk or a network. The capture is the one step of a run that
+    # nothing makes up for: a snapshot without its sidecar is a hole in the
+    # replay record (app/services/alert_integration.py), and
+    # app/alerts/recovery.py reports such a gap and never fills it. Its own
+    # transaction and its own exception boundary: it cannot delay, alter or
+    # roll back the snapshot. Production, 222 runs to 2026-11-10: behind the
+    # feed the capture followed the commit by 4.5 to 40 s (median 6.8 s), and
+    # on 2026-11-01 the container was killed 3.7 s after it.
+    try:
+        from app.services.alert_integration import on_snapshot_committed
+
+        on_snapshot_committed(snap_id)
+    except Exception as exc:
+        log.warning("alert_hook_failed", error=str(exc)[:300])
     try:
         from app.services.backfill import export_parquet
 
@@ -1617,15 +1632,5 @@ def run_recompute() -> int | None:
         build_and_persist_feed(raw, data)
     except Exception as exc:
         log.warning("dashboard_feed_failed", error=str(exc)[:300])
-    # Alert system: strictly AFTER the snapshot commits, in its own transaction
-    # and its own exception boundary. It cannot delay, alter or roll back the
-    # snapshot — the whole system is off by default and does nothing here until
-    # an operator enables capture.
-    try:
-        from app.services.alert_integration import on_snapshot_committed
-
-        on_snapshot_committed(snap_id)
-    except Exception as exc:
-        log.warning("alert_hook_failed", error=str(exc)[:300])
     log.info("recompute_done", snapshot_id=snap_id, median=data.median, band=data.action_band)
     return snap_id
