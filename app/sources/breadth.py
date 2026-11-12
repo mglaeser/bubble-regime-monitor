@@ -25,6 +25,7 @@ from datetime import UTC, date, datetime, timedelta
 
 from sqlalchemy import func, select
 
+from app.alerts.calendars import is_trading_day
 from app.config import get_settings
 from app.db import session_scope
 from app.logging_conf import get_logger
@@ -161,14 +162,26 @@ def refresh_breadth_polygon(target_days: int = POLYGON_TARGET_DAYS,
     short-circuited once the cache reached target_days total dates, so no new
     trading day was ever fetched and breadth froze at the cold-start window.
     One call = the whole US market for a date; we keep only the SSGA
-    constituents. Empty responses are non-trading days and cost one probe."""
+    constituents. A weekend or an exchange holiday (the NYSE calendar,
+    app/alerts/calendars.py) is not asked for; an empty response on any other
+    day is a closure the calendar does not know and costs one probe."""
     symbols = set(sp500_symbols())
     counts = _cached_polygon_date_counts(symbols)   # v3.7.8/§2: per-date coverage
     day = datetime.now(UTC).date() - timedelta(days=1)  # EOD; yesterday is the latest settled day
     calls = stored_days = trading_seen = span = 0
     while trading_seen < target_days and span < POLYGON_MAX_CALENDAR_DAYS:
         span += 1
-        if day.weekday() >= 5:            # weekend: not a trading day, no call
+        # A weekend or an exchange holiday has no session: no call. Skipping
+        # weekends only, the walk asked for every holiday in its window again
+        # on each sweep, 12 s apart, and stored nothing for it: 7 to 9 such
+        # calls on every scheduled sweep from 2026-10-05 to 2026-11-10. The
+        # calendar agrees with what Polygon answered on all 304 weekdays from
+        # 2025-09-10 to 2026-11-09: the 294 stored days are sessions, the 10
+        # without rows its holidays. A session it wrongly called closed would
+        # not be fetched and breadth would skip that one day; the alert TTLs,
+        # the trend rule's month-end and the price feeds' currency check
+        # (app/services/compute.py) already rest on the same calendar.
+        if not is_trading_day(day):
             day -= timedelta(days=1)
             continue
         if counts.get(day, 0) >= MIN_RESOLVED:  # COMPLETE cached day: count, no call
@@ -208,7 +221,7 @@ def refresh_breadth_polygon(target_days: int = POLYGON_TARGET_DAYS,
             stored_days += 1
             if written >= MIN_RESOLVED:   # only a COMPLETE day counts toward the target
                 trading_seen += 1
-        # else: empty response = non-trading day (holiday); no count
+        # else: empty response = a closure the calendar does not know; no count
         day -= timedelta(days=1)
         if pace_seconds:
             time.sleep(pace_seconds)
