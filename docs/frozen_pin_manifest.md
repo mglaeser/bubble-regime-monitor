@@ -187,7 +187,7 @@ Applied as `D = min(D_raw * V, 1.0)`. Neutral fallback when the ratio is missing
 |---|---|---|
 | Trigger | `red_flags.count >= 3` (≥3 of 4) | `aggregate.py:RedFlags.override_fired` |
 | Target | `Score = max(Score, 70.0)` | `aggregate.py` |
-| Band on override | `"de-risk"`; degraded → `"de-risk (data degraded)"` | `compute.py` (A-03) |
+| Band on override | `"de-risk"`, also on degraded data (A-03: the override wins the band; a degraded block without a fired override reads `"suppressed (block degraded)"`) | `compute.py` |
 
 Action-band edges (no override): `< 45` hold · `45–60` trim · `>= 60` de-risk. Source: `aggregate.py:action_band`.
 

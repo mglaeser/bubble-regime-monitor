@@ -1,8 +1,8 @@
 """Typed, NON-SCORING snapshot outputs consumed by the alert layer (Stage 0).
 
-The persisted `action_band` is a *display* string that folds three distinct
-facts into one field ("suppressed (block degraded)", "de-risk (data
-degraded)"). An alert layer that parsed it would be guessing, and a layer that
+The persisted `action_band` is a *display* string that folds the coverage
+gate into the band ("suppressed (block degraded)"; a fired override keeps
+"de-risk"). An alert layer that parsed it would be guessing, and a layer that
 recomputed the band itself would be a shadow scorer. Both are forbidden.
 
 This module derives the typed decomposition from values the scoring layer has

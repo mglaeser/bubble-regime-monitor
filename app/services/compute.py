@@ -1333,10 +1333,22 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
     # >=3 of 4 hard red-flag tripwires are robust to a degraded composite, and
     # masking that forced de-risk as "suppressed" would hide the strongest
     # bearish signal (fail-dangerous). override_fired is persisted regardless.
+    #
+    # The band the override wins is "de-risk" itself, as
+    # action_band_with_override returned it above. Until 2026-11 this state
+    # was published as "de-risk (data degraded)", a fifth word no reader of
+    # the band had copy for: the display deck /score serves beside it (band
+    # one-liner, splash blurb, both verdict tables) had no entry, and the
+    # companion dashboard draws a band it does not know as HOLD - in the one
+    # state A-03 exists for. That the data are degraded is served where every
+    # surface already reads it: meta.coverage, the typed data_degraded
+    # (band_state below), the status page's coverage flag and the digest's
+    # data_degraded fact. No stored row holds the old word: 0 of the 615
+    # production snapshots (2026-07-11 to 2026-11-10), on none of which the
+    # override fired. Pinned by tests/test_band_display_copy.py.
     coverage = _coverage_gate(indicators)
-    if coverage["degraded"]:
-        band = "de-risk (data degraded)" if red_flags.override_fired \
-            else "suppressed (block degraded)"
+    if coverage["degraded"] and not red_flags.override_fired:
+        band = "suppressed (block degraded)"
 
     # ---- legs ----
     trend_states: dict[str, dict[str, Any]] = {}

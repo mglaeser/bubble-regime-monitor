@@ -567,8 +567,7 @@ class TestRoundNineOn126:
             trends = {"SPY": {"faber_10mo": value}, "QQQ": {"faber_10mo": value}}
             assert composer.typed("spy_trend", digest_facts(_snapshot(trend_states=trends))["spy_trend"]) == value
 
-    @pytest.mark.parametrize("band", ["hold", "trim", "de-risk", "suppressed (block degraded)",
-                                      "de-risk (data degraded)"])
+    @pytest.mark.parametrize("band", ["hold", "trim", "de-risk", "suppressed (block degraded)"])
     def test_every_display_band_reaches_the_prompt_and_the_template(self, monkeypatch, band):
         facts = digest_facts(_snapshot(action_band=band))
         _, prompts = _compose(monkeypatch, REPLY, facts=facts)
@@ -1027,7 +1026,8 @@ class TestTypedFacts:
 
     @pytest.mark.parametrize("name, value, expected", [
         ("median", 59, 59), ("s1", 0.42, 0.42), ("override_fired", True, True), ("iqr_lo", -3, -3),
-        ("action_band", "de-risk (data degraded)", "de-risk (data degraded)"),
+        ("action_band", "suppressed (block degraded)", "suppressed (block degraded)"),
+        ("action_band", "de-risk (data degraded)", None),  # retired: tests/test_band_display_copy.py
         ("override_suffix", " OVERRIDE", " OVERRIDE"), ("override_suffix", "", ""),
         ("F_NEXT_CHECK", "22:00", "22:00"), ("F_BAND_PREVIOUS", "suppressed", "suppressed"),
         ("median", float("nan"), None), ("median", float("inf"), None), ("median", "59", None),
@@ -1162,7 +1162,7 @@ class TestRoundThreeOn145:
     """#145 round 3, SOTA-A, two readings of the word domains: a "fallback"
     band (a negative example in a test, read as a value the digest holds -
     compute.py's display band is action_band_with_override's three bands
-    and the two degraded displays, nothing else) and F_TRIGGER_VALUE /
+    and the degraded display, nothing else) and F_TRIGGER_VALUE /
     F_CURRENT_VALUE (the alert phrase set's MATERIAL_CHANGE slots, which the
     alert renderer fills; no library entry declares them). Each word domain
     is pinned at its producer, and every other fact an alert entry declares
@@ -1174,7 +1174,9 @@ class TestRoundThreeOn145:
 
         produced = {action_band_with_override(score, types.SimpleNamespace(override_fired=fired))
                     for score in range(0, 101) for fired in (False, True)}
-        degraded = {"suppressed (block degraded)", "de-risk (data degraded)"}
+        # one degraded display: a fired override on degraded data keeps
+        # "de-risk" (tests/test_band_display_copy.py computes all four states)
+        degraded = {"suppressed (block degraded)"}
         source = Path(compute.__file__).read_text(encoding="utf-8")
         assert all(f'"{band}"' in source for band in degraded)
         assert produced | degraded == composer.WORDS["action_band"]

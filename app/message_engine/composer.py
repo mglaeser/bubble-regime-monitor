@@ -183,13 +183,16 @@ _CONTROL_RE = re.compile(
 #: number, a structure - is no fact: the template shows a dash and the
 #: prompt leaves it out.
 _TRENDS = frozenset({"IN", "OUT", "unknown", "?"})
-_DIGEST_BANDS = frozenset(ACTION_BANDS) | {"suppressed (block degraded)", "de-risk (data degraded)"}
+_DIGEST_BANDS = frozenset(ACTION_BANDS) | {"suppressed (block degraded)"}
 WORDS: dict[str, frozenset[str]] = {
     # the digest: the snapshot's band - the whole of its producer's range,
-    # action_band_with_override's three bands and the two degraded displays
+    # action_band_with_override's three bands and the degraded display
     # compute.py folds the coverage gate into; neither the bare "suppressed"
     # state nor any other word is a band of it - and legs.faber_state's trend,
-    # today and in the earlier snapshots it is compared with
+    # today and in the earlier snapshots it is compared with. A fired
+    # override on degraded data reads "de-risk"; the word it had until
+    # 2026-11, "de-risk (data degraded)", is on no stored snapshot (0 of 615
+    # in production), so no earlier band can bring it back
     "action_band": _DIGEST_BANDS,
     "band_1d_ago": _DIGEST_BANDS,
     "band_7d_ago": _DIGEST_BANDS,
