@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app import methodology as _M
 from app.config import configured_environment, get_settings, near_miss_env_keys
 from app.db import session_scope
+from app.engine.aggregate import headline
 from app.engine.sms_report import deterministic_report
 from app.logging_conf import get_logger
 from app.message_engine import gate
@@ -103,8 +104,12 @@ def _readings(snap: Snapshot) -> dict[str, object]:
     warning flag and its reading minus its threshold, the override's rule,
     each trend's distance from its 10-month average, the VIX term structure,
     both blocks out of 100, five readings by their own values, and whether
-    data is degraded."""
-    median = round(snap.median)
+    data is degraded.
+
+    The two gaps are the headline minus each line, as the prompt's DATA line
+    says, and the headline is the whole points reached: a score under a line
+    reads a negative gap (59.996: 14 and -1), never "0, on the line"."""
+    median = headline(snap.median)
     flags = _flags(snap)
     trend = snap.trend_states or {}
     indicators = _indicators(snap)
@@ -134,8 +139,9 @@ def _readings(snap: Snapshot) -> dict[str, object]:
 def _a_day_earlier(snap: Snapshot, then: Snapshot | None) -> dict[str, object]:
     """Yesterday's reading beside today's: the headline and its change, the
     band, the override, the flags and the trends as they were, and each
-    sub-score's change, so a change can be explained. None throughout when
-    there is no snapshot that old."""
+    sub-score's change, so a change can be explained. The headline's change
+    is the difference of the two headlines shown, so the three numbers agree.
+    None throughout when there is no snapshot that old."""
     now_subs = {**_sub_scores(snap.block_s, SUB_SCORES["s"]), **_sub_scores(snap.block_d, SUB_SCORES["d"])}
     if then is None:
         return {"median_1d_ago": None, "median_1d_change": None, "band_1d_ago": None,
@@ -146,8 +152,8 @@ def _a_day_earlier(snap: Snapshot, then: Snapshot | None) -> dict[str, object]:
     then_subs = {**_sub_scores(then.block_s, SUB_SCORES["s"]), **_sub_scores(then.block_d, SUB_SCORES["d"])}
     flags = _flags(then)
     return {
-        "median_1d_ago": round(then.median),
-        "median_1d_change": round(snap.median) - round(then.median),
+        "median_1d_ago": headline(then.median),
+        "median_1d_change": headline(snap.median) - headline(then.median),
         "band_1d_ago": then.action_band,
         "override_fired_1d_ago": bool(then.override_fired),
         "red_flag_count_1d_ago": then.red_flag_count,
@@ -164,8 +170,8 @@ def _a_week_earlier(snap: Snapshot, then: Snapshot | None) -> dict[str, object]:
     if then is None:
         return {"median_7d_ago": None, "median_7d_change": None, "band_7d_ago": None,
                 "red_flag_count_7d_ago": None}
-    return {"median_7d_ago": round(then.median),
-            "median_7d_change": round(snap.median) - round(then.median),
+    return {"median_7d_ago": headline(then.median),
+            "median_7d_change": headline(snap.median) - headline(then.median),
             "band_7d_ago": then.action_band,
             "red_flag_count_7d_ago": then.red_flag_count}
 
@@ -175,7 +181,8 @@ def digest_facts(snap: Snapshot, *, day: Snapshot | None = None,
     """The daily digest's grounded facts, as the prompt library declares them.
 
     The headline mirrors deterministic_report(): the same snapshot fields,
-    the same rounding, the digest's own scale and flag total injected so the
+    the same whole numbers (the headline is aggregate.headline, the whole
+    points reached), the digest's own scale and flag total injected so the
     digits are grounded verbatim (the library's daily_digest note). Beside it
     goes what the score API serves (_readings) and the snapshots a day and a
     week earlier (`day`, `week`), so the model can say what changed (the
@@ -187,7 +194,7 @@ def digest_facts(snap: Snapshot, *, day: Snapshot | None = None,
     from app.services.engine_delivery import RED_FLAG_TOTAL, SCORE_SCALE_MAX
 
     return {
-        "median": round(snap.median),
+        "median": headline(snap.median),
         "score_scale_max": SCORE_SCALE_MAX,
         "action_band": snap.action_band,
         "override_fired": bool(snap.override_fired),

@@ -114,7 +114,7 @@ Base path `/api/v1`; every response is `{"data": ..., "meta": ...}` with the fiv
 
 | Endpoint | Purpose |
 |----------|---------|
-| `GET /api/v1/score` | Headline median, IQR, 5–95 band, blocks, red flags, action band, legs, judgment call |
+| `GET /api/v1/score` | Headline median (a whole number: the whole points reached, so 59.7 reads 59 and the number never names a band line the score is under), IQR, 5–95 band, blocks, red flags, action band, legs, judgment call |
 | `GET /api/v1/score/history?from&to&granularity` | History (`raw`/`daily`/`monthly`) |
 | `GET /api/v1/indicators` · `GET /api/v1/indicators/{id}` | Weights/grounding; full WHAT/HOW/WHY methodology |
 | `GET /api/v1/legs/trend` · `GET /api/v1/legs/fast-alarm` | Faber states; VIX curve/VRP/SKEW |

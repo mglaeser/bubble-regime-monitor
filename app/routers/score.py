@@ -11,6 +11,7 @@ from sqlalchemy import select
 from app.config import get_settings
 from app.content_registry import gauge_display
 from app.db import session_scope
+from app.engine.aggregate import headline
 from app.models import Snapshot
 from app.references import EPISTEMIC_CAVEATS
 from app.references import SCORE_EXAMPLE as _SCORE_EXAMPLE
@@ -67,7 +68,8 @@ def _latest_snapshot() -> Snapshot | None:
     "",
     summary="Headline regime score",
     description=(
-        "The Monte Carlo MEDIAN of the 0-100 regime heuristic with IQR and 5-95 band, "
+        "The Monte Carlo MEDIAN of the 0-100 regime heuristic (headline_median: the whole points "
+        "it has reached, so it never names a band line the score is under) with IQR and 5-95 band, "
         "both blocks with per-indicator objects, red flags, action band, trend states, "
         "fast alarm, and the judgment call. The headline is NOT a probability."
     ),
@@ -82,7 +84,7 @@ def get_score(request: Request, _: None = Depends(require_read_access)) -> dict[
         # a 503 service-state signal, NOT an upstream-failure 500.
         raise HTTPException(status_code=503, detail="no snapshot computed yet; try POST /api/v1/admin/refresh")
     data = {
-        "headline_median": round(snap.median),
+        "headline_median": headline(snap.median),
         # v3.7.8/M-02: `iqr` is the (q1,q3) interquartile INTERVAL (kept for
         # compatibility); `iqr_width` is the IQR proper (q3 - q1).
         "iqr": [round(snap.iqr_lo, 2), round(snap.iqr_hi, 2)],

@@ -20,6 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.config import get_settings
+from app.engine.aggregate import headline
 from app.logging_conf import get_logger
 from app.redaction import sanitize
 
@@ -97,7 +98,7 @@ def generate(median: float, iqr: tuple[float, float], band: str,
              last_successful: str | None = None) -> JudgmentCall:
     """Call the gateway; degrade to the last successful text on failure."""
     prompt = PROMPT_TEMPLATE.format(
-        median=round(median), iqr_lo=round(iqr[0]), iqr_hi=round(iqr[1]), band=band,
+        median=headline(median), iqr_lo=round(iqr[0]), iqr_hi=round(iqr[1]), band=band,
         s_scores=s_scores, d_scores=d_scores, v=v,
         red_flag_detail=red_flag_detail, override=override,
         spy_state=spy_state, qqq_state=qqq_state, fast_alarm=fast_alarm,
