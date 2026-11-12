@@ -89,3 +89,22 @@ def test_the_copied_template_boots_and_a_blank_key_stays_blank(monkeypatch, tmp_
     assert settings.sms_configured is False
     assert settings.daily_digest_transport == "none"
     assert settings.alerts_mode == "disabled"
+
+
+def test_the_template_and_the_readme_name_every_credential_and_switch():
+    """A `.env` made from the template can be completed from it: every
+    credential and every on/off switch the settings declare has a line. Of
+    those 15 the template lacked two: POLYGON_API_KEY - breadth's only
+    provider (app/sources/breadth.py), so an install from the documents dropped
+    D1, 0.35 of block D, on every recompute - and MESSAGE_ENGINE_ENABLED, which
+    the template's own comments name. The README names every credential too:
+    it said "two free API keys" and stopped."""
+    from app.config import Settings
+
+    wanted = [name for name in Settings.model_fields
+              if name.endswith(("_api_key", "_token", "_token_id", "_enabled"))]
+    template = {key.lower() for key in dotenv_values(EXAMPLE)}
+    assert [name for name in wanted if name not in template] == []
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert [name for name in wanted
+            if not name.endswith("_enabled") and name.upper() not in readme] == []
