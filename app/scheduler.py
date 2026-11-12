@@ -8,7 +8,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
-from app.config import configured_environment, get_settings, retired_env_keys
+from app.config import configured_environment, get_settings, near_miss_env_keys, retired_env_keys
 from app.engine.recompute_slots import cron_hour_expression
 from app.logging_conf import get_logger
 
@@ -179,11 +179,20 @@ def start() -> BackgroundScheduler:
                             ("IMESSAGE_API_KEY", bool(settings.imessage_api_key)),
                             ("IMESSAGE_RECIPIENT", bool(settings.imessage_recipient)),
                         ) if not present])
-        for key, why in retired_env_keys(configured_environment()):
+        environ = configured_environment()
+        for key, why in retired_env_keys(environ):
             # Loud at boot: a removed setting's old value changes nothing, and
             # the digest follows its transports - never in silence.
             log.error("retired_setting_present", key=key, why=why,
                       selected_transport=digest_transport)
+        for key, intended in near_miss_env_keys(environ):
+            # Loud at boot, whatever the transports do: a key one character off
+            # a setting is read by nothing. The digest's "no transport" reason
+            # below names it only when no transport is selected; beside a
+            # working one, a misspelt MESSAGE_ENGINE_ENABLED or LLM_* key showed
+            # only as the template digest or the stale judgment. The key and
+            # the setting it looks like, never a value.
+            log.error("misspelt_setting_present", key=key, looks_like=intended)
         if digest_transport != "none":
             _scheduler.add_job(
                 _sms_job,

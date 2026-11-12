@@ -339,9 +339,13 @@ sipgate; there is no send-failure fallback. It has no retirement switch: the
 process environment or the `.env` file the settings read - changes nothing,
 and never in silence: the boot logs `retired_setting_present`, the
 alerts preflight fails `no_retired_settings`, and the alert health projection
-names it. Turning the alert system on never changes the digest's transport,
-and a digest without one is named by the alert health projection ("the daily
-digest has no transport").
+names it. A key one character off a transport, message-engine or LLM setting
+(`MESSAGE_ENGINE_ENABLD`) is read by nothing either, and has the same three
+surfaces, whatever the transports do: the boot logs `misspelt_setting_present`,
+the alerts preflight fails `no_misspelt_settings`, and the alert health
+projection names it and is `degraded` at best. Turning the alert system on
+never changes the digest's transport, and a digest without one is named by the
+alert health projection ("the daily digest has no transport").
 
 Volume, lease, retention and LLM settings live in `app/config.py`; each has a
 safe default. Alert phrasing has no model path: configuring the runtime
