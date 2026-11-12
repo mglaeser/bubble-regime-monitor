@@ -203,3 +203,103 @@ class TestBreadthIsPolygonOnly:
             assert not hasattr(breadth, name), name
         for name in ("constituent_closes", "twelvedata_credits_left"):
             assert not hasattr(prices, name), name
+
+
+FRED_KEY = "fredkey-0000111122223333"           # pragma: allowlist secret
+MAINTENANCE_PAGE = "<html>maintenance</html>"   # 24 bytes
+
+
+class TestAFredAnswerThatIsNotJson:
+    """app/sources/__init__.py: an adapter "raises SourceError on total
+    failure". The text of that error is all that is kept of the failure: it is
+    stored as source_health.note (served by /readyz), shown as the feed's note
+    and logged.
+
+    From 2026-10-21 18:00 to 10-22 02:00 UTC FRED answered every call of three
+    consecutive runs with a 2xx that was not JSON. S1 was dropped in those
+    three snapshots, and the 9 source_health rows and 24 log lines of it hold
+    one text, json's own "Expecting value: line 1 column 1 (char 0)": whether
+    it was a maintenance page, an empty 200 or a 204 cannot be told from it.
+
+    Only FRED's adapter is pinned and changed. All 24 lines are FRED series,
+    and the log since 2026-10-05 (336 thousand lines) holds that text for no
+    other source."""
+
+    @pytest.fixture
+    def fred_answers(self, isolated_db, monkeypatch):
+        """The real adapter over the real HTTP client; only the transport is ours."""
+        import httpx
+
+        import app.http_client as hc
+        from app.config import get_settings
+
+        monkeypatch.setenv("FRED_API_KEY", FRED_KEY)
+        get_settings.cache_clear()
+        hc._breakers.clear()
+
+        def answer(status: int, **body) -> None:
+            monkeypatch.setattr(hc, "_client", httpx.Client(
+                transport=httpx.MockTransport(lambda _request: httpx.Response(status, **body)),
+                timeout=5))
+
+        yield answer
+        hc._breakers.clear()
+
+    @pytest.mark.parametrize(("status", "body", "text"), [
+        pytest.param(200, {"html": MAINTENANCE_PAGE},
+                     "FRED DGS10: HTTP 200 with a body that is not JSON "
+                     "(text/html; charset=utf-8, 24 bytes)", id="200-html"),
+        pytest.param(200, {},
+                     "FRED DGS10: HTTP 200 with a body that is not JSON "
+                     "(no content type, 0 bytes)", id="200-empty"),
+        pytest.param(204, {},
+                     "FRED DGS10: HTTP 204 with a body that is not JSON "
+                     "(no content type, 0 bytes)", id="204"),
+        pytest.param(200, {"content": b'{"observations": [',
+                           "headers": {"content-type": "application/json"}},
+                     "FRED DGS10: HTTP 200 with a body that is not JSON "
+                     "(application/json, 18 bytes)", id="200-cut-json"),
+    ])
+    def test_the_error_names_the_status_the_content_type_and_the_size(
+        self, fred_answers, status, body, text,
+    ):
+        from app.sources import fred
+
+        fred_answers(status, **body)
+        with pytest.raises(SourceError) as caught:
+            fred.observations("DGS10")
+
+        assert str(caught.value) == text
+        assert isinstance(caught.value.__cause__, ValueError), "json's own error stays the cause"
+
+    def test_the_stored_note_and_the_feed_note_say_what_fred_answered(self, fred_answers):
+        """The two places the October answers were kept in. The source is
+        recorded as failed and the feed item degrades as before; only the
+        reason reads differently. The body is upstream text, the stored note
+        is served by the unauthenticated /readyz and the other one by the
+        feed, so the body is described and never quoted."""
+        from app.services import compute
+        from app.services import dashboard_feed as feed
+        from app.sources import fred
+
+        fred_answers(200, html=MAINTENANCE_PAGE)
+        what = "HTTP 200 with a body that is not JSON (text/html; charset=utf-8, 24 bytes)"
+
+        raw = compute.RawInputs()
+        assert compute._track(raw, "fred_DFII10", lambda: fred.latest("DFII10")) is None
+        assert raw.source_health[-1]["ok"] is False
+        assert raw.source_health[-1]["note"] == f"FRED DFII10: {what}"
+        assert raw.gather_errors["fred_DFII10"] == f"FRED DFII10: {what}"
+
+        item = feed._series_item("tbill3m_yield", "3M T-bill yield", "yield", "pct", "fred:DTB3",
+                                 ["2026-10", "2026-11"], lambda: feed._fred_series("DTB3"))
+        assert item["available"] is False
+        assert item["note"] == f"source failed: FRED DTB3: {what}"
+        assert "maintenance" not in raw.source_health[-1]["note"] + item["note"]
+
+    def test_a_json_answer_is_read_as_before(self, fred_answers):
+        from app.sources import fred
+
+        fred_answers(200, json={"observations": [{"date": "2026-11-09", "value": "."},
+                                                 {"date": "2026-11-10", "value": "4.1"}]})
+        assert fred.observations("DGS10") == [("2026-11-10", 4.1)]
