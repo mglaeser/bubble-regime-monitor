@@ -11,8 +11,10 @@ streaming Responses request to that exact route (once more after a transient
 failure, app/llm_gateway.py) and never substitutes a model; any provider/model
 fallback is gateway-controlled and opaque to this service.
 
-Degradation: on any API error/timeout, persist the last successful text with
-stale:true and continue — never block the recompute or return a 500.
+The note is written onto a snapshot that is already committed
+(app.services.compute.write_judgment): the recompute never waits for it. On any
+API error or timeout the snapshot keeps the last successful text with
+stale:true; a first snapshot keeps none.
 """
 
 from __future__ import annotations

@@ -92,8 +92,10 @@ rolls back the entire plan, because half an episode is worse than none.
 ### Where the boundary is in code
 
 `app/services/compute.py::run_recompute` calls
-`app/services/alert_integration.py::on_snapshot_committed(snap_id)` strictly
-after the snapshot commits, inside a `try/except` that logs and swallows.
+`app/services/alert_integration.py::on_snapshot_committed(snap_id)` directly
+after the snapshot commits and before the dashboard feed is built, inside a
+`try/except` that logs and swallows
+(`tests/test_recompute_order.py::test_the_alert_capture_does_not_wait_for_the_feed`).
 
 ---
 
