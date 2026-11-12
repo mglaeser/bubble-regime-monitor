@@ -65,6 +65,14 @@ REPLAY_SCHEMA_VERSION = 4
 WINDOW_24H = timedelta(hours=24)
 WINDOW_168H = timedelta(hours=168)
 
+#: The keep condition of the immediate de-risk P1, as its rule states it
+#: (config/alert_rules.v3.2.yaml, regime.band_to_derisk): "Keep it only while
+#: replay shows <= 1 transient one-snapshot P1 per 24 months". Judged like the
+#: volume caps, on the busiest window. A month is 30.44 days here, as in
+#: `band_excursion_months`.
+TRANSIENT_DERISK_P1_CAP = 1
+WINDOW_24_MONTHS = timedelta(days=24 * 30.44)
+
 _MANDATORY_EVENT_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 _MANDATORY_EVENT_FIELDS = frozenset({
     "event_id",
@@ -173,6 +181,9 @@ class ReplaySummary:
     p1_total: int = 0
 
     # -- governance metrics ----------------------------------------------
+    #: The most one-snapshot entries into de-risk inside any 24 months: the
+    #: figure `TRANSIENT_DERISK_P1_CAP` bounds. On a history shorter than 24
+    #: months that is every one of them.
     transient_one_snapshot_band_p1: int = 0
     #: De-risk slots whose neighbours were blind, so "transient" cannot be
     #: decided either way. Reported, never folded into the count above.
@@ -701,8 +712,8 @@ def _collect_band_excursions(summary: ReplaySummary,
     """Transient one-snapshot entries into de-risk.
 
     The mandate keeps the immediate de-risk P1 only while replay shows at most
-    one transient one-snapshot excursion per 24 months, so the harness has to
-    measure it rather than assert it.
+    one transient one-snapshot excursion per 24 months. The harness measures
+    the busiest 24 months here and `_decide` judges it.
 
     A neighbour that is UNKNOWN — degraded coverage, a suppressed band, a blind
     slot — is NOT evidence that the excursion ended. Counting it as one would
@@ -711,7 +722,7 @@ def _collect_band_excursions(summary: ReplaySummary,
     episode. Those cases are reported separately as indeterminate.
     """
     states = [r.effective_action_state for r in records]
-    transient = 0
+    transient: list[datetime] = []
     indeterminate = 0
     for i in range(1, len(states) - 1):
         if states[i] != BAND_DERISK:
@@ -724,8 +735,9 @@ def _collect_band_excursions(summary: ReplaySummary,
         if _band_unknown(before) or _band_unknown(after):
             indeterminate += 1
         else:
-            transient += 1
-    summary.transient_one_snapshot_band_p1 = transient
+            transient.append(_moment_of(records[i]))
+    summary.transient_one_snapshot_band_p1 = _max_in_window(
+        transient, WINDOW_24_MONTHS)
     summary.indeterminate_band_excursions = indeterminate
 
     if len(records) >= 2:
@@ -959,7 +971,20 @@ def _decide(summary: ReplaySummary) -> None:
                 f"{evaluable_events - summary.mandatory_event_detected} of "
                 f"{evaluable_events} evaluable event(s)"
             )
-    if summary.band_excursion_months < 24.0:
+    if summary.transient_one_snapshot_band_p1 > TRANSIENT_DERISK_P1_CAP:
+        # The same asymmetry as the volume caps above: the busiest window only
+        # grows with more history, so a breach is provable on a history of any
+        # length and staying within the bound is not. Without this comparison
+        # the figure was measured and judged by nothing: production's sidecars
+        # of 2026-08-20 .. 2026-11-10 (2.69 months) hold four one-snapshot
+        # entries into de-risk, two of them sent as a P1, and the verdict
+        # listed the figure under `not_measured`.
+        failures.append(
+            "transient one-snapshot de-risk entries breached the keep "
+            "condition of regime.band_to_derisk: "
+            f"{summary.transient_one_snapshot_band_p1} > "
+            f"{TRANSIENT_DERISK_P1_CAP} per 24 months")
+    elif summary.band_excursion_months < 24.0:
         unmeasured.append(
             f"transient_derisk_p1_rate — the window spans "
             f"{summary.band_excursion_months} months; the target is stated per "

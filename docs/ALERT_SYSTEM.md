@@ -796,6 +796,21 @@ python -m app.alerts.cli dryrun --state-db /tmp/replay.db --from 2026-01-01
 Exit 0 means every check the run could make held; exit 1 means one failed, or
 the artifacts are invalid.
 
+One of those checks is the keep condition of the immediate de-risk P1
+(`regime.band_to_derisk`: at most one one-snapshot entry into de-risk in any
+24 months, `TRANSIENT_DERISK_P1_CAP` in `app/alerts/replay.py`). Like the
+volume caps it is a busiest-window count: more than one fails on a history of
+any length, and staying within it on a shorter history is listed under
+`not_measured`. The count is read from the inputs' bands, so it is the same at
+every stage. Production's sidecars of 2026-08-20 to 2026-11-10 (2.69 months)
+hold four such entries, all between 2026-09-25 and 2026-10-10, two of them sent
+as a P1; a dry-run over a window that includes those days lists the breach
+under `failures`, and `--from` judges a later period on its own. Read the list
+and not only the exit code: at stage 2 and above a dry-run over production's
+sidecars also fails because recall is unmeasured there (the frozen catalogue's
+windows lie in the synthetic history, and `app.alerts.cli dryrun` without
+`--events` has no catalogue).
+
 Three properties are structural rather than a matter of care:
 
 - **It reads history, not the world.** Replay consumes persisted
