@@ -186,7 +186,10 @@ class DailyClose(Base):
     Polygon/Massive grouped-daily endpoint (one call = the whole US market for
     one day). Keyed (symbol, date); the 200-day SMA is computed on read from the
     most recent 200 rows per symbol. The only breadth source (owner decision
-    D9, 2026-09-28)."""
+    D9, 2026-09-28). `provider` is the row's mark (app/sources/breadth.py):
+    "polygon" for a close from the provider's adjusted series as it is now,
+    "polygon-superseded" for one cached before the provider last re-based that
+    series. The read uses both; the sweep fetches a superseded day again."""
 
     __tablename__ = "daily_close"
 
