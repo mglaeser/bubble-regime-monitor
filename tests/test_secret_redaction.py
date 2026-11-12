@@ -1,24 +1,32 @@
 """Provider API keys must not reach persistence, an API response, or a log line.
 
 Four upstreams carry their key in the request QUERY STRING (FRED, Alpha Vantage,
-Polygon, Twelve Data). httpx puts the full URL into HTTPStatusError's message
-AND into its own INFO log line on every request. Two channels, both real, both
-reproduced before the fixes these tests pin:
+Polygon, Twelve Data). httpx's own Response.raise_for_status puts the full URL
+into HTTPStatusError's message, and httpx writes it into its own INFO log line
+on every request. Three channels, all real, all reproduced before the fixes
+these tests pin:
 
   1. an upstream 4xx wrote the key verbatim into SourceHealth.note, which the
      UNAUTHENTICATED GET /readyz returns;
   2. httpx logged the key on the SUCCESS path, six times a day, into a
-     container's journal, which the operator reads on a failed release.
+     container's journal, which the operator reads on a failed release;
+  3. the same error text outside the gather, where nothing redacted it: the
+     dashboard feed's `dashboard_series_failed` log line held the whole key at
+     every status tried, the feed's public note held up to half of it, and the
+     first-boot seed logged the text uncut.
 
 The repository had already written down the first guarantee — the /readyz entry
 in scripts/regime/authz_coverage.py states that SourceHealth.note must stay free
 of raw provider error text — while nothing enforced it. These tests are that
-enforcement.
+enforcement. The third channel is closed where the text is made
+(app.http_client.require_success), not at each place that reads it.
 """
 
 from __future__ import annotations
 
 import logging
+import pathlib
+import types
 
 import httpx
 import pytest
@@ -27,6 +35,8 @@ from app.redaction import sanitize
 
 FRED_KEY = "fredkey-AAAABBBBCCCCDDDD1234"      # pragma: allowlist secret
 POLY_KEY = "polyKEY0123456789abcdefgh"          # pragma: allowlist secret
+AV_KEY = "AVKEY0123456789X"                     # pragma: allowlist secret
+TIINGO_KEY = "tiingoKEY0123456789abcdef"        # pragma: allowlist secret
 
 
 class TestSanitizeRedactsTheRealStrings:
@@ -154,3 +164,174 @@ class TestTheReadSideStaysClean:
         # so a key sits at a lower offset and survives a naive [:120] cut.
         out = sanitize(bad, limit=400)
         assert FRED_KEY not in out and POLY_KEY not in out
+
+
+# ---------------------------------------------------------------------------
+# The error text is made without the query string (app.http_client.require_success)
+# ---------------------------------------------------------------------------
+
+STATUSES = (400, 403, 404, 429, 500, 502, 504, 520)   # 520 has no reason phrase: the shortest text
+
+#: Each raising site: the provider, its fake key, and the label its error text starts with.
+RAISING_SITES = [
+    pytest.param("fred", FRED_KEY, "fred:DTB3: ", id="fred"),                         # api_key in the query
+    pytest.param("alphavantage", AV_KEY, "alphavantage SPY: ", id="alphavantage"),    # apikey in the query
+    pytest.param("polygon", POLY_KEY, "polygon grouped: ", id="polygon"),             # apiKey in the query
+    # Tiingo's key travels in a header; its query holds dates.
+    pytest.param("tiingo", TIINGO_KEY, "tiingo SPY: ", id="tiingo"),
+    pytest.param("tiingo monthly", TIINGO_KEY, "tiingo monthly SPY: ", id="tiingo-monthly"),
+]
+
+
+def _answering(status: int) -> httpx.Client:
+    return httpx.Client(transport=httpx.MockTransport(lambda _r: httpx.Response(status, text="x")),
+                        timeout=5)
+
+
+@pytest.fixture
+def keyed(isolated_db, monkeypatch):
+    """Every provider has a fake key, a retry does not wait, no breaker is open."""
+    import tenacity
+
+    import app.http_client as hc
+    from app.config import get_settings
+
+    for name, key in (("FRED_API_KEY", FRED_KEY), ("ALPHAVANTAGE_API_KEY", AV_KEY),
+                      ("POLYGON_API_KEY", POLY_KEY), ("TIINGO_API_KEY", TIINGO_KEY)):
+        monkeypatch.setenv(name, key)
+    get_settings.cache_clear()
+    monkeypatch.setattr(hc._get_with_retry.retry, "wait", tenacity.wait_none())
+    hc._breakers.clear()
+    yield hc
+    hc._breakers.clear()
+    get_settings.cache_clear()
+
+
+@pytest.fixture
+def logged(monkeypatch):
+    """Every event the HTTP client, the feed and the first-boot seed log.
+
+    The three modules get a fresh logger first. A logger that was used before a
+    second configure_logging() (a test above calls it) keeps the processors of
+    the first one, and structlog's capture_logs() then stays empty: the pins
+    below would pass without having looked. Each of them therefore also
+    asserts that the event it is about was captured."""
+    import structlog
+    from structlog.testing import capture_logs
+
+    import app.http_client as hc
+    from app.services import backfill, dashboard_feed
+
+    for module in (hc, backfill, dashboard_feed):
+        monkeypatch.setattr(module, "log", structlog.get_logger(module.__name__))
+    with capture_logs() as events:
+        yield events
+
+
+def _provider_error(hc, monkeypatch, provider: str, status: int) -> Exception:
+    """What one real adapter call raises when its provider answers `status`."""
+    from app.sources import fred, prices
+
+    client = _answering(status)
+    if provider == "fred":
+        monkeypatch.setattr(hc, "_client", client)     # the pooled client behind app.http_client.fetch
+    else:
+        # The price adapters open a client of their own; only their name
+        # `httpx` is replaced, httpx.Client itself is not.
+        monkeypatch.setattr(prices, "httpx", types.SimpleNamespace(Client=lambda **_kwargs: client))
+    call = {
+        "fred": lambda: fred.observations("DTB3"),
+        "alphavantage": lambda: prices.fetch_alphavantage("SPY"),
+        "polygon": lambda: prices.fetch_polygon_grouped("2026-11-10"),
+        "tiingo": lambda: prices.fetch_tiingo("SPY"),
+        "tiingo monthly": lambda: prices.fetch_tiingo_monthly("SPY"),
+    }[provider]
+    with pytest.raises((httpx.HTTPStatusError, prices.ProviderError)) as caught:
+        call()
+    return caught.value
+
+
+@pytest.mark.parametrize("status", STATUSES)
+@pytest.mark.parametrize(("provider", "key", "label"), RAISING_SITES)
+def test_an_http_error_names_no_query_string(keyed, monkeypatch, provider, key, label, status):
+    """All five raising sites, at eight statuses. The whole key is asserted,
+    never a prefix of it: "fred" and "poly" are in the labels themselves."""
+    text = str(_provider_error(keyed, monkeypatch, provider, status))
+
+    assert key not in text, f"{provider} {status}: the key is in the error text"
+    assert "?" not in text, f"{provider} {status}: a query string is in the error text"
+    assert "key=" not in text.lower()
+    assert text.startswith(label), "the text must still say which source and series failed"
+
+
+@pytest.mark.parametrize(("status", "text"), [
+    pytest.param(403, "fred:DTB3: HTTP 403 Forbidden for https://api.stlouisfed.org/fred/series/observations",
+                 id="403"),
+    pytest.param(520, "fred:DTB3: HTTP 520 for https://api.stlouisfed.org/fred/series/observations",
+                 id="520"),
+])
+def test_an_http_error_names_its_source_its_status_and_the_url_up_to_its_path(
+    keyed, monkeypatch, status, text,
+):
+    assert str(_provider_error(keyed, monkeypatch, "fred", status)) == text
+
+
+@pytest.mark.parametrize("status", STATUSES)
+def test_a_fred_error_reaches_neither_the_feed_note_nor_the_log(keyed, logged, monkeypatch, status):
+    """The real feed item builder around the real FRED adapter. The feed cuts
+    the text ([:120] for the public note, [:200] for the log) and never
+    redacted it."""
+    from app.services import dashboard_feed as feed
+
+    monkeypatch.setattr(keyed, "_client", _answering(status))
+    item = feed._series_item("tbill3m_yield", "3M T-bill yield", "yield", "pct", "fred:DTB3",
+                             ["2026-10", "2026-11"], lambda: feed._fred_series("DTB3"))
+
+    assert [event["event"] for event in logged] == ["source_fetch_failed", "dashboard_series_failed"]
+    assert FRED_KEY not in repr(logged), "the key is in a log line"
+    assert "api_key" not in repr(logged)
+    assert "?" not in item["note"], "a query string, and with it the start of the key, is in the public note"
+    assert "api_key" not in item["note"]
+    assert item["available"] is False
+    assert item["note"].startswith("source failed: fred:DTB3: ")
+    assert str(status) in item["note"], "the note still says what happened"
+
+
+def test_the_first_boot_seed_does_not_log_the_key(keyed, logged, monkeypatch):
+    from app.services import backfill
+
+    monkeypatch.setattr(keyed, "_client", _answering(500))
+
+    assert backfill.seed_hy_oas_history() == 0
+    assert "hy_oas_seed_failed" in [event["event"] for event in logged]
+    assert FRED_KEY not in repr(logged), "the key is in a log line"
+    assert "api_key" not in repr(logged)
+
+
+def test_the_status_error_keeps_its_type_and_the_retry_rule(keyed, monkeypatch):
+    """What does not change: the error is httpx's HTTPStatusError with its
+    response, a 5xx and a 429 are tried three times, a 404 and a 403 once."""
+    seen = {"status": 0, "calls": 0}
+
+    def answer(_request: httpx.Request) -> httpx.Response:
+        seen["calls"] += 1
+        return httpx.Response(seen["status"], text="x")
+
+    monkeypatch.setattr(keyed, "_client",
+                        httpx.Client(transport=httpx.MockTransport(answer), timeout=5))
+    for status, attempts in ((500, 3), (429, 3), (404, 1), (403, 1)):
+        seen.update(status=status, calls=0)
+        with pytest.raises(httpx.HTTPStatusError) as caught:
+            keyed.fetch(f"probe-{status}", "https://example.test/x", params={"api_key": FRED_KEY})
+        assert caught.value.response.status_code == status
+        assert seen["calls"] == attempts, f"HTTP {status}: {seen['calls']} attempts"
+
+
+def test_no_module_calls_httpx_raise_for_status():
+    """httpx's Response.raise_for_status() writes the full request URL into
+    the error text. app.http_client.require_success is the one raising site."""
+    root = pathlib.Path(__file__).resolve().parents[1]
+    callers = [str(path.relative_to(root)) for path in sorted((root / "app").rglob("*.py"))
+               if ".raise_for_status(" in path.read_text(encoding="utf-8")]
+
+    assert callers == []

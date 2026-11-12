@@ -108,15 +108,54 @@ def _is_retryable(exc: BaseException) -> bool:
     return False
 
 
+def require_success(resp: httpx.Response, what: str) -> None:
+    """Raise httpx.HTTPStatusError for a non-2xx answer, WITHOUT the query string.
+
+    httpx's own Response.raise_for_status writes the full request URL into
+    the error text, and FRED, Alpha Vantage and Polygon carry their API key in
+    the query string: every caller that logged or stored that text logged or
+    stored the key. Redacting at one consumer (the gather's `_track`,
+    2026-08-17) left the others open: the dashboard feed, the first-boot seed,
+    the breadth sweep and the price chain cut the text and do not redact it.
+    Executed on 2026-11-11 with a fake key: a FRED error during the feed build
+    put 32 of the key's 32 characters into the `dashboard_series_failed` log
+    line at every status tried (400 403 404 429 500 502 504 520) and 5, 7, 7,
+    5 and 16 of them into the public feed note at 400, 403, 404, 502 and 520.
+    In production FRED answered an HTTP error three times in four months
+    (2026-07-15, 09-01 and 10-08: one failed `fred_baa_dgs10` row in
+    source_health each), every time on a call of the gather; the feed makes
+    six more FRED calls later in the same run, so which call is hit is
+    chance. The container's journal since 2026-10-05 (335,888 lines) holds
+    one key marker, redacted by the gather, and none that is not.
+
+    So the text is born without the query: the caller's own label (`what`:
+    the source and the series or symbol, which the query used to name), the
+    status, the reason and the URL up to its path. The type, the request and
+    the response are httpx's, so the retry rule and every caller that reads
+    `.response.status_code` are unchanged. What changes is the wording of an
+    HTTP status error wherever it is stored, served or logged
+    (source_health.note, the feed notes, the logs); nothing parses that
+    wording. This is the only raising site:
+    tests/test_secret_redaction.py::test_no_module_calls_httpx_raise_for_status.
+    """
+    if resp.is_success:
+        return
+    where = resp.request.url.copy_with(query=None)
+    raise httpx.HTTPStatusError(
+        " ".join(f"{what}: HTTP {resp.status_code} {resp.reason_phrase} for {where}".split()),
+        request=resp.request, response=resp)
+
+
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=1, max=20),
     retry=retry_if_exception(_is_retryable),
     reraise=True,
 )
-def _get_with_retry(url: str, headers: dict[str, str], params: dict[str, str] | None) -> httpx.Response:
+def _get_with_retry(source: str, url: str, headers: dict[str, str],
+                    params: dict[str, str] | None) -> httpx.Response:
     resp = get_client().get(url, headers=headers, params=params)
-    resp.raise_for_status()
+    require_success(resp, source)
     return resp
 
 
@@ -127,7 +166,7 @@ def fetch(source: str, url: str, *, headers: dict[str, str] | None = None,
     brk.check()
     merged = {**DEFAULT_HEADERS, **(headers or {})}
     try:
-        resp = _get_with_retry(url, merged, params)
+        resp = _get_with_retry(source, url, merged, params)
     except Exception:
         brk.record_failure()
         log.warning("source_fetch_failed", source=source, url=url)

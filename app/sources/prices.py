@@ -38,6 +38,7 @@ from datetime import UTC, date, datetime, timedelta
 import httpx
 
 from app.config import get_settings
+from app.http_client import require_success
 from app.logging_conf import get_logger
 from app.sources import Provenance, SourceError, SourceResult
 
@@ -258,7 +259,7 @@ def fetch_tiingo(canonical: str) -> tuple[list[tuple[str, float]], str, bool]:
         raise RateLimited(f"tiingo {vendor}: HTTP 429 (hourly/daily request cap)")
     if resp.status_code == 404:
         raise NotOnPlan(f"tiingo {vendor}: ticker not found")
-    resp.raise_for_status()
+    require_success(resp, f"tiingo {vendor}")
     try:
         payload = resp.json()
     except ValueError:
@@ -319,7 +320,7 @@ def fetch_alphavantage(canonical: str) -> tuple[list[tuple[str, float]], str, bo
             params={"function": "TIME_SERIES_DAILY", "symbol": vendor,
                     "outputsize": "full", "apikey": settings.alphavantage_api_key},
         )
-    resp.raise_for_status()
+    require_success(resp, f"alphavantage {vendor}")
     return parse_alphavantage(resp.json(), vendor), vendor, proxy
 
 
@@ -456,7 +457,7 @@ def fetch_tiingo_monthly(canonical: str, start_date: str = "1999-01-01",
                      "Content-Type": "application/json"})  # v3.7.4/O-03: header, not URL token
     if resp.status_code == 429:
         raise RateLimited(f"tiingo monthly {vendor}: HTTP 429")
-    resp.raise_for_status()
+    require_success(resp, f"tiingo monthly {vendor}")
     payload = resp.json()
     if not isinstance(payload, list):
         raise ProviderError(f"tiingo monthly {vendor}: non-list body")
@@ -515,7 +516,7 @@ def fetch_polygon_grouped(date_iso: str) -> dict[str, float]:
         raise RateLimited("polygon grouped: HTTP 429 (5 req/min free tier)")
     if resp.status_code in (401, 403):
         raise NotOnPlan(f"polygon grouped: HTTP {resp.status_code} (plan/key)")
-    resp.raise_for_status()
+    require_success(resp, "polygon grouped")
     return parse_polygon_grouped(resp.json())
 
 
