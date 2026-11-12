@@ -11,11 +11,13 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
+import yaml
 
-from scripts.regime import authz_coverage, findings_gate, separation_check
+from scripts.regime import authz_coverage, findings_gate, mypy_pin, separation_check
 
 ROOT = Path(__file__).resolve().parents[1]
 GATES = ("findings_gate", "separation_check", "authz_coverage")
@@ -37,6 +39,91 @@ def test_gate_passes_against_the_real_repository(gate: str) -> None:
     out = subprocess.run([sys.executable, "-m", f"scripts.regime.{gate}"],
                          capture_output=True, text=True, cwd=ROOT, check=False)
     assert out.returncode == 0, f"{gate} blocked on the committed tree:\n{out.stdout}\n{out.stderr}"
+
+
+class TestMypyDepthPin:
+    """`.mypy-config.pinned`: changing `[tool.mypy]` fails the build until that
+    file is updated in the same commit.
+
+    The type-check step used to cut the section out of pyproject.toml with a
+    regular expression that ended at the first `[`, and to run `mypy app`.
+    Executed on that step (mypy 2.3.1, 126 source files, ceiling 116):
+
+        as committed                                          116 errors  passed
+        [[tool.mypy.overrides]] module = ["app.*"],
+          ignore_errors = true appended to pyproject.toml       0 errors  passed,
+          and the step advised "lower MYPY_CEILING to 0"
+        a mypy.ini without strict, pyproject.toml untouched    33 errors  passed
+
+    So the pin compares the table the TOML library parses, sub-tables included,
+    and the step names the file mypy reads. The pin has no `--selftest`: these
+    tests feed it.
+    """
+
+    OVERRIDE = '\n[[tool.mypy.overrides]]\nmodule = ["app.*"]\nignore_errors = true\n'
+
+    @staticmethod
+    def _tree(tmp_path: Path, pyproject: str, pinned: str | None = None) -> Path:
+        committed = (ROOT / ".mypy-config.pinned").read_text(encoding="utf-8")
+        (tmp_path / "pyproject.toml").write_text(pyproject, encoding="utf-8")
+        (tmp_path / ".mypy-config.pinned").write_text(
+            committed if pinned is None else pinned, encoding="utf-8")
+        return tmp_path
+
+    @staticmethod
+    def _pyproject() -> str:
+        return (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+
+    def test_the_committed_configuration_matches_the_pin(self):
+        assert mypy_pin.problems() == []
+        assert mypy_pin.main() == 0
+
+    def test_a_per_module_override_fails_the_pin(self, tmp_path, capsys):
+        root = self._tree(tmp_path, self._pyproject() + self.OVERRIDE)
+        assert mypy_pin.problems(root), "a per-module override passed the depth pin"
+        assert mypy_pin.main(root) == 1
+        assert "BLOCK" in capsys.readouterr().err
+
+    def test_turning_strict_off_fails_the_pin(self, tmp_path):
+        # The pin file's own example: 217 errors fell to 84 with every file read.
+        root = self._tree(tmp_path, self._pyproject().replace("strict = true", "strict = false"))
+        assert mypy_pin.problems(root)
+
+    def test_a_missing_section_fails_the_pin(self, tmp_path):
+        root = self._tree(tmp_path, '[project]\nname = "bubblegauge"\n')
+        assert mypy_pin.problems(root)
+
+    def test_a_pin_file_without_the_table_fails_the_pin(self, tmp_path):
+        root = self._tree(tmp_path, self._pyproject(), pinned="# emptied\n")
+        assert mypy_pin.problems(root)
+
+    def test_a_file_that_does_not_parse_is_a_refusal(self, tmp_path):
+        root = self._tree(tmp_path, "[tool.mypy\nstrict = true\n")
+        with pytest.raises(tomllib.TOMLDecodeError):
+            mypy_pin.main(root)
+
+    def test_a_reordered_table_passes_the_pin(self, tmp_path):
+        # The contract is the parsed table, not its bytes: the same keys in
+        # another order, with a comment between them, are the same depth.
+        pinned = '[tool.mypy]\npython_version = "3.12"\nstrict = true\nignore_missing_imports = true\n'
+        reordered = ('[tool.mypy]\nignore_missing_imports = true\n# a comment\n'
+                     'strict = true\npython_version = "3.12"\n')
+        assert mypy_pin.problems(self._tree(tmp_path, reordered, pinned=pinned)) == []
+
+    def test_the_type_check_step_runs_the_pin_and_names_the_config_file(self):
+        # A mypy.ini outranks pyproject.toml when mypy looks for its
+        # configuration, so the step names the file the pin compares. The pin
+        # runs before `set +e`, where a failing command still fails the step.
+        workflow = yaml.safe_load(
+            (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))
+        steps = [step for step in workflow["jobs"]["test"]["steps"]
+                 if step.get("name", "").startswith("Type-check")]
+        assert len(steps) == 1
+        lines = [line.strip() for line in steps[0]["run"].splitlines()]
+        assert "python -m scripts.regime.mypy_pin" in lines
+        assert lines.index("python -m scripts.regime.mypy_pin") < lines.index("set +e")
+        assert [line for line in lines if line.startswith("mypy ")] == [
+            "mypy --config-file pyproject.toml app > /tmp/mypy.txt 2>&1"]
 
 
 class TestFindingsGateComputesRatherThanAsserts:
