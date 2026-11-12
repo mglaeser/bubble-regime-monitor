@@ -369,7 +369,8 @@ REGISTRY: dict[str, Methodology] = {
         how=(
             "Primary (v3.3.0): full-universe constituent computation — S&P 500 membership from "
             "the SSGA SPY holdings XLSX, daily closes for the whole US market from the "
-            "Polygon/Massive grouped-daily endpoint (1 call/day, daily_close cache), "
+            "Polygon/Massive grouped-daily endpoint (daily_close cache, fetched again when "
+            "the provider re-bases its split-adjusted series), "
             "pct = 100*#{close > SMA200}/N with a binomial CI on partial coverage. No fallback "
             "(since 2026-09-28): without Polygon, D1 is dropped and its block renormalized. "
             "sub_score = max(0.05, clip((hi - pct)/(hi - lo), 0, 1)) with baseline lo = 35, "

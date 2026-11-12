@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     tiingo_api_key: str = ""        # PRIMARY  (50 req/hr, 1000/day, 500 symbols/mo)
     twelve_data_api_key: str = ""   # SECONDARY (8 req/min, 800 credits/day)
     alphavantage_api_key: str = ""  # TERTIARY, CORE tickers only (25 req/day)
-    polygon_api_key: str = ""       # PRIMARY breadth (grouped-daily: 1 call/day, whole US market)
+    polygon_api_key: str = ""       # PRIMARY breadth (grouped-daily: 1 call = 1 day, whole US market)
 
     # Admin / security
     admin_api_key: str = "change-me-to-a-long-random-string"

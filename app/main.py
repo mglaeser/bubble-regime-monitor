@@ -42,8 +42,9 @@ async def lifespan(app: FastAPI):
     def _breadth_backfill() -> None:
         # Cold-start breadth backfill: warms the Polygon daily_close cache so D1 comes
         # alive without waiting for the first scheduled sweep. It
-        # is self-limiting — a warm cache leaves few stale/missing symbols, so
-        # this returns quickly on restarts.
+        # is self-limiting — a warm cache costs the probe and the sessions not
+        # stored yet, so this returns quickly on restarts. The one exception: a
+        # refresh of the window that the restart cut goes on here.
         try:
             from app.sources.breadth import refresh_breadth
 

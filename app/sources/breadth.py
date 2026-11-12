@@ -11,7 +11,10 @@ already fetches), NOT Wikipedia (its User-Agent policy returns 403).
 Closes come from Polygon/Massive grouped-daily, the ONLY provider (owner
 decision D9, 2026-09-28): one call returns every US ticker's close for one
 date, so a cold start caches ~210 trading days for the whole S&P 500 in ~210
-calls (5/min free tier) and the daily incremental is ONE call. The 200-DMA is
+calls (5/min free tier). Once warm, a sweep makes one call for a session it has
+not stored yet and one more for the oldest day of its window: the probe that
+tells whether the provider re-based its adjusted series, after which the window
+is fetched again (_supersede_if_rebased). The 200-DMA is
 computed on read from the daily_close table. Without a Polygon key, or with
 too little cached history, breadth raises and D1 is dropped and its block
 renormalized (guardrail #5); the 503-symbol Twelve Data sweep that used to be
@@ -23,7 +26,7 @@ from __future__ import annotations
 import time
 from datetime import UTC, date, datetime, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from app.alerts.calendars import is_trading_day
 from app.config import get_settings
@@ -43,6 +46,19 @@ MIN_RESOLVED = 25       # below this, the pct is too noisy to publish
 POLYGON_TARGET_DAYS = 210   # >= 200 needed for a 200-DMA (a little slack)
 POLYGON_PACE_SECONDS = 12.0  # Polygon free tier: 5 requests/minute
 POLYGON_MAX_CALENDAR_DAYS = 330  # ~210 trading days back, incl. weekends/holidays
+# The mark a cached close carries in DailyClose.provider, an existing column:
+# every row stored before there was a mark carries CURRENT's value (147,356 of
+# 147,356 in production on 2026-11-11), so the first probe judges those rows
+# like any others. The sweep counts a day as cached only while its rows are
+# CURRENT, so it fetches a SUPERSEDED day again. The read
+# (_breadth_from_daily_close) uses every row, whatever its mark:
+# fetching the window again takes about an hour (210 calls; 16.3 s a call at
+# the cold start of 2026-07-14), and from CURRENT rows alone no member would
+# have 200 closes for that hour. D1 would be dropped, block D would stand at
+# 0.65 of its weight, under the two-thirds coverage gate, and the band would be
+# suppressed (tests/test_breadth_basis.py pins that the reading holds).
+CURRENT = "polygon"                # from the provider's adjusted series as it is now
+SUPERSEDED = "polygon-superseded"  # cached before the provider last re-based that series
 # (v3.7.8/B-05 removed the binomial-CI + finite-population-correction path: the
 # un-resolved constituents are not a random sample, so a CI is invalid. Breadth
 # now reports worst-case full-universe identification bounds instead.)
@@ -130,7 +146,9 @@ def _breadth_from_daily_close(symbols: list[str]) -> tuple[int, int, date | None
 
 
 def _cached_polygon_date_counts(symbols: set[str]) -> dict[date, int]:
-    """date -> number of CURRENT constituents cached on that date (v3.7.8/§2).
+    """date -> number of today's constituents cached on that date from the
+    provider's current series (v3.7.8/§2); a superseded row is not counted, so
+    the walk fetches its day again.
 
     A DISTINCT-date set treated a partially written day (e.g. a run that stored
     only a handful of symbols before rate-limiting) as fully cached, so the walk
@@ -140,10 +158,81 @@ def _cached_polygon_date_counts(symbols: set[str]) -> dict[date, int]:
     with session_scope() as session:
         rows = session.execute(
             select(DailyClose.date, func.count(DailyClose.symbol))
-            .where(DailyClose.symbol.in_(symbols))
+            .where(DailyClose.symbol.in_(symbols), DailyClose.provider == CURRENT)
             .group_by(DailyClose.date)
         ).all()
     return {d: int(n) for d, n in rows}
+
+
+def _supersede_if_rebased(symbols: set[str], target_days: int) -> int:
+    """Ask the provider once more for the oldest day of the window. If storing
+    its answer would change a row, mark every cached row superseded: the walk
+    then fetches the window again, because a superseded day no longer counts as
+    cached. Every row, not that member's alone: a call returns a whole day, so
+    marking less would save no call. Returns the calls answered (0 or 1).
+
+    Polygon's `adjusted=true` closes are adjusted for the splits known on the
+    day of the request, so a day cached before a split keeps the old scale. In
+    production APH (163.18 on 2026-09-01, 80.04 on 09-02) and MNST (90.36 on
+    2026-08-07, 45.715 on 08-10) were counted below their 200-day mean for that
+    reason alone (APH 80.71 against a mean of 131.44, MNST 45.64 against 71.89
+    on 2026-11-09). The published breadth was 0.20 to 0.41 pp low on each of
+    its 58 observation dates from 2026-08-10 to 2026-11-09 (306/491 instead of
+    308/491 on the last), and red flag 4 (breadth below 50 %) was stored true
+    on 21 snapshots where it was false. A ratio of our own cannot tell a
+    split: SMCI fell from 30.79 to 20.53 on 2026-03-20, times 0.667, the ratio
+    of a 3-for-2 split, and both closes were fetched 17 seconds apart four
+    months later, so that was a real fall. So the provider decides.
+
+    The same comparison finds a constituent that joined the list after a day
+    was cached: the provider serves it for the probe day, the cache has no row.
+    On 2026-11-09, 13 of the 504 constituents had fewer than 200 cached closes
+    and were not counted; for 10 of them the first cached close is the day
+    they joined the list (2026-08-04 to 11-03). Fetching the window again
+    gives each the history the provider has. A new listing has none and stays
+    out until it has 200 sessions of its own.
+
+    Three things are deliberate:
+    - Only what the provider serves for the probe day is compared, and
+      exactly: the cache holds the number the provider sent. The test is a dry
+      run of what the walk would write for that day, so after a finished
+      refresh it is false. A cached close the provider no longer serves starts
+      nothing: it would start a refresh on every sweep.
+    - The probe day is the oldest of the newest target_days complete days that
+      are CURRENT. After a refresh that was cut (a restart, an HTTP 429) that is
+      the day the walk stopped at, already on the current series, so the next
+      sweep does not mark again and the walk goes on with the superseded days.
+    - It is one call for one day. Two things are not on that day: a split of a
+      member whose closes begin after it, and a re-basing that arrives while
+      the window is being fetched (the days fetched before it keep the old
+      scale). The next refresh puts both right, at the latest when the probe
+      day has moved on to such a row. Asking for every day instead would be
+      the window itself on every sweep."""
+    counts = _cached_polygon_date_counts(symbols)
+    window = sorted((d for d, n in counts.items() if n >= MIN_RESOLVED), reverse=True)[:target_days]
+    if not window:
+        return 0    # nothing cached on the current series: the walk fetches every day anyway
+    probe = window[-1]
+    try:
+        grouped = fetch_polygon_grouped(probe.isoformat())
+    except ProviderNotConfigured:
+        raise
+    except Exception as exc:    # a probe without an answer changes nothing
+        log.warning("breadth_polygon_probe_skipped", date=probe.isoformat(), error=str(exc)[:120])
+        return 0
+    with session_scope() as session:
+        cached = {sym: close for sym, close in session.execute(
+            select(DailyClose.symbol, DailyClose.close).where(DailyClose.date == probe))}
+        served = symbols & grouped.keys()
+        rebased = sorted(s for s in served if s in cached and cached[s] != grouped[s])
+        joined = sorted(s for s in served if s not in cached)
+        if rebased or joined:
+            session.execute(update(DailyClose).where(DailyClose.provider == CURRENT)
+                            .values(provider=SUPERSEDED))
+    if rebased or joined:
+        log.warning("breadth_polygon_rebased", date=probe.isoformat(), rebased=len(rebased),
+                    joined=len(joined), sample=(rebased + joined)[:5])
+    return 1
 
 
 def refresh_breadth_polygon(target_days: int = POLYGON_TARGET_DAYS,
@@ -155,8 +244,11 @@ def refresh_breadth_polygon(target_days: int = POLYGON_TARGET_DAYS,
     and counting already-cached days toward the target without a call. Starting
     at yesterday each time (not at the cache's end) is what makes the daily
     incremental actually pick up new trading days: cold start ~210 calls
-    (~42 min at 5/min); once warm, ~1 call for yesterday's new close, then the
-    walk hits cached days and stops at target_days.
+    (~42 min at 5/min); once warm, the probe (_supersede_if_rebased) and one
+    call for yesterday's new close, then the walk hits cached days and stops at
+    target_days. A day counts as cached only while its rows are CURRENT: after
+    a re-basing the same walk fetches the whole window again, newest day first,
+    and one that is cut goes on at the next sweep.
 
     v3.7.3 (B-01/02/07): the previous `while len(have) < target_days` guard
     short-circuited once the cache reached target_days total dates, so no new
@@ -164,11 +256,14 @@ def refresh_breadth_polygon(target_days: int = POLYGON_TARGET_DAYS,
     One call = the whole US market for a date; we keep only the SSGA
     constituents. A weekend or an exchange holiday (the NYSE calendar,
     app/alerts/calendars.py) is not asked for; an empty response on any other
-    day is a closure the calendar does not know and costs one probe."""
+    day is a closure the calendar does not know and costs one call."""
     symbols = set(sp500_symbols())
+    calls = _supersede_if_rebased(symbols, target_days)
+    if pace_seconds:
+        time.sleep(pace_seconds)    # the probe is a call under the 5/min limit
     counts = _cached_polygon_date_counts(symbols)   # v3.7.8/§2: per-date coverage
     day = datetime.now(UTC).date() - timedelta(days=1)  # EOD; yesterday is the latest settled day
-    calls = stored_days = trading_seen = span = 0
+    stored_days = trading_seen = span = 0
     while trading_seen < target_days and span < POLYGON_MAX_CALENDAR_DAYS:
         span += 1
         # A weekend or an exchange holiday has no session: no call. Skipping
@@ -213,7 +308,7 @@ def refresh_breadth_polygon(target_days: int = POLYGON_TARGET_DAYS,
                         c = grouped.get(sym)
                         if c is not None:
                             session.merge(DailyClose(symbol=sym, date=day, close=c,
-                                                     provider="polygon", fetched_at=now))
+                                                     provider=CURRENT, fetched_at=now))
                             written += 1
             except Exception as exc:  # pragma: no cover — a cache write must never fail the job
                 log.warning("breadth_polygon_write_failed", date=iso, error=str(exc)[:120])
@@ -234,8 +329,9 @@ def refresh_breadth_polygon(target_days: int = POLYGON_TARGET_DAYS,
 
 
 def refresh_breadth() -> dict[str, int]:
-    """The scheduled/boot refresh: Polygon grouped-daily (1 call/day once warm).
-    Without a Polygon key there is nothing to refresh."""
+    """The scheduled/boot refresh: Polygon grouped-daily (once warm, one probe
+    and one call per new session). Without a Polygon key there is nothing to
+    refresh."""
     if not get_settings().polygon_api_key:
         log.info("breadth_refresh_skipped", reason="POLYGON_API_KEY not configured")
         return {}

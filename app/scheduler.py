@@ -89,7 +89,7 @@ def _breadth_job() -> None:
     from app.sources.breadth import refresh_breadth
 
     try:
-        refresh_breadth()  # Polygon: one grouped-daily call per day once warm
+        refresh_breadth()  # Polygon, once warm: one probe and one call per new session
     except Exception as exc:  # a failed sweep must never crash the scheduler
         log.error("scheduled_breadth_refresh_failed", error=str(exc))
 
@@ -102,8 +102,9 @@ def start() -> BackgroundScheduler:
         # Every 4 hours, keeping the historical 06:00/18:00 anchors; the 06:00
         # and 14:00 runs follow the breadth sweeps by ten minutes.
         # Upstream budget at 6 runs/day: price/series caches reuse within their
-        # SLAs (daily data doesn't change intraday), Polygon stays 1 call/day,
-        # breadth spends nothing here (separate job), judgment = 6 LLM calls/day.
+        # SLAs (daily data doesn't change intraday), breadth spends nothing
+        # here (its Polygon calls are the separate job's), judgment = 6 LLM
+        # calls/day.
         # The slot hours live in app.engine.recompute_slots — the SAME
         # definition the snapshot's expected_recompute_slot and the alert
         # watchdog's missed-slot count use. Never restate them here.
