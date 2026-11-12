@@ -57,7 +57,14 @@ forward - restore `:latest` to main's image, start the service, fix the
 commit.
 A merge reaches production within one tick plus the release, about six
 minutes: merge outside the stretch from :50 before to :35 after the recompute
-slots (02/06/10/14/18/22 UTC).
+slots (02/06/10/14/18/22 UTC). A restart while a run gathers and computes (25
+to 105 s after the slot in production) loses that slot: the scheduler's jobs
+live in memory and nothing catches up at boot. The next number comes with the
+next slot, and one missed slot is reported by nothing (the outage alert needs
+two). Once the snapshot is committed - the alert capture follows it directly -
+a restart costs that run only its dashboard feed and its judgment note: the
+snapshot then carries the previous note, marked stale
+(`tests/test_recompute_order.py`).
 
 ### The deploy note
 

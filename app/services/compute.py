@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app import methodology as _M
 from app.alerts.calendars import is_trading_day
@@ -1451,29 +1451,24 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
 
 
 def persist_snapshot(data: SnapshotData, raw: RawInputs) -> int:
-    """Write snapshot + indicator_readings + source_health; return snapshot id."""
+    """Write snapshot + indicator_readings + source_health; return snapshot id.
+
+    No network call sits between the computation and its commit. The row
+    carries the previous snapshot's judgment note, marked stale, until
+    `write_judgment` replaces it (run_recompute's last step). Production, 222
+    runs to 2026-11-10: the commit used to wait 22 to 289 s for the model
+    (median 97 s), two thirds of the time in which a restart lost the slot."""
     from app.models import IndicatorReading
 
     settings = get_settings()
     now = datetime.now(UTC)
 
-    # judgment call (degrades gracefully; never blocks the recompute)
     with session_scope() as session:
         last = session.execute(
             select(Snapshot).order_by(Snapshot.computed_at.desc(), Snapshot.id.desc()).limit(1)
         ).scalars().first()
         last_text = last.judgment_call if last else None
         prev_snapshot_id = last.id if last else None
-
-    s_scores = {k: v.sub_score for k, v in data.indicators.items() if k.startswith("s")}
-    d_scores = {k: v.sub_score for k, v in data.indicators.items() if k.startswith("d")}
-    call = judgment.generate(
-        data.median, data.iqr, data.action_band, s_scores, d_scores, data.v_multiplier,
-        data.red_flags.as_dict(), data.override_fired,
-        data.trend_states.get("SPY", {}).get("faber_10mo", "unknown"),
-        data.trend_states.get("QQQ", {}).get("faber_10mo", "unknown"),
-        data.fast_alarm, last_successful=last_text,
-    )
 
     # ---- typed alert contract (Stage 0). NON-SCORING, post-hoc, pure. -------
     # Built here (not in compute_snapshot) so `observed_at` is the SAME instant
@@ -1547,9 +1542,13 @@ def persist_snapshot(data: SnapshotData, raw: RawInputs) -> int:
             block_d=block_d_payload,
             trend_states=data.trend_states,
             fast_alarm=data.fast_alarm,
-            judgment_call=call.text,
-            judgment_stale=call.stale,
-            judgment_error=call.error_class,
+            # Until write_judgment replaces it, GET /api/v1/score and the
+            # status page serve this as what it is: the previous note, stale
+            # (about 100 s at the median, every four hours). The alert input
+            # (app/alerts/input_builder.py) reads none of the three columns.
+            judgment_call=last_text,
+            judgment_stale=True,
+            judgment_error=None,
             data_freshness={**data.freshness, "_coverage": data.coverage,
                             "_unknown_red_flags": data.unknown_red_flags,
                             "_ath_provenance": data.ath_provenance},
@@ -1589,8 +1588,31 @@ def persist_snapshot(data: SnapshotData, raw: RawInputs) -> int:
     return snap_id
 
 
+def write_judgment(snap_id: int, data: SnapshotData) -> None:
+    """Ask the gateway for the note and write it onto the committed snapshot.
+
+    The model call sits between two short transactions, inside neither. On a
+    failed call the row keeps the carried text, stale, and gets the error
+    class (app.engine.judgment)."""
+    with session_scope() as session:
+        carried = session.get_one(Snapshot, snap_id).judgment_call
+    s_scores = {k: v.sub_score for k, v in data.indicators.items() if k.startswith("s")}
+    d_scores = {k: v.sub_score for k, v in data.indicators.items() if k.startswith("d")}
+    call = judgment.generate(
+        data.median, data.iqr, data.action_band, s_scores, d_scores, data.v_multiplier,
+        data.red_flags.as_dict(), data.override_fired,
+        data.trend_states.get("SPY", {}).get("faber_10mo", "unknown"),
+        data.trend_states.get("QQQ", {}).get("faber_10mo", "unknown"),
+        data.fast_alarm, last_successful=carried,
+    )
+    with session_scope() as session:
+        session.execute(update(Snapshot).where(Snapshot.id == snap_id).values(
+            judgment_call=call.text, judgment_stale=call.stale, judgment_error=call.error_class))
+
+
 def run_recompute() -> int | None:
-    """Full recompute: gather -> compute -> persist -> Parquet export.
+    """Full recompute: gather -> compute -> persist -> alert capture ->
+    Parquet export -> feed -> judgment note.
 
     Returns the snapshot id, or None if scoring was impossible (an entire
     block empty). Never raises upstream failures."""
@@ -1632,5 +1654,12 @@ def run_recompute() -> int | None:
         build_and_persist_feed(raw, data)
     except Exception as exc:
         log.warning("dashboard_feed_failed", error=str(exc)[:300])
+    # The judgment note last: the one model call of the run, onto the committed
+    # snapshot. Nothing above waits for it (22 to 289 s in production, up to
+    # the gateway's 900 s deadline).
+    try:
+        write_judgment(snap_id, data)
+    except Exception as exc:
+        log.warning("judgment_write_failed", error=sanitize(exc, limit=300))
     log.info("recompute_done", snapshot_id=snap_id, median=data.median, band=data.action_band)
     return snap_id
