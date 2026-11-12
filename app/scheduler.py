@@ -8,7 +8,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from app.config import configured_environment, get_settings, retired_env_keys
-from app.engine.recompute_slots import cron_hour_expression
+from app.engine.recompute_slots import cron_hour_expression, schedule_display
 from app.logging_conf import get_logger
 
 log = get_logger(__name__)
@@ -193,7 +193,7 @@ def start() -> BackgroundScheduler:
 
             log.warning("daily_digest_disabled", reason=no_transport_reason())
         _scheduler.start()
-        log.info("scheduler_started", recompute="every 4h (02/06/10/14/18/22 UTC)",
+        log.info("scheduler_started", recompute=schedule_display(),
                  breadth_refresh="01:00/13:00 UTC", daily_digest=digest_schedule,
                  alert_recovery="every 30min (:15/:45)",
                  alert_watchdog="every 30min (:10/:40), plus host timer",

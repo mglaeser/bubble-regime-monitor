@@ -161,6 +161,29 @@ class TestLiveSnapshotFlags:
         assert "block-degraded" in cats
         assert "indicator-dropped" in cats
 
+    @pytest.mark.parametrize("override, sentence", [
+        (False, "the action band is suppressed."),
+        (True, "the fired override keeps the action band at de-risk.")])
+    def test_the_coverage_flag_says_what_the_band_is(self, client, isolated_db, override, sentence):
+        """README, v3.7.3: a fired override wins the action band on degraded
+        data. The flag said "the action band is suppressed" then too."""
+        from app.services.compute import compute_snapshot, persist_snapshot
+        from tests.conftest import make_golden_raw_inputs
+
+        raw = make_golden_raw_inputs()
+        raw.hyperscalers = None      # drop D3 (0.32)
+        raw.lppls_confidence = None  # drop D4 (0.20) -> >1/3 of Block D
+        if override:                 # flags 2, 3 and 4
+            raw.smh_2yr_return_pct, raw.spy_2yr_return_pct = 200.0, 30.0
+            raw.hy_oas_bps, raw.hy_oas_history_bps = 500.0, [200.0] * 800
+            raw.breadth_pct, raw.index_within_2pct_of_ath = 40.0, True
+        data = compute_snapshot(raw, mc_samples=2_000, mc_seed=1)
+        assert data.override_fired is override and data.action_band.startswith(
+            "de-risk" if override else "suppressed")
+        persist_snapshot(data, raw)
+        flags = {f["id"]: f for f in client.get("/api/v1/status").json()["science_audit"]["flags"]}
+        assert flags["coverage-D"]["detail"].endswith(sentence)
+
 
 class TestHtmlPage:
     def test_root_and_status_serve_html(self, client):
@@ -236,3 +259,84 @@ class TestCompletenessFixes:
             snap.judgment_error = None
         body = client.get("/api/v1/status").json()
         assert any(f["id"] == "judgment-stale" for f in body["science_audit"]["flags"])
+
+
+class TestSnapshotAge:
+    """The status document says when the number it shows is old (module
+    docstring of app/services/status.py: the audit lists everything currently
+    incomplete; README: "Live service + science-audit status"). "Old" is the
+    outage alert's own condition, app/alerts/watchdog.py: two scheduled
+    recomputes missed and 90 minutes more.
+
+    Production served one snapshot for 60 h (from 2026-07-27), 24 h (08-01),
+    344 h (08-06 to 08-20) and 16 h (08-28) while the audit listed no flag of
+    category service-state and none that named the age."""
+
+    @staticmethod
+    def _snapshot_computed(hours_ago: float) -> None:
+        from datetime import timedelta
+
+        from sqlalchemy import update
+
+        from app.db import session_scope
+        from app.models import Snapshot
+        from app.services.compute import compute_snapshot, persist_snapshot
+        from tests.conftest import make_golden_raw_inputs
+
+        raw = make_golden_raw_inputs()
+        persist_snapshot(compute_snapshot(raw, mc_samples=2_000, mc_seed=1), raw)
+        with session_scope() as session:
+            session.execute(update(Snapshot).values(
+                computed_at=datetime.now(UTC) - timedelta(hours=hours_ago)))
+
+    @staticmethod
+    def _flags(client) -> dict[str, dict]:
+        return {f["id"]: f for f in client.get("/api/v1/status").json()["science_audit"]["flags"]}
+
+    def test_a_snapshot_sixty_hours_old_is_flagged_as_an_error(self, client):
+        self._snapshot_computed(60)
+        body = client.get("/api/v1/status").json()
+        flag = {f["id"]: f for f in body["science_audit"]["flags"]}["snapshot-old"]
+        assert flag["severity"] == "error" and flag["category"] == "service-state"
+        # it names the snapshot's own time and how many recomputes are missing
+        assert body["snapshot"]["computed_at"] in flag["detail"]
+        # 60 h hold 15 four-hourly slots (16 if one falls between this test's clock and the service's)
+        assert any(f"{n} scheduled recomputes" in flag["detail"] for n in (15, 16))
+        # errors lead the list the page renders
+        assert body["science_audit"]["flags"][0]["severity"] == "error"
+
+    @pytest.mark.parametrize("hours_ago", [0, 5])
+    def test_a_snapshot_inside_the_schedule_is_not_flagged(self, client, hours_ago):
+        # Five hours hold at most two slots, and the second is then at most an
+        # hour old: inside the alert's 90-minute grace at any time of day.
+        self._snapshot_computed(hours_ago)
+        assert "snapshot-old" not in self._flags(client)
+
+    def test_a_failed_last_recompute_is_flagged_without_its_error_text(self, client, monkeypatch):
+        """The run's error text is an upstream's words; it stays in
+        recompute.last and no word of it enters the flag."""
+        from app.routers import admin
+
+        self._snapshot_computed(0)
+        monkeypatch.setitem(admin._last, "finished_at", "2026-11-11T02:01:00+00:00")
+        monkeypatch.setitem(admin._last, "error", "provider said: NOT-FOR-A-FLAG")
+        body = client.get("/api/v1/status").json()
+        flag = {f["id"]: f for f in body["science_audit"]["flags"]}["recompute-failed"]
+        assert flag["severity"] == "error" and flag["category"] == "service-state"
+        assert "2026-11-11T02:01:00+00:00" in flag["detail"]
+        assert "NOT-FOR-A-FLAG" not in flag["title"] + flag["detail"]
+        assert body["recompute"]["last"]["error"] == "provider said: NOT-FOR-A-FLAG"
+
+    def test_a_last_recompute_that_worked_is_not_flagged(self, client, monkeypatch):
+        from app.routers import admin
+
+        self._snapshot_computed(0)
+        monkeypatch.setitem(admin._last, "error", None)
+        assert "recompute-failed" not in self._flags(client)
+
+    def test_the_no_snapshot_flag_reads_the_schedule_from_the_slot_table(self, client):
+        """app/engine/recompute_slots.py: the schedule "must never be restated
+        as a literal"; the flag spelt it "4-hourly (02/06/10/14/18/22 UTC)"."""
+        from app.engine.recompute_slots import schedule_display
+
+        assert schedule_display() in self._flags(client)["no-snapshot"]["detail"]
