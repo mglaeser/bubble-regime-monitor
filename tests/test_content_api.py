@@ -917,10 +917,13 @@ class TestBlockArtifact:
         import app.content_registry as reg
 
         # Round 18 (SOTA-A): gauge.reg.s5 was wrongly on this list — its
-        # "Today's spreads are near 25-year tights" is a frozen market fact,
-        # not live-referential copy; it is now dated + stamped. The rest were
-        # re-reviewed after that miss: each block's "today/now" refers to the
-        # live payload it rides (band state, coverage, fusion output).
+        # "Today's spreads are near 25-year tights" was a frozen market fact.
+        # Since content_version 3 the block makes no market statement at all
+        # (S5 reads the excess bond premium of two years ago), so it needs no
+        # stamp and stays off the list; tests/test_content_deck_truth.py pins
+        # that. The rest were re-reviewed after that miss: each block's
+        # "today/now" refers to the live payload it rides (band state,
+        # coverage, fusion output).
         LIVE_REFERENTIAL = {
             "gauge.band.oneliner", "gauge.coverage.tip",
             "gauge.epistemic.not_probability", "gauge.fusion.caveat",
@@ -949,9 +952,12 @@ class TestBlockArtifact:
         import app.content_registry as reg
 
         reg._clear_artifact_cache()
-        assert reg.content_version() == 2
+        # The version rises with every change of served text, so a client sees
+        # that the content changed. 3: the deck statements the service
+        # contradicted are corrected (tests/test_content_deck_truth.py).
+        assert reg.content_version() == 3
         payload = reg.dashboard_payload()
-        assert payload["content_version"] == 2
+        assert payload["content_version"] == 3
         assert len(payload["blocks"]) >= 211
         reg._clear_artifact_cache()
 
