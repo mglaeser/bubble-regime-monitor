@@ -110,7 +110,7 @@ Red-flag count 0 → override not fired. **Deterministic point score 52.43; MC m
 
 ## API
 
-Base path `/api/v1`; every response is `{"data": ..., "meta": ...}` with the five epistemic caveats in `meta`. Each per-indicator object carries `as_of`, `age_days`, and `stale` (true past the source's freshness SLA), plus provenance (`data_source`, `fallback_used`, `dropped`, `note`). Reads rate-limited 60/min/IP; `READ_ENDPOINTS_PUBLIC` toggles key requirement; admin refresh requires `X-API-Key`.
+Base path `/api/v1`. The score, history, indicator, legs, methodology and content reads answer `{"data": ..., "meta": ...}` with the five epistemic caveats in `meta`; the dashboard feed, `/replay/evidence` and the admin routes use the same two keys with a `meta` that carries no caveats; `/status` (the caveats at its top level), the alert API and the health probes have shapes of their own. Each per-indicator object carries `as_of`, `age_days`, and `stale` (true past the source's freshness SLA), plus provenance (`data_source`, `fallback_used`, `dropped`, `note`). Reads rate-limited 60/min/IP; `READ_ENDPOINTS_PUBLIC` toggles key requirement; admin refresh requires `X-API-Key`.
 
 | Endpoint | Purpose |
 |----------|---------|

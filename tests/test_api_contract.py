@@ -143,3 +143,40 @@ def test_score_history(client_with_snapshot):
     body = resp.json()
     assert isinstance(body["data"], list) and body["data"]
     assert "median" in body["data"][0]
+
+
+@pytest.mark.parametrize("path", [
+    "/api/v1/score", "/api/v1/score/history", "/api/v1/indicators", "/api/v1/indicators/s1",
+    "/api/v1/legs/trend", "/api/v1/legs/fast-alarm", "/api/v1/meta/methodology",
+    "/api/v1/content/dashboard", "/api/v1/content/dynamic"])
+def test_the_reads_the_readme_names_carry_the_envelope_and_the_five_caveats(client_with_snapshot, path):
+    """README, API: the score, history, indicator, legs, methodology and
+    content reads answer {"data", "meta"} with the five caveats in meta."""
+    body = client_with_snapshot.get(path).json()
+    assert set(body) == {"data", "meta"}
+    assert body["meta"]["epistemic_caveats"] == EPISTEMIC_CAVEATS and len(EPISTEMIC_CAVEATS) == 5
+
+
+@pytest.mark.parametrize("path", ["/api/v1/dashboard/feed", "/api/v1/replay/evidence",
+                                  "/api/v1/admin/refresh/status"])
+def test_the_feed_the_replay_evidence_and_the_admin_routes_have_a_meta_without_caveats(client, path):
+    """README, API: the same two keys, and a meta that carries no caveats.
+    "Every response ... with the five epistemic caveats in meta" was not true
+    of these."""
+    from datetime import UTC, datetime
+
+    from app.db import session_scope
+    from app.models import DashboardFeed
+    from tests.conftest import TEST_ADMIN_KEY
+
+    with session_scope() as session:
+        session.add(DashboardFeed(computed_at=datetime.now(UTC), payload="{}"))
+    body = client.get(path, headers={"X-API-Key": TEST_ADMIN_KEY}).json()
+    assert set(body) == {"data", "meta"}
+    assert "epistemic_caveats" not in body["meta"]
+
+
+def test_the_status_document_has_no_envelope_and_carries_the_caveats_itself(client_with_snapshot):
+    body = client_with_snapshot.get("/api/v1/status").json()
+    assert "data" not in body and "meta" not in body
+    assert body["epistemic_caveats"] == EPISTEMIC_CAVEATS
