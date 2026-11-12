@@ -41,7 +41,7 @@ async def lifespan(app: FastAPI):
 
     def _breadth_backfill() -> None:
         # Cold-start breadth backfill: warms the Polygon daily_close cache so D1 comes
-        # alive without waiting for the first scheduled 01:00/13:00 sweep. It
+        # alive without waiting for the first scheduled sweep. It
         # is self-limiting — a warm cache leaves few stale/missing symbols, so
         # this returns quickly on restarts.
         try:

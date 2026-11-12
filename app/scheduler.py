@@ -99,8 +99,8 @@ def start() -> BackgroundScheduler:
     if _scheduler is None:
         settings = get_settings()
         _scheduler = BackgroundScheduler(timezone="UTC")
-        # Every 4 hours, offset +2h so runs sit 1h AFTER the 01:00/13:00 breadth
-        # sweeps (fresh cache) and keep the historical 06:00/18:00 anchors.
+        # Every 4 hours, keeping the historical 06:00/18:00 anchors; the 06:00
+        # and 14:00 runs follow the breadth sweeps by ten minutes.
         # Upstream budget at 6 runs/day: price/series caches reuse within their
         # SLAs (daily data doesn't change intraday), Polygon stays 1 call/day,
         # breadth spends nothing here (separate job), judgment = 6 LLM calls/day.
@@ -111,9 +111,25 @@ def start() -> BackgroundScheduler:
                                              timezone="UTC"),
                            id="recompute", replace_existing=True,
                            coalesce=True, misfire_grace_time=3600, max_instances=1)
-        # Breadth cache refresh twice daily, off the recompute hours so the two
-        # never contend.
-        _scheduler.add_job(_breadth_job, CronTrigger(hour="1,13", minute=0, timezone="UTC"),
+        # Breadth cache refresh twice daily, ten minutes ahead of the 06:00 and
+        # 14:00 recomputes: the walk asks for yesterday first and has it stored
+        # within seconds (by 13:00:04 for each of the 55 sessions the 13:00
+        # sweep stored from 2026-08-15 to 2026-11-10).
+        # Polygon's free plan serves a session once its New York day is over.
+        # The first sweep used to run at 01:00 UTC, when New York is still at
+        # 20:00 or 21:00 of the day asked for: all 37 of them from 2026-10-05
+        # to 2026-11-10 stored no day (26 were answered HTTP 403 for yesterday,
+        # 11 had a weekend behind them), so yesterday's session was first read
+        # by the 14:00 run. Boot refreshes did store day D at D+1 04:43 UTC
+        # (2026-08-28) and 05:34 UTC (2026-09-24), 00:43 and 01:34 in New York.
+        # 05:50 UTC is 01:50 there in summer and 00:50 in winter, so the 06:00
+        # and 10:00 runs and the 08:00 digest read yesterday's breadth instead
+        # of the day before's. No early success is on record from winter time;
+        # 00:50 is later than the earliest one by the New York clock, by UTC
+        # and by the time since the close (8 h 50 min against 8 h 43 min). If
+        # Polygon refuses at 05:50, the 13:50 sweep stores the day, as the
+        # 13:00 one did.
+        _scheduler.add_job(_breadth_job, CronTrigger(hour="5,13", minute=50, timezone="UTC"),
                            id="breadth_refresh", replace_existing=True,
                            coalesce=True, misfire_grace_time=3600, max_instances=1)
         # The delivery dispatcher polls the outbox, one pass at a time
@@ -194,7 +210,7 @@ def start() -> BackgroundScheduler:
             log.warning("daily_digest_disabled", reason=no_transport_reason())
         _scheduler.start()
         log.info("scheduler_started", recompute="every 4h (02/06/10/14/18/22 UTC)",
-                 breadth_refresh="01:00/13:00 UTC", daily_digest=digest_schedule,
+                 breadth_refresh="05:50/13:50 UTC", daily_digest=digest_schedule,
                  alert_recovery="every 30min (:15/:45)",
                  alert_watchdog="every 30min (:10/:40), plus host timer",
                  alert_retention="daily 03:25 UTC",
