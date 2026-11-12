@@ -97,6 +97,69 @@ def test_the_served_width_is_the_difference_of_the_served_quartiles(client):
     assert data["iqr"] == [data["q1"], data["q3"]]
 
 
+def _unknown_flags_served_and_in_the_contract(client, **raw_over) -> tuple[list[str], list[str]]:
+    """Score the golden inputs, changed by `raw_over`, through the real pipeline
+    and store the snapshot. Returns the unknown flags the API then serves, and
+    the flags the stored typed contract (red_flag_meta) gives the state UNKNOWN."""
+    from app.services.compute import compute_snapshot, persist_snapshot
+    from tests.conftest import make_golden_raw_inputs
+
+    raw = make_golden_raw_inputs()
+    for name, value in raw_over.items():
+        setattr(raw, name, value)
+    snapshot_id = persist_snapshot(
+        compute_snapshot(raw, mc_samples=2_000, mc_seed=20260711, gsadf_contested=True), raw)
+    with session_scope() as session:
+        flags = session.get(Snapshot, snapshot_id).red_flag_meta["flags"]
+        in_contract = [flag["source_key"] for flag in flags.values() if flag["state"] == "UNKNOWN"]
+    return client.get("/api/v1/score").json()["data"]["unknown_red_flags"], in_contract
+
+
+@pytest.mark.parametrize("raw_over, unknown", [
+    # The fixture as it is computes no GSADF statistic: flag 1 alone.
+    ({}, {"gsadf_explosive_noncontested"}),
+    ({"breadth_pct": None}, {"gsadf_explosive_noncontested", "breadth_lt_50_near_ath"}),
+    # Breadth 44 % is known and under its 50 % threshold, but the SPY series
+    # did not arrive, so "the index within 2 % of its high" was never observed
+    # (gather_inputs then leaves index_within_2pct_of_ath at its default,
+    # False). The contract calls flag 4 UNKNOWN; the second list, which
+    # compute_snapshot built for this field, left it out as a flag whose
+    # input was known.
+    ({"breadth_pct": 44.0, "spy_daily": None, "spy_daily_closes": None,
+      "index_within_2pct_of_ath": False}, {"gsadf_explosive_noncontested", "breadth_lt_50_near_ath"}),
+    ({"smh_2yr_return_pct": None}, {"gsadf_explosive_noncontested", "semi_runup_ge_150pp"}),
+    ({"hy_oas_history_bps": []}, {"gsadf_explosive_noncontested", "hy_oas_widen_gt_100bps"}),
+    # Every input observed and flag 1 contested, as on all 490 production
+    # snapshots that carry the contract (2026-11-10): the statistic is known,
+    # the flag is BLOCKED by governance, and nothing is unknown.
+    ({"gsadf_stat": 1.2, "gsadf_cv90": 1.1393, "gsadf_cv95": 1.378,
+      "bsadf_stat": 1.2, "bsadf_cv90": 1.1393, "bsadf_cv95": 1.378}, set()),
+])
+def test_the_api_lists_as_unknown_exactly_the_flags_the_contract_calls_unknown(client, raw_over, unknown):
+    """`unknown_red_flags` lists the red flags whose input was unknown this run
+    (app/references.py, v3.7.8/§24). The snapshot's typed contract says the
+    same thing per flag, as the state UNKNOWN, and for flag 4 it needs both
+    legs: breadth and the index near its high (snapshot_contract). One
+    snapshot cannot say both "unknown" and "known" about one flag."""
+    served, in_contract = _unknown_flags_served_and_in_the_contract(client, **raw_over)
+    assert set(served) == unknown
+    assert sorted(served) == sorted(in_contract)
+
+
+def test_a_snapshot_stored_before_the_contract_serves_no_unknown_flags(client):
+    """The 125 oldest production snapshots (up to 2026-08-06) carry no typed
+    contract: red_flag_meta is {}, the column's default. They read an empty
+    list, as they did before (82 never had a list, 43 had an empty one)."""
+    with session_scope() as session:
+        session.add(Snapshot(
+            computed_at=datetime(2026, 8, 6, 10, 1, tzinfo=UTC), service_version="3.8.0",
+            median=52.0, iqr_lo=50.0, iqr_hi=54.0, band5=47.0, band95=57.0, point_score=52.0,
+            action_band="trim", data_freshness={"_unknown_red_flags": []}))
+    response = client.get("/api/v1/score")
+    assert response.status_code == 200
+    assert response.json()["data"]["unknown_red_flags"] == []
+
+
 def test_indicators_list_and_detail(client):
     resp = client.get("/api/v1/indicators")
     assert resp.status_code == 200

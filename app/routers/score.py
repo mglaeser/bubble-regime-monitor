@@ -11,6 +11,7 @@ from sqlalchemy import select
 from app.config import get_settings
 from app.content_registry import gauge_display
 from app.db import session_scope
+from app.engine.snapshot_contract import FLAG_UNKNOWN
 from app.models import Snapshot
 from app.references import EPISTEMIC_CAVEATS
 from app.references import SCORE_EXAMPLE as _SCORE_EXAMPLE
@@ -62,6 +63,26 @@ def _latest_snapshot() -> Snapshot | None:
         ).scalars().first()
 
 
+def _unknown_flags(snap: Snapshot) -> list[str]:
+    """The red flags whose input was unknown on this run (v3.7.8/§24): the
+    ones the snapshot's typed contract gives the state UNKNOWN
+    (app/engine/snapshot_contract.py; flag 4 needs both of its legs, breadth
+    and the index near its high). Observability only: red_flag_count and the
+    frozen unknown-as-false rule do not read it.
+
+    The contract is the one place that says it. compute_snapshot used to
+    build a second list for this field, which named flag 4 only when breadth
+    was missing: with breadth known and the SPY series missing, the API said
+    flag 4's input was known while the contract of the same snapshot said
+    UNKNOWN and counted 2 fireable flags of the 3 the override requires.
+
+    Stored snapshots (production, 2026-11-10): the 490 that carry the
+    contract hold four flags each, every one with `source_key` and `state`
+    (build_red_flag_meta is the only writer), and both lists were empty on
+    all of them; the 125 older ones hold {} and read [] as before."""
+    flags = (snap.red_flag_meta or {}).get("flags") or {}
+    return [flag["source_key"] for flag in flags.values() if flag["state"] == FLAG_UNKNOWN]
+
 
 @router.get(
     "",
@@ -99,9 +120,7 @@ def get_score(request: Request, _: None = Depends(require_read_access)) -> dict[
         "override_fired": snap.override_fired,
         "red_flag_count": snap.red_flag_count,
         "red_flag_detail": snap.red_flag_detail,
-        # v3.7.8/§24: red flags whose input was unknown this run (observability;
-        # does NOT change red_flag_count / the frozen unknown-as-false rule).
-        "unknown_red_flags": (snap.data_freshness or {}).get("_unknown_red_flags", []),
+        "unknown_red_flags": _unknown_flags(snap),
         "block_S": snap.block_s,
         "block_D": snap.block_d,
         "V": {

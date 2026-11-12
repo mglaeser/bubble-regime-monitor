@@ -397,7 +397,6 @@ class SnapshotData:
     fast_alarm: dict[str, Any]
     freshness: dict[str, str]
     coverage: dict[str, Any]
-    unknown_red_flags: list[str] = field(default_factory=list)  # v3.7.8/§24 (observability)
     ath_provenance: dict[str, Any] = field(default_factory=lambda: dict(ATH_PROVENANCE))  # PIN-F label
     # Typed alert contract (Stage 0) — derived from the values above, never a
     # second opinion on them. See app/engine/snapshot_contract.py.
@@ -1306,19 +1305,10 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         index_within_2pct_of_ath=raw.index_within_2pct_of_ath,
     )
     mc_in.red_flags = red_flags
-
-    # v3.7.8/§24: observability for red flags whose INPUT is unknown this run.
-    # The frozen numerical rule is unchanged (unknown -> not-fired, red_flag_count
-    # untouched); this list just makes the epistemic gap visible to the reader.
-    unknown_red_flags: list[str] = []
-    if runup is None:
-        unknown_red_flags.append("semi_runup_ge_150pp")
-    if raw.hy_oas_bps is None or not raw.hy_oas_history_bps:
-        unknown_red_flags.append("hy_oas_widen_gt_100bps")
-    if raw.breadth_pct is None:
-        unknown_red_flags.append("breadth_lt_50_near_ath")
-    if not _s4_ok:
-        unknown_red_flags.append("gsadf_explosive_noncontested")
+    # Which of these flags had an unknown input is said once, per flag, by the
+    # typed contract persist_snapshot stores (build_red_flag_meta: the state
+    # UNKNOWN). The score API's unknown_red_flags reads that; no list is built
+    # here.
 
     if not sub_s or not sub_d:
         raise RuntimeError("an entire block is empty — cannot score (all sources down)")
@@ -1427,7 +1417,6 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         fast_alarm=alarm.as_dict(),
         freshness=freshness,
         coverage=coverage,
-        unknown_red_flags=unknown_red_flags,
         # Typed alert contract (Stage 0): the band decomposition the display
         # string above collapses. Derived by calling the SAME authoritative
         # band functions, from the SAME median — never a second computation.
@@ -1551,7 +1540,6 @@ def persist_snapshot(data: SnapshotData, raw: RawInputs) -> int:
             judgment_stale=call.stale,
             judgment_error=call.error_class,
             data_freshness={**data.freshness, "_coverage": data.coverage,
-                            "_unknown_red_flags": data.unknown_red_flags,
                             "_ath_provenance": data.ath_provenance},
             # RM-1: stamp the methodology actually in force in THIS process —
             # read from the loader, never re-stated by hand.
