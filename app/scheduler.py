@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 
 from app.config import configured_environment, get_settings, retired_env_keys
 from app.engine.recompute_slots import cron_hour_expression
@@ -119,9 +120,18 @@ def start() -> BackgroundScheduler:
         # The delivery dispatcher polls the outbox, one pass at a time
         # (`max_instances=1`), so a pass takes the queue in claim order. The
         # budget caps do not depend on it (outbox.dispatch_budget_usage).
+        # An interval trigger, because ALERTS_DISPATCH_POLL_S is an interval:
+        # health allows the dispatcher three of them of silence
+        # (app/alerts/health.py). A cron step `second="*/N"` is not one. It
+        # cannot exceed 59 - for 60 APScheduler raises ValueError out of this
+        # function and the service does not boot - and it starts again at
+        # second 0 of every minute, so 45 polled at gaps of 45 s and 15 s
+        # (tests/test_dispatch_poll.py). At the default of 20 s the passes are
+        # as frequent as before; the first comes 20 s after the start, not at
+        # the next :00/:20/:40.
         _scheduler.add_job(_alert_dispatch_job,
-                           CronTrigger(second=f"*/{max(20, settings.alerts_dispatch_poll_s)}",
-                                       timezone="UTC"),
+                           IntervalTrigger(seconds=max(20, settings.alerts_dispatch_poll_s),
+                                           timezone="UTC"),
                            id="alert_dispatch", replace_existing=True,
                            coalesce=True, misfire_grace_time=120, max_instances=1)
         # Every 30 minutes, offset off the recompute and breadth hours so the

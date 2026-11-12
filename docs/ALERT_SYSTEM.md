@@ -605,8 +605,9 @@ Separately, the dispatcher has no LLM path at any stage.
 What the runtime no longer checks, by that decision: the evidence and the
 stage, and nothing is re-checked at the wire - a demotion after planning no
 longer withholds work already queued, and a promotion change reaches the wire
-at the next dispatch pass, at most one pass later (the job runs at least every
-20 s). What stops a live send now: ALERTS_MODE other than `live`; a silence;
+at the next dispatch pass, at most one pass later (the job runs every 20 s;
+`ALERTS_DISPATCH_POLL_S` sets a longer interval, never a shorter one). What
+stops a live send now: ALERTS_MODE other than `live`; a silence;
 the dispatch job's own check before every pass - a candidate that is not the
 promoted artifact refuses the pass before any sender exists
 (tests/test_alert_promotion.py::test_the_live_dispatch_job_refuses_an_unpromoted_candidate);
