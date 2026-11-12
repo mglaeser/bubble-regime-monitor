@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 from fastapi.testclient import TestClient
 
+from app.db import session_scope
+from app.models import Snapshot
 from app.references import EPISTEMIC_CAVEATS, FRAMEWORK
 
 
@@ -71,6 +75,89 @@ def test_score_envelope(client_with_snapshot):
     # A judgment is a model's words whenever it exists; the renderer tints the
     # dynamic-content marker by this (owner, 2026-09-21).
     assert data["judgment_call"]["provenance"] == ("generated" if data["judgment_call"]["text"] else "none")
+
+
+def test_the_served_width_is_the_difference_of_the_served_quartiles(client):
+    """`iqr_width` is the IQR proper, q3 - q1 (README, v3.7.8/M-02), so the
+    three numbers served agree with each other. The quartiles stored here are
+    production snapshot 611's (2026-11-10 06:00), which was served as q1 49.8,
+    q3 54.0 and iqr_width 4.19: the width was rounded from the unrounded
+    difference (4.1942) and was 0.01 off the two quartiles served beside it
+    on 163 of the 615 production snapshots up to 2026-11-10.
+    test_score_envelope asserts the same relation on the golden fixture's
+    quartiles, where the two ways of rounding happen to agree."""
+    with session_scope() as session:
+        session.add(Snapshot(
+            computed_at=datetime(2026, 11, 10, 6, 0, 45, tzinfo=UTC), service_version="3.9.0",
+            median=51.86169478754713, iqr_lo=49.802240404123545, iqr_hi=53.996457710169,
+            band5=47.0029010206321, band95=57.132138829588904, point_score=51.768960213024,
+            action_band="suppressed (block degraded)"))
+    data = client.get("/api/v1/score").json()["data"]
+    assert (data["q1"], data["q3"], data["iqr_width"]) == (49.8, 54.0, 4.2)
+    assert data["iqr"] == [data["q1"], data["q3"]]
+
+
+def _unknown_flags_served_and_in_the_contract(client, **raw_over) -> tuple[list[str], list[str]]:
+    """Score the golden inputs, changed by `raw_over`, through the real pipeline
+    and store the snapshot. Returns the unknown flags the API then serves, and
+    the flags the stored typed contract (red_flag_meta) gives the state UNKNOWN."""
+    from app.services.compute import compute_snapshot, persist_snapshot
+    from tests.conftest import make_golden_raw_inputs
+
+    raw = make_golden_raw_inputs()
+    for name, value in raw_over.items():
+        setattr(raw, name, value)
+    snapshot_id = persist_snapshot(
+        compute_snapshot(raw, mc_samples=2_000, mc_seed=20260711, gsadf_contested=True), raw)
+    with session_scope() as session:
+        flags = session.get(Snapshot, snapshot_id).red_flag_meta["flags"]
+        in_contract = [flag["source_key"] for flag in flags.values() if flag["state"] == "UNKNOWN"]
+    return client.get("/api/v1/score").json()["data"]["unknown_red_flags"], in_contract
+
+
+@pytest.mark.parametrize("raw_over, unknown", [
+    # The fixture as it is computes no GSADF statistic: flag 1 alone.
+    ({}, {"gsadf_explosive_noncontested"}),
+    ({"breadth_pct": None}, {"gsadf_explosive_noncontested", "breadth_lt_50_near_ath"}),
+    # Breadth 44 % is known and under its 50 % threshold, but the SPY series
+    # did not arrive, so "the index within 2 % of its high" was never observed
+    # (gather_inputs then leaves index_within_2pct_of_ath at its default,
+    # False). The contract calls flag 4 UNKNOWN; the second list, which
+    # compute_snapshot built for this field, left it out as a flag whose
+    # input was known.
+    ({"breadth_pct": 44.0, "spy_daily": None, "spy_daily_closes": None,
+      "index_within_2pct_of_ath": False}, {"gsadf_explosive_noncontested", "breadth_lt_50_near_ath"}),
+    ({"smh_2yr_return_pct": None}, {"gsadf_explosive_noncontested", "semi_runup_ge_150pp"}),
+    ({"hy_oas_history_bps": []}, {"gsadf_explosive_noncontested", "hy_oas_widen_gt_100bps"}),
+    # Every input observed and flag 1 contested, as on all 490 production
+    # snapshots that carry the contract (2026-11-10): the statistic is known,
+    # the flag is BLOCKED by governance, and nothing is unknown.
+    ({"gsadf_stat": 1.2, "gsadf_cv90": 1.1393, "gsadf_cv95": 1.378,
+      "bsadf_stat": 1.2, "bsadf_cv90": 1.1393, "bsadf_cv95": 1.378}, set()),
+])
+def test_the_api_lists_as_unknown_exactly_the_flags_the_contract_calls_unknown(client, raw_over, unknown):
+    """`unknown_red_flags` lists the red flags whose input was unknown this run
+    (app/references.py, v3.7.8/§24). The snapshot's typed contract says the
+    same thing per flag, as the state UNKNOWN, and for flag 4 it needs both
+    legs: breadth and the index near its high (snapshot_contract). One
+    snapshot cannot say both "unknown" and "known" about one flag."""
+    served, in_contract = _unknown_flags_served_and_in_the_contract(client, **raw_over)
+    assert set(served) == unknown
+    assert sorted(served) == sorted(in_contract)
+
+
+def test_a_snapshot_stored_before_the_contract_serves_no_unknown_flags(client):
+    """The 125 oldest production snapshots (up to 2026-08-06) carry no typed
+    contract: red_flag_meta is {}, the column's default. They read an empty
+    list, as they did before (82 never had a list, 43 had an empty one)."""
+    with session_scope() as session:
+        session.add(Snapshot(
+            computed_at=datetime(2026, 8, 6, 10, 1, tzinfo=UTC), service_version="3.8.0",
+            median=52.0, iqr_lo=50.0, iqr_hi=54.0, band5=47.0, band95=57.0, point_score=52.0,
+            action_band="trim", data_freshness={"_unknown_red_flags": []}))
+    response = client.get("/api/v1/score")
+    assert response.status_code == 200
+    assert response.json()["data"]["unknown_red_flags"] == []
 
 
 def test_indicators_list_and_detail(client):

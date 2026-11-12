@@ -97,21 +97,10 @@ def test_g06_s4_floor_labelled_imputation(isolated_db):
 
 
 # ---- §24: unknown-red-flag observability (no red_flag_count change) ----------
-
-def test_s24_unknown_red_flags_listed(isolated_db):
-    from app.services.compute import compute_snapshot
-    from tests.conftest import make_golden_raw_inputs
-
-    raw = make_golden_raw_inputs()   # all inputs present EXCEPT a computed GSADF
-    data = compute_snapshot(raw, mc_samples=2_000, mc_seed=1)
-    # GSADF was not computed -> its red flag input is unknown; the others are known.
-    assert "gsadf_explosive_noncontested" in data.unknown_red_flags
-    assert "breadth_lt_50_near_ath" not in data.unknown_red_flags
-
-    raw2 = make_golden_raw_inputs()
-    raw2.breadth_pct = None
-    data2 = compute_snapshot(raw2, mc_samples=2_000, mc_seed=1)
-    assert "breadth_lt_50_near_ath" in data2.unknown_red_flags
+# Pinned on the field as served, through the pipeline and the API:
+# tests/test_api_contract.py::test_the_api_lists_as_unknown_exactly_the_flags_the_contract_calls_unknown.
+# Its first two cases are the two asserted here until the API read the typed
+# contract (no GSADF statistic: flag 1 and not flag 4; no breadth: flag 4).
 
 
 # ---- §2/§3: breadth metadata + identification bounds ------------------------

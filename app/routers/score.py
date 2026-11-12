@@ -11,6 +11,7 @@ from sqlalchemy import select
 from app.config import get_settings
 from app.content_registry import gauge_display
 from app.db import session_scope
+from app.engine.snapshot_contract import FLAG_UNKNOWN
 from app.models import Snapshot
 from app.references import EPISTEMIC_CAVEATS
 from app.references import SCORE_EXAMPLE as _SCORE_EXAMPLE
@@ -62,6 +63,26 @@ def _latest_snapshot() -> Snapshot | None:
         ).scalars().first()
 
 
+def _unknown_flags(snap: Snapshot) -> list[str]:
+    """The red flags whose input was unknown on this run (v3.7.8/§24): the
+    ones the snapshot's typed contract gives the state UNKNOWN
+    (app/engine/snapshot_contract.py; flag 4 needs both of its legs, breadth
+    and the index near its high). Observability only: red_flag_count and the
+    frozen unknown-as-false rule do not read it.
+
+    The contract is the one place that says it. compute_snapshot used to
+    build a second list for this field, which named flag 4 only when breadth
+    was missing: with breadth known and the SPY series missing, the API said
+    flag 4's input was known while the contract of the same snapshot said
+    UNKNOWN and counted 2 fireable flags of the 3 the override requires.
+
+    Stored snapshots (production, 2026-11-10): the 490 that carry the
+    contract hold four flags each, every one with `source_key` and `state`
+    (build_red_flag_meta is the only writer), and both lists were empty on
+    all of them; the 125 older ones hold {} and read [] as before."""
+    flags = (snap.red_flag_meta or {}).get("flags") or {}
+    return [flag["source_key"] for flag in flags.values() if flag["state"] == FLAG_UNKNOWN]
+
 
 @router.get(
     "",
@@ -81,23 +102,25 @@ def get_score(request: Request, _: None = Depends(require_read_access)) -> dict[
         # No snapshot yet (fresh boot, first scheduled run pending) — this is
         # a 503 service-state signal, NOT an upstream-failure 500.
         raise HTTPException(status_code=503, detail="no snapshot computed yet; try POST /api/v1/admin/refresh")
+    # The width is the difference of the two quartiles served beside it. Rounded
+    # from the unrounded difference it was 0.01 off them on 163 of the 615
+    # production snapshots up to 2026-11-10 (06:00 that day: 49.8, 54.0 and 4.19).
+    q1, q3 = round(snap.iqr_lo, 2), round(snap.iqr_hi, 2)
     data = {
         "headline_median": round(snap.median),
         # v3.7.8/M-02: `iqr` is the (q1,q3) interquartile INTERVAL (kept for
         # compatibility); `iqr_width` is the IQR proper (q3 - q1).
-        "iqr": [round(snap.iqr_lo, 2), round(snap.iqr_hi, 2)],
-        "q1": round(snap.iqr_lo, 2),
-        "q3": round(snap.iqr_hi, 2),
-        "iqr_width": round(snap.iqr_hi - snap.iqr_lo, 2),
+        "iqr": [q1, q3],
+        "q1": q1,
+        "q3": q3,
+        "iqr_width": round(q3 - q1, 2),
         "band_5_95": [round(snap.band5, 2), round(snap.band95, 2)],
         "point_score": round(snap.point_score, 2),
         "action_band": snap.action_band,
         "override_fired": snap.override_fired,
         "red_flag_count": snap.red_flag_count,
         "red_flag_detail": snap.red_flag_detail,
-        # v3.7.8/§24: red flags whose input was unknown this run (observability;
-        # does NOT change red_flag_count / the frozen unknown-as-false rule).
-        "unknown_red_flags": (snap.data_freshness or {}).get("_unknown_red_flags", []),
+        "unknown_red_flags": _unknown_flags(snap),
         "block_S": snap.block_s,
         "block_D": snap.block_d,
         "V": {
