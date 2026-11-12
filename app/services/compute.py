@@ -532,29 +532,36 @@ def gather_inputs() -> RawInputs:
     # R subprocess degrades to the 0.25 floor.
     ndx = _track(raw, "price_NDX", lambda: _closes("NDX"))
     if ndx:
-        import math
-
-        gsadf_pairs, long_history_error = _s4_months(ndx.value, today)
-        gsadf_monthly = [c for _, c in gsadf_pairs]
-        raw.gsadf_as_of = gsadf_pairs[-1][0] if gsadf_pairs else None
-        if long_history_error is None:
-            gsadf_src_note = f"Nasdaq-100 via QQQ proxy (Tiingo monthly 1999+, T={len(gsadf_monthly)})"
+        # ONE SERIES OR NO READING, PREPARED INSIDE ITS OWN BOUNDARY. The long
+        # monthly history is fetched, cut to completed months and put into
+        # logs by one tracked callable (_s4_series), as _ebp and _baa_spread
+        # are below. When any of that fails S4 has no statistic this run, and
+        # the mapping answers with its declared 0.25, state FLOOR, quality 0.0;
+        # no shorter series stands in (see _s4_months for what did, and why it
+        # went). The gate on the daily series above is as it was: S4 has always
+        # waited for it, and it has not failed (price_NDX: 613 of 613 health
+        # rows ok, 2026-07-12 .. 2026-11-10).
+        s4_series = _track(raw, "price_NDX_monthly", lambda: _s4_series(today))
+        if s4_series:
+            gsadf_logs, raw.gsadf_as_of, gsadf_months = s4_series
+            out = run_gsadf(gsadf_logs, timeout_s=get_settings().gsadf_timeout_s)
+            if out:
+                raw.gsadf_stat, raw.gsadf_cv90, raw.gsadf_cv95 = out.gsadf, out.cv90, out.cv95
+                raw.bsadf_stat, raw.bsadf_cv90 = out.bsadf, out.bsadf_cv90
+                raw.bsadf_cv95, raw.bsadf_argmax = out.bsadf_cv95, out.bsadf_argmax
+                raw.bsadf_n, raw.bsadf_n_finite = out.bsadf_n, out.bsadf_n_finite
+                raw.bsadf_cv_route = out.bsadf_cv_route
+                raw.gsadf_note = (f"Nasdaq-100 via QQQ proxy (Tiingo monthly 1999+, "
+                                  f"T={gsadf_months}) (cached MC CVs)")
+            else:
+                # Reason only — the "GSADF not computable this run" prefix is added
+                # once by the s4 note builder; do not repeat it here (was double-nested).
+                raw.gsadf_note = "R/exuber unavailable or the fit failed"
         else:
-            gsadf_src_note = (f"Nasdaq-100 via QQQ proxy (short series T={len(gsadf_monthly)}; "
-                              f"long history unavailable: {long_history_error})")
-        out = run_gsadf([math.log(v) for v in gsadf_monthly[-_M.get_path("gsadf", "series_months_max"):]],
-                        timeout_s=get_settings().gsadf_timeout_s)
-        if out:
-            raw.gsadf_stat, raw.gsadf_cv90, raw.gsadf_cv95 = out.gsadf, out.cv90, out.cv95
-            raw.bsadf_stat, raw.bsadf_cv90 = out.bsadf, out.bsadf_cv90
-            raw.bsadf_cv95, raw.bsadf_argmax = out.bsadf_cv95, out.bsadf_argmax
-            raw.bsadf_n, raw.bsadf_n_finite = out.bsadf_n, out.bsadf_n_finite
-            raw.bsadf_cv_route = out.bsadf_cv_route
-            raw.gsadf_note = f"{gsadf_src_note} (cached MC CVs)"
-        else:
-            # Reason only — the "GSADF not computable this run" prefix is added
-            # once by the s4 note builder; do not repeat it here (was double-nested).
-            raw.gsadf_note = "R/exuber unavailable or the fit failed"
+            # The reason as _track recorded it: redacted (app.redaction), the
+            # same text the price_NDX_monthly health row carries.
+            cause = raw.gather_errors.get("price_NDX_monthly", "unknown cause")
+            raw.gsadf_note = f"long monthly history unavailable: {cause[:80]}"
     else:
         raw.gsadf_note = "no Nasdaq-100/QQQ series this run"
 
@@ -742,10 +749,8 @@ def scored_s4_statistic(raw: RawInputs) -> tuple[float | None, float | None, flo
     return raw.gsadf_stat, raw.gsadf_cv90, raw.gsadf_cv95
 
 
-def _s4_months(ndx_daily: list[tuple[str, float]],
-               today: str) -> tuple[list[tuple[str, float]], str | None]:
-    """The month-end rows S4 is fitted on, oldest first, and why the long
-    history was not used (None when it was).
+def _s4_months(today: str) -> list[tuple[str, float]]:
+    """The month-end rows S4 is fitted on, oldest first.
 
     COMPLETED MONTHS ONLY: a row is in the fit when its month is strictly
     earlier than the month of `today`, the rule legs.month_end_faber uses.
@@ -770,19 +775,47 @@ def _s4_months(ndx_daily: list[tuple[str, float]],
     35). Not checked here: that the vendor has printed the month's final close.
     A feed that stops shows on S4's date when the SLA runs out, and on the
     daily series of the same vendor within its own 3 days.
+
+    ONE SERIES OR NO READING. The test is calibrated on the long monthly
+    history: QQQ from 1999, T~330; the adapter refuses fewer than 100 rows, the
+    documented minimum (PSY tables start at T=100). When that fetch failed, the
+    months inside the daily cache stood in here: about 42 months from 893 daily
+    rows, exuber's minimum window then about 12 where the long history has 35
+    or 36, i.e. another statistic under the same name, published as COMPUTED at
+    quality 1.0 and deciding 0.05 or 0.25 (about 1.4 points of the score). A
+    length check would refuse that series every time (893 daily rows cannot
+    hold 100 months), so it is removed, not guarded. It never ran in production
+    (2026-07-15 .. 2026-11-10: 601 of 601 computed readings were fitted on
+    T=329..333, 0 of 615 notes say "short series"), so no stored reading
+    changes. A failed fetch now raises into the caller's boundary, and S4 gets
+    what the mapping declares for a statistic that could not be computed: 0.25,
+    state FLOOR, quality 0.0, which costs Block S the 0.07 of S4 (coverage
+    0.93 with the other four counted; the block degrades below two thirds).
     """
     from app.sources import prices as price_src  # local, as in gather_inputs
 
-    try:
-        # PSY tables start at T=100; QQQ monthly from 1999 gives T~330.
-        rows = price_src.fetch_tiingo_monthly("NDX")
-        error = None
-    except Exception as exc:
-        # The shorter daily series stands in: the last bar of each month, under
-        # its own date.
-        rows = list({d[:7]: (d, c) for d, c in ndx_daily}.values())
-        error = str(exc)[:80]
-    return [(d, c) for d, c in rows if d[:7] < today[:7]], error
+    rows = price_src.fetch_tiingo_monthly("NDX")
+    return [(d, c) for d, c in rows if d[:7] < today[:7]]
+
+
+def _s4_series(today: str) -> tuple[list[float], str, int]:
+    """S4's input as one tracked source: the log prices R is handed (the last
+    gsadf.series_months_max completed months), the date of the last of them,
+    and how many completed months the history holds.
+
+    FETCHED AND DERIVED IN ONE CALLABLE, so `_track` covers both: the rule
+    `_ebp` and `_baa_spread` follow in gather_inputs. The fetch used to run
+    untracked and the logarithm in the gather body. math.log raises on a bar
+    <= 0, the adapter accepts any float, and nothing between the gather body
+    and the scheduler catches an exception: one such bar would have ended
+    every recompute without a snapshot until the vendor corrected it (the
+    2026-08 EBP date format did that for twelve days), where it should cost S4
+    alone, weight 0.07, its reading. No such bar was ever served. A history
+    with no completed month fails here the same way (no last row).
+    """
+    months = _s4_months(today)
+    tail = months[-_M.get_path("gsadf", "series_months_max"):]
+    return [math.log(close) for _, close in tail], months[-1][0], len(months)
 
 
 def _closed_months(daily: list[tuple[str, float]]) -> frozenset[str]:
