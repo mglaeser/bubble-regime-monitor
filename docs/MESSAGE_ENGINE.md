@@ -30,7 +30,10 @@ converge, and 57 review rounds on #121 and 20 on #124 showed it.
   name, which fills the template too (`typed_facts`, #126 round 14);
   the references for the trigger - the methodology and sources of its
   indicators (`app/message_engine/context.py`, repo-authored text only);
-  and how to write: one message, in `MESSAGE_LANGUAGE`, for its channel
+  and how to write: one message, in `MESSAGE_LANGUAGE` with each number
+  written as that language writes it (the digits as given: of production's
+  36 generated German digests of 2026-10-05 to 11-10, 19 carried the facts'
+  decimal point and 13 a comma), for its channel
   only, without links, within the channel's length and alphabet as the
   check counts them (septets and GSM-7 on SMS, where `[ \ ] ^ { | } ~ €`
   count as two; code points on iMessage, in printable ASCII and Latin-1,
@@ -580,10 +583,10 @@ by setting. `MESSAGE_LANGUAGE` (`en` | `de`) is that switch, one setting so
 the two paths never disagree in a single day's messages. The alert phrase
 set carries both languages since v3.5 (docs/ALERT_SYSTEM.md). The prompt
 library carries, per entry, `translations.<lang>` with its `fallback`
-template; the composer asks the model to write in the selected language and
-sends that language's template otherwise. An entry without a translation
-for the selected language renders in the library's own language: the
-owner's words in one language beat no words at all.
+template; the composer asks the model to write in the selected language,
+numbers included, and sends that language's template otherwise. An entry
+without a translation for the selected language renders in the library's
+own language: the owner's words in one language beat no words at all.
 
 ## Decision 28 — the digest's model is handed what the API serves (the owner, 2026-10-04)
 

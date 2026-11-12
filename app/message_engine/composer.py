@@ -368,6 +368,7 @@ def prompt_for(trigger: str, entry: dict[str, Any], facts: dict[str, object],
     references = context_material.render(context_material.references_for(trigger))
     framework = context_material.framework_for(trigger)
     language = settings.message_language or LIBRARY_LANGUAGE
+    written = _LANGUAGE_NAMES.get(language, language)
     # THE LENGTH AND THE ALPHABET AS THE CHECK COUNTS THEM: septets and GSM-7
     # on SMS, code points and the message alphabet on iMessage (#126 round 5,
     # SOTA-A: "150 characters" and a "€" at 150 was refused as 151 septets)
@@ -386,9 +387,16 @@ def prompt_for(trigger: str, entry: dict[str, Any], facts: dict[str, object],
         ("REFERENCES - what the indicators measure and where their data comes from:\n"
          f"{references}") if references else "",
         f"FRAMEWORK - how the monitor reads its numbers:\n{framework}" if framework else "",
-        (f"WRITE: one message in {_LANGUAGE_NAMES.get(language, language)}, for this channel only and "
-         f"without naming a channel, plain text without links or phone numbers, {length}. Reply with the "
-         f"message only."),
+        # EACH NUMBER AS THE LANGUAGE WRITES IT: the facts are Python's ("51.1"),
+        # and beside "exactly as given" the model copied the point into German
+        # on 19 of production's 36 generated digests of 2026-10-05..11-10
+        # ("51.1%"), wrote the comma on 13 ("41,8 %") and no decimal on 4. The
+        # language decides the mark and the digits stay the fact's: an
+        # instruction, with no rule per language and no check on the text
+        # (the owner's ruling of 2026-09-25: the reader interprets).
+        (f"WRITE: one message in {written}, for this channel only and without naming a channel, each number "
+         f"written as {written} writes it (its decimal mark included) with the digits as given, plain text "
+         f"without links or phone numbers, {length}. Reply with the message only."),
     ]
     return "\n\n".join(part for part in parts if part)
 
