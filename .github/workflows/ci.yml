@@ -191,6 +191,12 @@ jobs:
           python -m scripts.regime.separation_check --selftest
           python -m scripts.regime.separation_check
       - name: Regime — authorisation coverage (C-01, BLOCKING)
+        # The gate imports the application the server runs (app.main:app) and
+        # judges the routes it serves, not the decorators in the source. No
+        # lifespan runs: no migration, no scheduler, no network. TESTING is set
+        # as in the other steps that import the application.
+        env:
+          TESTING: "true"
         run: |
           python -m scripts.regime.authz_coverage --selftest
           python -m scripts.regime.authz_coverage
