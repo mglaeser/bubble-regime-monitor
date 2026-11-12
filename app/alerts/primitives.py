@@ -250,7 +250,8 @@ def _eval_range(node: RangeCondition, ctx: EvaluationContext,
 
 
 def _eval_crossing(node: CrossingCondition, ctx: EvaluationContext,
-                   thresholds: dict[str, float | int | None]) -> ConditionOutcome:
+                   thresholds: dict[str, float | int | None],
+                   *, hold_target: bool = False) -> ConditionOutcome:
     now = read_source(node.source, ctx.current)
     value = _as_number(now.value)
     if not now.available or value is None:
@@ -259,6 +260,12 @@ def _eval_crossing(node: CrossingCondition, ctx: EvaluationContext,
     if level is None:
         return ConditionOutcome(truth=None, status=EvaluationStatus.DISABLED,
                                 reasons=[f"level {node.level} is an unresolved pin"],
+                                evidence={node.source: now})
+    if hold_target:
+        # The episode a crossing opened lasts while the value stays where it
+        # crossed to: at or above the level going up, at or below going down.
+        held = value >= float(level) if node.direction == "up" else value <= float(level)
+        return ConditionOutcome(truth=held, reasons=["inverse_resolution_hold"],
                                 evidence={node.source: now})
     if ctx.previous is None:
         # Sitting above a level is not crossing it. Without a predecessor there
@@ -371,8 +378,19 @@ def evaluate_condition(node: Condition, ctx: EvaluationContext, rule: RuleSpec,
     if isinstance(node, NeverCondition):
         return ConditionOutcome(truth=False, status=EvaluationStatus.DISABLED,
                                 reasons=[f"structurally dark: {node.reason}"])
+    # A transition or crossing episode lasts while the state it led to lasts:
+    # the flag stays off, the leg stays in, the value stays beyond the level.
+    # `single_shot` holds as `auto_on_inverse` does. Ending the episode at the
+    # next evaluation instead would lose the P2 of the 22:00 UTC slot: it is
+    # held until 07:00 Berlin, the 02:00 UTC evaluation would resolve its
+    # episode, and `outbox.revalidate_members` drops a resolved member as
+    # RESOLVED_BEFORE_SEND. It would also put the 48 h reminder of
+    # structure.s3_tier_150 out of reach. With the hold a held all-clear is
+    # sent in the morning while it is still true and dropped when it is not.
+    # No auto_on_inverse rule has a crossing condition (0 of 90), so the
+    # crossing hold reaches the single_shot rules only.
     hold_inverse_target = (
-        currently_firing and rule.resolution.policy == "auto_on_inverse"
+        currently_firing and rule.resolution.policy in ("auto_on_inverse", "single_shot")
     )
     if isinstance(node, TransitionCondition):
         return _eval_transition(node, ctx, hold_target=hold_inverse_target)
@@ -387,7 +405,7 @@ def evaluate_condition(node: Condition, ctx: EvaluationContext, rule: RuleSpec,
     if isinstance(node, RangeCondition):
         return _eval_range(node, ctx, thresholds)
     if isinstance(node, CrossingCondition):
-        return _eval_crossing(node, ctx, thresholds)
+        return _eval_crossing(node, ctx, thresholds, hold_target=hold_inverse_target)
     if isinstance(node, DeltaCondition):
         return _eval_delta(node, ctx, thresholds)
     if isinstance(node, CountCondition):

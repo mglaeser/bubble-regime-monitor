@@ -280,13 +280,24 @@ def evaluate_state(
                 decision.reasons.append("candidate_reverted_before_confirmation")
             _clear_candidate(decision)
         elif prior == ConditionState.FIRING:
-            if rule.resolution.policy in ("auto_on_inverse", "auto_on_condition_false"):
+            if rule.resolution.policy == "manual":
+                # A manual episode never ends by itself (rulespec.ResolutionSpec).
+                decision.condition_state = ConditionState.FIRING
+            else:
+                # Every other policy ends the episode here, single_shot too, so
+                # the next occurrence opens a new one and `cooldown_seconds`
+                # alone limits a repeat message. A single_shot episode used to
+                # stay FIRING and nothing ever closed it, so each of the seven
+                # enabled single_shot rules fired once per ruleset. Production
+                # (read-only, 2026-11-10): tripwire.rf4_all_clear fired on
+                # 10-16, the flag came back on 10-20 and cleared on 10-21 14:02
+                # with no second all-clear (its cooldown over since 10-18, 1 of
+                # 5 non-P1 messages used in 24 h, outside quiet hours), and
+                # structure.s3_tier_100 read FIRING since 09-22 at a run-up of
+                # 64.7. How long such an episode lasts is decided in
+                # `primitives.evaluate_condition`: while its state lasts.
                 decision.resolve_episode = True
                 decision.reasons.append("condition_false")
-            else:
-                # single_shot / manual episodes do not self-resolve; the
-                # condition simply reads NORMAL again.
-                decision.condition_state = ConditionState.FIRING
         return decision
 
     # ---- condition is TRUE ---------------------------------------------
