@@ -808,8 +808,10 @@ def attest_consistency(votes: list[dict], models: list[str],
     AND supplies a substantive, distinct reason that helps attest_reasons pass.
 
     Found adversarially: a panelist returned refuted=false with a reason that
-    named two concrete defects. Fail-CLOSED — an inconsistent vote is discarded
-    as a parse failure, not resolved in favour of green.
+    named two concrete defects. Fail-CLOSED — one inconsistent green vote blocks
+    the run: this function returns ``block`` and ``main()`` exits 1 at the first
+    blocking gate. The other voices' approvals do not carry it (#182 round 1:
+    three approvals, one reason said "no bypass path", the run was refused).
 
     THE LADDER, per green vote, first hit wins, every rung fail-CLOSED:
       1. a ``defects`` ledger present but not a list of strings -> the schema
@@ -826,10 +828,15 @@ def attest_consistency(votes: list[dict], models: list[str],
       4. the vote's own prose names a defect word -> BLOCK.
 
     RUNG 4'S MATCH IS DELIBERATELY LITERAL, and stays that way. A green reason
-    saying "no fail-open" is discarded even though it asserts the OPPOSITE of a
-    defect, which cost a unanimous 3/3 approval on PR #64. The fix for that is
+    saying "no fail-open" blocks the run even though it asserts the OPPOSITE of
+    a defect, which cost a unanimous 3/3 approval on PR #64. The fix for that is
     upstream, in `build_system_prompt`: a green vote is asked to name code paths
-    and no defect term at all, so the ambiguous phrasing is never produced.
+    and no defect term at all, so the ambiguous phrasing is rare. The record on
+    2026-11-11: 485 saved panel logs hold one run blocked by this rung (#117
+    round 1, "injected stub predicate"), and #182 round 1 is noted beside it;
+    with #64, three blocks, each on approving prose, none a hidden finding. The
+    cost is accepted by decision
+    (tests/test_independent_verify.py::TestSharedAttackCorpus).
 
     Teaching this function to read negation was tried, in two repositories and
     two independent attempts, and withdrawn both times. Seven laundering paths
