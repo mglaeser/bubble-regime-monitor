@@ -295,6 +295,10 @@ class RawInputs:
     vix_ratio_fallback: bool = False
     vix_as_of: str | None = None
     vix_level: float | None = None
+    # The level is FRED's VIXCLS close first, the CBOE quote as the fallback
+    # (vix.vix_level); the date is FRED's observation date, None for the quote.
+    vix_level_source: str = "fred_VIXCLS"
+    vix_level_as_of: str | None = None
     skew: float | None = None
 
     spy_daily_closes: list[float] | None = None
@@ -792,6 +796,8 @@ def gather_inputs() -> RawInputs:
     r = _track(raw, "vix_level", vix_src.vix_level)
     if r:
         raw.vix_level = r.value
+        raw.vix_level_source = r.provenance.source
+        raw.vix_level_as_of = r.provenance.as_of
     r = _track(raw, "cboe_skew", vix_src.skew_level)
     if r:
         raw.skew = r.value

@@ -126,6 +126,43 @@ class TestSourceChains:
         assert result.provenance.fallback_used is False
         assert fetched == [vix.CBOE_VIX_URL, vix.CBOE_VIX3M_URL]
 
+    def test_the_vix_level_keeps_its_provenance(self, monkeypatch):
+        """The VIX level is FRED's VIXCLS close, with FRED's source and date;
+        the CBOE quote answers only when FRED fails, and has no date."""
+        import app.sources.vix as vix
+        from app.sources import Provenance, SourceResult
+
+        monkeypatch.setattr(vix, "fred_latest", lambda series_id: SourceResult(
+            19.92, Provenance(source=f"fred_{series_id}", as_of="2026-11-09")))
+        level = vix.vix_level()
+        assert (level.value, level.provenance.source, level.provenance.as_of) == (
+            19.92, "fred_VIXCLS", "2026-11-09")
+
+        def fred_down(series_id):
+            raise SourceError("fred down")
+
+        monkeypatch.setattr(vix, "fred_latest", fred_down)
+        monkeypatch.setattr(vix, "_cboe_last", lambda url, source: 19.46)
+        level = vix.vix_level()
+        assert (level.value, level.provenance.source, level.provenance.as_of) == (
+            19.46, "cboe_vix", None)
+
+    def test_the_recompute_carries_the_vix_levels_source_and_day(self):
+        """gather_inputs kept the level's value and dropped its source and
+        date, so the feed could only guess them. It needs every provider, so
+        its wiring is pinned by source (as tests/test_gather_error_boundary.py
+        does); what the feed publishes from it is in tests/test_dashboard_feed.py."""
+        import inspect
+
+        from app.services import compute
+
+        src = inspect.getsource(compute.gather_inputs)
+        assert "raw.vix_level_source = r.provenance.source" in src
+        assert "raw.vix_level_as_of = r.provenance.as_of" in src
+        # with no level fetched the label names the chain's first source
+        assert compute.RawInputs().vix_level_source == "fred_VIXCLS"
+        assert compute.RawInputs().vix_level_as_of is None
+
     def test_shillerdata_follows_multpl_for_the_current_cape(self, monkeypatch):
         import app.sources.cape as cape
 
