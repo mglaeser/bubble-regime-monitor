@@ -101,9 +101,11 @@ def start() -> BackgroundScheduler:
         _scheduler = BackgroundScheduler(timezone="UTC")
         # Every 4 hours, offset +2h so runs sit 1h AFTER the 01:00/13:00 breadth
         # sweeps (fresh cache) and keep the historical 06:00/18:00 anchors.
-        # Upstream budget at 6 runs/day: price/series caches reuse within their
-        # SLAs (daily data doesn't change intraday), Polygon stays 1 call/day,
-        # breadth spends nothing here (separate job), judgment = 6 LLM calls/day.
+        # Upstream budget at 6 runs/day: the daily price series are fetched
+        # once per NYSE session (by the first run after its UTC day; the cache
+        # answers the other runs, app/sources/prices.py), Polygon stays 1
+        # call/day, breadth spends nothing here (separate job), judgment = 6
+        # LLM calls/day.
         # The slot hours live in app.engine.recompute_slots — the SAME
         # definition the snapshot's expected_recompute_slot and the alert
         # watchdog's missed-slot count use. Never restate them here.

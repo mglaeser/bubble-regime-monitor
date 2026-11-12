@@ -18,7 +18,9 @@ Chain (spec v3.1 section 2):
   ONLY (SPY/QQQ/SMH/SOXX). Free tier is UNADJUSTED daily — acceptable for
   short-window ETF math, flagged.
 - TERMINAL  SQLite cache: last good series per canonical symbol served with
-  stale flags on total provider failure. Never a 500.
+  stale flags on total provider failure. Never a 500. It also answers, with
+  no provider asked, while it holds every completed NYSE session
+  (`_session_missing`): one fetch per symbol per session.
 
 INDEX HANDLING (decisive): none of the chain's free tiers serves raw index
 levels, so NDX -> QQQ and SPX -> SPY ETF proxies everywhere; proxy
@@ -37,6 +39,7 @@ from datetime import UTC, date, datetime, timedelta
 
 import httpx
 
+from app.alerts.calendars import is_trading_day
 from app.config import get_settings
 from app.logging_conf import get_logger
 from app.sources import Provenance, SourceError, SourceResult
@@ -48,7 +51,6 @@ INDEX_PROXIES = {"NDX": "QQQ", "SPX": "SPY"}  # the chain's free tiers serve no 
 
 FAIL_THRESHOLD = 3
 COOLDOWN = timedelta(hours=6)
-CACHE_SLA_DAYS = 3
 CACHE_MAX_ROWS = 900
 HISTORY_DAYS = 1300  # ~3.5 trading years: covers 2-3yr windows + SMA200
 
@@ -375,25 +377,59 @@ def _fetcher(name: str) -> Callable[[str], tuple[list[tuple[str, float]], str, b
     return globals()[f"fetch_{name}"]
 
 
+def _session_missing(last_bar: date, today: date) -> bool:
+    """Is an NYSE session that is over missing after `last_bar`?
+
+    A session is over when its UTC day is: the close is 21:00 UTC at the
+    latest, and the first recompute of the next UTC day (02:00) is the first
+    to ask. A running session is never a reason to ask: its bar is not final,
+    and in production Tiingo returned none for it (3 fetches of 3 in session).
+
+    This replaces a window of three calendar days (CACHE_SLA_DAYS = 3), under
+    which a regular week asked a provider on Monday, Tuesday and Friday at
+    02:00 UTC only and never read Tuesday's or Wednesday's close. Production,
+    2026-07-11 to 2026-11-10: 330 of 613 snapshots read a price endpoint one
+    (244) or two (86) completed sessions old (Wednesday 78 of 87, Thursday 86
+    of 86), and S3 sat in a tier the last completed session did not give on
+    18 snapshots (score 2.5 to 2.7 points high). All 41 fetches at 02:00 UTC
+    returned the last session before that UTC day.
+
+    Cost: one fetch per series per session: 4 series on 5 days a week (02:00
+    UTC, Tuesday to Saturday), where the window asked on 3. On the first
+    session day after a long weekend nothing is asked. The window asked on
+    each of that day's runs for a bar that did not exist (Tuesday 2026-09-08:
+    five times) and at 22:01 UTC, summer time, got the day's own bar; without
+    that fetch the cached bar is 4 calendar days old on the sixth run too
+    (whether that reads stale is the freshness SLA's rule, in
+    app/services/compute.py), and the day's bar arrives at 02:00 UTC like
+    every other."""
+    return any(is_trading_day(last_bar + timedelta(days=n))
+               for n in range(1, (today - last_bar).days))
+
+
 def get_daily_closes(canonical: str) -> SourceResult:
     """Daily closes for a canonical symbol via the full provider chain.
 
-    Cache within CACHE_SLA_DAYS short-circuits the network. Every failure
-    feeds the provider health scorer; total failure serves the stale cache
-    (flagged) or raises SourceError. The cache answers only for the
-    instrument the chain reads now: a row cached from another one - a native
-    NDX/SPX from before the proxies were the only path - is passed over, and
-    the next fetch replaces it (#155 round 2)."""
+    The cache answers without a fetch while no completed session is missing
+    from it (`_session_missing`). When a fetch still lacks the session (a
+    late provider, a closure the pinned calendar does not know), its answer
+    is served and the next run asks again: the chain is asked once per symbol
+    per run, and the schedule is the retry. Every failure feeds the provider
+    health scorer; total failure serves the stale cache (flagged) or raises
+    SourceError. The cache answers only for the instrument the chain reads
+    now: a row cached from another one - a native NDX/SPX from before the
+    proxies were the only path - is passed over, and the next fetch replaces
+    it (#155 round 2)."""
     canonical = canonical.upper()
     cached = _cache_get(canonical)
     if cached and cached[2].rsplit(":", 1)[-1] != resolve_symbol(canonical)[0]:
         cached = None
     if cached:
         rows, as_of, source = cached
-        age = (datetime.now(UTC).date() - date.fromisoformat(as_of)).days
-        if age <= CACHE_SLA_DAYS:
+        last_bar, today = date.fromisoformat(as_of), datetime.now(UTC).date()
+        if not _session_missing(last_bar, today):
             return SourceResult(rows, Provenance(source=source, as_of=as_of,
-                                                 note=f"cache ({age}d old)"))
+                                                 note=f"cache ({(today - last_bar).days}d old)"))
 
     errors: list[str] = []
     for name in PROVIDER_ORDER:
