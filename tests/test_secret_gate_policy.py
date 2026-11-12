@@ -28,6 +28,7 @@ Two lessons, one test file:
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -318,6 +319,33 @@ class TestImageContextExcludesCredentials:
                 f"{ignore_file}: {path!r} "
                 f"{'entered' if should_exclude else 'was wrongly kept out of'} "
                 "the build context")
+
+    def test_git_add_all_never_stages_the_env_family(self, tmp_path):
+        """The same family, kept out of the repository: `.gitignore` named
+        `.env` alone, so five backups of the credential file
+        (`.env.bak-<timestamp>`) sat untracked and unignored in the production
+        checkout, one `git add -A` from a commit (2026-11-11) - and the secret
+        gate reads the index, so it speaks after the commit. Asked of git
+        itself, in an empty repository that holds this `.gitignore` and
+        nothing of the host's own git configuration."""
+        git = shutil.which("git")
+        if git is None:
+            pytest.skip("git absent")
+        home = tmp_path / "home"
+        work = tmp_path / "work"
+        home.mkdir()
+        work.mkdir()
+        shutil.copy(ROOT / ".gitignore", work / ".gitignore")
+        cases = [*self.CASES, (".env.bak-20260101T000000Z", True)]
+        for path, _ in cases:
+            (work / path).parent.mkdir(parents=True, exist_ok=True)
+            (work / path).write_text("x\n", encoding="utf-8")
+        env = {"PATH": os.environ["PATH"], "HOME": str(home), "GIT_CONFIG_NOSYSTEM": "1"}
+        for command in (["init", "-q"], ["add", "-A"]):
+            subprocess.run([git, *command], cwd=work, env=env, check=True, capture_output=True)
+        staged = set(subprocess.run([git, "ls-files"], cwd=work, env=env, check=True,
+                                    capture_output=True, text=True).stdout.split())
+        assert staged == {".gitignore"} | {path for path, excluded in cases if not excluded}
 
     def test_the_two_ignore_files_cannot_drift(self):
         assert Path(".dockerignore").read_text() \

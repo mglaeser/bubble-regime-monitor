@@ -4,7 +4,19 @@ __pycache__/
 # The SYMLINK form too: a trailing slash matches directories only, and a
 # `.venv -> ../other/.venv` link walked through it and was committed (PR #100).
 .venv
+# The credential file and every backup or variant of it: a backup of a
+# credential file is the credential file (.containerignore says it for the
+# image). This file named `.env` alone, and five `.env.bak-<timestamp>` copies
+# sat untracked and unignored in the production checkout (2026-11-11), one
+# `git add -A` from a commit; the secret gate reads the index, so it speaks
+# only afterwards. The template is re-included last: the last match wins.
 .env
+.env.*
+*.env
+*.env.*
+.env~
+*.env~
+!.env.example
 data/*.db
 data/*.db-*
 data/snapshots/*
