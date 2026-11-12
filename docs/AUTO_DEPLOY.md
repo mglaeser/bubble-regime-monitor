@@ -9,9 +9,9 @@ chain is deleted, in the repository and on the host.
 | Piece | File | What it does |
 |---|---|---|
 | The service | `deploy/quadlet/bubblegauge.container` | A Podman Quadlet unit: systemd starts the container at boot (with linger), restarts it when it dies, and kills it when it stops answering `/healthz` (podman's own health check). It runs `localhost/bubblegauge:latest`. |
-| The release | `deploy/release.sh`, installed as `~/.local/bin/bubblegauge-release`, via `deploy/systemd/bubblegauge-release.service` | One comparison and no memory: the commit the running container carries (its OCI revision label; a stopped container carries none) against `origin/main`. Different: build main's commit from an export, point `:latest` at the image, restart the service - the new image migrates the database as it boots, one transaction - and wait for `/healthz`. Equal: nothing - a container that runs main's commit and does not answer is the service unit's to kill and restart, not the release's. |
+| The release | `deploy/release.sh`, installed as `~/.local/bin/bubblegauge-release`, via `deploy/systemd/bubblegauge-release.service` | One comparison and no memory of a release: the commit the running container carries (its OCI revision label; a stopped container carries none) against `origin/main`. Different: build main's commit from an export, point `:latest` at the image, restart the service - the new image migrates the database as it boots, one transaction - and wait for `/healthz`. Equal: nothing - a container that runs main's commit and does not answer is the service unit's to kill and restart, not the release's. |
 | The schedule | `deploy/systemd/bubblegauge-release.timer` | Five minutes after the last release ended, and two minutes after boot. |
-| The alarm | `deploy/systemd/bubblegauge-notify-failed@.service` | A failed release is reported once over iMessage through the host's notifier, then at most once an hour while it persists. |
+| The alarm | `deploy/systemd/bubblegauge-notify-failed@.service` | A failed release is reported once over iMessage through the host's notifier, then at most once an hour while it persists. A fetch that fails is not a failed release; it is reported once no fetch has succeeded for an hour. |
 
 **The contract.** The service runs `origin/main`'s commit, and main reaches
 production only as images, built and run in rootless containers: what runs
@@ -22,7 +22,13 @@ would fetch its fix. The checkout follows main fast-forward only, and git
 refuses rather than overwrite anything of the host's - local edits, untracked
 files and, with `--no-overwrite-ignore`, ignored ones such as `.env` and
 `data/`: a commit that tracked them would otherwise replace the host's
-secrets or its database. A release that fails
+secrets or its database. A fetch that fails is not a release that fails:
+nothing was being released and the service is untouched, so the tick says so
+and ends, and the next one tries again. When no fetch has succeeded for an
+hour the release fails and is reported: merges do not deploy. The time of the
+last good fetch is one empty file,
+`~/.local/state/bubblegauge-release/fetched` (the unit's state directory).
+A release that fails
 exits non-zero, is reported, and is tried again at the next tick; a commit that
 cannot be built, or cannot boot from scratch, touches nothing - the candidate
 is booted first in a throwaway container on an empty database (no `.env`, no
@@ -38,7 +44,11 @@ the service unit's, not the release's: stopping the release ends its build,
 and stopping the service ends a boot in flight, with an uncommitted
 migration rolled back. After the switch the service is
 systemd's: `Restart=always` every ten seconds without limit, and the health
-check kills a container that stops answering. Nothing rolls back: a release
+check kills a container that stops answering. A tick that falls into such a
+restart waits for the container, a minute at most, before it compares:
+`podman run --rm` leaves none in between, and with none to read the release
+took the commit that was coming back for a new one (2026-11-01). A service
+that stays down is released after that minute. Nothing rolls back: a release
 that answers nothing after the switch is what main says to run, and the next
 commit fixes it. The hand rollback, valid while the schema has not moved (the
 five newest commit tags are kept):
@@ -109,6 +119,7 @@ loginctl enable-linger "$USER"         # keep the user's units running without a
 ```bash
 systemctl --user list-timers bubblegauge-release.timer   # next check
 journalctl --user -u bubblegauge-release.service -n 50   # last releases
+ls -l ~/.local/state/bubblegauge-release/fetched         # the last fetch that succeeded
 systemctl --user start bubblegauge-release.service       # release now
 systemctl --user status bubblegauge.service              # the container
 systemctl --user restart bubblegauge.service             # apply a changed .env: the release moves code only

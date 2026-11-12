@@ -10,14 +10,17 @@
 # fast-forward made it, on the host, at the next tick, and a commit that broke
 # it stopped the very release that could fetch its fix (#147 round 6).
 #
-# One comparison and no memory: the commit the RUNNING container carries (its
-# OCI revision label) against origin/main. Equal: nothing to do. Different:
-# build main's commit from an export, point :latest at the image, restart the
-# service - the new image migrates the database as it boots, one transaction -
-# and wait for /healthz. A release that fails exits non-zero - the unit's
-# OnFailure= reports it - and is tried again at the next tick. Nothing rolls
-# back: after the switch the service is systemd's, and a release main cannot
-# run is fixed forward (docs/AUTO_DEPLOY.md, "The release timer").
+# One comparison and no memory of a release: the commit the RUNNING container
+# carries (its OCI revision label) against origin/main. Equal: nothing to do.
+# Different: build main's commit from an export, point :latest at the image,
+# restart the service - the new image migrates the database as it boots, one
+# transaction - and wait for /healthz. A release that fails exits non-zero -
+# the unit's OnFailure= reports it - and is tried again at the next tick. A
+# fetch that fails is not a release that fails: the tick ends, the next one
+# tries again, and what is reported is an hour without a fetch that succeeded
+# (see the fetch). Nothing rolls back: after the switch the service is
+# systemd's, and a release main cannot run is fixed forward
+# (docs/AUTO_DEPLOY.md, "The release timer").
 set -Eeuo pipefail
 
 IMAGE=localhost/bubblegauge
@@ -31,6 +34,9 @@ LABEL=org.opencontainers.image.revision
 # A boot, its migration included, has five minutes: the unit's TimeoutStartSec,
 # its health start period and this wait agree (the tests shorten it).
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-300}"
+# A container the unit restarts by itself is back within this (the tests
+# shorten it): the unit's RestartSec, 10 s, plus a start.
+RESTART_WAIT="${RESTART_WAIT:-60}"
 
 die() { printf '\nERROR: %s\n' "$*" >&2; exit 1; }
 trap 'die "release failed at line $LINENO"' ERR
@@ -58,16 +64,62 @@ last() {
 
 # Exactly origin's branch head, by explicit refspec and without tags: neither a
 # tag named like the branch nor a local ref stands in for it (#143 round 27).
-git fetch --quiet --prune --no-tags origin "+refs/heads/$BRANCH:$REMOTE"
+#
+# A fetch that fails is not a release that fails: nothing was being released,
+# and the service is untouched. The tick says so and ends before the
+# comparison - what origin's head is, is not known, so nothing is released
+# from the last known head either - and the next tick tries again. What fails
+# the unit, and reaches the owner through OnFailure=, is a failure that lasts:
+# no fetch has succeeded for an hour, so merges do not deploy (a revoked
+# deploy key, a changed host key). On the host, 2026-10-05 to 11-10: 18 of
+# about 10,300 ticks failed, every one of them here ("git@github.com:
+# Permission denied (publickey)" for single attempts, on six days, thirteen
+# of them within 91 minutes on 11-04), with main unmoved and the service up;
+# each failed the unit, and seven notices "bubblegauge-release failed ...
+# Alert delivery may be down" went out. The oldest good fetch at any of the
+# 18 was 27 minutes old: under this rule none of them is reported, and a
+# failure that lasts still is. git keeps no time of its last good fetch - a
+# refused one empties FETCH_HEAD and moves its time (executed, git 2.43) - so
+# the release keeps it: an empty file in the unit's StateDirectory=, touched
+# after a fetch that succeeded and never by one that failed, so failing ticks
+# do not keep the report away; with no file at all (a host that never reached
+# origin) the first failed fetch is reported. It is no memory of a release:
+# the comparison below still knows nothing of earlier runs.
+if ! git fetch --quiet --prune --no-tags origin "+refs/heads/$BRANCH:$REMOTE"; then
+  [[ -n "$(find "$STATE_DIRECTORY/fetched" -mmin -60 2>/dev/null)" ]] \
+    || die "no fetch from origin has succeeded for an hour: merges do not deploy; $SERVICE is untouched"
+  printf '==> the fetch failed: nothing is released, and the next tick tries again\n' >&2
+  exit 0
+fi
+touch "$STATE_DIRECTORY/fetched"
 TARGET="$(git rev-parse "$REMOTE")"
 # The one comparison. A container that runs main's commit and does not answer
 # is the unit's: podman's health check kills it after three failed checks,
 # Restart= boots it again, and the alarms report it. The release probes
 # nothing here - the probe on this path was where #143's rounds 3, 29 and 37
 # came from - and releases nothing it would only restart.
-[[ "$TARGET" != "$(running)" ]] || exit 0
+#
+# A container its unit is restarting is waited for, a minute at most, before
+# the comparison: after a kill, `podman run --rm` leaves no container at all
+# for the unit's RestartSec (10 s) plus the start, and with none to read the
+# release took the commit that was coming back for a new one. On the host,
+# 2026-11-01: health kill 02:02:51, container removed 02:02:56, this tick and
+# systemd's restart both 02:03:06, the container back 02:03:17 (26 s after
+# the kill), "==> Releasing 9f79c7a (running: 9f79c7a)", a rebuild, and a
+# second restart at 02:04:15, 58 s into the boot. The six restarts of that
+# night left no container for 11.5 to 38.2 s each, against the minute here.
+# This is no health probe come back: the restart is systemd's, already under
+# way, and the wait asks one thing - is there a container to read - and then
+# compares once. A running container ends it at the first look, so the quiet
+# path waits for nothing. A service that stays down is released as before,
+# the minute later (#147 round 3), and what comes back is compared like any
+# running container, so a crash loop on an older commit still gets its fix.
+# Read once: what is compared is what the line below names.
+back_by=$((SECONDS + RESTART_WAIT))
+until carried="$(running)"; [[ -n "$carried" ]] || (( SECONDS >= back_by )); do sleep 1; done
+[[ "$TARGET" != "$carried" ]] || exit 0
 
-printf '\n==> Releasing %s (running: %s)\n' "${TARGET:0:7}" "$(running | cut -c1-7)"
+printf '\n==> Releasing %s (running: %s)\n' "${TARGET:0:7}" "${carried:0:7}"
 # The checkout follows, fast-forward only, and git refuses rather than
 # overwrite anything of the host's: a diverged checkout, a local edit, an
 # untracked file - and, with --no-overwrite-ignore, an ignored one. Git treats

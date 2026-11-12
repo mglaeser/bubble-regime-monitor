@@ -28,7 +28,13 @@ Description=Report a bubblegauge watchdog failure over iMessage from the host
 [Service]
 Type=oneshot
 EnvironmentFile=%h/.config/bubblegauge/imessage.env
-ExecStart=%h/.local/bin/bubblegauge-notify-outage "alert watchdog unit failed"
+# The reason names the consequence, because this caller knows it: a watchdog
+# that cannot run - the container gone, the check crashed or hung - is the
+# case in which alert delivery may be down. The notifier adds no consequence
+# of its own (deploy/notify-outage.sh, at TEXT). The semicolon sits inside the
+# quoted argument, not as a word of its own, so it separates no commands
+# (systemd.service(5), "Command lines").
+ExecStart=%h/.local/bin/bubblegauge-notify-outage "alert watchdog unit failed; alert delivery may be down"
 # Never let the notifier's own failure loop back into another notification.
 # MUST exceed the script's worst-case curl budget, or systemd kills the last
 # delivery attempt: --max-time 20 per attempt, --retry 2, --retry-delay 3
