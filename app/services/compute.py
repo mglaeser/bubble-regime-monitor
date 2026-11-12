@@ -63,7 +63,7 @@ from app.indicators import (
 from app.logging_conf import get_logger
 from app.models import HyOasHistory, Snapshot, SourceHealth
 from app.redaction import sanitize
-from app.references import REGISTRY
+from app.references import REGISTRY, SOURCE_REGISTRY
 
 log = get_logger(__name__)
 
@@ -174,6 +174,30 @@ def monthly_baa_spread_bps(
 
 
 COVERAGE_DROP_THRESHOLD = _M.get_path("coverage", "drop_threshold")  # 1/3
+
+# The real 10-year yield's freshness SLA (README "Data sources & freshness
+# SLAs": Real 10-yr (S1), 3d), read from the registry row that documents it.
+# While FRED cannot serve the yield, S1 serves its last reading for that long
+# and is dropped after it.
+#
+# That reading is a tier of the fallback chain (AGENTS.md rule 3), not the
+# neutral placeholder rule 4 forbids: the service measured it itself, it keeps
+# the day it was measured on, it is flagged fallback_used, and it ends with
+# the SLA. Without a stored reading nothing is filled in and S1 is dropped
+# (tests/test_s1_last_reading.py). D2's cached reading, the price cache and
+# the HY OAS history are tiers of the same kind.
+#
+# Why: on 2026-10-21 18:00, 22:00 and 10-22 02:00 UTC FRED answered the DFII10
+# request with a body that was not JSON (3 of 615 recomputes; CAPE has failed
+# in none). S1 (weight 0.33, sub-score 0.975, the highest of Block S) was
+# dropped and the block renormalized onto the lower four: the median read
+# 47.94 / 47.51 / 48.07 where S1's reading of 14:00 UTC gives 52.72 / 52.25 /
+# 52.86, and one P2 message (ops.coverage_risk_masking) went out. Over the 612
+# stored S1 readings (2026-07-11 .. 2026-11-10) the sub-score moved by at most
+# 0.0143 within three days, which is 0.11 headline points; dropping S1 moved
+# the headline by 3.9 to 5.3 points on the stored snapshots replayed.
+REAL10Y_SLA_DAYS: int = next(
+    spec.sla_days for spec in SOURCE_REGISTRY if spec.key == "fred_real10y")
 
 
 def _coverage_gate(indicators: dict[str, Any]) -> dict[str, Any]:
@@ -306,6 +330,10 @@ class RawInputs:
     # last good (non-dropped) D2 reading from a prior snapshot, for the
     # margin >90d staleness guard: {"value", "sub_score", "timestamp"}
     margin_cached: dict[str, Any] | None = None
+
+    # S1's last reading from its primary sources, read only when FRED did not
+    # serve the real yield: {"value", "sub_score", "data_source", "as_of"}
+    s1_last: dict[str, Any] | None = None
 
     source_health: list[dict[str, Any]] = field(default_factory=list)
     gather_errors: dict[str, str] = field(default_factory=dict)
@@ -447,6 +475,30 @@ def _track(raw: RawInputs, source: str, fn: Any) -> Any:
         return None
 
 
+def last_primary_reading(indicator_id: str) -> dict[str, Any] | None:
+    """The newest stored reading of an indicator that its own sources served.
+
+    Not dropped and not a fallback: a carried reading is stored with
+    fallback_used, so it is never carried again and its age keeps counting
+    from the last reading that was measured."""
+    from app.models import IndicatorReading
+
+    with session_scope() as session:
+        row = session.execute(
+            select(IndicatorReading)
+            .where(IndicatorReading.indicator_id == indicator_id,
+                   IndicatorReading.dropped.is_(False),
+                   IndicatorReading.fallback_used.is_(False),
+                   IndicatorReading.sub_score.is_not(None))
+            .order_by(IndicatorReading.timestamp.desc()).limit(1)
+        ).scalars().first()
+        if row is None:
+            return None
+        return {"value": row.value, "sub_score": row.sub_score,
+                "data_source": row.data_source,
+                "as_of": row.timestamp.date().isoformat()}
+
+
 def gather_inputs() -> RawInputs:
     """Fetch all upstream sources with per-source circuit breakers.
 
@@ -478,6 +530,8 @@ def gather_inputs() -> RawInputs:
     if r:
         raw.real10y_decimal = r.value / 100.0
         raw.real10y_as_of = r.provenance.as_of
+    else:
+        raw.s1_last = last_primary_reading("s1")
 
     r = _track(raw, "ssga_spy_xlsx", ssga_src.top10_concentration)
     if r:
@@ -867,6 +921,25 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
                                            note="no CAPE history; percentile shimmed (0.99 if "
                                                 "CAPE>35 else 0.5); quality 0.5",
                                            quality=0.5)
+    elif (raw.real10y_decimal is None and raw.s1_last is not None
+          and (_s1_last_age := _age_days(raw.s1_last["as_of"])) is not None
+          and 0 <= _s1_last_age <= REAL10Y_SLA_DAYS):
+        # The real yield is unavailable: serve S1's last reading, with its own
+        # date, while it is inside the yield's SLA (see REAL10Y_SLA_DAYS). It
+        # counts with full quality, as D2's cached reading does: the table
+        # stores no quality, and all 612 S1 readings stored by 2026-11-10 are
+        # the full blend from multpl. The Monte Carlo uses the sub-score
+        # pinned for every draw, as for the ECY-only reading above: on the
+        # golden raw inputs (tests/conftest.py) the point score is the same
+        # (53.30) and the median reads 53.43 against 53.41.
+        sub = float(raw.s1_last["sub_score"])
+        sub_s["s1"] = sub
+        mc_in.s1_sub = sub
+        indicators["s1"] = IndicatorOutput(
+            "s1", raw.s1_last["value"], sub, False, raw.s1_last["data_source"], True,
+            note=f"real yield unavailable (FRED DFII10); serving the reading of "
+                 f"{raw.s1_last['as_of']}, for at most {REAL10Y_SLA_DAYS} days",
+            as_of=raw.s1_last["as_of"])
     else:
         indicators["s1"] = IndicatorOutput("s1", None, None, True, raw.cape_source, False,
                                            note="CAPE/real-yield unavailable; dropped, Block S renormalized")

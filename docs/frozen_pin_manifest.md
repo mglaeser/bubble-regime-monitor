@@ -235,6 +235,7 @@ Source: `compute.py`, `d4_lppls.py`.
 - d4 FLOOR / s4 FLOOR: row stays in payload with `quality=0.0`; the value is EXCLUDED from the geometric mean (block renormalizes). `VALID_ZERO` (a genuine 0) ENTERS the aggregation.
 - s5 chain: EBP (≥24 mo) → BAA-DGS10 proxy (≥24 mo) → HY-OAS 3yr → drop.
 - d2: within 75d SLA → YoY + rollover; else last-good cached (rollover unknown); else drop.
+- s1: real yield (FRED `DFII10`) unavailable → S1's last stored reading that is neither dropped nor itself a fallback, with the day it was measured and `fallback_used`, while at most 3 days old (the yield's SLA, `compute.py:REAL10Y_SLA_DAYS`); else drop.
 
 ## 12. Monte Carlo constants
 
