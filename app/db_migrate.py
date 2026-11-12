@@ -14,7 +14,10 @@ the project accumulated before migrations were authoritative:
 
 Used at app boot (main.lifespan): every release migrates the database as its
 new image boots, under the code that fits it (docs/AUTO_DEPLOY.md);
-`python -m app.db_migrate` runs the same upgrade by hand.
+`python -m app.db_migrate` runs the same upgrade by hand and prints its
+outcome. Neither applies Alembic's own logging setup (`_alembic_config`): at
+a boot Alembic's lines go through the process's logging, like any library's;
+by hand, the revision-by-revision output is the command line's, `make migrate`.
 
 A migration that fails fails the boot; nothing falls back, and the database
 is as it was: the upgrade runs as one transaction (migrations/env.py). The
@@ -48,6 +51,13 @@ def _alembic_config():
     # so this works regardless of cwd.
     cfg.set_main_option("sqlalchemy.url", get_settings().db_url)
     cfg.set_main_option("script_location", str(_ALEMBIC_INI.parent / "migrations"))
+    # The process's logging is app.logging_conf's and uvicorn's: migrations/env.py
+    # reads this and leaves it alone. Applied at every boot, Alembic's setup
+    # (fileConfig on alembic.ini) switched uvicorn's loggers off: the production
+    # journal of 2026-10-05 to 2026-11-10 holds 8 boots and not one "Application
+    # startup complete", and a request or a boot that fails wrote no traceback
+    # (executed on the real server; tests/test_boot_logging.py).
+    cfg.attributes["configure_logger"] = False
     return cfg
 
 
