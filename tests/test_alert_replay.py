@@ -10,7 +10,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -27,7 +27,7 @@ from app.alerts.replay import (
     ruleset_at_stage,
     run_replay,
 )
-from tests.test_alert_evaluation import make_input
+from tests.test_alert_evaluation import make_input, semis_input
 
 RULES = Path("config/alert_rules.v3.2.yaml")
 PHRASES = Path("config/alert_phrases.v3.5.json")
@@ -644,6 +644,73 @@ def test_a_derisk_neighbour_settles_an_excursion(tmp_path, artifacts):
     summary = _run(tmp_path, artifacts, name="run.db", inputs=history)
     assert summary.transient_one_snapshot_band_p1 == 0
     assert summary.indeterminate_band_excursions == 0
+
+
+# ---------------------------------------------------------------------------
+# a planned alert is taken as sent at its release time, so cooldowns and
+# reminders run as they do in production
+# ---------------------------------------------------------------------------
+
+
+def _band_arc(states: list[str]) -> list:
+    """One input every four hours from 2026-08-17 06:00 UTC, one band each."""
+    start = datetime(2026, 8, 17, 6, 0, tzinfo=UTC)
+    return [make_input(identity=f"arc-{index}",
+                       computed_at=(start + timedelta(hours=4 * index)).isoformat(),
+                       effective=state, base=state,
+                       median=64.0 if state == "de-risk" else 52.0)
+            for index, state in enumerate(states)]
+
+
+def test_a_replay_plans_no_repeat_inside_the_rules_cooldown(tmp_path, artifacts):
+    """De-risk at 4 h, out at 8 h, de-risk again at 24 h: 20 h after the first
+    P1, inside the rule's 48 h. Production suppresses that repeat
+    (`planner._cooldown_active`); a replay that started no cooldown planned it
+    and counted it."""
+    assert artifacts.ruleset.rule("regime.band_to_derisk").cooldown_seconds == 48 * 3600
+    summary = _run(tmp_path, artifacts, inputs=_band_arc(
+        ["trim", "de-risk", "trim", "trim", "trim", "trim", "de-risk", "de-risk"]))
+    assert summary.episodes_by_rule["regime.band_to_derisk"] == 2
+    assert summary.p1_total == 1
+    assert summary.suppressions_by_reason.get("COOLDOWN") == 1
+    assert summary.deliveries_sent == 0
+
+
+def test_a_replay_plans_the_repeat_once_the_cooldown_is_over(tmp_path, artifacts):
+    """The second entry 52 h after the first: a cooldown ends, both are planned."""
+    summary = _run(tmp_path, artifacts, inputs=_band_arc(
+        ["trim", "de-risk", "trim"] + ["trim"] * 11 + ["de-risk", "de-risk"]))
+    assert summary.episodes_by_rule["regime.band_to_derisk"] == 2
+    assert summary.p1_total == 2
+    assert "COOLDOWN" not in summary.suppressions_by_reason
+
+
+def test_a_replay_plans_the_reminder_of_a_condition_that_lasts(tmp_path, artifacts):
+    """De-risk from 4 h on, for 104 h. The P1, and 48 h after it the one
+    reminder its rule allows: a second would be due at 100 h if the replay did
+    not count the first for the episode (`repository.load_reminders_sent`)."""
+    policy = artifacts.ruleset.rule("regime.band_to_derisk").reminder_policy
+    assert (policy.after_seconds, policy.max_reminders) == (48 * 3600, 1)
+    summary = _run(tmp_path, artifacts, inputs=_band_arc(["trim"] + ["de-risk"] * 27))
+    assert summary.deliveries_by_kind == {"INITIAL": 1, "REMINDER": 1}
+    assert summary.deliveries_sent == 0
+
+
+def test_the_150_pp_tier_is_reminded_only_while_the_run_up_stays_beyond_it(
+        tmp_path, artifacts):
+    """structure.s3_tier_150 declares one reminder after 48 h, and a reminder
+    belongs to an open episode. The episode lasts while the run-up stays at or
+    above 150 pp: a run-up that stays there is reminded, one that fell back
+    after four hours is not."""
+    policy = artifacts.ruleset.rule("structure.s3_tier_150").reminder_policy
+    assert (policy.enabled, policy.after_seconds) == (True, 48 * 3600)
+    stays = [semis_input(i, value) for i, value in enumerate([140.0] + [155.0] * 14)]
+    falls = [semis_input(i, value)
+             for i, value in enumerate([140.0, 155.0] + [120.0] * 13)]
+    assert _run(tmp_path, artifacts, name="stays.db", inputs=stays
+                ).deliveries_by_kind == {"INITIAL": 1, "REMINDER": 1}
+    assert _run(tmp_path, artifacts, name="falls.db", inputs=falls
+                ).deliveries_by_kind == {"INITIAL": 1}
 
 
 # ---------------------------------------------------------------------------

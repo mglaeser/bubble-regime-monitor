@@ -1242,3 +1242,239 @@ def test_unknown_at_a_full_window_does_not_erase_known_flap_history():
 
     assert after["states"] == before["states"] == known
     assert after["transitions"] == before["transitions"]
+
+
+# ---------------------------------------------------------------------------
+# an event rule fires for every occurrence (resolution policy single_shot)
+#
+# docs/ALERT_SYSTEM.md section 5: "the condition re-fires and the cooldown is
+# the only thing standing between that and a second message". The ruleset on
+# structure.s3_tier_100: "sitting above 100 pp forever must alert once, not on
+# every recompute". All of these use the shipped ruleset.
+# ---------------------------------------------------------------------------
+
+
+def _drive(rule: RuleSpec, inputs: list[AlertInput]) -> list[tuple[bool, bool, str]]:
+    """Feed consecutive inputs through one rule, carrying its memory as the
+    engine does (`engine.evaluate_ruleset`, `repository.apply_decision`).
+
+    One (activated, resolved, condition state) per input.
+    """
+    memory = InstanceMemory()
+    previous: AlertInput | None = None
+    steps: list[tuple[bool, bool, str]] = []
+    for index, current in enumerate(inputs):
+        ctx = _ctx(current, previous)
+        firing = effective_prior_state(
+            memory.condition_state, memory.last_known_condition_state
+        ) == ConditionState.FIRING
+        decision = evaluate_state(
+            rule=rule, instance_fingerprint="fp", memory=memory,
+            outcome=evaluate_rule(rule, ctx, currently_firing=firing),
+            ctx=ctx, now=NOW + timedelta(hours=4 * index))
+        steps.append((decision.activate_episode, decision.resolve_episode,
+                      str(decision.condition_state)))
+        episode = None if decision.resolve_episode else (
+            "EP" if decision.open_episode else memory.current_episode_id)
+        memory = InstanceMemory(
+            state_version=memory.state_version + 1,
+            condition_state=decision.condition_state,
+            last_known_condition_state=decision.condition_state,
+            consecutive_true=decision.consecutive_true,
+            current_episode_id=episode)
+        previous = current
+    return steps
+
+
+def semis_input(index: int, runup_pp: float) -> AlertInput:
+    """An input whose semiconductor run-up (s3) reads `runup_pp`."""
+    stamp = (NOW + timedelta(hours=4 * index)).isoformat()
+    base = make_input(identity=f"semis-{index}", computed_at=stamp)
+    evidence = EvidenceModel(**build_evidence(
+        obs.DOMAIN_SEMIS, runup_pp, observed_at=stamp, unit="pp", source_id="s3",
+        period_start=stamp[:10], period_end=stamp[:10], data_state="FRESH",
+    ).as_dict())
+    return base.model_copy(update={"indicators": [*base.indicators, evidence]})
+
+
+def test_the_all_clear_fires_for_every_clearing():
+    """Production lost one: tripwire.rf4_all_clear fired on 2026-10-16, the
+    flag came back on 10-20 and cleared on 10-21 14:02 without a message."""
+    rule = _artifacts().ruleset.rule("tripwire.rf4_all_clear")
+    flag = [True, False, False, True, False, False]
+    steps = _drive(rule, [make_input(identity=f"rf4-{i}", rf4=value)
+                          for i, value in enumerate(flag)])
+    assert [activated for activated, _resolved, _state in steps] == [
+        False, True, False, False, True, False]
+    # The flag stays off: the all-clear is still what is true, one episode.
+    assert steps[2] == (False, False, "FIRING")
+    # The flag is back: the all-clear is over, and the next clearing is new.
+    assert steps[3] == (False, True, "NORMAL")
+
+
+def test_faber_back_in_holds_while_in_and_fires_again():
+    rule = _artifacts().ruleset.rule("legs.faber_spy_back_in")
+    leg = ["out", "in", "in", "out", "in"]
+    steps = _drive(rule, [make_input(identity=f"faber-{i}", faber=value)
+                          for i, value in enumerate(leg)])
+    assert [activated for activated, _resolved, _state in steps] == [
+        False, True, False, False, True]
+    assert steps[2] == (False, False, "FIRING")
+    assert steps[3] == (False, True, "NORMAL")
+
+
+def test_override_resolves_fires_again():
+    rule = _artifacts().ruleset.rule("override.resolves")
+    override = [True, False, False, True, False]
+    steps = _drive(rule, [make_input(identity=f"override-{i}", override=value)
+                          for i, value in enumerate(override)])
+    assert [activated for activated, _resolved, _state in steps] == [
+        False, True, False, False, True]
+    assert steps[3] == (False, True, "NORMAL")
+
+
+def test_a_crossing_holds_beyond_its_level_and_fires_at_the_next_crossing():
+    """structure.s3_tier_100 over production's run-up values of 2026-09-22
+    (98.7 -> 103.7) and 2026-10-16 (-> 91.5), then a second crossing."""
+    rule = _artifacts().ruleset.rule("structure.s3_tier_100")
+    runup = [98.7, 103.7, 107.8, 91.5, 64.7, 101.0]
+    steps = _drive(rule, [semis_input(i, value) for i, value in enumerate(runup)])
+    assert steps[1] == (True, False, "FIRING")      # crossed 100
+    assert steps[2] == (False, False, "FIRING")     # above 100: one episode, no repeat
+    assert steps[3] == (False, True, "NORMAL")      # back below: over
+    assert steps[4] == (False, False, "NORMAL")
+    assert steps[5] == (True, False, "FIRING")      # crossed again: a new episode
+
+
+def test_a_crossing_hold_follows_its_direction_and_only_the_two_holding_policies():
+    """Up is held at or above the level, down at or below it. A crossing that
+    resolves `auto_on_condition_false` stays an event that ends at the next
+    evaluation: tripwire.margin_rollover is the enabled rule of that kind."""
+    def rule(direction: str, policy: str) -> RuleSpec:
+        return _rule(
+            rule_id="test.cross", source_fields=["breadth_pct"],
+            condition={"kind": "crossing", "source": "breadth_pct",
+                       "direction": direction, "level": "tier"},
+            thresholds=[{"name": "tier", "value": 60.0, "unit": "percent",
+                         "attribution": "LIT"}],
+            confirmation_sources=["breadth_pct"], authoritative=False,
+            resolution={"policy": policy})
+
+    def truth(direction: str, policy: str, value: float | None, *, firing: bool = True):
+        before = make_input(identity="before", breadth=value)
+        return evaluate_rule(rule(direction, policy),
+                             _ctx(make_input(identity="now", breadth=value), before),
+                             currently_firing=firing).truth
+
+    for policy in ("single_shot", "auto_on_inverse"):
+        assert truth("up", policy, 70.0) is True
+        assert truth("up", policy, 60.0) is True
+        assert truth("up", policy, 59.9) is False
+        assert truth("down", policy, 50.0) is True
+        assert truth("down", policy, 60.0) is True
+        assert truth("down", policy, 60.1) is False
+        # Sitting beyond a level is not crossing it: no episode, no hold.
+        assert truth("up", policy, 70.0, firing=False) is False
+        # An unreadable value holds the episode as UNKNOWN, it does not end it.
+        assert truth("up", policy, None) is None
+    assert truth("up", "auto_on_condition_false", 70.0) is False
+    assert truth("down", "auto_on_condition_false", 50.0) is False
+
+
+def test_a_falsification_outcome_fires_each_time():
+    """A condition that names no lasting state (a `delta`) ends at the first
+    false evaluation, so the next recorded outcome is a new P1."""
+    rule = _artifacts().ruleset.rule("constellation.falsification_event")
+    recorded = [0, 1, 1, 2]
+    steps = _drive(rule, [
+        make_input(identity=f"outcome-{i}").model_copy(
+            update={"falsification_events": [{"id": k} for k in range(count)]})
+        for i, count in enumerate(recorded)])
+    assert [(activated, resolved) for activated, resolved, _state in steps] == [
+        (False, False), (True, False), (False, True), (True, False)]
+
+
+def test_the_rows_stuck_in_production_settle_at_the_next_evaluation():
+    """Production, 2026-11-10 22:02: two instances read FIRING with an open
+    episode. No migration touches them; the next evaluation decides them."""
+    def decide(rule, memory, current, previous, *, firing):
+        ctx = _ctx(current, previous)
+        return evaluate_state(
+            rule=rule, instance_fingerprint="fp", memory=memory,
+            outcome=evaluate_rule(rule, ctx, currently_firing=firing), ctx=ctx, now=NOW)
+
+    stuck = InstanceMemory(state_version=300, condition_state=ConditionState.FIRING,
+                           last_known_condition_state=ConditionState.FIRING,
+                           current_episode_id="EP")
+
+    # structure.s3_tier_100, open since 09-22, run-up 64.7: over, no message.
+    tier = _artifacts().ruleset.rule("structure.s3_tier_100")
+    settled = decide(tier, stuck, semis_input(1, 64.7), semis_input(0, 64.9), firing=True)
+    assert (settled.resolve_episode, settled.activate_episode,
+            settled.condition_state) == (True, False, ConditionState.NORMAL)
+
+    # tripwire.rf4_all_clear, open since 10-16, flag off: it stays open, and
+    # that is now correct. No message for the clearing of 10-21 after the fact.
+    all_clear = _artifacts().ruleset.rule("tripwire.rf4_all_clear")
+    off = make_input(identity="off", rf4=False)
+    on = make_input(identity="on", rf4=True)
+    held = decide(all_clear, stuck, off, off, firing=True)
+    assert (held.resolve_episode, held.activate_episode,
+            held.condition_state) == (False, False, ConditionState.FIRING)
+    # The flag returns: the episode ends. It clears again: a new all-clear.
+    over = decide(all_clear, stuck, on, off, firing=True)
+    assert (over.resolve_episode, over.condition_state) == (True, ConditionState.NORMAL)
+    again = decide(all_clear, InstanceMemory(state_version=301), off, on, firing=False)
+    assert again.activate_episode is True and again.open_episode is True
+
+
+def test_a_manual_episode_still_never_ends_by_itself():
+    """`manual` is the one policy a false condition does not resolve."""
+    rule = _rule(resolution={"policy": "manual"},
+                 condition={"kind": "enum_equals", "source": "effective_action_state",
+                            "values": ["de-risk"]})
+    memory = InstanceMemory(state_version=3, condition_state=ConditionState.FIRING,
+                            last_known_condition_state=ConditionState.FIRING,
+                            current_episode_id="EP")
+    current = make_input(identity="trim", effective="trim")
+    outcome = evaluate_rule(rule, _ctx(current, current), currently_firing=True)
+    assert outcome.truth is False
+    decision = evaluate_state(rule=rule, instance_fingerprint="fp", memory=memory,
+                              outcome=outcome, ctx=_ctx(current, current), now=NOW)
+    assert decision.resolve_episode is False
+    assert decision.condition_state == ConditionState.FIRING
+
+
+def test_two_all_clears_five_days_apart_both_plan_a_message(isolated_db):
+    """The real engine and database: the breadth flag is on, clears, comes
+    back five days later and clears again. Each clearing is an episode with a
+    planned message; the first episode ended when the flag came back."""
+    from sqlalchemy import select
+
+    from app.alerts.models import AlertDeliveryMember, AlertEpisode
+    from app.db import session_scope
+
+    artifacts = _artifacts()
+    start = datetime(2026, 8, 17, 2, 0, tzinfo=UTC)
+    activated: dict[int, list[str]] = {}
+    for slot, flag in [(0, True), (1, False), (2, False), (33, True), (34, False),
+                       (35, False)]:
+        at = start + timedelta(hours=4 * slot)
+        current = make_input(identity=f"clear-{slot}", computed_at=at.isoformat(),
+                             rf4=flag, rf4_period=at.date().isoformat())
+        _store_input(current, at)
+        outcome = _run(current, artifacts, now=at + timedelta(minutes=2))
+        assert outcome.status == "COMMITTED"
+        activated[slot] = [d.rule_id for d in outcome.decisions if d.activate_episode]
+
+    assert "tripwire.rf4_all_clear" in activated[1]
+    assert "tripwire.rf4_all_clear" in activated[34], "the second all-clear did not fire"
+    assert "tripwire.rf4_all_clear" not in activated[2] + activated[33] + activated[35]
+    with session_scope() as session:
+        episodes = [(row.episode_status, row.is_open) for row in session.execute(
+            select(AlertEpisode).where(AlertEpisode.rule_id == "tripwire.rf4_all_clear")
+            .order_by(AlertEpisode.opened_at)).scalars().all()]
+        members = session.execute(select(AlertDeliveryMember).where(
+            AlertDeliveryMember.rule_id == "tripwire.rf4_all_clear")).scalars().all()
+        assert episodes == [(EpisodeStatus.RESOLVED, False), (EpisodeStatus.FIRING, True)]
+        assert len(members) == 2

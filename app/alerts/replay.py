@@ -21,7 +21,8 @@ here rather than a matter of care:
   Determinism is the Stage 1 gate, so it is asserted, not assumed.
 
 Nothing here can send. The sender is `NullSender` by construction and the mode
-is `DRYRUN`, which is its own state namespace.
+is `DRYRUN`, which is its own state namespace. A planned alert is taken as sent
+at its release time, so cooldowns and reminders run as they do in production.
 """
 
 from __future__ import annotations
@@ -567,6 +568,8 @@ def run_replay(
                 # NOT_EVALUABLE is reported, never counted as a detection.
                 continue
 
+            with scope() as session:
+                _take_released_alerts_as_sent(session, now=_moment_of(alert_input))
             outcome = run_evaluation(
                 scope,
                 alert_input=alert_input,
@@ -604,6 +607,44 @@ def run_replay(
     )
     _decide(summary)
     return summary
+
+
+def _take_released_alerts_as_sent(session: Session, *, now: datetime) -> None:
+    """Advance the notification memory as a send does, at the release time.
+
+    Production starts a rule's cooldown and its next notification generation
+    when an alert is sent (`outbox.mark_sent`). A replay sends nothing, so
+    without this step no cooldown ever started and no reminder was ever due:
+    over production's 307 sidecars since the promotion of 2026-09-20 it
+    planned 24 first alerts and no reminder where production planned 19 and 2
+    (5 episodes suppressed by their cooldown). With it the replay plans those
+    21, each at the same slot, with the same kind, priority and rule (read-only
+    copy of 2026-11-10). The delivery row is not touched: nothing is SENT, and
+    a hold by budget, a drop or a withdrawal before sending is not modelled.
+    """
+    from app.alerts.models import (
+        AlertDelivery,
+        AlertDeliveryMember,
+        AlertInstanceNotificationState,
+    )
+
+    for delivery, member in session.execute(
+        select(AlertDelivery, AlertDeliveryMember)
+        .join(AlertDeliveryMember,
+              AlertDeliveryMember.delivery_id == AlertDelivery.delivery_id)
+        .where(AlertDelivery.not_before <= now,
+               AlertDeliveryMember.delivered.is_(False))
+        .order_by(AlertDelivery.not_before.asc(), AlertDelivery.delivery_id.asc())
+    ).all():
+        # `delivered` is what `repository.load_reminders_sent` counts, so a
+        # rule's `max_reminders` holds per episode as it does in production.
+        member.delivered = True
+        state = session.get(AlertInstanceNotificationState, (
+            delivery.mode, delivery.live_profile, member.instance_fingerprint))
+        if state is not None:
+            state.last_sent_at = delivery.not_before
+            state.next_notification_generation = max(
+                state.next_notification_generation, member.notification_generation + 1)
 
 
 def _collect_episodes(session: Session, summary: ReplaySummary,
