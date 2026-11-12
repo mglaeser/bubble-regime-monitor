@@ -10,7 +10,8 @@
 > This banner records the **authoritative operator verdicts** on each PIN. The
 > analysis below (my original recommendations) is retained unchanged as the
 > reasoning of record, but where a recommendation conflicts with a verdict here,
-> **this banner governs.** No PIN is implemented. Every open item now routes
+> **this banner governs.** No PIN is implemented, except G (2026-11, its row
+> below). Every open item now routes
 > through the companion **[PIN Evidence Pack](./PIN_EVIDENCE_PACK.md)** before any
 > decision; nothing is a "freeze-scope completion" until proven so there.
 
@@ -22,7 +23,7 @@
 | **D. D3 non-positive OCF** | **HOLD** | "Saturate base to 1.0" not approved. Compare ≥5 alternatives with quantified historical effect. Evaluate **jointly with E** as one D3 decision. |
 | **E. D3 minimum issuers** | **HOLD** | `min_issuers = 3` not approved. Sensitivity across 1–5 usable issuers and hard minimums 2/3/4, drop-vs-suppress, historical effect. Joint with D. |
 | **F. ATH basis** | **DIRECTION APPROVED, SOURCE UNPINNED** | Intended object = **S&P 500 price index** ATH (fallback: unadjusted SPY price close, labelled ETF proxy). Dividend-adjusted total-return SPY is **not acceptable** as the ATH basis. Watermark must use genuinely long history, not the 900-row cache. Propose the concrete public source + fallback chain and demonstrate continuity before implementing; evaluate its freeze class explicitly. |
-| **G. LPPLS_SEED** | **HOLD PENDING PROBE** | Run a package-level probe of lppls==0.6.24 (RNG source, worker inheritance, workers=1 control, isolated-subprocess reproducibility, before/after D4 effect). Reusing `20260711` is not automatically freeze-neutral. Return a repeated-run before/after table. |
+| **G. LPPLS_SEED** | **RESOLVED 2026-11** (was **HOLD PENDING PROBE**) | The verdict of 2026-07-19 asked for a package-level probe of lppls==0.6.24 with a repeated-run before/after table, and for the chosen path to be brought back for approval before any implementation. The probe and the table are in [PIN Evidence Pack](./PIN_EVIDENCE_PACK.md) section 6. The change that wrote this row is the chosen path brought back: it reaches `main` only by the owner's merge, and that merge is the approval that lifts the hold. **Path:** the forked fit worker is seeded with the frozen `monte_carlo.seed` (20260711) through an at-fork hook (`app/indicators/d4_lppls.py:LPPLS_SEED`, `tests/test_d4_reproducible.py`). No new constant and no byte of `frozen_methodology.json`: the number was already frozen, and the methodology version is unchanged. The golden fixture does not move (D4 enters it as a fixed number). **Effect:** the same closes give the same D4. Before, D4 differed in 399 of 407 consecutive production snapshots in which no other input had changed, and 11 of the 16 changes between trim and de-risk had D4 as the only moved input. **One relevel at deploy:** on the last four endpoints the seeded reading is 0.02 to 0.04 below the mean of production's unseeded readings of the same closes (0.1626 against 0.2043 on the closes of 2026-11-09), about −0.4 to −0.7 headline points at 17 points per unit of D4. |
 | **H. S5 calendar anchoring** | **AUTHORIZE v4 DESIGN PHASE ONLY** | Proceed with the S5-v4 **design + test implementation** as the first score-shifting workstream. Do **not** activate in the production headline. Production S5 stays positional and keeps emitting `s5_lag="provisional_positional"`, `known_defects=[C-01,C-02,C-03]`. New methodology version + falsification-clock reset + dual reporting + regenerated golden only after final operator approval. |
 
 **Next deliverable (this document's companion):** a documentation-only **PIN
@@ -281,6 +282,17 @@ rationale · estimated effect · backward-compat/freeze implications · recommen
 
 ## G. `LPPLS_SEED` — determinism of the D4 fit
 
+> **Superseded 2026-11: see the banner.** The items below are the reasoning of
+> 2026-07-19, kept as written; where they differ from this note, this note
+> holds. Item 1: a seed is set, in the forked fit worker. Item 4 ("slightly different d4 sub-scores",
+> "not a red-flag tripwire"): measured in production from 2026-07-11 to
+> 2026-11-10, the redraw moved the headline on unchanged inputs by a median of
+> 0.19 points, 0.61 at the 90th percentile and 1.73 at most; D4 was the only
+> moved input in 11 of the 16 changes between the trim and de-risk bands, and
+> one of those 11 sent the priority-1 alert of 2026-09-30 22:01 UTC (median
+> 59.96 → 60.06 on D4 0.2981 → 0.3048). Items 5 and 7: no constant was added;
+> the seed is the frozen `monte_carlo.seed`, and `workers` stays 1.
+
 1. **Current behavior.** **No seed is set.** `model.mp_compute_nested_fits(...)`
    (`d4_lppls.py:210`) runs the lppls 0.6.24 optimizer from random initial guesses
    (up to `max_searches` per window) with no RNG control anywhere in the module or
@@ -372,7 +384,7 @@ rationale · estimated effect · backward-compat/freeze implications · recommen
 | E | D3 min issuers | v4 | no | independent, low-risk |
 | B | MIN_RESOLVED_SCORE | v4 | no | independent |
 | F | ATH basis | v4 | no | safety-critical review (override) |
-| G | LPPLS seed | v4 | no | needs a 0.6.24 RNG/worker probe first |
+| G | LPPLS seed | v4 | no | needs a 0.6.24 RNG/worker probe first — **resolved 2026-11, see the banner** |
 | C | NDX instrument policy | freeze/doc | no | freeze QQQ-proxy explicitly; low effort |
 
 **S3 common-calendar returns** and **CAPE degraded-history MC** remain behind H and
@@ -381,5 +393,6 @@ decided.
 
 ---
 
-*No PIN in this memo has been implemented. Awaiting your approval of the exact
+*No PIN in this memo has been implemented, except G (2026-11, see the banner).
+Awaiting your approval of the exact
 constants/policies above before any v4 (score-shifting) work begins.*

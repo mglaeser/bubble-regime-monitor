@@ -156,6 +156,7 @@ The ladder below is statistic-agnostic; `gsadf.statistic` selects what `stat` is
 | `O_min` / `D_min` / tc-window | library DS-LPPLS defaults **⚠ from module comment, not set in our code** — confirm vs pinned lppls 0.6.24 before final freeze | `d4_lppls.py` header comment |
 | Sub-score | `clip(pos_confidence_at_t2, 0, 1)` | `d4_lppls.py:sub_score` |
 | Quality | `1.0` full scan / `0.5` partial (<100 windows) / `0.0` FLOOR | `d4_lppls.py` |
+| Fit seed (since 2026-11) | the Monte Carlo's frozen seed, `monte_carlo.seed` = `20260711`, set in the forked fit worker; no key of its own | `d4_lppls.py:LPPLS_SEED` |
 | Subprocess timeout | `lppls_timeout_s = 1500` | `config.py` |
 
 ## 5. VIX term-structure thresholds and multipliers
@@ -241,7 +242,7 @@ Source: `compute.py`, `d4_lppls.py`.
 | Constant | Value | Source |
 |---|---|---|
 | Sample count `N` | `100_000` | `montecarlo.py`; `config.py:mc_samples` |
-| Seed | `20260711` | `montecarlo.py`; `config.py:mc_seed` |
+| Seed | `20260711` | `montecarlo.py`; `config.py:mc_seed`; `d4_lppls.py:LPPLS_SEED` (the LPPLS fit reads the same frozen value) |
 | RNG | `numpy.random.default_rng(seed)` (PCG64) | `montecarlo.py` |
 | Dirichlet concentration | `DIRICHLET_CONCENTRATION = 50.0`; weights ~ `Dirichlet(base * 50)` | `montecarlo.py` |
 | Alpha | `alpha ~ U(0.40, 0.60)` (`ALPHA_RANGE`), `beta = 1 - alpha` | `montecarlo.py:ALPHA_RANGE` |

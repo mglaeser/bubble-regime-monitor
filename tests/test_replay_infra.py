@@ -196,9 +196,12 @@ class TestRM5Assembler:
 
         _persist_golden()
         pkg = assemble_decision_packages()
-        for pin in ("DE_d3_ocf_quorum", "F_ath_basis", "G_lppls_execution", "C_ndx_identity"):
+        for pin in ("DE_d3_ocf_quorum", "F_ath_basis", "C_ndx_identity"):
             assert pkg[pin]["status"] == "PENDING_HOST"
         assert "H_s5_calendar" not in pkg
+        # PIN G is resolved, not pending: the fit worker is seeded
+        # (tests/test_d4_reproducible.py), so no host study is outstanding
+        assert "G_lppls_execution" not in pkg
         assert pkg["B_coverage_floor"]["report"]["snapshots"] == 1
 
 
