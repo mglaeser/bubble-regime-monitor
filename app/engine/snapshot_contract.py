@@ -9,9 +9,17 @@ This module derives the typed decomposition from values the scoring layer has
 ALREADY computed, by *calling* the authoritative band functions in
 `app.engine.aggregate` — it never restates a threshold or a formula:
 
-    score_action_band     band implied by the MC headline median alone, before
-                          the non-compensatory override and before coverage
-                          suppression                    -> aggregate.action_band
+    score_action_band     band of the published Monte Carlo median, before
+                          coverage suppression           -> aggregate.action_band
+                          The override holds every draw at its floor before
+                          the median is taken (montecarlo.monte_carlo), so
+                          with a fired override this reads de-risk, as
+                          base_action_band does: the two are equal on every
+                          snapshot the pipeline computes (all 606 production
+                          snapshots that carry both, to 2026-11-10; the
+                          override had fired on none of the 615). What the
+                          composite alone said stays readable from the two
+                          block values (aggregate.combine).
     base_action_band      authoritative decision after the persisted override,
                           before coverage presentation suppression
                                                  -> aggregate.action_band_with_override
