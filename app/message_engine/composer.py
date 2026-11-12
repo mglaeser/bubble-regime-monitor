@@ -181,7 +181,8 @@ _CONTROL_RE = re.compile(
 #: and only as one of that fact's values. The judgment is the prior LLM
 #: judgment, redacted and capped. Any other value - text, a non-finite
 #: number, a structure - is no fact: the template shows a dash and the
-#: prompt leaves it out.
+#: prompt leaves it out. The judgment's prompt types its values by the same
+#: rule and these word domains (app/engine/judgment.py:generate).
 _TRENDS = frozenset({"IN", "OUT", "unknown", "?"})
 _DIGEST_BANDS = frozenset(ACTION_BANDS) | {"suppressed (block degraded)", "de-risk (data degraded)"}
 WORDS: dict[str, frozenset[str]] = {

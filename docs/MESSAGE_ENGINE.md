@@ -65,7 +65,10 @@ converge, and 57 review rounds on #121 and 20 on #124 showed it.
   a producer types, which is pinned (`tests/test_message_engine.py::TestRoundTwoOn145`),
   as is the engine's wiring: `engine_delivery.deliver` is called once in
   the app, from the daily digest, and outside the engine's package only the
-  digest and the entry point import it (`TestRoundOneOn145`). The template
+  digest and the entry point import it - the deploy note its admission gate
+  alone, and the judgment the type rule alone (`composer.typed`, a check
+  of one value: `judgment.generate` types the values of its own prompt by
+  it, AGENTS.md ground rule 1) (`TestRoundOneOn145`). The template
   renderer holds the type line by itself: a slot renders a typed fact,
   whatever dict `render_fallback` is given. With the two fixed entries gone
   no entry is `llm: false`, and the composer has no fixed-trigger path.
