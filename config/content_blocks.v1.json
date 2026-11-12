@@ -1,5 +1,5 @@
 {
-  "content_version": 2,
+  "content_version": 3,
   "generated": "2026-08-29",
   "origin": "save-haven-monitor prose migration (shallow-frontend program, A1 ledger; verbatim extraction)",
   "blocks": {
@@ -1063,7 +1063,7 @@
     },
     "gauge.epistemic.chip_long": {
       "kind": "text",
-      "text": "Heuristic · not a probability · calibrated on n≈4 · see limits",
+      "text": "Heuristic · not a probability · uncalibrated (n≈4) · see limits",
       "source": "src/bubblegauge.tsx:148"
     },
     "gauge.band.oneliner": {
@@ -1072,9 +1072,9 @@
         "hold": "Hold — structural risk is present but not acute. No action indicated by the trend rule.",
         "trim": "Trim — fragility is elevated. Consider easing risk if the trend rule confirms.",
         "de-risk": "De-risk — fragility is high or a hard override has fired. The trend rule is now the thing to watch.",
-        "suppressed": "Not scored right now — too many inputs for one block are unavailable, so the action band is withheld rather than guessed.",
-        "suppressed (block degraded)": "Not scored right now — too many inputs for one block are unavailable, so the action band is withheld rather than guessed.",
-        "fallback": "Not scored right now — too many inputs for one block are unavailable, so the action band is withheld rather than guessed.",
+        "suppressed": "Band withheld right now — too many inputs for one block are unavailable, so the action band is withheld rather than guessed; the score is still published.",
+        "suppressed (block degraded)": "Band withheld right now — too many inputs for one block are unavailable, so the action band is withheld rather than guessed; the score is still published.",
+        "fallback": "Band withheld right now — too many inputs for one block are unavailable, so the action band is withheld rather than guessed; the score is still published.",
         "unknown": "Not scored — the current reading could not be classified, so the action band is withheld."
       },
       "source": "src/bubblegauge.tsx:149-154"
@@ -1178,12 +1178,11 @@
     "gauge.reg.s5": {
       "kind": "map",
       "entries": {
-        "plain": "When lenders are most relaxed, trouble tends to arrive about two years later. As of Jul 2026, spreads were near 25-year tights.",
-        "fire": "High-yield spreads are historically tight (measured with a two-year lead).",
+        "plain": "When lenders are most relaxed, trouble tends to arrive about two years later. So the reading is how loosely credit was priced two years ago; it does not follow where spreads stand at the moment.",
+        "fire": "Two years ago credit risk was priced unusually cheaply (a low excess bond premium, the Fed's measure).",
         "why": "Literature-grounded on López-Salido-Stein-Zakrajšek's finding that hot credit at t−2 precedes contraction at t."
       },
-      "source": "src/bubblegauge.tsx:194-197",
-      "as_of": "2026-07"
+      "source": "src/bubblegauge.tsx:194-197"
     },
     "gauge.reg.d1": {
       "kind": "map",
@@ -1370,9 +1369,9 @@
         "hold": "Structural risk present, not acute.",
         "trim": "Fragility elevated — the trend rule is the trigger.",
         "de-risk": "Fragility high, or a hard override fired.",
-        "suppressed": "Not scored — inputs degraded.",
-        "suppressed (block degraded)": "Not scored — inputs degraded.",
-        "fallback": "Not scored — inputs degraded.",
+        "suppressed": "Band withheld — inputs degraded.",
+        "suppressed (block degraded)": "Band withheld — inputs degraded.",
+        "fallback": "Band withheld — inputs degraded.",
         "unknown": "Not scored — reading unclassified."
       },
       "source": "src/bubblegauge.tsx:1438"
@@ -1412,7 +1411,7 @@
     },
     "gauge.live_backfill.editorial_line": {
       "kind": "text",
-      "text": "The panel's written analysis remains the Jul 2026 editorial snapshot. Refreshes twice daily.",
+      "text": "The panel's written analysis remains the Jul 2026 editorial snapshot.",
       "source": "src/bubblegauge.tsx:1276",
       "as_of": "2026-07"
     },
@@ -1446,7 +1445,7 @@
         {
           "band": "suppressed (block degraded)",
           "trend_broken": "any",
-          "template": "Not scored today."
+          "template": "Band withheld today."
         },
         {
           "band": "de-risk",
@@ -1486,7 +1485,7 @@
         {
           "band": "suppressed",
           "trend_broken": "any",
-          "template": "Not scored today."
+          "template": "Band withheld today."
         },
         {
           "band": "fallback",
