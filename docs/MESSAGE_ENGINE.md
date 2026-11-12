@@ -596,11 +596,23 @@ the daily digest alone, so the digest is what changed:
 
 - **The facts** (`app/services/digest.py`, `digest_facts`). Beside the
   headline, what `GET /api/v1/score` serves: the 5-95 range, the band lines
-  and the headline's distance from them, each warning flag and its reading
-  minus its threshold, the override's rule, each trend's distance from its
-  10-month average, the VIX term structure, both blocks out of 100, five
-  readings by their own values (CAPE, the top-10 share, the semiconductors'
-  run-up, breadth, the margin-debt growth) and whether data is degraded.
+  and the headline's distance from them, each warning flag's state as the
+  snapshot's flag contract types it (`red_flag_meta`: ACTIVE, INACTIVE,
+  BLOCKED, UNKNOWN) and its reading minus its threshold, the override's rule
+  and the contract's count of flags that can fire, each trend's distance
+  from its 10-month average, the VIX term structure, both blocks out of 100,
+  five readings by their own values (CAPE, the top-10 share, the
+  semiconductors' run-up, breadth, the margin-debt growth) and whether a
+  block's coverage is degraded (the coverage gate's verdict: more than a
+  third of a block's weight dropped or stale, which suppresses the band
+  unless the override fired). A flag is its state and not its active bit,
+  because the bit reads "active False" for a blocked and an unknown flag
+  alike: flag 1 is BLOCKED and 3 of 4 flags can fire in all 490 of
+  production's snapshots that carry the contract, and the digest of
+  2026-11-05 put the contested test "0.22 unter der Warnschwelle", a
+  threshold whose crossing fires nothing. The coverage line said "some data
+  degraded", and read False beside a stale indicator on 27 of the 37 digest
+  mornings of 2026-10-05 to 11-10.
   And the change: the newest snapshot 22 to 30 hours older - yesterday's
   same slot, or the one before when it was missed - with its headline, band,
   override, flags, trends and VIX term structure (state and multiplier) and

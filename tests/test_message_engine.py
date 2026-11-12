@@ -544,6 +544,7 @@ def _snapshot(**over) -> types.SimpleNamespace:
             "block_s": {"indicators": {"s1": {"sub_score": 0.8}, "s2": {"sub_score": None}}},
             "block_d": {"indicators": {"d1": {"sub_score": 0.11}}}, "judgment_call": "Valuations are stretched.",
             "band5": 52.3, "band95": 66.0, "red_flag_meta": {}, "override_required_count": 3,
+            "override_fireable_universe_count": 3,
             "v_state": "contango", "v_multiplier": 1.0, "data_degraded": False}
     base.update(over)
     return types.SimpleNamespace(**base)

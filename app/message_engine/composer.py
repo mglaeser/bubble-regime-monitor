@@ -31,7 +31,14 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.alerts.gsm7 import GSM7_EXT
 from app.config import Settings, get_settings
 from app.engine.recompute_slots import RECOMPUTE_SLOT_HOURS
-from app.engine.snapshot_contract import ACTION_BANDS, ACTION_STATES
+from app.engine.snapshot_contract import (
+    ACTION_BANDS,
+    ACTION_STATES,
+    FLAG_ACTIVE,
+    FLAG_BLOCKED,
+    FLAG_INACTIVE,
+    FLAG_UNKNOWN,
+)
 from app.llm_gateway import complete
 from app.logging_conf import get_logger
 from app.message_engine import context as context_material
@@ -185,6 +192,7 @@ _CONTROL_RE = re.compile(
 _TRENDS = frozenset({"IN", "OUT", "unknown", "?"})
 _DIGEST_BANDS = frozenset(ACTION_BANDS) | {"suppressed (block degraded)", "de-risk (data degraded)"}
 _VOL_STATES = frozenset({"contango", "flat", "backwardation"})
+_FLAG_STATES = frozenset({FLAG_ACTIVE, FLAG_INACTIVE, FLAG_UNKNOWN, FLAG_BLOCKED})
 WORDS: dict[str, frozenset[str]] = {
     # the digest: the snapshot's band - the whole of its producer's range,
     # action_band_with_override's three bands and the two degraded displays
@@ -202,6 +210,9 @@ WORDS: dict[str, frozenset[str]] = {
     # the VIX term structure, v_vix.state's three states, today and a day earlier
     "vol_state": _VOL_STATES,
     "vol_state_1d_ago": _VOL_STATES,
+    # each warning flag's state as the snapshot contract types it
+    # (snapshot_contract.RedFlagFact.state), today and a day earlier
+    **{f"rf{n}_state{when}": _FLAG_STATES for n in (1, 2, 3, 4) for when in ("", "_1d_ago")},
     # the alert contract's facts the entries declare as words
     # (app/alerts/render_context.py): the band states, the asset, the next
     # check. The other facts an entry declares there are numbers by their
