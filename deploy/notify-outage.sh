@@ -94,7 +94,16 @@ fi
 
 HOST=$(hostname 2>/dev/null || echo "?")
 WHEN=$(date -u '+%Y-%m-%d %H:%M UTC' 2>/dev/null || echo "?")
-TEXT="bubblegauge: $REASON. $CONTAINER on $HOST at $WHEN. Alert delivery may be down."
+# The notice says what the host knows - the caller's reason, the container's
+# state, the host, the time - and no consequence of its own. Every notice used
+# to end "Alert delivery may be down.", and the notifier cannot know that: a
+# release that fails before the switch (a fetch, a merge, a build, a candidate
+# that does not boot) leaves the service untouched. From 2026-10-05 to 11-05
+# seven release notices carried the sentence while the service ran main's
+# commit and recomputed in every slot. A caller that knows a consequence
+# names it in its reason: the watchdog's unit does
+# (deploy/systemd/bubblegauge-alert-watchdog-failed.service).
+TEXT="bubblegauge: $REASON. $CONTAINER on $HOST at $WHEN."
 
 # uuidgen is not guaranteed on a minimal host; the fallback stays inside the
 # proxy's required charset [A-Za-z0-9._~-]{8,128}.

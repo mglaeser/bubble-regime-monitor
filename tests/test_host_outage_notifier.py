@@ -12,6 +12,7 @@ that can be the broken thing.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -299,3 +300,39 @@ def test_a_down_host_reports_nothing_by_the_owners_decision():
     outages = (root / "docs" / "AUTO_DEPLOY.md").read_text(encoding="utf-8")
     assert "A host that is down reports nothing" in outages
     assert "there is no external monitor" in outages
+
+
+# What the host knows at the moment a unit fails, after the caller's reason.
+_WHAT_THE_HOST_KNOWS = r" container (running|NOT running|state unknown) on \S+ at \d{4}-\d\d-\d\d \d\d:\d\d UTC\."
+
+
+def _notice(tmp_path: Path, unit: str, instance: str = "") -> str:
+    """The text the unit's own ExecStart= line sends, as systemd runs it (%i is
+    the template's instance)."""
+    line = next(ln for ln in (SCRIPT.parent / "systemd" / unit).read_text().splitlines()
+                if ln.startswith("ExecStart="))
+    reason = re.fullmatch(r'ExecStart=\S+ "(.*)"', line).group(1).replace("%i", instance)  # type: ignore[union-attr]
+    res = _run(tmp_path, GOOD, reason)
+    assert res.returncode == 0, res.stderr
+    return json.loads((tmp_path / "curl-stdin").read_text())["text"]
+
+
+def test_the_release_notice_states_what_the_host_knows_and_no_more(tmp_path):
+    """README, "Host notices": the failed unit, the container's state, the
+    host, the time. A release that fails before the switch - a fetch, a merge,
+    a build, a candidate that does not boot - leaves the service untouched,
+    one that fails after it does not, and the notifier cannot know which it
+    was: from 2026-10-05 to 11-05 seven release notices ended "Alert delivery
+    may be down." while the service ran main's commit and recomputed in every
+    slot. So the notice names no consequence of its own."""
+    text = _notice(tmp_path, "bubblegauge-notify-failed@.service", "bubblegauge-release")
+    assert re.fullmatch(r"bubblegauge: bubblegauge-release failed\." + _WHAT_THE_HOST_KNOWS, text), text
+
+
+def test_the_watchdog_notice_keeps_its_consequence(tmp_path):
+    """A watchdog that cannot run - the container gone, the check crashed or
+    hung - is the case the sentence was written for, so its unit says it, in
+    the reason it hands the notifier, and the notice says it once."""
+    text = _notice(tmp_path, "bubblegauge-alert-watchdog-failed.service")
+    assert re.fullmatch(r"bubblegauge: alert watchdog unit failed; alert delivery may be down\."
+                        + _WHAT_THE_HOST_KNOWS, text), text
