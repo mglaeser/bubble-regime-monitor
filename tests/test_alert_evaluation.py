@@ -1242,3 +1242,136 @@ def test_unknown_at_a_full_window_does_not_erase_known_flap_history():
 
     assert after["states"] == before["states"] == known
     assert after["transitions"] == before["transitions"]
+
+
+# ---------------------------------------------------------------------------
+# degraded data: a fact of the snapshot under evaluation is still a fact
+# ---------------------------------------------------------------------------
+
+#: Every source read from the snapshot itself, not from an evidence item or a
+#: red-flag record. A rule declares `freshness_requirements: same_snapshot`
+#: for each of these it holds.
+SNAPSHOT_FACTS = (
+    "effective_action_state", "base_action_band", "score_action_band",
+    "band_suppressed_by_coverage", "data_degraded", "headline_median", "point_score",
+    "iqr_lo", "iqr_hi", "override_fired", "override_active_fireable_count",
+    "override_required_count", "override_fireable_universe_count",
+    "falsification_outcome_count",
+)
+
+
+def _slot(i: int) -> datetime:
+    return datetime(2026, 8, 17, 2, 0, tzinfo=UTC) + timedelta(hours=4 * i)
+
+
+def _slot_input(i: int, **kw) -> AlertInput:
+    return make_input(identity=f"slot-{i}", computed_at=_slot(i).isoformat(), **kw)
+
+
+@pytest.mark.parametrize("source_id", SNAPSHOT_FACTS)
+def test_a_fact_of_the_snapshot_under_evaluation_is_fresh_on_degraded_data(source_id):
+    """`same_snapshot` holds by construction: the value has no age.
+
+    Degradation is a fact of its own (`data_degraded`), not a property of the
+    other facts of the same snapshot.
+    """
+    from app.alerts.sources import read_source
+
+    degraded = _slot_input(1, effective="suppressed", base="trim", degraded=True,
+                           suppressed=True)
+    value = read_source(source_id, degraded)
+    assert value.available is True
+    assert value.fresh is True
+
+
+def _rules_about_degraded_data():
+    """Each enabled rule whose condition needs degraded data, on the input its
+    title describes. Suppression implies degradation and no override
+    (`app/engine/snapshot_contract.py`), so every input here is degraded."""
+    before = _slot_input(0, effective="de-risk", base="de-risk", point=50.0)
+    suppressed = _slot_input(1, effective="suppressed", base="trim", degraded=True,
+                             suppressed=True, point=51.0)
+    override_wins = _slot_input(1, effective="de-risk", base="de-risk", degraded=True,
+                                suppressed=False, override=True)
+    flag_input_lost = suppressed.model_copy(
+        update={"override_fireable_universe_count": 2})      # the override needs 3
+    return [
+        # "Base band changed while coverage suppression is active"
+        ("regime.base_band_moved_while_suppressed", suppressed, before),
+        # "Coverage degradation is real and unmitigated"
+        ("constellation.coverage_degradation_real", suppressed, before),
+        # "False alarm likely": the point score rises on degraded data
+        ("constellation.false_alarm_likely", suppressed, before),
+        # "Data degraded without a suppressed decision"
+        ("ops.coverage_degraded_info", override_wins, before),
+        # "A red-flag input was unavailable this run", here while suppressed
+        ("ops.rf_input_unavailable", flag_input_lost, before),
+    ]
+
+
+@pytest.mark.parametrize("rule_id,now,before", _rules_about_degraded_data(),
+                         ids=[case[0] for case in _rules_about_degraded_data()])
+def test_a_rule_about_degraded_data_fires_on_degraded_data(rule_id, now, before):
+    """A rule that needs degraded data to be true must be able to be true.
+
+    While a snapshot fact read STALE on a degraded snapshot, each of these was
+    UNKNOWN exactly when its condition held, because each holds such a fact.
+    """
+    rule = _artifacts().ruleset.rule(rule_id)
+    assert rule is not None and rule.enabled
+    assert now.data_degraded is True
+    outcome = evaluate_rule(rule, _ctx(now, before))
+    assert outcome.truth is True, outcome.reasons
+
+
+@pytest.mark.parametrize("rule_id", ["legs.faber_spy_out_high_risk",
+                                     "constellation.execution_armed"])
+def test_the_faber_p1_still_refuses_degraded_data(rule_id):
+    """The P1 that must not act on degraded data says so in its condition.
+
+    `data_degraded == false` is a term of both rules, so a degraded input makes
+    them FALSE whatever the freshness of the facts beside it. That term, not a
+    stale marker on the snapshot's facts, is the control.
+    """
+    rule = _artifacts().ruleset.rule(rule_id)
+    assert rule is not None and rule.enabled
+    before = _slot_input(0, faber="in", median=58.0)
+    clean = _slot_input(1, faber="out", median=58.0)
+    degraded = _slot_input(1, faber="out", median=58.0, degraded=True)
+    assert evaluate_rule(rule, _ctx(clean, before)).truth is True
+    assert evaluate_rule(rule, _ctx(degraded, before)).truth is False
+
+
+def test_a_base_band_move_under_suppression_reaches_the_plan(isolated_db):
+    """de-risk, then a suppressed snapshot whose base band is trim.
+
+    The owner is told two things, once each: that coverage suppresses the band
+    (the constellation supersedes `ops.coverage_risk_masking`, it does not
+    double it) and that the base band moved underneath.
+    """
+    from sqlalchemy import select
+
+    from app.alerts.models import AlertDelivery, AlertDeliveryMember
+    from app.db import session_scope
+
+    artifacts = _artifacts()
+    derisk = _slot_input(0, effective="de-risk", base="de-risk", median=60.4)
+    suppressed = _slot_input(1, effective="suppressed", base="trim", median=59.8,
+                             degraded=True, suppressed=True)
+    for i, inp in enumerate((derisk, suppressed)):
+        _store_input(inp, _slot(i))
+        outcome = _run(inp, artifacts, now=_slot(i) + timedelta(minutes=2))
+        assert outcome.status == "COMMITTED"
+
+    activated = {d.rule_id for d in outcome.decisions if d.activate_episode}
+    assert {"regime.base_band_moved_while_suppressed",
+            "constellation.coverage_degradation_real",
+            "ops.coverage_risk_masking"} <= activated
+    with session_scope() as session:
+        planned = sorted(session.execute(
+            select(AlertDeliveryMember.rule_id)
+            .join(AlertDelivery,
+                  AlertDelivery.delivery_id == AlertDeliveryMember.delivery_id)
+        ).scalars())
+    assert planned == ["constellation.coverage_degradation_real",
+                       "regime.base_band_moved_while_suppressed"]

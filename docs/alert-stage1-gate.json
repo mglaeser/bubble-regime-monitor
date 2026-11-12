@@ -113,9 +113,9 @@
         "cov-faber-out-high-risk": 8,
         "cov-rf4-persistent": 12
       },
-      "episodes_activated": 19,
+      "episodes_activated": 21,
       "episodes_by_bucket": {
-        "constellation": 2,
+        "constellation": 4,
         "legs": 5,
         "ops": 4,
         "regime": 4,
@@ -123,10 +123,11 @@
       },
       "episodes_by_priority": {
         "P1": 8,
-        "P2": 10,
+        "P2": 12,
         "P4": 2
       },
       "episodes_by_rule": {
+        "constellation.coverage_degradation_real": 2,
         "constellation.execution_armed": 2,
         "legs.faber_spy_back_in": 1,
         "legs.faber_spy_out_high_risk": 2,
@@ -142,8 +143,8 @@
       },
       "episodes_cancelled_stale": 0,
       "episodes_cancelled_unconfirmed": 1,
-      "episodes_opened": 20,
-      "episodes_resolved": 17,
+      "episodes_opened": 22,
+      "episodes_resolved": 19,
       "evaluated_at_stage": 3,
       "evaluations_committed": 20,
       "evaluations_conflict": 0,
@@ -178,7 +179,7 @@
       "schema_version": 4,
       "suppressions_by_reason": {
         "DATA_QUALITY_GUARD": 5,
-        "SUPERSEDED": 4
+        "SUPERSEDED": 6
       },
       "transient_one_snapshot_band_p1": 1,
       "window_first": "2026-07-10T02:00:00+00:00",
@@ -205,9 +206,9 @@
         "cov-faber-out-high-risk": 8,
         "cov-rf4-persistent": 12
       },
-      "episodes_activated": 19,
+      "episodes_activated": 21,
       "episodes_by_bucket": {
-        "constellation": 2,
+        "constellation": 4,
         "legs": 5,
         "ops": 4,
         "regime": 4,
@@ -215,10 +216,11 @@
       },
       "episodes_by_priority": {
         "P1": 8,
-        "P2": 10,
+        "P2": 12,
         "P4": 2
       },
       "episodes_by_rule": {
+        "constellation.coverage_degradation_real": 2,
         "constellation.execution_armed": 2,
         "legs.faber_spy_back_in": 1,
         "legs.faber_spy_out_high_risk": 2,
@@ -234,8 +236,8 @@
       },
       "episodes_cancelled_stale": 0,
       "episodes_cancelled_unconfirmed": 1,
-      "episodes_opened": 20,
-      "episodes_resolved": 17,
+      "episodes_opened": 22,
+      "episodes_resolved": 19,
       "evaluated_at_stage": 4,
       "evaluations_committed": 20,
       "evaluations_conflict": 0,
@@ -272,7 +274,7 @@
       "schema_version": 4,
       "suppressions_by_reason": {
         "DATA_QUALITY_GUARD": 5,
-        "SUPERSEDED": 4
+        "SUPERSEDED": 6
       },
       "transient_one_snapshot_band_p1": 1,
       "window_first": "2026-07-10T02:00:00+00:00",

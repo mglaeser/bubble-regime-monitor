@@ -184,7 +184,10 @@ monthly leg did not has *not* been confirmed — every declared confirmation
 source must reach the required count.
 
 A stale hold source makes the rule `UNKNOWN`, not false: "it was true four
-weeks ago" is not evidence that it is true now.
+weeks ago" is not evidence that it is true now. A fact read from the snapshot
+under evaluation (`same_snapshot`) is fresh by construction, on degraded data
+too. Degradation is itself a fact, `data_degraded`; a rule that must not act on
+degraded data names it in its condition, as the Faber P1 does.
 
 ### TTLs live in real calendars
 
@@ -882,6 +885,16 @@ moved.
 
 Owner decision D2a (2026-10-03) removes the summary's `digest_items` with the
 weekly digest. It was 0 in every run, and no other number moved.
+
+A fact of the snapshot under evaluation reads fresh on a degraded snapshot too
+(section 5), so the rules about degraded data can fire. At Stages 3 and 4 each
+of the arc's two blind slots now opens `constellation.coverage_degradation_real`
+(absent `-> 2`), which supersedes `ops.coverage_risk_masking` on both:
+`episodes_opened` `20 -> 22`, `episodes_activated` `19 -> 21`,
+`episodes_resolved` `17 -> 19`, the constellation bucket `2 -> 4`, P2 episodes
+`10 -> 12`, `SUPERSEDED` suppressions `4 -> 6`. Deliveries planned (13), the
+largest non-P1 counts per 24 h and per 168 h (5 and 8, the caps) and the
+verdict did not move; Stage 1 is unchanged.
 
 `tests/fixtures/alert_replay_history.json` declares the **arc** — twenty
 recompute slots through hold → trim → de-risk → recovery, with two blind slots
