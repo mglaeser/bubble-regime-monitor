@@ -106,7 +106,7 @@ Red-flag count 0 → override not fired. **Deterministic point score 52.43; MC m
 | Margin (D2) | FINRA XLSX (3–4-week publication lag) | none — cache & tolerate staleness | 45d |
 | Hyperscaler FCF (D3) | SEC EDGAR companyfacts (mandatory UA, ≤8 req/s self-cap) | total-revenue gate proxy | 100d |
 | LPPLS (D4) | `lppls==0.6.24` (pinned; maintenance-inactive) | **drop + renormalize Block D** | 3d |
-| VIX curve (V) | CBOE delayed quotes | FRED `VIXCLS`/`VIX3M` | 2d |
+| VIX curve (V) | CBOE delayed quotes, measured from 10:00 New York to midnight of an NYSE trading day; a run outside keeps the last measured reading | FRED `VIXCLS`/`VIX3M` | none applied: the reading carries the date of the session it was measured in (`data_freshness._v_reading.as_of`; its age in days is `data_freshness.v`) |
 
 ## API
 

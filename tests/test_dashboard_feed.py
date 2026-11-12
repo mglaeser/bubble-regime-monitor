@@ -8,7 +8,7 @@ Per DASHBOARD_FEED_SPEC.md sign-off: frozen key inventory; points ALWAYS length
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -178,6 +178,21 @@ class TestBuildFeedGolden:
         assert (g["detail"]["cv90"], g["detail"]["cv95"]) != (SUP_CV90, SUP_CV95)
         sup = g["detail"]["gsadf_sup"]                      # sup still visible
         assert (sup["stat"], sup["cv90"], sup["cv95"]) == (SUP_1986, SUP_CV90, SUP_CV95)
+
+    def test_the_feed_dates_the_ratio_and_nothing_else(self, snapshot, patched_sources):
+        """raw.vix_as_of is the New York session the VIX / VIX3M pair was
+        measured in. Friday's close read on Monday morning is three calendar
+        days old and current: the ratio ages by the feed's rule for a daily
+        market value (7 d), not by a literal 2. The VIX level (FRED's close),
+        the VRP and SKEW are other readings and do not borrow the date."""
+        raw, data = snapshot
+        raw.vix_as_of = (datetime.now(UTC).date() - timedelta(days=3)).isoformat()
+        m = df.build_feed(raw, data)["metrics"]
+        assert m["vix_term_ratio"]["as_of"] == raw.vix_as_of
+        assert m["vix_term_ratio"]["stale"] is False
+        assert m["vix_term_state"]["as_of"] == raw.vix_as_of
+        for key in ("vix_level", "vrp", "skew"):
+            assert m[key]["as_of"] is None and m[key]["stale"] is None, key
 
 
 class TestDegradation:

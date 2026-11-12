@@ -369,9 +369,15 @@ def build_feed(raw: Any, data: Any) -> dict[str, Any]:
         detail={"state": d4.state, "bands": lp.get("bands"),
                 "n_windows_qualifying": lp.get("n_windows_qualifying"),
                 "n_windows_positive": lp.get("n_windows_positive")})
-    m["vix_level"] = _scalar(raw.vix_level, "level", raw.vix_as_of, "cboe", sla_days=2)
+    # raw.vix_as_of dates the VIX / VIX3M ratio only: the New York session the
+    # pair was measured in. It was None on every production run until the
+    # ratio got that date, so the level, the VRP and SKEW below, which are
+    # other readings, published as_of null and stale null and still do. A
+    # Friday close read on Monday morning is 3 calendar days old: the ratio
+    # ages as every other daily market value here does.
+    m["vix_level"] = _scalar(raw.vix_level, "level", None, "cboe")
     m["vix_term_ratio"] = _scalar(data.v_ratio, "ratio", raw.vix_as_of,
-                                  raw.vix_ratio_source, sla_days=2,
+                                  raw.vix_ratio_source, sla_days=SLA_DAILY,
                                   detail={"state": data.v_state})
     m["vix_term_state"] = _scalar(None, "categorical", raw.vix_as_of,
                                   raw.vix_ratio_source,
@@ -380,8 +386,8 @@ def build_feed(raw: Any, data: Any) -> dict[str, Any]:
                                   available=data.v_ratio is not None)
     fa = data.fast_alarm or {}
     m["vrp"] = _scalar(fa.get("vrp"), fa.get("vrp_units", "annualized_variance_pts_pct2"),
-                       raw.vix_as_of, "cboe+spy_realized", sla_days=2)
-    m["skew"] = _scalar(raw.skew, "level", raw.vix_as_of, "cboe", sla_days=2)
+                       None, "cboe+spy_realized")
+    m["skew"] = _scalar(raw.skew, "level", None, "cboe")
     qqq_last = _last_pair(raw.qqq_daily or [])
     m["qqq_close"] = _scalar(qqq_last[1] if qqq_last else None, "USD",
                              qqq_last[0] if qqq_last else None, "price_chain:QQQ",
