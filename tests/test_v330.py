@@ -25,11 +25,47 @@ class TestRescaleAggregation:
 
 
 class TestJudgmentCompletionGuard:
-    def test_fragment_gets_terminal_punctuation(self):
+    """The stored judgment is at most 300 characters and never ends mid-word
+    (app/engine/judgment.py). The gateway raises on an incomplete or empty
+    stream, so an answer that arrives within the limit is whole."""
+
+    @pytest.mark.parametrize("answer", [
+        "Shares look pricey, but lending conditions remain calm",
+        'Shares look very pricey against their own history. People call the lending market "calm."',
+        "Short answer",
+    ])
+    def test_an_answer_within_the_limit_is_stored_as_written(self, answer):
+        """Until 2026-11 an answer that did not end in . ! or ? took the cut
+        meant for one that is too long: the first lost its last word
+        ("... conditions remain."), the second its last sentence, the third
+        became "Short."."""
         from app.engine.judgment import _clean_completion
 
-        out = _clean_completion("Valuations are stretched but breadth is holding, leaving the band at")
-        assert out[-1] in ".!?"
+        assert _clean_completion(answer) == answer
+
+    def test_a_longer_answer_ends_at_its_last_whole_sentence_within_the_limit(self):
+        """The LAST sentence end counts, whatever its mark and with its closing
+        quote, up to the limit itself (the old cut took the last ". " before
+        any "!" or "?"); and no result is longer than the limit (400
+        characters without a space came back 301 long)."""
+        from app.engine.judgment import _clean_completion
+
+        tail = "And a tail that runs past the limit without an end"
+        text = "A first sentence is here. " * 10 + "Then one more ends exactly at the limit! " + tail
+        out = _clean_completion(text, 300)
+        assert len(text) > 300 == len(out) and out.endswith("at the limit!") and text.startswith(out)
+        quoted = "A first sentence is here. " * 10 + 'They call this market "calm." ' + tail
+        assert _clean_completion(quoted, 300).endswith('this market "calm."')
+        assert len(_clean_completion("x" * 400, 300)) <= 300
+
+    def test_a_fragment_longer_than_the_limit_ends_at_a_whole_word(self):
+        """What v3.2.0's text[:300] cut left: '...leaving the band at'."""
+        from app.engine.judgment import _clean_completion
+
+        fragment = "Valuations are stretched but breadth is holding, leaving the band at " * 6
+        out = _clean_completion(fragment, 300)
+        assert len(fragment) > 300 >= len(out) and out.endswith(".")
+        assert fragment.startswith(out[:-1]) and fragment[len(out) - 1] in " ,"
 
     def test_clean_sentence_passes_through(self):
         from app.engine.judgment import _clean_completion
