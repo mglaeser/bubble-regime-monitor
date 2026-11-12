@@ -30,7 +30,23 @@ def observations(series_id: str, limit: int | None = None) -> list[tuple[str, fl
         params["limit"] = str(limit)
         params["sort_order"] = "desc"
     resp = fetch(f"fred:{series_id}", BASE, params=params)
-    obs = resp.json().get("observations", [])
+    try:
+        payload = resp.json()
+    except ValueError as exc:
+        # A 2xx whose body is not JSON. json's own text for it, "Expecting
+        # value: line 1 column 1 (char 0)", is all that was kept when FRED
+        # answered that way for three consecutive runs (2026-10-21 18:00 to
+        # 10-22 02:00 UTC; S1 dropped in each): 9 source_health rows and 24
+        # log lines that say neither the status, nor the content type, nor
+        # whether there was a body at all. So the error names those three.
+        # The body is not quoted: it is upstream text, and this text is
+        # stored in source_health.note, which the unauthenticated /readyz
+        # serves, and it is the note of the series in the dashboard feed.
+        raise SourceError(
+            f"FRED {series_id}: HTTP {resp.status_code} with a body that is not JSON "
+            f"({resp.headers.get('content-type') or 'no content type'}, "
+            f"{len(resp.content)} bytes)") from exc
+    obs = payload.get("observations", [])
     pairs = [(o["date"], float(o["value"])) for o in obs if o.get("value") not in (None, ".")]
     if limit:
         pairs.reverse()
