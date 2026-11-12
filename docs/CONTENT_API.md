@@ -94,7 +94,8 @@ stamp; the reviewed allowlist lives in `test_dated_editorial_carries_as_of`.
 ```
 
 - Standard `{data, meta}` envelope, `require_read_access` + 60/min rate limit —
-  the `/api/v1/status` pattern. `Cache-Control: public, max-age=300` / `max-age=60`.
+  the `/api/v1/status` pattern. `Cache-Control: public, max-age=300` / `max-age=60`
+  (`private` when reads are keyed, `READ_ENDPOINTS_PUBLIC=false`).
 - Registry: `app/content_registry.py`. Scientific text is **imported** from
   `app/references.py` (the declared single source of truth), never re-typed;
   the schedule string is derived from `app/engine/recompute_slots.py`
