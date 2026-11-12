@@ -508,9 +508,9 @@ _CLOCK_SKEW_TOLERANCE_S = 60
 
 #: The schema this build expects. Health reports a FAULT when the live
 #: database is on any other revision, so this moves in the same PR as a
-#: migration - 0026 drops the instance reminder count: a reminder belongs to
-#: its episode.
-_ALERT_SCHEMA_REVISION = "0026"
+#: migration - 0027 passes the stored source-health notes through the
+#: gather's redaction.
+_ALERT_SCHEMA_REVISION = "0027"
 _REQUIRED_PARTIAL_INDEXES = frozenset({
     "uq_alert_input_snapshot_id",
     "uq_alert_episode_open",
