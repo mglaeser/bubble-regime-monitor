@@ -83,6 +83,15 @@ _MANDATORY_EVENT_FIELDS = frozenset({
 # ---------------------------------------------------------------------------
 
 
+#: A replay decides from the sidecars alone. The evaluation's budget is a
+#: production guard measured on the host's clock (`time.monotonic`, 1,500 ms),
+#: and with it one stalled evaluation changed the summary: executed 2026-11-11
+#: on the committed synthetic history at stage 3, a single 1.6 s stall gave 19
+#: of 20 evaluations committed, 15 episodes instead of 20, and a failed gate.
+#: A day per evaluation is a budget no replay reaches.
+_NO_WALL_CLOCK_BUDGET_MS = 24 * 60 * 60 * 1000
+
+
 @dataclass(frozen=True)
 class ReplayConfig:
     """What to replay, and where to put the state it produces."""
@@ -574,6 +583,7 @@ def run_replay(
                 mode=Mode.DRYRUN,
                 live_profile=config.live_profile,
                 now=_moment_of(alert_input),
+                budget_ms=_NO_WALL_CLOCK_BUDGET_MS,
             )
             if outcome.status == EvaluationRunStatus.COMMITTED:
                 summary.evaluations_committed += 1
