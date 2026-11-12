@@ -24,7 +24,7 @@ from typing import Any
 from sqlalchemy import select
 
 from app import methodology as _M
-from app.alerts.calendars import is_trading_day
+from app.alerts.calendars import is_trading_day, trading_days_after
 from app.config import get_settings
 from app.db import session_scope
 from app.engine import judgment, legs
@@ -72,6 +72,23 @@ log = get_logger(__name__)
 # Freshness SLAs (days): loaded from the frozen artifact. s5=45 because the S5
 # primary (Fed EBP) is monthly; a stale indicator is excluded from coverage.
 FRESHNESS_SLA_DAYS: dict[str, int] = _M.as_dict("freshness_sla_days")
+
+# The readings a daily market feed delivers once per NYSE session, the ones with
+# the 3-day SLA: their SLA counts NYSE sessions since as_of, not calendar days.
+# The numbers stay the artifact's.
+# Counted in calendar days, Friday's breadth was 4 days old on every Tuesday
+# until the 14:00 UTC run (Monday's was stored at 13:00 UTC on Tuesday), d1's
+# 0.35 of block D was lost and the coverage gate read a weekend as an outage:
+# 47 of the 53 bands withheld from 2026-07-11 to 2026-11-10 (the other 6 were
+# dropped indicators), and 8 of the 9 "Coverage unterdrueckt die Stufe"
+# messages. In sessions the same reading is 2 old, one short of the SLA; with no
+# weekend or exchange holiday between as_of and today both counts agree.
+# The consequence: a daily feed that really stops is stale once more than three
+# sessions have passed. That is the same day as before when its last reading is
+# a Monday's, two calendar days later when a weekend lies in between, three when
+# an exchange holiday does too, and never earlier. A dropped indicator loses its
+# weight at once, as before.
+SESSION_AGED: frozenset[str] = frozenset({"s2", "s3", "d1", "d4"})
 
 # v3.7.7/§2.3: the s5 t-2 lookup is a POSITIONAL index, not calendar-anchored.
 # Until the S5 v4 (C-01/C-02/C-03) lands, every computed s5 path carries this
@@ -127,6 +144,25 @@ def _age_days(as_of_iso: str | None) -> int | None:
         return (datetime.now(UTC).date() - date.fromisoformat(as_of_iso[:10])).days
     except ValueError:
         return None
+
+
+def _past_sla(indicator_id: str, as_of_iso: str | None, today: date) -> bool | None:
+    """Is a reading dated `as_of_iso` past its indicator's freshness SLA on `today`?
+
+    None when the date or the SLA is unknown. A reading dated after `today`
+    (clock skew, bad vintage) is past it (v3.7.3/O-06)."""
+    sla = FRESHNESS_SLA_DAYS.get(indicator_id)
+    if not as_of_iso or sla is None:
+        return None
+    try:
+        as_of = date.fromisoformat(as_of_iso[:10])
+    except ValueError:
+        return None
+    if as_of > today:
+        return True
+    if indicator_id in SESSION_AGED:
+        return trading_days_after(as_of, today) > sla
+    return (today - as_of).days > sla
 
 
 def _month_end_iso(yyyy_mm: str) -> str:
@@ -341,13 +377,9 @@ class IndicatorOutput:
     @property
     def stale(self) -> bool | None:
         """True past the indicator's freshness SLA (or dated in the future);
-        None when age is unknown. A negative age (as_of in the future =
-        clock skew / bad vintage) is treated as stale/suspect (v3.7.3/O-06)."""
-        age = self.age_days
-        sla = FRESHNESS_SLA_DAYS.get(self.id)
-        if age is None or sla is None:
-            return None
-        return age > sla or age < 0
+        None when age is unknown. The SLA of a daily market reading counts
+        NYSE sessions, every other one calendar days (`SESSION_AGED`)."""
+        return _past_sla(self.id, self.as_of, datetime.now(UTC).date())
 
     def payload(self) -> dict[str, Any]:
         meta = REGISTRY[self.id]
