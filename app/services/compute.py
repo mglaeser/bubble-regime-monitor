@@ -814,6 +814,12 @@ def _feed_is_current(daily: list[tuple[str, float]], as_of_date: str | None) -> 
     return last_bar >= previous
 
 
+#: The Monte Carlo's sample count and seed: the frozen artifact's, and nothing
+#: else's (app/config.py says why they are no settings).
+MC_SAMPLES: int = _M.get_path("monte_carlo", "samples")
+MC_SEED: int = _M.get_path("monte_carlo", "seed")
+
+
 def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
                      mc_seed: int | None = None,
                      gsadf_contested: bool | None = None,
@@ -829,8 +835,8 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
     of the NEXT month arrives, which delays a month-end P1 by a day or more.
     """
     settings = get_settings()
-    n = mc_samples or settings.mc_samples
-    seed = mc_seed or settings.mc_seed
+    n = mc_samples or MC_SAMPLES
+    seed = mc_seed or MC_SEED
     contested = settings.gsadf_contested if gsadf_contested is None else gsadf_contested
 
     indicators: dict[str, IndicatorOutput] = {}

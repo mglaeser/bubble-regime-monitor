@@ -303,12 +303,62 @@ def test_no_unregistered_scored_literal_collisions():
     )
 
 
-def test_config_mc_defaults_are_the_artifact():
-    from app.config import Settings
+# ---- The Monte Carlo's seed and sample count are the artifact's alone -------
 
-    s = Settings()
-    assert s.mc_samples == M.get_path("monte_carlo", "samples")
-    assert s.mc_seed == M.get_path("monte_carlo", "seed")
+def test_the_environment_cannot_move_the_monte_carlo(isolated_db, monkeypatch):
+    """AGENTS.md ground rule 6: the seed is pinned, and a snapshot records the
+    artifact's hash and version and nothing else about the run, so what that
+    hash does not cover must not move the score. As settings both did, under
+    one hash (bfb3d9a5) and at the artifact's 100 000 draws: MC_SEED=1 gave
+    the golden inputs a median of 53.4515 for 53.4119, MC_SAMPLES=2000 gave
+    53.3795."""
+    from app.config import get_settings
+    from app.services.compute import compute_snapshot
+    from tests.conftest import make_golden_raw_inputs
+
+    def scored() -> tuple[float, tuple[float, float], tuple[float, float]]:
+        get_settings.cache_clear()
+        data = compute_snapshot(make_golden_raw_inputs())
+        return data.median, data.iqr, data.band_5_95
+
+    before = scored()
+    monkeypatch.setenv("MC_SEED", "1")
+    monkeypatch.setenv("MC_SAMPLES", "2000")
+    assert scored() == before
+
+
+def test_the_seed_and_the_sample_count_are_no_settings():
+    """Neither is a setting any more, and a host that still sets one is told
+    so (app/config.py RETIRED_ENV_KEYS: named at boot, in the alerts preflight
+    and in alert health). Dropped without a word, a value other than the
+    artifact's would move that host's score at the deploy that stops reading
+    it: on production's snapshots by about 0.02 for seed 1 and about 0.13 for
+    2 000 draws."""
+    from app.config import Settings, retired_env_keys
+
+    old = {"MC_SAMPLES", "MC_SEED"}
+    assert not {key.lower() for key in old} & set(Settings.model_fields)
+    named = dict(retired_env_keys({"mc_samples": "2000", "MC_SEED": "1"}))
+    assert set(named) == old
+    assert all("frozen_methodology.json" in why for why in named.values())
+
+
+def test_the_pipeline_runs_the_artifacts_seed_and_sample_count(monkeypatch):
+    """A recompute names neither (compute.run_recompute), so it runs the
+    artifact's monte_carlo.samples and monte_carlo.seed: 100 000 draws, seed
+    20260711."""
+    from app.services import compute
+    from tests.conftest import make_golden_raw_inputs
+
+    assert (compute.MC_SAMPLES, compute.MC_SEED) == (
+        M.get_path("monte_carlo", "samples"), M.get_path("monte_carlo", "seed")) == (100_000, 20260711)
+
+    ran: dict[str, int] = {}
+    monte_carlo = compute.monte_carlo
+    monkeypatch.setattr(compute, "monte_carlo",
+                        lambda inputs, **run: ran.update(run) or monte_carlo(inputs, **run))
+    compute.compute_snapshot(make_golden_raw_inputs())
+    assert ran == {"n": 100_000, "seed": 20260711}
 
 
 # ---- MUTATION: a changed artifact flows through to the engine ---------------
