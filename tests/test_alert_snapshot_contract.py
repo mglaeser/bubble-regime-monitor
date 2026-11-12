@@ -105,12 +105,37 @@ def test_score_band_follows_the_frozen_edges(median, expected):
     assert not state.data_degraded
 
 
-def test_override_moves_base_but_not_score_band():
-    state = derive_band_state(headline_median=30.0, red_flags=_three_flags(),
-                              coverage_degraded=False)
-    assert state.score_action_band == BAND_HOLD      # the median alone still says hold
-    assert state.base_action_band == BAND_DERISK     # the override wins the decision
-    assert state.effective_action_state == BAND_DERISK
+def test_a_fired_override_holds_every_published_number_at_its_floor(isolated_db):
+    """README: ">= 3 of the 4 red flags -> Score = max(Score, 70)". The Monte
+    Carlo applies the rule to every draw before it takes the median, so with a
+    fired override the published median, both ranges and the point score read
+    the floor, and score_action_band is de-risk like base_action_band.
+
+    The test this one replaces handed derive_band_state a median of 30 beside
+    three flags and asserted a score band of hold under a base band of de-risk:
+    a pair the pipeline cannot produce. What the composite alone said stays
+    readable from the two block values the snapshot stores and serves.
+    """
+    from app.engine.aggregate import action_band, combine
+    from app.services.compute import compute_snapshot
+    from tests.conftest import make_golden_raw_inputs
+
+    raw = make_golden_raw_inputs()
+    raw.smh_2yr_return_pct = 200.0      # flag 2: a run-up of 168 points beyond the market
+    raw.hy_oas_bps = 400.0              # flag 3: 150 basis points above the three-year low
+    raw.breadth_pct = 44.0              # flag 4: under half, with the index at its high
+    data = compute_snapshot(raw, mc_samples=20_000, mc_seed=20260711, gsadf_contested=True)
+
+    assert data.override_fired and data.red_flags.count == 3
+    assert (data.median, data.iqr, data.band_5_95, data.point_score) == (
+        70.0, (70.0, 70.0), (70.0, 70.0), 70.0)
+    assert data.band_state.score_action_band == BAND_DERISK
+    assert data.band_state.base_action_band == BAND_DERISK
+    assert data.band_state.effective_action_state == BAND_DERISK
+
+    composite = combine(data.s_block, data.d_block)
+    assert composite == pytest.approx(57.84, abs=0.01)
+    assert action_band(composite) == BAND_TRIM
 
 
 def test_coverage_suppression_is_typed_not_prose():
