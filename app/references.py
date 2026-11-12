@@ -168,10 +168,13 @@ REGISTRY: dict[str, Methodology] = {
             "S&P Dow Jones Indices concentration data",
             "JPMAM Guide to the Markets (cross-check)",
         ],
+        # Concentration is an input of no red flag: red flag 4 is breadth below
+        # 50 % while the index is near its high (engine/aggregate.py,
+        # evaluate_red_flags; see the d1 caveat).
         caveats=[
             "The lo/hi anchors are judgmental (chosen to bracket the 2000-peak ~27% and a plausible "
             "extreme ~41-44%), not estimated from a labeled crash dataset; concentration has weak "
-            "standalone timing power. It also feeds red-flag #4 in combination with breadth.",
+            "standalone timing power.",
             "Some data vendors report '36.4%' as the information-technology sector weight — the S2 "
             "input is the sum of the top-10 individual holding weights, read from the holdings XLSX, "
             "not a sector table.",
@@ -207,12 +210,16 @@ REGISTRY: dict[str, Methodology] = {
             "Greenwood, R., Shleifer, A. & You, Y. (2019). 'Bubbles for Fama.' Journal of "
             "Financial Economics 131(1): 20-43. doi:10.1016/j.jfineco.2018.09.002",
         ],
+        # The Magnificent-7 figure is the one the indicator was scoped with; no
+        # code computes it, so the sentence is dated instead of saying "currently".
+        # app/indicators/s3_semis_gsy.py quotes this caveat verbatim.
         caveats=[
             "The 53%/80% crash frequencies are Fama-French-49 industry-level base rates, NOT "
-            "calibrated to this specific AI episode. The whole-market Magnificent-7 basket does "
-            "not currently meet the run-up threshold (~0 pp net two-year run-up), so the indicator "
-            "is deliberately scoped to semiconductors only; applying the GSY threshold to the broad "
-            "index would understate the signal because the mega-caps are already the market."
+            "calibrated to this specific AI episode. When the indicator was scoped (July 2026) the "
+            "whole-market Magnificent-7 basket did not meet the run-up threshold (~0 pp net two-year "
+            "run-up; the service does not recompute that figure), so the indicator is deliberately "
+            "scoped to semiconductors only; applying the GSY threshold to the broad index would "
+            "understate the signal because the mega-caps are already the market."
         ],
     ),
     "s4": Methodology(
@@ -221,9 +228,11 @@ REGISTRY: dict[str, Methodology] = {
         weight=0.07,
         grounding="contested",
         block="S",
+        # One series is tested: the Nasdaq-100 through its QQQ proxy
+        # (services/compute.py hands run_gsadf nothing else). SMH is S3's input.
         what=(
             "A recursive right-tailed unit-root test (Phillips-Shi-Yu) for explosive "
-            "(faster-than-exponential) dynamics in Nasdaq-100 and SMH monthly log prices. Since "
+            "(faster-than-exponential) dynamics in Nasdaq-100 monthly log prices (QQQ proxy). Since "
             "v4.0-s4-endpoint the SCORED statistic is the backward SADF at the LAST observation — a "
             "present-tense read of the current regime — rather than the GSADF supremum over every "
             "endpoint in the sample, which answers the historical question 'was there ever an "
@@ -241,9 +250,27 @@ REGISTRY: dict[str, Methodology] = {
             "stdin/stdout. Which statistic is scored is the frozen constant gsadf.statistic "
             "(\"bsadf_endpoint\"); it is a methodology value in the SHA-pinned artifact, not a "
             "setting, so it cannot be moved by configuration. The endpoint statistic is compared "
-            "against the LAST row of the simulated BSADF critical-value matrix (~1.38-1.43 at the "
-            "95% level for T~330-490, materially below the GSADF CVs above, because a single "
-            "endpoint is not a supremum over hundreds of them). The GSADF sup is still computed and "
+            # What that row is was read from the objects radf_mc_cv cached in
+            # production (GSADF_CV_CACHE; n = 329..333, nrep 2000, seed 20260711):
+            # the last row of bsadf_cv equals sadf_cv exactly at 90 / 95 / 99 %, and
+            # every column of bsadf_cv is non-decreasing. In R:
+            #   cv <- readRDS("mc_cv_n333_nrep2000_seed20260711.rds")
+            #   tail(cv$bsadf_cv, 1); cv$sadf_cv
+            # The sizes are simulated, by the method the sentence names. The rule is
+            # the one the library defines and stays: no score changes.
+            "against the LAST row of exuber's bsadf_cv, the library's date-stamping critical "
+            "values. That row is the critical value of the SADF statistic for the sample size: in "
+            "the critical-value objects cached in production for n = 329..333 it equals sadf_cv "
+            "exactly (n = 333: 1.1393 / 1.3780 at the 90% / 95% level; ~1.38-1.43 at 95% for "
+            "T~330-490, below the GSADF CVs above), and the matrix is the running SADF critical "
+            "value of a growing sample. It is NOT a quantile of the endpoint statistic's own null "
+            "distribution, which lies lower (about 0.3 / 0.6, simulated), so the two levels are "
+            "not this statistic's test size: a driftless random walk exceeds the two values in "
+            "1.2-1.4% and 0.6-0.7% of samples, one with a drift of 0.13 standard deviations per "
+            "month in about 7% and 4%, one with 0.25 in 21-22% and 14-15% (the ranges of three "
+            "numpy simulations of the lag-0 ADF regression with a constant: n = 333, 297 windows, "
+            "20 000 to 40 000 paths, independent implementations and seeds). The GSADF sup is "
+            "still computed and "
             "REPORTED alongside it. Sub-score mapping: stat > cv95 AND non-contested -> 1.0; "
             "> cv90 -> 0.5; contested-or-stale-or-data-missing -> 0.25; "
             "tested-and-not-explosive -> 0.05. Since v4.1 gsadf.contested_rule = 'asymmetric': "
@@ -251,7 +278,10 @@ REGISTRY: dict[str, Methodology] = {
             "over-rejection critique bites, but a CONTESTED NON-REJECTION is released to 0.05. "
             "Chen et al. establish SIZE distortion, which bounds false positives and says "
             "nothing against a non-rejection; a test biased toward rejecting that still fails "
-            "to reject is stronger evidence of no explosiveness. The 0.25 cap sat ABOVE what "
+            "to reject is stronger evidence of no explosiveness. That bias is Chen et al.'s "
+            "result for their data-generating process and the sup test; for this endpoint rule "
+            "it is not measured, and against a plain random walk the rule rejects LESS often "
+            "than its nominal level (the sizes above). The 0.25 cap sat ABOVE what "
             "the test returned, so it was a floor pushing the headline UP. Residual: a "
             "non-rejection can also mean LOW POWER; SUB_NULL is 'tested and not explosive', "
             "never 'certainly calm'."
@@ -285,7 +315,8 @@ REGISTRY: dict[str, Methodology] = {
             "(Cowles d2430, 2025), who date-stamped explosiveness in Nasdaq/Mag-7 prices through "
             "January 2025. Because a false-positive-prone test should not dominate a risk gauge, the "
             "weight is deliberately tiny (0.07) and the indicator carries a permanent CONTESTED "
-            "flag. The p<0.05 red-flag additionally requires non-contested, i.e. it fires only if "
+            "flag. Red flag #1 (the statistic above the 95% critical value) additionally requires "
+            "non-contested, i.e. it fires only if "
             "the dispute resolves in favor of genuine explosiveness — controlled by the manual "
             "GSADF_CONTESTED=true config flag."
         ),
@@ -302,15 +333,21 @@ REGISTRY: dict[str, Methodology] = {
             "Wasserstein, R. L. & Lazar, N. A. (2016). 'The ASA Statement on p-Values: Context, "
             "Process, and Purpose.' The American Statistician 70(2): 129-133. "
             "doi:10.1080/00031305.2016.1154108",
-            "Chen, Chen & Huang (2026). arXiv:2604.25826 (flag: verify at build time)",
-            "Basele, Phillips & Shi (2025). Cowles Foundation Discussion Paper d2430 "
-            "(flag: verify at build time)",
+            # Both verified on 2026-07-14 (VERIFIED_CITATIONS; UNVERIFIED_CITATIONS
+            # is empty), so neither carries a "verify at build time" flag.
+            "Chen, Chen & Huang (2026). arXiv:2604.25826",
+            "Basele, Phillips & Shi (2025). Cowles Foundation Discussion Paper d2430",
         ],
+        # What is exposed is what exists: the R script returns the statistic and
+        # its critical values (engine/gsadf_runner.py, GsadfOutput); nothing in
+        # the service computes a p-value. app/indicators/s4_gsadf.py quotes this
+        # caveat verbatim.
         caveats=[
             "The CONTESTED flag is currently permanent because of Chen-Chen-Huang (2026): under "
             "hump-shaped GPT fundamentals the test spuriously rejects 93-100% of the time. We expose "
-            "the binary decision plus the p-value (per the ASA p-value statement, Wasserstein & "
-            "Lazar 2016) rather than pretending to a graded posterior we cannot honestly calibrate."
+            "the binary decision plus the statistic and its 90% and 95% critical values (no p-value "
+            "is computed; cf. the ASA p-value statement, Wasserstein & Lazar 2016) rather than "
+            "pretending to a graded posterior we cannot honestly calibrate."
         ],
     ),
     "s5": Methodology(
@@ -319,10 +356,21 @@ REGISTRY: dict[str, Methodology] = {
         weight=0.13,
         grounding="literature-grounded",
         block="S",
+        # The score is 1 - percentile(excess bond premium at t-2), see `how`: it
+        # reads the pricing of two years ago, not the spreads of the day. In
+        # production S5 rose from 0.52 to 0.85 on 2026-11-05 (the premium of two
+        # years earlier went from -0.06 to -0.33 pp) while HY OAS stood at 334 bps,
+        # 75 above its three-year low. The digest's model reads this text
+        # (message_engine/context.py); it is kept under context.MAX_TEXT so that
+        # the prompt carries all of it.
         what=(
-            "The tightness of high-yield credit spreads read as late-cycle sentiment fragility: "
-            "aggressively priced credit risk today predicts subsequent spread widening and an "
-            "economic downturn roughly two years out."
+            "How cheaply credit risk was priced TWO YEARS AGO, read as late-cycle sentiment "
+            "fragility: the Fed's excess bond premium (the part of corporate bond spreads that "
+            "expected defaults do not explain) as it stood 24 months back, ranked against its "
+            "history since 1973; a credit spread of two years ago stands in when the premium cannot "
+            "be read. Aggressively priced credit predicts spread widening and an economic downturn "
+            "roughly two years later, so the reading of two years ago speaks about the present; it "
+            "does not follow the spreads of the day."
         ),
         how=(
             "PREFERRED input (v3.3.1): the Fed's Excess Bond Premium (Gilchrist-Zakrajsek, monthly "
@@ -370,7 +418,11 @@ REGISTRY: dict[str, Methodology] = {
             "Primary (v3.3.0): full-universe constituent computation — S&P 500 membership from "
             "the SSGA SPY holdings XLSX, daily closes for the whole US market from the "
             "Polygon/Massive grouped-daily endpoint (1 call/day, daily_close cache), "
-            "pct = 100*#{close > SMA200}/N with a binomial CI on partial coverage. No fallback "
+            # No interval is computed: v3.7.8 removed the binomial one (the names
+            # not yet resolved are no random sample) for the bounds in
+            # sources/breadth.py, _breadth_identification_bounds_pct.
+            "pct = 100*#{close > SMA200}/N; on partial coverage the note carries worst-case "
+            "full-universe identification bounds (display only, never scored). No fallback "
             "(since 2026-09-28): without Polygon, D1 is dropped and its block renormalized. "
             "sub_score = max(0.05, clip((hi - pct)/(hi - lo), 0, 1)) with baseline lo = 35, "
             "hi = 90 and a 0.05 soft floor (v3.3.0 — hi=75 clipped normal bull-market breadth "
@@ -460,8 +512,7 @@ REGISTRY: dict[str, Methodology] = {
             "revenue-stall-plus-cash-burn releases the full sub-score."
         ),
         references=[
-            "BIS (2026), Annual Economic Report (buildout/AI-capex context) "
-            "(flag: verify at build time)",
+            "BIS (2026), Annual Economic Report (buildout/AI-capex context)",  # verified 2026-07-14
             "General buildout-analogy literature (railroad/telecom capital-cycle studies)",
         ],
         caveats=[
@@ -1182,7 +1233,11 @@ KNOWN_ISSUES: list[dict[str, str]] = [
      "detail": "Chen-Chen-Huang (2026) show GSADF-type tests spuriously reject the no-bubble "
      "null 93-100% of the time under hump-shaped GPT fundamentals; since v4.1 a contested "
      "REJECTION is capped at 0.25 while a contested NON-rejection is released to 0.05, and S4 "
-     "carries a low weight.", "ref": "indicator s4"},
+     "carries a low weight. While the flag stands, red flag 1 cannot fire, so the override "
+     "(3 of the 4 red flags) needs all three remaining flags at once; every snapshot carries "
+     "the two counts (override_required_count 3; override_fireable_universe_count 3, or less "
+     "when another flag's input is missing).",
+     "ref": "indicator s4"},
     {"id": "index-proxy", "severity": "info", "category": "data-substitution",
      "title": "Stock indices served via ETF proxies",
      "detail": "No free data tier serves raw index levels, so Nasdaq-100 uses QQQ and S&P 500 "
@@ -1220,15 +1275,36 @@ KNOWN_ISSUES: list[dict[str, str]] = [
      "detail": "If the price chain falls through to Alpha Vantage, closes are split/dividend "
      "unadjusted (acceptable for short-window ETF math; flagged in provenance).",
      "ref": "sources.prices"},
-    {"id": "gsadf-wb-cv", "severity": "info", "category": "calibration",
-     "title": "GSADF now uses extended history + wild-bootstrap CVs (verify on host)",
-     "detail": "v3.3.0 feeds an extended Tiingo monthly history (QQQ from 1999, T~329, past the "
-     "PSY T=100 tabulation floor) and switched exuber to wild-bootstrap critical values "
-     "(radf_wb_cv, Harvey et al. 2016; robust to the serial-correlation oversizing of "
-     "Pedersen-Schutte 2020). s4 is still capped at the contested 0.25, so this does not move "
-     "the headline — it only makes the displayed statistic honest. The R path degrades to the "
-     "0.25 floor if exuber errors; smoke-test on the host after deploy.",
-     "ref": "indicator s4"},
+    # No entry describes the GSADF critical values. The one that stood here
+    # ("gsadf-wb-cv") said exuber uses wild-bootstrap values and that S4 is
+    # "still capped at the contested 0.25". Neither is the case: r/gsadf.R calls
+    # radf_mc_cv (cached Monte Carlo values, since v3.3.1; REGISTRY["s4"].how
+    # describes them), and under the asymmetric contested rule the newest
+    # production reading is 0.05, its note "(cached MC CVs)" (2026-11-10).
+    #
+    # The two entries below are deviations every snapshot already declares in
+    # its payload (services/compute.py: S5_PROVISIONAL_LAG, ATH_PROVENANCE; in
+    # production 533 of 615 snapshots carry each stamp, every one since
+    # 2026-07-29).
+    {"id": "s5-positional-lag", "severity": "warn", "category": "documented-deviation",
+     "title": "S5 reads 'two years ago' by counting observations, not by the calendar",
+     "detail": "The t-2yr lookup steps back a fixed number of observations (24 monthly ones on "
+     "the excess-bond-premium and Baa-proxy tiers, 504 daily rows on the HY-OAS tier), so a gap "
+     "in a series shifts the horizon and the tiers do not mean the same two years. Every S5 "
+     "payload says so: s5_lag = provisional_positional, known_defects C-01, C-02, C-03. "
+     "Calendar anchoring moves the score and the golden fixture and is deferred to S5 v4 by "
+     "operator decision (docs/PINS_DECISION_MEMO.md, H).",
+     "ref": "indicator s5"},
+    {"id": "ath-window-high", "severity": "info", "category": "data-substitution",
+     "title": "Red flag 4 measures 'near the all-time high' against the high of the cached window",
+     "detail": "The high is the maximum of the dividend-ADJUSTED SPY closes the price layer "
+     "holds (at most 900 rows, about 3.5 years), not the all-time high of the S&P 500 price "
+     "index, which is the intended basis (docs/PINS_DECISION_MEMO.md, F): a window that no "
+     "longer contains the record high understates it. Until an approved long-history source "
+     "exists every snapshot labels the basis: _ath_provenance ath_basis = "
+     "adjusted_spy_provider_window_max, ath_history_complete = false (operator decision "
+     "PIN-F, 2026-07-23).",
+     "ref": "red flag 4"},
 ]
 
 
