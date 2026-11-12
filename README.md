@@ -186,7 +186,7 @@ SMS_DAILY_HOUR=8                                     # UTC hour (default 08:00)
 
 Three more things that bite in practice. The recipient must **also** be on the proxy's own allowlist, which is `admin`-scoped — a `messages:send` key can neither read that list nor add itself to it, so a destination missing from it fails `403` no matter what you set here. Proxy keys **expire** (90 days by default), and an expired key is a `401` indistinguishable from one that is simply wrong. And a `202` from the proxy means Messages.app accepted the command — it is explicitly *not* delivery confirmation, and it is the *only* status treated as sent: any other 2xx means something that is not the proxy's send route answered.
 
-Mind the spelling: settings load with `extra="ignore"`, so an unrecognised key is dropped **without any error**. `IMESSAG_ENABLED=true` reads as "iMessage off", and paired with `SMS_ENABLED=false` you get a service that sends nothing at all. The digest job now names a probable misspelling in its skip reason instead of going quiet.
+Mind the spelling: settings load with `extra="ignore"`, so an unrecognised key is dropped **without any error**. `IMESSAG_ENABLED=true` reads as "iMessage off", and paired with `SMS_ENABLED=false` you get a service that sends nothing at all. The digest job now names a probable misspelling in its skip reason instead of going quiet. A key one character off `MESSAGE_ENGINE_ENABLED`, an `IMESSAGE_*` setting, `SMS_ENABLED` or an `LLM_*` setting is also named at boot (`misspelt_setting_present`) and by the alert health projection, which is then `degraded` at best, whatever the transports do.
 
 ### Over SMS, via the [sipgate REST API v2](https://api.sipgate.com/v2/doc)
 

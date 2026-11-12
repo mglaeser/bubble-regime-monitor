@@ -73,6 +73,10 @@ jobs:
           # app/services/replay.py is gone (the holidays library replaced both).
           # 146 -> 145: the Twelve Data breadth sweep went (breadth is Polygon-only).
           # 145 -> 134: the unscored S4 and S5 shadows went (owner decision D4).
+          # 134 -> 133: the message engine's typed facts (D7, #145).
+          # 133 -> 119: the dormant LLM selector and the actionability reviews
+          # went (owner decision D2b, #152).
+          # 119 -> 116: one helper builds each red-flag fact (S12, #171).
           MYPY_CEILING: "116"
           # The floor constrains REACH, not DEPTH: it proves mypy READ the tree.
           # It does NOT make a low count mean "little is wrong" -- an earlier

@@ -163,7 +163,7 @@ class Settings(BaseSettings):
     # The alert silences' key (empty -> 503); alert reads take ADMIN_API_KEY (owner decision D3a).
     alerts_write_api_key: str = ""
 
-    # Volume governance. P1 is exempt from all three.
+    # The dispatcher's poll interval, its lease and the evaluation lease, in seconds.
     alerts_dispatch_poll_s: int = 20
     alerts_dispatch_lease_s: int = 120
     alerts_eval_lease_s: int = 300

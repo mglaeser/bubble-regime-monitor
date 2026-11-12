@@ -19,8 +19,10 @@ StartLimitIntervalSec=0
 ContainerName=bubblegauge
 Image=localhost/bubblegauge:latest
 EnvironmentFile=%h/playground/bubble-regime-monitor/.env
-# :z, the SELinux label every container that mounts /data shares: the release's
-# migration container mounts it too, and a private :Z would relabel it away.
+# :z, the shared SELinux label, not a private :Z, which would relabel the
+# directory away from any other container that mounts it. The release mounts
+# nothing here: the service migrates the database as it boots, and the
+# release's smoke boot has its own empty directory (deploy/release.sh).
 Volume=%h/playground/bubble-regime-monitor/data:/data:z
 # Loopback only: the reverse proxy (host network) is the one way in. Rootless
 # Podman's port handler rewrites every forwarded connection's source to

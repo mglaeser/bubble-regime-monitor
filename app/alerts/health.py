@@ -39,7 +39,7 @@ from app.alerts.models import (
 from app.alerts.registry import ValidatedRuleset, instance_fingerprint, unresolved_pins
 from app.alerts.rulespec import RuleSpec
 from app.alerts.sources import read_source
-from app.config import configured_environment, retired_env_keys
+from app.config import configured_environment, near_miss_env_keys, retired_env_keys
 
 
 def iso(moment: datetime | None) -> str | None:
@@ -950,8 +950,15 @@ def health_projection(
     no_digest_transport = settings.daily_digest_transport == "none"
     if no_digest_transport:
         conditions.append("the daily digest has no transport")
-    retired = retired_env_keys(configured_environment())
+    environ = configured_environment()
+    retired = retired_env_keys(environ)
     conditions.extend(f"retired setting {key} is set and changes nothing: {why}" for key, why in retired)
+    # A key one character off a setting is read by nothing, like a retired one,
+    # and is named the same way, whatever the transports do: the boot's "no
+    # transport" reason names it only for a digest without a transport. The
+    # key and the setting it looks like, never a value.
+    misspelt = near_miss_env_keys(environ)
+    conditions.extend(f"setting {key} is read by nothing: it looks like {intended}" for key, intended in misspelt)
     critical = (
         ruleset is None
         or schema_fault
@@ -978,7 +985,8 @@ def health_projection(
     return {
         "status": (
             "critical" if critical
-            else "degraded" if fallback_reason or queue_degraded or no_digest_transport or retired
+            else "degraded" if (fallback_reason or queue_degraded or no_digest_transport
+                                or retired or misspelt)
             else "ok"
         ),
         "components": components,
