@@ -19,7 +19,7 @@ import pytest
 # and adding NOT NULL in SQLite means a batch_alter_table rebuild per column.
 # That is a migration of its own. What this ledger buys is that the debt is
 # FROZEN -- it may shrink, never grow -- in the same spirit as MYPY_CEILING and
-# the byte-identical .secrets.baseline.
+# the accepted entries of .secrets.baseline.
 #
 # Note what is ABSENT: every alert table (migrations 0007/0008/0009) matches
 # exactly. The divergence is entirely pre-alert, from 0001-0004.

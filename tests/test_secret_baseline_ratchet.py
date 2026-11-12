@@ -1,4 +1,4 @@
-"""The secret-baseline ratchet, and proof that each of its checks can fail.
+"""The secret baseline's two pins, and proof that each of their checks can fail.
 
 ## Why this file exists
 
@@ -8,18 +8,21 @@ PR #34 — which legitimately added one entry — turned both red simultaneously
 and the obvious repair (re-point them) would have been two independent edits to
 two copies of one authority.
 
-The reference now lives once, in `tests/secretbaselineref.py`, as a PINNED
-commit id. This file proves the arrangement actually holds:
+The reference now lives once, in `tests/secretbaselineref.py`: the entries
+the baseline may hold as a literal (`ACCEPTED_ENTRIES`), its scan configuration
+as a PINNED commit id. This file proves the arrangement actually holds:
 
   * every guarded property reddens when violated — asserted by feeding a
     mutated baseline through the SAME function the real test calls, so a check
     that silently stopped comparing would be caught here;
-  * the reference cannot be moved by branch or merge-base movement;
+  * the reference commit cannot be moved by branch or merge-base movement;
   * both baseline tests read the one reference and neither carries its own.
 
-The mutations are applied to the REAL accepted baseline rather than to a
-hand-written fixture. A hand-written one would drift from the shape the gate
-actually produces, and then these tests would be about a document nobody ships.
+The mutations are applied to REAL baselines rather than to a hand-written
+fixture: the entry mutations to the committed file, the configuration mutations
+to the baseline at the pinned commit. A hand-written one would drift from the
+shape the gate actually produces, and then these tests would be about a
+document nobody ships.
 """
 
 from __future__ import annotations
@@ -39,109 +42,124 @@ ROOT = Path(__file__).resolve().parents[1]
 
 @pytest.fixture
 def accepted():
-    """The accepted baseline, as bytes and as a parsed document."""
+    """The baseline at the pinned commit, as bytes and as a parsed document:
+    the reference for the scan configuration."""
     raw = ref.reference_baseline_bytes(root=ROOT)
     if raw is None:
         pytest.skip("accepted baseline reference unavailable in this checkout")
     return {"bytes": raw, "doc": json.loads(raw)}
 
 
-def _rewrite(document: dict) -> bytes:
-    """Serialise a mutated document the way the baseline file is written."""
-    return (json.dumps(document, indent=2, sort_keys=True) + "\n").encode()
+@pytest.fixture
+def committed():
+    """The committed baseline, parsed: the document the real-file test reads.
+
+    Read from the working tree, so no git object is needed and nothing skips."""
+    return json.loads((ROOT / ref.BASELINE_PATH).read_text(encoding="utf-8"))
 
 
 def _some_entry(document: dict):
     """One real entry, with the path it sits under.
 
-    Asserted rather than skipped: the accepted baseline is a pinned document
-    that is known to carry entries, so an empty one is a finding and not a
+    Asserted rather than skipped: the committed baseline is known to carry
+    entries (`ref.ACCEPTED_ENTRIES`), so an empty one is a finding and not a
     reason to stop checking."""
     for path, entries in sorted(document["results"].items()):
         if entries:
             return path, entries[0]
     raise AssertionError(
-        "the accepted baseline carries no entries — the mutation proofs below "
+        "the committed baseline carries no entries — the mutation proofs below "
         "would all pass vacuously")
 
 
-# --------------------------------------------------------------- growth ------
+# -------------------------------------------------------------- entries ------
 
 
-class TestTheGrowthRatchetReddens:
-    """The ratchet is the load-bearing one: an unbounded baseline is a
-    slow-motion wildcard exclusion."""
+class TestTheAcceptedEntriesRedden:
+    """The committed baseline holds exactly `ref.ACCEPTED_ENTRIES`, per file.
 
-    def test_the_accepted_baseline_passes_against_itself(self, accepted):
-        ref.assert_has_not_grown(accepted["doc"], accepted["doc"])
+    This class replaces TestTheGrowthRatchetReddens and
+    TestRemovalIsNotSilentlyEquivalent. Those fed mutated copies of the baseline
+    at the pinned commit (b047c3d: 19 entries in 4 files) through
+    `assert_has_not_grown` and `assert_identical_to_reference`, and both
+    reddened there. Neither protected the committed file, which holds 4 entries
+    in 1 file. Executed on 9f79c7a with the assertions the real-file tests
+    called:
 
-    def test_one_added_entry_after_the_new_reference_reddens(self, accepted):
-        """The case that matters: someone adds an entry and says nothing."""
-        grown = copy.deepcopy(accepted["doc"])
+        committed baseline + 1, + 2, + 15 new entries in app/config.py   accepted
+        committed baseline + 16                                          refused: "baseline grew by 1 entries"
+        the identity check on the committed baseline                     fails: "entries 19 -> 4"; no test
+                                                                         had applied it since 2026-08-17
+
+    Equality with a literal leaves no such room: one entry more or one fewer is
+    refused. And every mutation below is applied to the committed file through
+    the function the real-file test calls
+    (tests/test_secret_gate_policy.py::TestBaselineShape::
+    test_the_baseline_holds_exactly_the_accepted_entries), so this class cannot
+    go on proving a check that nothing applies to that file."""
+
+    def test_the_committed_baseline_is_accepted(self, committed):
+        ref.assert_accepted_entries(committed)
+
+    def test_one_added_entry_reddens(self, committed):
+        """The case that matters: someone adds an entry and says nothing.
+
+        The growth check accepted exactly this document on 9f79c7a."""
+        grown = copy.deepcopy(committed)
         path, entry = _some_entry(grown)
-        extra = dict(entry)
         # A different hash under the same file: one more entry, nothing else.
-        extra["hashed_secret"] = "0" * 40  # pragma: allowlist secret
-        extra["line_number"] = int(entry.get("line_number") or 1) + 1
+        extra = dict(entry, hashed_secret="0" * 40,  # pragma: allowlist secret
+                     line_number=int(entry.get("line_number") or 1) + 1)
         grown["results"][path] = list(grown["results"][path]) + [extra]
+        with pytest.raises(AssertionError, match="are not the accepted"):
+            ref.assert_accepted_entries(grown)
 
-        assert ref.entry_count(grown) == ref.entry_count(accepted["doc"]) + 1
-        with pytest.raises(AssertionError, match="grew by 1 entries"):
-            ref.assert_has_not_grown(grown, accepted["doc"])
-
-    def test_an_entry_added_under_a_brand_new_file_also_reddens(self, accepted):
-        grown = copy.deepcopy(accepted["doc"])
+    def test_an_entry_under_a_new_file_reddens(self, committed):
+        grown = copy.deepcopy(committed)
         _, entry = _some_entry(grown)
         grown["results"]["app/newly_added.py"] = [dict(
             entry, hashed_secret="1" * 40)]  # pragma: allowlist secret
-        with pytest.raises(AssertionError, match="grew by 1 entries"):
-            ref.assert_has_not_grown(grown, accepted["doc"])
+        with pytest.raises(AssertionError, match="app/newly_added.py"):
+            ref.assert_accepted_entries(grown)
 
-
-class TestRemovalIsNotSilentlyEquivalent:
-    """A removal must not be able to pay for an addition.
-
-    The growth check compares TOTALS, so one entry removed and one added nets
-    to zero and slips through it. That is exactly why byte-identity is enforced
-    alongside it, and this class is the proof that the pair is doing the work
-    rather than the total alone."""
-
-    def test_removing_an_entry_is_not_caught_by_the_growth_check_alone(
-            self, accepted):
-        """Stated as a limitation, not papered over."""
-        shrunk = copy.deepcopy(accepted["doc"])
+    def test_a_removed_entry_reddens_too(self, committed):
+        """A shrink has to lower the literal in the same change. The growth
+        check let it pass in silence, which is how the room for 15 additions
+        opened (19 entries -> 5 -> 4 while the reference stayed at 19)."""
+        shrunk = copy.deepcopy(committed)
         path, _ = _some_entry(shrunk)
         shrunk["results"][path] = shrunk["results"][path][1:]
-        if not shrunk["results"][path]:
-            del shrunk["results"][path]
-        # Fewer entries, so the ratchet is satisfied — by design.
-        ref.assert_has_not_grown(shrunk, accepted["doc"])
-        assert ref.entry_count(shrunk) < ref.entry_count(accepted["doc"])
+        with pytest.raises(AssertionError, match="are not the accepted"):
+            ref.assert_accepted_entries(shrunk)
 
-    def test_but_removing_an_entry_reddens_the_identity_check(self, accepted):
-        shrunk = copy.deepcopy(accepted["doc"])
-        path, _ = _some_entry(shrunk)
-        shrunk["results"][path] = shrunk["results"][path][1:]
-        if not shrunk["results"][path]:
-            del shrunk["results"][path]
-        with pytest.raises(AssertionError, match="entries 6 -> 5|entries"):
-            ref.assert_identical_to_reference(_rewrite(shrunk),
-                                              accepted["bytes"])
+    def test_an_entry_moved_to_another_file_reddens(self, committed):
+        """One removed here, one added there: the total is unchanged, which is
+        all the growth check compared. The literal is per file."""
+        moved = copy.deepcopy(committed)
+        path, entry = _some_entry(moved)
+        moved["results"][path] = moved["results"][path][1:]
+        moved["results"]["app/newly_added.py"] = [dict(
+            entry, hashed_secret="2" * 40)]  # pragma: allowlist secret
+        assert sum(ref.entries_by_file(moved).values()) \
+            == sum(ref.ACCEPTED_ENTRIES.values())
+        with pytest.raises(AssertionError, match="app/newly_added.py"):
+            ref.assert_accepted_entries(moved)
 
-    def test_a_swap_that_keeps_the_total_reddens_the_identity_check(
-            self, accepted):
-        """One removed, one added: the total is unchanged and the ratchet is
-        blind to it. Byte-identity is not."""
-        swapped = copy.deepcopy(accepted["doc"])
-        path, entry = _some_entry(swapped)
-        replacement = dict(entry, hashed_secret="2" * 40)  # pragma: allowlist secret
-        swapped["results"][path] = (
-            [replacement] + list(swapped["results"][path][1:]))
-        assert ref.entry_count(swapped) == ref.entry_count(accepted["doc"])
-        ref.assert_has_not_grown(swapped, accepted["doc"])      # blind, as designed
-        with pytest.raises(AssertionError):
-            ref.assert_identical_to_reference(_rewrite(swapped),
-                                              accepted["bytes"])
+    def test_an_entry_exchanged_inside_one_file_is_not_seen(self, committed):
+        """The stated limit, pinned so that it reads as a decision.
+
+        The literal counts the entries per file and does not name them: a
+        hash is credential-shaped, so naming the four would put four allowlist
+        pragmas into the reference. One entry exchanged for another in the
+        same file therefore passes. The growth check did not see that either,
+        and the secret scan still refuses every secret whose hash the baseline
+        does not hold."""
+        exchanged = copy.deepcopy(committed)
+        path, entry = _some_entry(exchanged)
+        exchanged["results"][path] = [dict(
+            entry, hashed_secret="3" * 40)  # pragma: allowlist secret
+        ] + list(exchanged["results"][path][1:])
+        ref.assert_accepted_entries(exchanged)
 
 
 # -------------------------------------------------- filters and exclusions ----
@@ -195,24 +213,14 @@ class TestConfigurationChangesRedden:
         with pytest.raises(AssertionError, match="plugins_used"):
             ref.assert_configuration_unchanged(mutated, accepted["doc"])
 
-    def test_a_configuration_change_also_reddens_the_identity_check(
-            self, accepted):
-        mutated = copy.deepcopy(accepted["doc"])
-        mutated["filters_used"] = list(mutated.get("filters_used", []))[1:]
-        with pytest.raises(AssertionError, match="configuration changed"):
-            ref.assert_identical_to_reference(_rewrite(mutated),
-                                              accepted["bytes"])
-
-    def test_a_regenerated_baseline_is_named_as_such(self, accepted):
-        """`generated_at` moving on its own is the signature of a rescan.
-
-        The operator's standing instruction is not to regenerate the baseline,
-        so the failure says which thing happened rather than 'bytes differ'."""
-        mutated = copy.deepcopy(accepted["doc"])
-        mutated["generated_at"] = "2099-01-01T00:00:00Z"
-        with pytest.raises(AssertionError, match="REGENERATED"):
-            ref.assert_identical_to_reference(_rewrite(mutated),
-                                              accepted["bytes"])
+    # Two tests of `assert_identical_to_reference` stood here: a configuration
+    # change reddened it too, and a baseline whose `generated_at` alone had
+    # moved was named as REGENERATED. The function is deleted (see
+    # TestTheAcceptedEntriesRedden): no test applied it to the committed file,
+    # where it fails. A rescan that adds or removes an entry is refused by the
+    # accepted entries, and one that changes a filter, a plugin or the version
+    # by the checks of this class. A rescan that moves the timestamp and
+    # nothing else changes nothing the gate decides.
 
 
 # ------------------------------------------------- the reference cannot move --
