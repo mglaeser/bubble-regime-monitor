@@ -250,9 +250,27 @@ REGISTRY: dict[str, Methodology] = {
             "stdin/stdout. Which statistic is scored is the frozen constant gsadf.statistic "
             "(\"bsadf_endpoint\"); it is a methodology value in the SHA-pinned artifact, not a "
             "setting, so it cannot be moved by configuration. The endpoint statistic is compared "
-            "against the LAST row of the simulated BSADF critical-value matrix (~1.38-1.43 at the "
-            "95% level for T~330-490, materially below the GSADF CVs above, because a single "
-            "endpoint is not a supremum over hundreds of them). The GSADF sup is still computed and "
+            # What that row is was read from the objects radf_mc_cv cached in
+            # production (GSADF_CV_CACHE; n = 329..333, nrep 2000, seed 20260711):
+            # the last row of bsadf_cv equals sadf_cv exactly at 90 / 95 / 99 %, and
+            # every column of bsadf_cv is non-decreasing. In R:
+            #   cv <- readRDS("mc_cv_n333_nrep2000_seed20260711.rds")
+            #   tail(cv$bsadf_cv, 1); cv$sadf_cv
+            # The sizes are simulated, by the method the sentence names. The rule is
+            # the one the library defines and stays: no score changes.
+            "against the LAST row of exuber's bsadf_cv, the library's date-stamping critical "
+            "values. That row is the critical value of the SADF statistic for the sample size: in "
+            "the critical-value objects cached in production for n = 329..333 it equals sadf_cv "
+            "exactly (n = 333: 1.1393 / 1.3780 at the 90% / 95% level; ~1.38-1.43 at 95% for "
+            "T~330-490, below the GSADF CVs above), and the matrix is the running SADF critical "
+            "value of a growing sample. It is NOT a quantile of the endpoint statistic's own null "
+            "distribution, which lies lower (about 0.3 / 0.6, simulated), so the two levels are "
+            "not this statistic's test size: a driftless random walk exceeds the two values in "
+            "1.2-1.4% and 0.6-0.7% of samples, one with a drift of 0.13 standard deviations per "
+            "month in about 7% and 4%, one with 0.25 in 21-22% and 14-15% (the ranges of three "
+            "numpy simulations of the lag-0 ADF regression with a constant: n = 333, 297 windows, "
+            "20 000 to 40 000 paths, independent implementations and seeds). The GSADF sup is "
+            "still computed and "
             "REPORTED alongside it. Sub-score mapping: stat > cv95 AND non-contested -> 1.0; "
             "> cv90 -> 0.5; contested-or-stale-or-data-missing -> 0.25; "
             "tested-and-not-explosive -> 0.05. Since v4.1 gsadf.contested_rule = 'asymmetric': "
@@ -260,7 +278,10 @@ REGISTRY: dict[str, Methodology] = {
             "over-rejection critique bites, but a CONTESTED NON-REJECTION is released to 0.05. "
             "Chen et al. establish SIZE distortion, which bounds false positives and says "
             "nothing against a non-rejection; a test biased toward rejecting that still fails "
-            "to reject is stronger evidence of no explosiveness. The 0.25 cap sat ABOVE what "
+            "to reject is stronger evidence of no explosiveness. That bias is Chen et al.'s "
+            "result for their data-generating process and the sup test; for this endpoint rule "
+            "it is not measured, and against a plain random walk the rule rejects LESS often "
+            "than its nominal level (the sizes above). The 0.25 cap sat ABOVE what "
             "the test returned, so it was a floor pushing the headline UP. Residual: a "
             "non-rejection can also mean LOW POWER; SUB_NULL is 'tested and not explosive', "
             "never 'certainly calm'."
@@ -294,7 +315,8 @@ REGISTRY: dict[str, Methodology] = {
             "(Cowles d2430, 2025), who date-stamped explosiveness in Nasdaq/Mag-7 prices through "
             "January 2025. Because a false-positive-prone test should not dominate a risk gauge, the "
             "weight is deliberately tiny (0.07) and the indicator carries a permanent CONTESTED "
-            "flag. The p<0.05 red-flag additionally requires non-contested, i.e. it fires only if "
+            "flag. Red flag #1 (the statistic above the 95% critical value) additionally requires "
+            "non-contested, i.e. it fires only if "
             "the dispute resolves in favor of genuine explosiveness — controlled by the manual "
             "GSADF_CONTESTED=true config flag."
         ),

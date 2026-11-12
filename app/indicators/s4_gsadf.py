@@ -11,7 +11,8 @@ WHAT/HOW/WHY/references/caveats: see app.references.REGISTRY["s4"]; summary:
 
     WHICH STATISTIC (frozen_methodology.json gsadf.statistic). The scored
     statistic is the BSADF at the LAST observation, compared against the last
-    row of the simulated BSADF CV matrix — not the GSADF sup over all
+    row of the simulated BSADF CV matrix (exuber's date-stamping values: the
+    SADF critical value for the sample size) — not the GSADF sup over all
     endpoints. GSADF answers "was there ever an explosive episode anywhere in
     this window?"; it stays rejected for as long as the episode remains in
     sample. BubbleGauge reports a CURRENT regime, so it must read the endpoint.
@@ -118,9 +119,11 @@ def sub_score(stat: float | None, cv90: float | None, cv95: float | None,
               contested: bool, stale: bool = False, asymmetric: bool = False) -> float:
     """Map a right-tailed statistic against its simulated finite-sample CVs.
 
-    `stat`/`cv90`/`cv95` must be the SAME family: the endpoint BSADF against the
-    endpoint BSADF CVs (the scored path), or the GSADF sup against the GSADF CVs.
-    Mixing them compares a statistic to the wrong null distribution.
+    `stat`/`cv90`/`cv95` must be the pair the library pairs: the endpoint BSADF
+    with the last row of exuber's date-stamping critical values (the scored
+    path; that row is the SADF critical value for the sample size, see REGISTRY
+    s4), or the GSADF sup with the GSADF critical values. Never the endpoint
+    against the sup's values or the reverse.
 
     contested-or-stale caps the sub-score at 0.25 regardless of the statistic
     (controlled by the manual GSADF_CONTESTED config flag). Data-missing also

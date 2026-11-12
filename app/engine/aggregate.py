@@ -159,7 +159,9 @@ def evaluate_red_flags(
 ) -> RedFlags:
     """Evaluate the four non-compensatory red flags.
 
-    1. GSADF explosive at p < 0.05 AND non-contested (requires GSADF_CONTESTED=false).
+    1. S4's scored statistic above its 95% critical value AND non-contested
+       (requires GSADF_CONTESTED=false). The critical value is no p-level of the
+       statistic: see REGISTRY["s4"].how.
     2. Semiconductor 2-yr net-of-market run-up >= 150 pp.
     3. HY OAS has widened > 100 bps above its trailing 3-yr tights.
     4. Breadth < 50% of S&P 500 members above their 200-DMA WHILE the index is

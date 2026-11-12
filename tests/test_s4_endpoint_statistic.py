@@ -784,3 +784,28 @@ class TestTheRScriptReturnsTheEndpointNotTheSup:
         # No statistic means no comparison was possible: emitting critical values
         # beside a null statistic implies a test that did not happen.
         assert out["bsadf_cv90"] is None and out["bsadf_cv95"] is None
+
+
+def test_the_registry_does_not_call_the_threshold_a_test_level():
+    """The threshold is exuber's date-stamping value: the SADF critical value for
+    the sample size, not a quantile of the endpoint statistic. Read from the
+    cached exuber objects of production (n = 329..333, nrep 2000, seed 20260711):
+    the last row of bsadf_cv equals sadf_cv exactly at all three levels (n = 333:
+    1.1393 / 1.3780 / 1.9593), and every column of the matrix is non-decreasing.
+    Its levels are therefore not this statistic's size (simulated: 1.2-1.4 % /
+    0.6-0.7 % on a driftless random walk, where 10 % / 5 % would be nominal), so the
+    spec attaches no p-value to the comparison. Neither R nor the cache exists
+    in CI, so the measurement stands in the registry sentence with its method
+    and this test holds the wording."""
+    import inspect
+
+    from app.engine.aggregate import evaluate_red_flags
+    from app.references import REGISTRY
+
+    for text in (REGISTRY["s4"].how, REGISTRY["s4"].why):
+        assert "p<0.05" not in text and "p<0.10" not in text
+    assert "date-stamping critical values" in REGISTRY["s4"].how
+    assert "SADF statistic for the sample size" in REGISTRY["s4"].how
+    assert "not a supremum over hundreds" not in REGISTRY["s4"].how
+    # the same wording where red flag 1 is defined
+    assert "p < 0.05" not in inspect.getdoc(evaluate_red_flags)

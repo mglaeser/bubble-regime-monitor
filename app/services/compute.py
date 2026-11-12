@@ -900,7 +900,7 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
                                            note="run-up unavailable; dropped, Block S renormalized")
 
     # ---- S4 GSADF ----
-    # Mapping: explosive p<0.05 non-contested -> 1.0; p<0.10 -> 0.5;
+    # Mapping: stat > cv95 non-contested -> 1.0; > cv90 -> 0.5;
     # contested-or-stale-or-DATA-MISSING -> 0.25; tested-and-not-explosive -> 0.05.
     # asymmetric= is deliberately NOT bound to a setting: see app/config.py. It
     # defaults False, so this call is byte-equivalent to the pre-branch one.
