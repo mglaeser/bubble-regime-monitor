@@ -64,6 +64,7 @@ from app.logging_conf import get_logger
 from app.models import HyOasHistory, Snapshot, SourceHealth
 from app.redaction import sanitize
 from app.references import REGISTRY
+from app.sources import Provenance, SourceResult
 
 log = get_logger(__name__)
 
@@ -294,6 +295,10 @@ class RawInputs:
     vix_ratio_fallback: bool = False
     vix_as_of: str | None = None
     vix_level: float | None = None
+    # The level is FRED's VIXCLS close first, the CBOE quote as the fallback
+    # (vix.vix_level); the date is FRED's observation date, None for the quote.
+    vix_level_source: str = "fred_VIXCLS"
+    vix_level_as_of: str | None = None
     skew: float | None = None
 
     spy_daily_closes: list[float] | None = None
@@ -445,6 +450,68 @@ def _track(raw: RawInputs, source: str, fn: Any) -> Any:
         raw.gather_errors[source] = sanitize(exc, limit=300)
         log.warning("gather_failed", source=source, error=sanitize(exc))
         return None
+
+
+def _last_v_reading() -> SourceResult | None:
+    """The V reading the previous snapshot was scored with, or None when it kept none."""
+    with session_scope() as session:
+        kept = (session.execute(
+            select(Snapshot.data_freshness)
+            .order_by(Snapshot.computed_at.desc(), Snapshot.id.desc()).limit(1)
+        ).scalar() or {}).get("_v_reading")
+    if not kept:
+        return None
+    return SourceResult(kept["ratio"], Provenance(source=kept["source"], as_of=kept["as_of"]))
+
+
+def _v_reading(now: datetime) -> SourceResult:
+    """V's reading for a run at `now`: measured while both CBOE quotes are of
+    one New York session (vix.session_of_pair), else the reading the previous
+    snapshot was scored with. With nothing kept (a first run, or the run after
+    a failed measurement) it measures.
+
+    Before the open there is no pair of one session to measure, and "no
+    reading" would set V to 1.00 every morning, which in a backwardation is
+    the same flapping. The kept reading carries the date of the session that
+    measured it, and no bound on its age is applied: after an outage that
+    spans a session, the runs until the next session are scored with the
+    reading of the last snapshot before it, under its true date
+    (data_freshness.v shows the age). In the 222 logged runs no slot was
+    missed and no kept reading is older than the last session (3 calendar
+    days, a Friday's on a Monday morning).
+
+    The 222 logged recomputes of 2026-10-05 to 11-10 under this rule: 101
+    measure and 121 keep; V changes state 11 times instead of 21. Ten runs get
+    another state, and their headline moves by -2.31 to +3.58 points (the
+    stored median times the square root of the change in min(D_raw * V, 1)),
+    none across a band edge: the ten lie between 49.42 and 54.79, trim. The
+    other 212 are unchanged. vol.backwardation is one spell, 2026-11-05 18:00
+    to 11-09 18:00 UTC, instead of three episodes, and the message of
+    2026-11-10 14:05 UTC is not sent."""
+    from app.sources import vix as vix_src
+
+    session = vix_src.session_of_pair(now)
+    if session is None:
+        kept = _last_v_reading()
+        if kept is not None:
+            return kept
+    return vix_src.term_structure_ratio(session)
+
+
+def _v_reading_to_keep(data: SnapshotData, raw: RawInputs) -> dict[str, Any]:
+    """The reading a later run outside the session is scored with (_v_reading):
+    this run's, when v_vix.state accepts its ratio. A run without a usable
+    ratio keeps none, so nothing is carried across a failed measurement. A run
+    scored with a kept reading keeps the same one again, with its date."""
+    ratio = data.v_ratio
+    if ratio is None:
+        return {}
+    try:
+        v_vix.state(ratio)
+    except ValueError:
+        return {}
+    return {"_v_reading": {"ratio": ratio, "as_of": raw.vix_as_of,
+                           "source": raw.vix_ratio_source}}
 
 
 def gather_inputs() -> RawInputs:
@@ -713,18 +780,24 @@ def gather_inputs() -> RawInputs:
         cause = raw.gather_errors.get("lppls", "unknown cause")
         raw.lppls_note = f"LPPLS floored ({cause}); excluded from Block D, which renormalizes"
 
-    r = _track(raw, "vix_term_structure", vix_src.term_structure_ratio)
+    r = _track(raw, "vix_term_structure", lambda: _v_reading(datetime.now(UTC)))
     if r:
         raw.vix_ratio = r.value
         raw.vix_ratio_source = r.provenance.source
         raw.vix_ratio_fallback = r.provenance.fallback_used
-        # v3.7.8/§9: never fabricate `today` — an unknown source date stays None
-        # (unverified), consistent with the breadth/EBP provenance policy. V is a
-        # multiplier, not a coverage-gated block indicator, so this is display-only.
+        # The New York session the CBOE pair was measured in, by the clock and
+        # the NYSE calendar (vix.session_of_pair; the payload's own time is not
+        # read); for a kept reading the session that measured it; or FRED's
+        # observation date. It stays None (v3.7.8/§9: an unknown date is never
+        # stamped) for a pair measured outside a session with nothing kept. V
+        # is a multiplier, not a coverage-gated block indicator: the date is
+        # shown (data_freshness.v, the feed) and gates nothing.
         raw.vix_as_of = r.provenance.as_of
     r = _track(raw, "vix_level", vix_src.vix_level)
     if r:
         raw.vix_level = r.value
+        raw.vix_level_source = r.provenance.source
+        raw.vix_level_as_of = r.provenance.as_of
     r = _track(raw, "cboe_skew", vix_src.skew_level)
     if r:
         raw.skew = r.value
@@ -1552,7 +1625,8 @@ def persist_snapshot(data: SnapshotData, raw: RawInputs) -> int:
             judgment_error=call.error_class,
             data_freshness={**data.freshness, "_coverage": data.coverage,
                             "_unknown_red_flags": data.unknown_red_flags,
-                            "_ath_provenance": data.ath_provenance},
+                            "_ath_provenance": data.ath_provenance,
+                            **_v_reading_to_keep(data, raw)},
             # RM-1: stamp the methodology actually in force in THIS process —
             # read from the loader, never re-stated by hand.
             methodology_sha256=_M.frozen_sha256(),

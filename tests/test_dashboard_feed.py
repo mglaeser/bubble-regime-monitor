@@ -8,7 +8,7 @@ Per DASHBOARD_FEED_SPEC.md sign-off: frozen key inventory; points ALWAYS length
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -178,6 +178,45 @@ class TestBuildFeedGolden:
         assert (g["detail"]["cv90"], g["detail"]["cv95"]) != (SUP_CV90, SUP_CV95)
         sup = g["detail"]["gsadf_sup"]                      # sup still visible
         assert (sup["stat"], sup["cv90"], sup["cv95"]) == (SUP_1986, SUP_CV90, SUP_CV95)
+
+    def test_the_feed_dates_the_ratio_and_nothing_else(self, snapshot, patched_sources):
+        """raw.vix_as_of is the New York session the VIX / VIX3M pair was
+        measured in. Friday's close read on Monday morning is three calendar
+        days old and current: the ratio ages by the feed's rule for a daily
+        market value (7 d), not by a literal 2. The VIX level (FRED's close),
+        the VRP and SKEW are other readings and do not borrow the date."""
+        raw, data = snapshot
+        raw.vix_as_of = (datetime.now(UTC).date() - timedelta(days=3)).isoformat()
+        m = df.build_feed(raw, data)["metrics"]
+        assert m["vix_term_ratio"]["as_of"] == raw.vix_as_of
+        assert m["vix_term_ratio"]["stale"] is False
+        assert m["vix_term_state"]["as_of"] == raw.vix_as_of
+        for key in ("vix_level", "vrp", "skew"):
+            assert m[key]["as_of"] is None and m[key]["stale"] is None, key
+
+    @pytest.mark.parametrize(("source", "age_days"), [
+        ("fred_VIXCLS", 1),     # the chain's first source: FRED's daily close, dated
+        ("cboe_vix", None),     # its fallback: the CBOE quote, undated
+    ])
+    def test_the_feed_names_the_vix_levels_source_and_day(self, snapshot, patched_sources,
+                                                          source, age_days):
+        """The VIX level is FRED's VIXCLS close first and the CBOE quote only
+        as the fallback (vix.vix_level), and the VRP is computed from it. The
+        feed said "cboe" with no date for both. Production, feed row of
+        2026-11-10 22:02 UTC: vix_level 19.92, source "cboe", as_of null, beside
+        a ratio from the CBOE quote of that run, 19.46 / 20.64; 19.92 is the
+        close of 11-09."""
+        raw, data = snapshot
+        as_of = (None if age_days is None else
+                 (datetime.now(UTC).date() - timedelta(days=age_days)).isoformat())
+        raw.vix_level_source, raw.vix_level_as_of = source, as_of
+        m = df.build_feed(raw, data)["metrics"]
+        assert m["vix_level"]["value"] == raw.vix_level
+        assert m["vix_level"]["source"] == source
+        assert m["vix_level"]["as_of"] == as_of
+        assert m["vix_level"]["stale"] is (None if as_of is None else False)
+        assert m["vrp"]["source"] == f"{source}+spy_realized"
+        assert m["vrp"]["as_of"] is None        # what dates the VRP is not decided here
 
 
 class TestDegradation:

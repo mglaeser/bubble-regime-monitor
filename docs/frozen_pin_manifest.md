@@ -166,7 +166,7 @@ The ladder below is statistic-agnostic; `gsadf.statistic` selects what `stat` is
 | Flat | `0.95 <= ratio <= 1.0` | `1.05` | `v_vix.py` |
 | Backwardation | `ratio > 1.0` | `1.15` | `v_vix.py` |
 
-Applied as `D = min(D_raw * V, 1.0)`. Neutral fallback when the ratio is missing: `v_state = "contango"`, `V = 1.0`. Ratio divides only on an IDENTICAL VIX/VIX3M observation date (v3.7.6/X-01).
+Applied as `D = min(D_raw * V, 1.0)`. Neutral fallback when the ratio is missing: `v_state = "contango"`, `V = 1.0`. Ratio divides only on an IDENTICAL VIX/VIX3M observation date (v3.7.6/X-01); the CBOE pair is measured in the New York session only (`vix.session_of_pair`) and kept between sessions.
 
 ## 6. Red-flag keys and thresholds
 
