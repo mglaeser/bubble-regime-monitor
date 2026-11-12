@@ -95,6 +95,17 @@ def _snapshot_period(inp: AlertInput) -> str | None:
 def _snapshot_value(
     source_id: str, domain: str, value: Any, inp: AlertInput, *, reason: str = "not persisted"
 ) -> SourceValue:
+    if inp.snapshot_id is None:
+        # The watchdog's input (`build_watchdog_input`) is built without a
+        # snapshot and carries no scoring state. `AlertInput` defaults its
+        # three booleans to False and its falsification log to empty, and a
+        # default is not an observation. Read as facts, the outage input
+        # resolved an open `override.fires` or coverage episode, and the
+        # recovery observation after it planned "override resolved" while the
+        # override was still active. Unavailable is UNKNOWN, which resolves
+        # nothing. Production has had one watchdog input (2026-08-29, before
+        # evaluation went live) and no override, so this has not happened yet.
+        return _missing(source_id, domain, "this input carries no snapshot")
     if value is None:
         return _missing(source_id, domain, reason)
     period = _snapshot_period(inp)
