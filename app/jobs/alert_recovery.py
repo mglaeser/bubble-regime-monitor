@@ -2,7 +2,9 @@
 
 Runs whether or not alerting is enabled, because both failures are about
 EVIDENCE rather than notification — a sidecar gap during a capture-only stage
-is exactly the thing that would silently ruin a later replay.
+is exactly the thing that would silently ruin a later replay. While alerting is
+enabled it also re-runs the newest recompute's evaluation as long as that has
+not committed (`_unfinished_evaluations`).
 
 An `INCONSISTENT` evaluation (lease expired with a plan already applied) is
 never auto-repaired: it is logged loudly and left for an operator, because
@@ -15,8 +17,10 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from app.alerts.enums import EvaluationRunStatus
-from app.alerts.models import AlertComponentHeartbeat
+from sqlalchemy import func, select
+
+from app.alerts.enums import EvaluationRunStatus, InputOrigin
+from app.alerts.models import AlertComponentHeartbeat, AlertEvaluation, AlertInputSnapshot
 from app.alerts.recovery import reconcile_sidecars, recover_evaluations
 from app.config import get_settings
 from app.db import session_scope
@@ -120,9 +124,77 @@ def _retry_mode(original: str, ambient: str) -> str:
     return original
 
 
-def _retryable_inputs(session: Any, abandoned: list[str], *, limit: int,
+#: How a run ends without committing. None of them has applied anything: the
+#: apply is one transaction (`app/alerts/engine.py`, P2), so re-running the same
+#: input reclaims the row under the same logical identity.
+_NOT_COMMITTED = (EvaluationRunStatus.ABANDONED, EvaluationRunStatus.TIMED_OUT,
+                  EvaluationRunStatus.CONFLICT, EvaluationRunStatus.FAILED)
+
+
+def _unfinished_evaluations(session: Any, *, ambient_mode: str) -> list[str]:
+    """The NEWEST RECOMPUTE's evaluations that ended without committing.
+
+    Read from the table, not from this sweep's report: a run that ends
+    TIMED_OUT, CONFLICT or FAILED never held an expired lease, and one that a
+    manual sweep (`alerts recover-evaluations`, POST /admin/alerts/recover)
+    marked ABANDONED is in no later report. Both were final, and a transition
+    rule compares with the predecessor only, so that input's band change was
+    never alerted. Production, 2026-11-01 06:03 UTC: one evaluation of 306
+    ended TIMED_OUT (1,620 ms against 1,500) and the 06:15 and 06:45 runs of
+    this job reported `retried 0`.
+
+    Only the newest. Its decisions are applied to the state as it is now, so an
+    older input re-run after a later one announces a state that no longer holds
+    (executed: trim, de-risk [not committed], trim, then the re-run opens the
+    de-risk P1 while the band is trim). That includes the evaluation this job's
+    own sweep abandons, which was re-run whatever had been evaluated since. The
+    scheduled evaluations start :01 to :07 after their slot and this job runs
+    at :15 and :45, so the two re-runs the budget allows happen before the next
+    recompute (production: never less than 239 minutes between two). What this
+    selection cannot see is an input captured between it and the re-run's own
+    reads: a recompute that ends within a second of :15:00 or :45:00, one
+    started by hand or a scheduled one that takes a quarter of an hour. Then
+    overlapping applies end in CONFLICT by the state compare-and-set, and a
+    re-run that starts just after the newer evaluation committed is applied
+    late.
+
+    Only a recompute. A watchdog input carries no scoring state and the
+    timestamp of the last snapshot, so by time it ties with that recompute's
+    input (production: the one watchdog input, 2026-08-29 08:23, and the input
+    of snapshot 174). Counted here, which of the two is the newest would be
+    undefined, and the recovery observation the watchdog captures at :10 after
+    an outage could end the re-runs of the recompute that came back at :00.
+    The watchdog evaluates its own input again on every pass while the outage
+    lasts, and its recovery observation while the outage episode is open
+    (`app/alerts/watchdog.py::run_once`), so its evaluations need no re-run
+    from here.
+
+    An input that has committed in the mode a re-run would use is done: that is
+    what ends the re-runs after a promotion (the re-run commits a new row under
+    the promoted rules) and after the operator reduced the mode.
+    """
+    moment = func.coalesce(AlertInputSnapshot.computed_at, AlertInputSnapshot.built_at)
+    newest = session.execute(
+        select(AlertInputSnapshot.input_identity)
+        .where(AlertInputSnapshot.origin == InputOrigin.RECOMPUTE)
+        .order_by(moment.desc()).limit(1)
+    ).scalar_one_or_none()
+    if newest is None:
+        return []
+    rows = session.execute(
+        select(AlertEvaluation).where(AlertEvaluation.input_identity == newest)
+        .order_by(AlertEvaluation.evaluation_id)
+    ).scalars().all()
+    committed = {str(row.mode) for row in rows
+                 if row.status == EvaluationRunStatus.COMMITTED}
+    return [row.evaluation_id for row in rows
+            if row.status in _NOT_COMMITTED
+            and _retry_mode(str(row.mode), ambient_mode) not in committed]
+
+
+def _retryable_inputs(session: Any, unfinished: list[str], *, limit: int,
                       exhausted: list[str] | None = None) -> list[tuple[str, str]]:
-    """(input identity, mode) for abandoned evaluations still in budget.
+    """(input identity, mode) for unfinished evaluations still in budget.
 
     The attempt count lives on the evaluation row, so a retry that abandons
     again is counted and eventually stops. Without the bound one permanently
@@ -134,11 +206,9 @@ def _retryable_inputs(session: Any, abandoned: list[str], *, limit: int,
     re-running it under whatever the process happens to be configured for now
     can turn an interrupted shadow evaluation into a live one that sends.
     """
-    from app.alerts.models import AlertEvaluation
-
     exhausted = exhausted if exhausted is not None else []
     out: list[tuple[str, str]] = []
-    for evaluation_id in abandoned:
+    for evaluation_id in unfinished:
         row = session.get(AlertEvaluation, evaluation_id)
         if row is None or row.input_identity is None:
             continue
@@ -164,12 +234,14 @@ def run_once() -> dict[str, Any]:
     with session_scope() as session:
         report = recover_evaluations(session)
         gaps = reconcile_sidecars(session)
-        # Which inputs the abandoned evaluations were for, read INSIDE the
-        # sweep's session so the retry below works from what was just written.
+        # Which inputs the unfinished evaluations were for, read INSIDE the
+        # sweep's session so the retry below works from what was just written:
+        # a row this sweep marked ABANDONED is among them.
         exhausted: list[str] = []
-        retryable = _retryable_inputs(session, report.abandoned,
-                                      limit=settings.alerts_eval_retry_max,
-                                      exhausted=exhausted)
+        retryable = _retryable_inputs(
+            session,
+            _unfinished_evaluations(session, ambient_mode=settings.alerts_mode),
+            limit=settings.alerts_eval_retry_max, exhausted=exhausted)
 
     # RETRY, outside that transaction. `recover_evaluations` records
     # "safe to retry" and nothing ever retried, so an outage that interrupted

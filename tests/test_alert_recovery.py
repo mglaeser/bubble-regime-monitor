@@ -1466,3 +1466,345 @@ def test_work_written_off_by_the_retry_budget_reaches_the_status(
     out = _retryable_inputs(session, ["SPENT"], limit=2, exhausted=exhausted)
     assert out == []
     assert exhausted == ["SPENT"], "the write-off was invisible to the caller"
+
+
+# --- the job re-runs the newest recompute's evaluation while it has not committed ---
+#
+# Written from README "What it sends by itself", alert row ("Every recompute
+# ... is evaluated ... The :15/:45 job re-runs ...") and docs/ALERT_SYSTEM.md
+# section 2 ("a lost evaluation is simply retried"). The real chain throughout:
+# `evaluate_input`, the watchdog and `alert_recovery.run_once`, none of them
+# replaced. The only injected fault is the ending itself.
+
+SLOT0 = datetime(2026, 8, 17, 2, 0, tzinfo=UTC)
+DERISK = "regime.band_to_derisk"
+
+
+def _slot(i: int) -> datetime:
+    return SLOT0 + timedelta(hours=4 * i)
+
+
+def _slot_input(i: int, **kw):
+    """The recompute input of slot i, captured."""
+    item = make_input(identity=f"slot-{i}", computed_at=_slot(i).isoformat(), **kw)
+    _store_input(item, _slot(i))
+    return item
+
+
+def _evaluate_slot(item, i: int):
+    from app.services.alert_integration import evaluate_input
+
+    return evaluate_input(item.input_identity, now=_slot(i) + timedelta(minutes=2))
+
+
+@pytest.fixture()
+def shadow_alerts(isolated_db, monkeypatch):
+    from app.config import get_settings
+
+    monkeypatch.setenv("ALERTS_MODE", "shadow")
+    monkeypatch.setenv("ALERT_INPUT_CAPTURE", "true")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+def _evaluation_rows() -> dict[str, tuple[str, int]]:
+    """(status, attempt count) of each input's evaluation."""
+    with session_scope() as session:
+        return {row.input_identity: (str(row.status), row.attempt_count)
+                for row in session.execute(select(AlertEvaluation)).scalars()}
+
+
+def _derisk_alerts() -> list[str]:
+    """The planned deliveries of the de-risk P1, by kind."""
+    from app.alerts.models import AlertDelivery, AlertDeliveryMember
+
+    with session_scope() as session:
+        return [str(kind) for (kind,) in session.execute(
+            select(AlertDelivery.delivery_kind)
+            .join(AlertDeliveryMember,
+                  AlertDeliveryMember.delivery_id == AlertDelivery.delivery_id)
+            .where(AlertDeliveryMember.rule_id == DERISK)).all()]
+
+
+def _interrupt(item, i: int) -> None:
+    """The process dies in the middle of the evaluation: a claimed row, nothing applied."""
+    from app.alerts.artifacts import load_active, register
+    from app.alerts.engine import claim_evaluation
+
+    with session_scope() as session:
+        artifacts = load_active(session)
+        register(session, artifacts)
+        claim_evaluation(session, alert_input=item, current=artifacts.ruleset,
+                         mode="shadow", live_profile="default",
+                         now=_slot(i) + timedelta(minutes=2), lease_seconds=300)
+
+
+def _end_without_committing(monkeypatch, how: str, *, always: bool = False) -> None:
+    """The next evaluation ends TIMED_OUT, CONFLICT or FAILED; the one after is normal."""
+    from app.alerts import engine
+    from app.alerts.errors import EvaluationConflict, EvaluationDeadlineExceeded
+
+    left = {"n": 10**9 if always else 1}
+    if how == "TIMED_OUT":
+        real_check = engine.Deadline.check
+
+        def check(self, where: str) -> None:
+            if left["n"] > 0:
+                left["n"] -= 1
+                raise EvaluationDeadlineExceeded(f"evaluation exceeded its budget at {where}")
+            real_check(self, where)
+
+        monkeypatch.setattr(engine.Deadline, "check", check)
+        return
+    real_persist = engine.persist_plan
+
+    def persist(*args, **kw):
+        if left["n"] > 0:
+            left["n"] -= 1
+            if how == "CONFLICT":
+                raise EvaluationConflict("state moved between planning and apply")
+            raise RuntimeError("database is locked")
+        return real_persist(*args, **kw)
+
+    monkeypatch.setattr(engine, "persist_plan", persist)
+
+
+@pytest.mark.parametrize("ending", ["TIMED_OUT", "CONFLICT", "FAILED"])
+def test_an_evaluation_that_did_not_commit_is_rerun_and_its_band_change_is_alerted(
+        shadow_alerts, monkeypatch, ending):
+    """Production, 2026-11-01 06:03 UTC: one evaluation of 306 ended TIMED_OUT
+    and the 06:15 and 06:45 runs of the job reported `retried 0`."""
+    from app.jobs import alert_recovery
+
+    before = _slot_input(0, effective="trim")
+    entered = _slot_input(1, effective="de-risk", base="de-risk", median=60.2)
+    assert _evaluate_slot(before, 0).status == "COMMITTED"
+
+    _end_without_committing(monkeypatch, ending)
+    if ending == "FAILED":
+        with pytest.raises(RuntimeError):
+            _evaluate_slot(entered, 1)
+    else:
+        assert _evaluate_slot(entered, 1).status == ending
+    assert _evaluation_rows()[entered.input_identity] == (ending, 1)
+    assert _derisk_alerts() == []
+
+    result = alert_recovery.run_once()
+
+    assert _evaluation_rows()[entered.input_identity] == ("COMMITTED", 2)
+    assert _derisk_alerts() == ["INITIAL"], "the band entered de-risk and nothing was planned"
+    assert (result["status"], result["retried"]) == ("ok", 1)
+    # ... and once committed it is done.
+    assert alert_recovery.run_once()["retried"] == 0
+
+
+def test_an_evaluation_a_manual_sweep_abandoned_is_rerun_by_the_job(shadow_alerts):
+    """`alerts recover-evaluations --once` sweeps; the job's next run re-runs."""
+    from app.alerts import cli
+    from app.jobs import alert_recovery
+
+    item = _slot_input(0)
+    _interrupt(item, 0)
+
+    assert cli.main(["recover-evaluations", "--once"]) == 0
+    assert _evaluation_rows()[item.input_identity] == ("ABANDONED", 1)
+
+    assert alert_recovery.run_once()["retried"] == 1
+    assert _evaluation_rows()[item.input_identity] == ("COMMITTED", 2)
+
+
+def test_a_rerun_that_raises_is_tried_again_at_the_next_run(shadow_alerts, monkeypatch):
+    import app.services.alert_integration as integration
+    from app.jobs import alert_recovery
+
+    before = _slot_input(0, effective="trim")
+    entered = _slot_input(1, effective="de-risk", base="de-risk", median=60.2)
+    assert _evaluate_slot(before, 0).status == "COMMITTED"
+    _end_without_committing(monkeypatch, "TIMED_OUT")
+    assert _evaluate_slot(entered, 1).status == "TIMED_OUT"
+
+    real = integration.evaluate_input
+    calls = {"n": 0}
+
+    def locked_once(identity, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("database is locked")
+        return real(identity, **kw)
+
+    monkeypatch.setattr(integration, "evaluate_input", locked_once)
+    first = alert_recovery.run_once()
+    assert (first["status"], first["retries_failed"]) == ("critical", 1)
+    second = alert_recovery.run_once()
+    assert (second["status"], second["retried"]) == ("ok", 1)
+    assert _derisk_alerts() == ["INITIAL"]
+
+
+@pytest.mark.parametrize("ending", ["TIMED_OUT", "interrupted"])
+def test_an_older_input_is_not_rerun_once_a_newer_one_exists(
+        shadow_alerts, monkeypatch, ending):
+    """Its decisions would be applied to today's state: a de-risk P1 while the
+    band is trim. That holds for the evaluation the job's own sweep abandons,
+    which the job re-ran whatever had been evaluated since."""
+    from app.jobs import alert_recovery
+
+    before = _slot_input(0, effective="trim")
+    entered = _slot_input(1, effective="de-risk", base="de-risk", median=60.2)
+    assert _evaluate_slot(before, 0).status == "COMMITTED"
+    if ending == "interrupted":
+        _interrupt(entered, 1)
+    else:
+        _end_without_committing(monkeypatch, ending)
+        assert _evaluate_slot(entered, 1).status == ending
+    left_again = _slot_input(2, effective="trim")
+    assert _evaluate_slot(left_again, 2).status == "COMMITTED"
+
+    result = alert_recovery.run_once()
+
+    assert _derisk_alerts() == [], "a de-risk alert was planned while the band is trim"
+    assert result["retried"] == 0
+    assert _evaluation_rows()[entered.input_identity] == (
+        ("ABANDONED", 1) if ending == "interrupted" else (ending, 1))
+
+
+def test_the_reruns_stop_at_the_budget_and_the_job_reports_the_loss(
+        shadow_alerts, monkeypatch):
+    """ALERTS_EVAL_RETRY_MAX = 2: the first run and two re-runs, then degraded."""
+    from app.jobs import alert_recovery
+
+    item = _slot_input(0)
+    _end_without_committing(monkeypatch, "TIMED_OUT", always=True)
+    assert _evaluate_slot(item, 0).status == "TIMED_OUT"
+
+    runs = [alert_recovery.run_once() for _ in range(4)]
+
+    assert _evaluation_rows()[item.input_identity] == ("TIMED_OUT", 3)
+    assert [run["retries_failed"] for run in runs] == [1, 1, 0, 0]
+    assert [run["retries_budget_exhausted"] for run in runs] == [0, 0, 1, 1]
+    assert [run["status"] for run in runs] == ["critical", "critical", "degraded", "degraded"]
+
+
+def _evaluation_row(session, identity: str, *, mode: str, status: str, key: str) -> None:
+    """One evaluation row as a run under some ruleset left it (the key stands for the ruleset)."""
+    from app.alerts.artifacts import load_active, register
+    from app.alerts.canonical import new_ulid
+    from app.alerts.repository import utc_ms
+
+    now = datetime.now(UTC)
+    artifacts = load_active(session)
+    register(session, artifacts)
+    sha = artifacts.ruleset.rules_sha256
+    session.add(AlertEvaluation(
+        evaluation_id=new_ulid(utc_ms(now)), idempotency_key=f"{identity}-{mode}-{key}",
+        input_identity=identity, mode=mode, live_profile="default",
+        current_rules_sha256=sha, evaluation_set_sha256=sha,
+        evaluated_ruleset_hashes=[sha], evaluator_version="1", status=status,
+        attempt_count=1, started_at=now, plan_applied=status == "COMMITTED"))
+
+
+@pytest.mark.parametrize(("ambient", "done_in", "expected"), [
+    ("live", None, 1),         # nothing committed: re-run
+    ("live", "live", 0),       # committed under the promoted rules after a CONFLICT: done
+    ("shadow", "shadow", 0),   # the operator reduced the mode and the re-run committed there: done
+    ("live", "shadow", 1),     # a shadow run says nothing about the live one
+])
+def test_an_input_that_committed_in_the_mode_of_the_rerun_is_done(
+        isolated_db, ambient, done_in, expected):
+    from app.jobs.alert_recovery import _unfinished_evaluations
+
+    item = _slot_input(0)
+    with session_scope() as session:
+        _evaluation_row(session, item.input_identity, mode="live", status="CONFLICT",
+                        key="replaced")
+        if done_in:
+            _evaluation_row(session, item.input_identity, mode=done_in, status="COMMITTED",
+                            key="promoted")
+    with session_scope() as session:
+        assert len(_unfinished_evaluations(session, ambient_mode=ambient)) == expected
+
+
+def _outage_then_a_recompute_into_derisk(tmp_path, monkeypatch) -> tuple[datetime, int]:
+    """A trim recompute at 02:00, evaluated; none at 06:00 and 10:00, and the
+    watchdog opens the outage at 11:40; the 14:00 recompute lands in de-risk."""
+    from app.alerts import watchdog
+    from app.services.alert_integration import capture_alert_input, evaluate_input
+    from tests.test_alert_end_to_end import _snapshot, _stage3_shadow
+
+    _stage3_shadow(tmp_path, monkeypatch, "outage")
+    day = datetime(2026, 8, 20, tzinfo=UTC)
+    with session_scope() as session:
+        before = _snapshot(session, computed_at=day + timedelta(hours=2),
+                           effective="trim", prev_id=None).id
+    at = day + timedelta(hours=2, minutes=2)
+    assert evaluate_input(capture_alert_input(before, now=at), now=at).status == "COMMITTED"
+    assert watchdog.run_once(now=day + timedelta(hours=11, minutes=40))["firing"] is True
+    with session_scope() as session:
+        back = _snapshot(session, computed_at=day + timedelta(hours=14, minutes=1),
+                         effective="de-risk", prev_id=before).id
+    return day, back
+
+
+def test_a_watchdog_input_does_not_end_the_reruns_of_the_newest_recompute(
+        isolated_db, tmp_path, monkeypatch):
+    """A watchdog input carries the timestamp of the last snapshot, so by time
+    it ties with that recompute's input (production: the one watchdog input,
+    2026-08-29 08:23, and the input of snapshot 174). After an outage the
+    watchdog's recovery observation is captured at :10 and commits; the
+    recompute's evaluation, which timed out at :03, is still re-run at :15."""
+    from app.alerts import watchdog
+    from app.jobs import alert_recovery
+    from app.services.alert_integration import capture_alert_input, evaluate_input
+
+    day, back = _outage_then_a_recompute_into_derisk(tmp_path, monkeypatch)
+    at = day + timedelta(hours=14, minutes=3)
+    entered = capture_alert_input(back, now=at)
+    _end_without_committing(monkeypatch, "TIMED_OUT")
+    assert evaluate_input(entered, now=at).status == "TIMED_OUT"
+
+    observed = watchdog.run_once(now=day + timedelta(hours=14, minutes=10))
+    assert (observed["recovery_observation"], observed["evaluation_status"]) == (
+        True, "COMMITTED")
+
+    result = alert_recovery.run_once()
+
+    assert result["retried"] == 1
+    assert _evaluation_rows()[entered] == ("COMMITTED", 2)
+    assert _derisk_alerts() == ["INITIAL"]
+
+
+def test_the_watchdog_not_the_job_reruns_a_watchdog_inputs_evaluation(
+        isolated_db, tmp_path, monkeypatch):
+    """The job re-runs recomputes. The watchdog evaluates its own input again
+    on every pass while the outage lasts, so an outage evaluation that did not
+    commit is re-run there; the job running it after the recompute came back
+    would open the outage alert for an outage that is over."""
+    from app.alerts import watchdog
+    from app.alerts.models import AlertEpisode
+    from app.jobs import alert_recovery
+    from tests.test_alert_end_to_end import _snapshot, _stage3_shadow
+
+    _stage3_shadow(tmp_path, monkeypatch, "watchdog")
+    day = datetime(2026, 8, 20, tzinfo=UTC)
+    with session_scope() as session:
+        _snapshot(session, computed_at=day + timedelta(hours=2), effective="trim",
+                  prev_id=None)
+
+    def outages() -> int:
+        with session_scope() as session:
+            return len(session.execute(select(AlertEpisode.episode_id).where(
+                AlertEpisode.rule_id == "ops.recompute_outage",
+                AlertEpisode.is_open.is_(True))).all())
+
+    _end_without_committing(monkeypatch, "TIMED_OUT")
+    first = watchdog.run_once(now=day + timedelta(hours=11, minutes=40))
+    assert (first["firing"], first["evaluation_status"]) == (True, "TIMED_OUT")
+
+    assert alert_recovery.run_once()["retried"] == 0
+    assert _evaluation_rows()[first["input_identity"]] == ("TIMED_OUT", 1)
+    assert outages() == 0
+
+    second = watchdog.run_once(now=day + timedelta(hours=12, minutes=10))
+    assert second["evaluation_status"] == "COMMITTED"
+    assert _evaluation_rows()[first["input_identity"]] == ("COMMITTED", 2)
+    assert outages() == 1

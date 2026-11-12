@@ -167,10 +167,10 @@ class Settings(BaseSettings):
     alerts_dispatch_poll_s: int = 20
     alerts_dispatch_lease_s: int = 120
     alerts_eval_lease_s: int = 300
-    # How many times an ABANDONED evaluation is re-run before it is left for an
-    # operator. Recovery marks a lease-expired evaluation "safe to retry" and
-    # nothing retried it, so the work simply stopped — an outage that
-    # interrupted an evaluation silently cost that snapshot its alerts. Bounded
+    # How many times an evaluation that did not commit (ABANDONED, TIMED_OUT,
+    # CONFLICT, FAILED) is re-run before it is written off. The recovery job
+    # re-runs the newest recompute's at :15 and :45: with 2 the re-runs are over
+    # 45 minutes after the slot, hours before the next recompute. Bounded
     # because a retry that can loop is a way to turn one stuck input into a
     # permanently busy recovery job.
     alerts_eval_retry_max: int = 2
