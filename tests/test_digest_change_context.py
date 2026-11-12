@@ -37,12 +37,12 @@ def _flag(active: bool, distance: float) -> dict:
 
 def _snapshot(*, computed_at: datetime = T0, median: float = 60.51, action_band: str = "de-risk",
               s1: float = 0.98, d1: float = 0.88, rf4: bool = True, qqq: str = "IN",
-              red_flag_count: int = 1) -> Snapshot:
+              red_flag_count: int = 1, v_state: str = "contango", v_multiplier: float = 1.0) -> Snapshot:
     """A snapshot as production stored snapshot 392 (2026-10-04 18:00 UTC)."""
     return Snapshot(
         computed_at=computed_at, service_version="3.9.0", median=median, iqr_lo=58.5, iqr_hi=62.57,
         band5=55.74, band95=65.54, point_score=60.47, action_band=action_band, override_fired=False,
-        red_flag_count=red_flag_count, red_flag_detail={}, v_multiplier=1.0, v_state="contango",
+        red_flag_count=red_flag_count, red_flag_detail={}, v_multiplier=v_multiplier, v_state=v_state,
         block_s={"value": 0.743865, "indicators": {
             "s1": {"value": 41.38, "sub_score": s1}, "s2": {"value": 38.905092, "sub_score": 0.91},
             "s3": {"value": 111.072, "sub_score": 0.525}, "s4": {"value": 1.3181, "sub_score": 0.25},
@@ -135,15 +135,52 @@ class TestTheChange:
             "median_1d_ago": 57, "median_1d_change": 4, "band_1d_ago": "trim", "override_fired_1d_ago": False,
             "red_flag_count_1d_ago": 0, "rf1_active_1d_ago": False, "rf2_active_1d_ago": False,
             "rf3_active_1d_ago": False, "rf4_active_1d_ago": False, "spy_trend_1d_ago": "IN",
-            "qqq_trend_1d_ago": "OUT", "s1_1d_change": 0.03, "s2_1d_change": 0.0, "s3_1d_change": 0.0,
+            "qqq_trend_1d_ago": "OUT", "vol_state_1d_ago": "contango", "vol_multiplier_1d_ago": 1.0,
+            "s1_1d_change": 0.03, "s2_1d_change": 0.0, "s3_1d_change": 0.0,
             "s4_1d_change": 0.0, "s5_1d_change": 0.0, "d1_1d_change": 0.08, "d2_1d_change": 0.0,
             "d3_1d_change": 0.0, "d4_1d_change": 0.0, "median_7d_ago": 55, "median_7d_change": 6,
             "band_7d_ago": "trim", "red_flag_count_7d_ago": 0}
 
+    def test_a_changed_volatility_term_structure_is_carried(self):
+        """The VIX multiplier scales the whole timing block (D = min(D_raw * V, 1),
+        app/indicators/v_vix.py), so a change of state moves the score with no
+        sub-score moving. Production, the 37 digests of 2026-10-05..11-10: the
+        state differed from the day-earlier slot on six mornings (10-17, 10-20,
+        11-03, 11-05, 11-06, 11-10) and the multiplier alone moved the point
+        score by +1.33, -1.31, +1.19, -1.22, +3.46 and -2.41; none of the six
+        digests names it, and the one of 10-20 put a fall of 1.40 - 1.31 of it
+        the multiplier - down to the top-10 share, whose sub-score moved 0.01.
+        The facts carried today's state and nothing to compare it with."""
+        day = _snapshot(computed_at=T0 - timedelta(days=1))
+        today = _snapshot(v_state="backwardation", v_multiplier=1.15)
+        facts = digest.digest_facts(today, day=day)
+        assert (facts["vol_state"], facts["vol_multiplier"]) == ("backwardation", 1.15)
+        assert (facts["vol_state_1d_ago"], facts["vol_multiplier_1d_ago"]) == ("contango", 1.0)
+        prompt = composer.prompt_for("daily_digest", _entry(), facts, Channel.IMESSAGE,
+                                     Settings(_env_file=None, message_engine_enabled=True))
+        earlier = next(line for line in prompt.splitlines() if line.startswith("a day earlier:"))
+        assert earlier.endswith("volatility term structure contango, its multiplier 1.0")
+        assert "  vol_state_1d_ago = contango" in prompt and "  vol_multiplier_1d_ago = 1.0" in prompt
+
+    def test_the_earlier_volatility_state_is_one_of_the_producers_words(self):
+        assert composer.WORDS["vol_state_1d_ago"] is composer.WORDS["vol_state"]
+        day = _snapshot(computed_at=T0 - timedelta(days=1), v_state="calm")
+        assert composer.typed_facts(_entry(), digest.digest_facts(_snapshot(), day=day))["vol_state_1d_ago"] is None
+
+    def test_a_change_of_the_term_structure_can_be_the_point(self):
+        """The TASK's first tier names it beside the band, the override, the
+        flags and the trends, and the explanation is pointed at the earlier
+        multiplier, not at the sub-score changes alone."""
+        task = " ".join(dict(composer._SECTION_RE.findall(_entry()["prompt"]))["TASK"].split())
+        first = task.split("Choose the point in this order:")[1].split("; else")[0]
+        assert "the volatility term structure" in first
+        explain = task.split("what changed, from what to what,")[1].split(";")[0]
+        assert "the sub-score changes" in explain and "the multiplier a day earlier" in explain
+
     def test_with_no_earlier_snapshot_the_change_is_left_out(self, monkeypatch):
         facts = digest.digest_facts(_snapshot())
         changes = {name for name in facts if "_1d_" in name or "_7d_" in name}
-        assert len(changes) == 24 and all(facts[name] is None for name in changes)
+        assert len(changes) == 26 and all(facts[name] is None for name in changes)
         prompts: list[str] = []
         monkeypatch.setattr(composer, "complete",
                             lambda *, user, **_kw: prompts.append(user) or type("C", (), {"text": "ok"})())

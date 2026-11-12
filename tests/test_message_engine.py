@@ -1152,9 +1152,10 @@ class TestRoundTwoOn145:
     def test_the_unwired_entries_are_gone_and_the_library_is_re_signed(self):
         lib = composer.library()
         assert not self.GONE & set(lib["prompts"]) and len(lib["prompts"]) == 23
-        # re-signed since on the owner's request of 2026-10-04 (tests/test_digest_change_context.py)
-        assert lib["version"] == "1.3.0" and lib["status"].startswith("SIGNED 2026-10-04")
-        assert "Previously: SIGNED 2026-10-01" in lib["status"]
+        # re-signed since on the owner's requests of 2026-10-04 and 2026-11-11
+        # (tests/test_digest_change_context.py); every earlier signature stays behind "Previously:"
+        assert lib["version"] == "1.4.0" and lib["status"].startswith("SIGNED 2026-11-12 mglaeser - ")
+        assert "Previously: SIGNED 2026-10-04" in lib["status"] and "Previously: SIGNED 2026-10-01" in lib["status"]
         assert not any("llm" in entry for entry in lib["prompts"].values())
 
 

@@ -133,15 +133,24 @@ def _readings(snap: Snapshot) -> dict[str, object]:
 
 def _a_day_earlier(snap: Snapshot, then: Snapshot | None) -> dict[str, object]:
     """Yesterday's reading beside today's: the headline and its change, the
-    band, the override, the flags and the trends as they were, and each
-    sub-score's change, so a change can be explained. None throughout when
-    there is no snapshot that old."""
+    band, the override, the flags, the trends and the VIX term structure as
+    they were, and each sub-score's change, so a change can be explained.
+    None throughout when there is no snapshot that old.
+
+    The term structure is carried because its multiplier scales the whole
+    timing block (D = min(D_raw * V, 1), app/indicators/v_vix.py): a change
+    of state moves the score while no sub-score moves. On 6 of the 37 digest
+    mornings of 2026-10-05..11-10 the state differed from the day-earlier
+    slot and the multiplier alone moved the point score by 1.19 to 3.46; the
+    facts held today's state with nothing to compare it with, and none of the
+    six digests named it."""
     now_subs = {**_sub_scores(snap.block_s, SUB_SCORES["s"]), **_sub_scores(snap.block_d, SUB_SCORES["d"])}
     if then is None:
         return {"median_1d_ago": None, "median_1d_change": None, "band_1d_ago": None,
                 "override_fired_1d_ago": None, "red_flag_count_1d_ago": None,
                 **{f"{flag}_active_1d_ago": None for flag in FLAGS},
                 "spy_trend_1d_ago": None, "qqq_trend_1d_ago": None,
+                "vol_state_1d_ago": None, "vol_multiplier_1d_ago": None,
                 **{f"{key}_1d_change": None for key in now_subs}}
     then_subs = {**_sub_scores(then.block_s, SUB_SCORES["s"]), **_sub_scores(then.block_d, SUB_SCORES["d"])}
     flags = _flags(then)
@@ -154,6 +163,8 @@ def _a_day_earlier(snap: Snapshot, then: Snapshot | None) -> dict[str, object]:
         **{f"{flag}_active_1d_ago": (flags.get(flag) or {}).get("active") for flag in FLAGS},
         "spy_trend_1d_ago": _trend(then, "SPY"),
         "qqq_trend_1d_ago": _trend(then, "QQQ"),
+        "vol_state_1d_ago": then.v_state,
+        "vol_multiplier_1d_ago": _number(then.v_multiplier, 2),
         **{f"{key}_1d_change": _change(now, then_subs[key]) for key, now in now_subs.items()},
     }
 

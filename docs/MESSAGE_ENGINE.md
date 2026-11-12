@@ -603,8 +603,13 @@ the daily digest alone, so the digest is what changed:
   run-up, breadth, the margin-debt growth) and whether data is degraded.
   And the change: the newest snapshot 22 to 30 hours older - yesterday's
   same slot, or the one before when it was missed - with its headline, band,
-  override, flags and trends and each sub-score's change, and the newest 166
-  to 174 hours older - last week's - with its headline, band and flag count.
+  override, flags, trends and VIX term structure (state and multiplier) and
+  each sub-score's change, and the newest 166 to 174 hours older - last
+  week's - with its headline, band and flag count. The earlier term
+  structure is there because its multiplier scales the whole timing block
+  (`D = min(D_raw * V, 1)`): on 6 of the 37 digest mornings of 2026-10-05 to
+  11-10 the state had changed and that alone moved the point score by 1.19
+  to 3.46, and none of the six digests could name it.
   Nothing older: after an outage the change is left out rather than called
   a day's. Every fact stays a number, a truth
   value or the monitor's own word (decision 16), and the judgment is passed
@@ -614,14 +619,16 @@ the daily digest alone, so the digest is what changed:
   prompt adds the framework the methodology endpoint serves
   (`app.references.FRAMEWORK`) with each leg's caveat: repo-authored text
   only (AGENTS.md ground rule 1).
-- **The prompt** (library 1.3.0, re-signed on the owner's instruction). One
+- **The prompt** (library 1.4.0, re-signed on the owner's instruction). One
   point, chosen by what changed since a day earlier - the band, the
-  override, a flag, a trend - else a clear move of the headline, else the
-  biggest driver or the line the reading sits close to; explained with what
-  changed, which indicators moved it, what they measure, and where it
-  leaves the reading against the band lines, the thresholds and the trend
-  rule. iMessage holds 350 code points (`MESSAGE_ENGINE_IMESSAGE_MAX_CHARS`);
-  SMS stays one GSM-7 segment of 150 septets, and the template is unchanged.
+  override, a flag, a trend, the volatility term structure - else a clear
+  move of the headline, else the biggest driver or the line the reading sits
+  close to; explained with what changed, what moved it (the indicators whose
+  sub-scores changed, or the term structure's multiplier), what they
+  measure, and where it leaves the reading against the band lines, the
+  thresholds and the trend rule. iMessage holds 350 code points
+  (`MESSAGE_ENGINE_IMESSAGE_MAX_CHARS`); SMS stays one GSM-7 segment of 150
+  septets, and the template is unchanged.
 - **The effort.** The model reasons as hard as it can (`composer._EFFORT =
   "max"`; the owner, 2026-10-04: "Please have reasoning on max"). With an
   effort the gateway also asks for the reasoning summary, and that summary

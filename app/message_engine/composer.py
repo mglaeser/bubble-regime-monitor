@@ -184,6 +184,7 @@ _CONTROL_RE = re.compile(
 #: prompt leaves it out.
 _TRENDS = frozenset({"IN", "OUT", "unknown", "?"})
 _DIGEST_BANDS = frozenset(ACTION_BANDS) | {"suppressed (block degraded)", "de-risk (data degraded)"}
+_VOL_STATES = frozenset({"contango", "flat", "backwardation"})
 WORDS: dict[str, frozenset[str]] = {
     # the digest: the snapshot's band - the whole of its producer's range,
     # action_band_with_override's three bands and the two degraded displays
@@ -198,8 +199,9 @@ WORDS: dict[str, frozenset[str]] = {
     "qqq_trend": _TRENDS,
     "spy_trend_1d_ago": _TRENDS,
     "qqq_trend_1d_ago": _TRENDS,
-    # the VIX term structure, v_vix.state's three states
-    "vol_state": frozenset({"contango", "flat", "backwardation"}),
+    # the VIX term structure, v_vix.state's three states, today and a day earlier
+    "vol_state": _VOL_STATES,
+    "vol_state_1d_ago": _VOL_STATES,
     # the alert contract's facts the entries declare as words
     # (app/alerts/render_context.py): the band states, the asset, the next
     # check. The other facts an entry declares there are numbers by their
