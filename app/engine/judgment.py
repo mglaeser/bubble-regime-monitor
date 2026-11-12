@@ -17,6 +17,7 @@ stale:true and continue — never block the recompute or return a 500.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -96,20 +97,35 @@ class JudgmentCall:
     error_class: str | None = None  # exception class name of the last failure, if any
 
 
+#: A sentence end: its mark, with any closing quote or bracket, before a space.
+_SENTENCE_END_RE = re.compile(r"""[.!?]["'”’)\]]*(?=\s)""")
+
+
 def _clean_completion(text: str, limit: int = 300) -> str:
-    """Trim to <= limit chars on a SENTENCE boundary and guarantee terminal
-    punctuation, so the stored judgment never ends mid-word (the old text[:300]
-    hard cut produced fragments like '...leaving the band at')."""
-    text = " ".join(text.split()).strip()
-    if len(text) <= limit and text[-1:] in ".!?":
+    """The answer on one line, at most `limit` characters.
+
+    Within the limit it is stored as the model wrote it. The gateway raises on
+    an incomplete or empty stream (app/llm_gateway.py), so a text that arrives
+    is whole. Until 2026-11 a period was guaranteed here, by sending every
+    answer that did not end in . ! or ? through the cut below: "... lending
+    conditions remain calm" was stored as "... lending conditions remain.", and
+    an answer ending in a closing quote ('... "calm."') lost its last sentence.
+    None of production's 547 answers since v3.3.0 took that path (all end in a
+    period, the longest is 277 characters), so none is stored differently.
+
+    A longer one is cut at its last sentence end within the limit, or, without
+    one, at a whole word with a period, so the stored judgment never ends
+    mid-word (v3.2.0's text[:300] cut left "...leaving the band at") and is
+    never longer than the limit (the old cut returned 301 characters for 400
+    without a space, and took the last ". " before any later "!" or "?").
+    """
+    text = " ".join(text.split())
+    if len(text) <= limit:
         return text
-    clipped = text[:limit]
-    for end in (". ", "! ", "? ", ".", "!", "?"):
-        idx = clipped.rfind(end)
-        if idx >= 40:  # keep a meaningful sentence, not a stub
-            return clipped[: idx + 1].strip()
-    cut = clipped.rsplit(" ", 1)[0].rstrip(",;:- ")  # no boundary: last whole word + period
-    return (cut + ".") if cut else clipped
+    ends = [match.end() for match in _SENTENCE_END_RE.finditer(text[: limit + 1])]
+    if ends and ends[-1] >= 40:  # keep a meaningful sentence, not a stub
+        return text[: ends[-1]]
+    return text[: limit - 1].rsplit(" ", 1)[0].rstrip(",;:- ") + "."  # no sentence end: whole words
 
 
 def run_completion(prompt: str) -> str:
