@@ -81,14 +81,18 @@ def get_score(request: Request, _: None = Depends(require_read_access)) -> dict[
         # No snapshot yet (fresh boot, first scheduled run pending) — this is
         # a 503 service-state signal, NOT an upstream-failure 500.
         raise HTTPException(status_code=503, detail="no snapshot computed yet; try POST /api/v1/admin/refresh")
+    # The width is the difference of the two quartiles served beside it. Rounded
+    # from the unrounded difference it was 0.01 off them on 163 of the 615
+    # production snapshots up to 2026-11-10 (06:00 that day: 49.8, 54.0 and 4.19).
+    q1, q3 = round(snap.iqr_lo, 2), round(snap.iqr_hi, 2)
     data = {
         "headline_median": round(snap.median),
         # v3.7.8/M-02: `iqr` is the (q1,q3) interquartile INTERVAL (kept for
         # compatibility); `iqr_width` is the IQR proper (q3 - q1).
-        "iqr": [round(snap.iqr_lo, 2), round(snap.iqr_hi, 2)],
-        "q1": round(snap.iqr_lo, 2),
-        "q3": round(snap.iqr_hi, 2),
-        "iqr_width": round(snap.iqr_hi - snap.iqr_lo, 2),
+        "iqr": [q1, q3],
+        "q1": q1,
+        "q3": q3,
+        "iqr_width": round(q3 - q1, 2),
         "band_5_95": [round(snap.band5, 2), round(snap.band95, 2)],
         "point_score": round(snap.point_score, 2),
         "action_band": snap.action_band,

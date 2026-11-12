@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 from fastapi.testclient import TestClient
 
+from app.db import session_scope
+from app.models import Snapshot
 from app.references import EPISTEMIC_CAVEATS, FRAMEWORK
 
 
@@ -71,6 +75,26 @@ def test_score_envelope(client_with_snapshot):
     # A judgment is a model's words whenever it exists; the renderer tints the
     # dynamic-content marker by this (owner, 2026-09-21).
     assert data["judgment_call"]["provenance"] == ("generated" if data["judgment_call"]["text"] else "none")
+
+
+def test_the_served_width_is_the_difference_of_the_served_quartiles(client):
+    """`iqr_width` is the IQR proper, q3 - q1 (README, v3.7.8/M-02), so the
+    three numbers served agree with each other. The quartiles stored here are
+    production snapshot 611's (2026-11-10 06:00), which was served as q1 49.8,
+    q3 54.0 and iqr_width 4.19: the width was rounded from the unrounded
+    difference (4.1942) and was 0.01 off the two quartiles served beside it
+    on 163 of the 615 production snapshots up to 2026-11-10.
+    test_score_envelope asserts the same relation on the golden fixture's
+    quartiles, where the two ways of rounding happen to agree."""
+    with session_scope() as session:
+        session.add(Snapshot(
+            computed_at=datetime(2026, 11, 10, 6, 0, 45, tzinfo=UTC), service_version="3.9.0",
+            median=51.86169478754713, iqr_lo=49.802240404123545, iqr_hi=53.996457710169,
+            band5=47.0029010206321, band95=57.132138829588904, point_score=51.768960213024,
+            action_band="suppressed (block degraded)"))
+    data = client.get("/api/v1/score").json()["data"]
+    assert (data["q1"], data["q3"], data["iqr_width"]) == (49.8, 54.0, 4.2)
+    assert data["iqr"] == [data["q1"], data["q3"]]
 
 
 def test_indicators_list_and_detail(client):
