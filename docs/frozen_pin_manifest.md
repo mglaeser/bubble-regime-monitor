@@ -106,7 +106,7 @@ The ladder below is statistic-agnostic; `gsadf.statistic` selects what `stat` is
 |---|---|---|
 | Explosive & non-contested (`stat > cv95`) | `1.0` | `s4_gsadf.py` |
 | `stat > cv90` | `0.5` | `s4_gsadf.py` |
-| Contested REJECTION / stale / data-missing / degenerate CV / unknown rule | `SUB_CONTESTED_OR_STALE = 0.25` | `s4_gsadf.py` |
+| Contested REJECTION / data-missing / degenerate CV / unknown rule (a stale reading is not floored: it keeps its measurement and loses its weight in the coverage gate) | `SUB_CONTESTED_OR_STALE = 0.25` | `s4_gsadf.py` |
 | Contested NON-rejection (`stat <= cv90`) under `contested_rule = "asymmetric"` | `SUB_NULL = 0.05` | `s4_gsadf.py` |
 | Tested-and-not-explosive | `0.05` | `s4_gsadf.py` |
 | COMPUTED gate | finite `stat`, finite `cv90 < cv95`, else FLOOR (0.25, quality 0.0) | `s4_gsadf.py`/`compute.py` (G-04) |
@@ -258,7 +258,7 @@ MC anchor ranges: CAPE window integers `U[20,40]`; concentration `lo U(16,20)`, 
 | MC CV replications | `MC_NREP = 2000` | `r/gsadf.R` |
 | MC CV seed | `MC_SEED = 20260711` | `r/gsadf.R` |
 | CV cache key | `mc_cv_n{n}_nrep{nrep}_seed{seed}.rds` (G-01) | `r/gsadf.R` |
-| Series fed | last 360 monthly log prices (QQQ proxy for NDX) | `compute.py` |
+| Series fed | last 360 completed monthly log prices (QQQ proxy for NDX); the month in progress is not in the fit | `compute.py:_s4_months` |
 | Timeout / contested default | `gsadf_timeout_s = 1800` / `gsadf_contested = True` | `config.py` |
 
 Note: `1.49` is a SADF critical value and must NEVER be hard-coded; the simulated GSADF 95% CV is ~1.9–2.1 depending on T.
