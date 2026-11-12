@@ -577,7 +577,13 @@ def test_stage_gating_still_binds_inside_a_replay(tmp_path, artifacts):
     """Replay can ask about another stage; it cannot ignore staging."""
     at_one = _run(tmp_path, artifacts, name="s1.db", stage=1)
     at_three = _run(tmp_path, artifacts, name="s3.db", stage=3)
-    assert at_one.episodes_by_rule == {}
+    # The history ends on a degraded slot, and the two stage-1 rules about
+    # degraded data fire on it. Nothing gated to a later stage may.
+    stage_one = {rule.rule_id for rule in artifacts.ruleset.active_rules(1)}
+    assert set(at_one.episodes_by_rule) == {
+        "constellation.false_alarm_likely", "ops.coverage_degraded_info"}
+    assert set(at_one.episodes_by_rule) <= stage_one
+    assert "regime.band_to_derisk" not in stage_one
     assert "regime.band_to_derisk" in at_three.episodes_by_rule
 
 

@@ -95,6 +95,17 @@ def _snapshot_period(inp: AlertInput) -> str | None:
 def _snapshot_value(
     source_id: str, domain: str, value: Any, inp: AlertInput, *, reason: str = "not persisted"
 ) -> SourceValue:
+    if inp.snapshot_id is None:
+        # The watchdog's input (`build_watchdog_input`) is built without a
+        # snapshot and carries no scoring state. `AlertInput` defaults its
+        # three booleans to False and its falsification log to empty, and a
+        # default is not an observation. Read as facts, the outage input
+        # resolved an open `override.fires` or coverage episode, and the
+        # recovery observation after it planned "override resolved" while the
+        # override was still active. Unavailable is UNKNOWN, which resolves
+        # nothing. Production has had one watchdog input (2026-08-29, before
+        # evaluation went live) and no override, so this has not happened yet.
+        return _missing(source_id, domain, "this input carries no snapshot")
     if value is None:
         return _missing(source_id, domain, reason)
     period = _snapshot_period(inp)
@@ -103,7 +114,25 @@ def _snapshot_value(
         observation_domain_id=domain,
         value=value,
         available=True,
-        data_state=DataState.STALE if inp.data_degraded else DataState.FRESH,
+        # FRESH on a degraded snapshot too. The value is read from the snapshot
+        # under evaluation, so it has no age: `same_snapshot`, the freshness
+        # requirement every rule declares for these sources, holds by
+        # construction. Degradation is a fact of its own (`data_degraded`), and
+        # a rule that must not act on degraded data names it in its condition,
+        # as the Faber P1 does (`data_degraded == false`, pinned by
+        # test_the_faber_p1_still_refuses_degraded_data).
+        #
+        # This read STALE whenever `data_degraded`, and a true rule with a
+        # stale hold source is UNKNOWN (`primitives.evaluate_rule`). The
+        # enabled rules ABOUT degraded data hold such a source, so they were
+        # UNKNOWN exactly when their condition held. Production, 2026-09-20 ..
+        # 11-10, 306 evaluations, 26 of them on a degraded snapshot: 39
+        # `condition_unknown` events and no episode
+        # (constellation.coverage_degradation_real 26,
+        # constellation.false_alarm_likely 12, and on 2026-10-06 02:00 UTC
+        # regime.base_band_moved_while_suppressed 1: the base band went
+        # de-risk -> trim under suppression and no message said so).
+        data_state=DataState.FRESH,
         economic_observation_key=obs.economic_observation_key(
             domain, period_start=period, period_end=period),
         observed_at=inp.computed_at,

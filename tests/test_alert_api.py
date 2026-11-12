@@ -659,9 +659,10 @@ def test_mechanism_projection_exposes_typed_evidence_and_source_progress(client)
     from tests.test_alert_evaluation import make_input
 
     now = datetime(2026, 8, 25, 10, 0, tzinfo=UTC)
-    alert_input = make_input(
-        identity="projection-input", effective="trim").model_copy(
-            update={"snapshot_id": None})
+    # A recompute input names its snapshot: only the watchdog's input has none,
+    # and that one carries no scoring fact. The row's `snapshot_id` column
+    # below stays NULL because it is a foreign key and no snapshot row exists.
+    alert_input = make_input(identity="projection-input", effective="trim")
     with session_scope() as session:
         artifacts = load_active(session)
         register(session, artifacts, now=now)

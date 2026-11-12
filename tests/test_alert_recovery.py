@@ -1217,6 +1217,171 @@ def test_a_healthy_watchdog_pass_resolves_the_open_outage(
     get_settings.cache_clear()
 
 
+# ---------------------------------------------------------------------------
+# a watchdog input says that no snapshot arrived, and nothing about the score
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("slot_key,missed", [
+    ("2026-08-20T14:00:00+00:00", 2),
+    ("recovery:2026-08-20T18:00:00+00:00", 0),
+], ids=["firing", "recovery"])
+def test_a_watchdog_input_carries_the_missed_slots_and_nothing_else(slot_key, missed):
+    """Built without a snapshot, it has one fact: the missed-slot count.
+
+    `AlertInput` defaults `override_fired`, `data_degraded` and
+    `band_suppressed_by_coverage` to False and its falsification log to empty.
+    On this input those are defaults, not observations, and an unavailable
+    source is UNKNOWN: it resolves nothing and starts nothing.
+    """
+    from types import SimpleNamespace
+
+    from app.alerts.input_builder import build_watchdog_input
+    from app.alerts.sources import SOURCE_REGISTRY, read_source
+
+    last = SimpleNamespace(computed_at=datetime(2026, 8, 20, 6, 0, tzinfo=UTC),
+                           methodology_version=None, methodology_sha256=None)
+    watchdog_input = build_watchdog_input(
+        expected_slot_key=slot_key, missed_slots=missed,
+        built_at=datetime(2026, 8, 20, 18, 10, tzinfo=UTC),
+        service_version="3.8.0", last_snapshot=last)
+
+    assert watchdog_input.snapshot_id is None
+    available = {source_id for source_id in SOURCE_REGISTRY
+                 if read_source(source_id, watchdog_input).available}
+    assert available == {"missed_recompute_slots"}
+
+
+OUTAGE_DAY = datetime(2026, 8, 20, tzinfo=UTC)
+
+
+def _outage_arc(tmp_path, monkeypatch, *, before: str, after: str | None = None) -> None:
+    """An outage in production's shape, through the real capture and watchdog.
+
+    Snapshots carry lineage (`prev_snapshot_id`), every sidecar is captured
+    from its snapshot and evaluated, and the watchdog writes and evaluates its
+    own inputs:
+
+      02:00  a quiet trim snapshot
+      06:00  the snapshot `before` names: "quiet", "override" or "suppressed"
+      10:00, 14:00  no recompute; at 15:31 the watchdog fires
+      18:00  with `after`: the recompute is back in that state, and at 18:10
+             the watchdog writes its recovery observation
+    """
+    import pathlib
+
+    import yaml
+
+    from app.alerts.watchdog import run_once
+    from app.config import get_settings
+    from app.services.alert_integration import capture_alert_input, evaluate_input
+    from tests.test_alert_end_to_end import _snapshot
+
+    source = yaml.safe_load(
+        pathlib.Path("config/alert_rules.v3.2.yaml").read_text(encoding="utf-8"))
+    source["meta"]["active_stage"] = 3
+    staged = tmp_path / "alert_rules.stage3.yaml"
+    staged.write_text(
+        yaml.safe_dump(source, sort_keys=False, allow_unicode=True),
+        encoding="utf-8")
+    monkeypatch.setenv("ALERTS_RULES_PATH", str(staged))
+    monkeypatch.setenv("ALERTS_MODE", "shadow")
+    monkeypatch.setenv("ALERT_INPUT_CAPTURE", "true")
+    get_settings.cache_clear()
+
+    def recompute(hour: int, state: str, prev_id: int | None) -> int:
+        at = OUTAGE_DAY + timedelta(hours=hour)
+        with session_scope() as session:
+            snap = _snapshot(
+                session, computed_at=at, prev_id=prev_id,
+                effective={"quiet": "trim", "override": "de-risk",
+                           "suppressed": "suppressed"}[state])
+            if state == "override":
+                snap.override_fired = True
+            if state == "suppressed":
+                # Suppression hides the band; the base band stays a band.
+                snap.base_action_band = snap.score_action_band = "trim"
+                snap.band_suppressed_by_coverage = True
+                snap.data_degraded = True
+            snapshot_id = snap.id
+        outcome = evaluate_input(
+            capture_alert_input(snapshot_id, now=at + timedelta(minutes=1)),
+            now=at + timedelta(minutes=2))
+        assert outcome.status == EvaluationRunStatus.COMMITTED
+        return snapshot_id
+
+    quiet_id = recompute(2, "quiet", None)
+    last_id = recompute(6, before, quiet_id)
+
+    fired = run_once(now=OUTAGE_DAY + timedelta(hours=15, minutes=31))
+    assert fired["firing"] is True
+    assert fired["evaluation_status"] == EvaluationRunStatus.COMMITTED
+    if after is None:
+        return
+    recompute(18, after, last_id)
+    recovered = run_once(now=OUTAGE_DAY + timedelta(hours=18, minutes=10))
+    assert recovered["recovery_observation"] is True
+    assert recovered["evaluation_status"] == EvaluationRunStatus.COMMITTED
+
+
+def _episodes(rule_id: str) -> list[bool]:
+    """`is_open` of every episode the rule has, oldest first."""
+    from app.alerts.models import AlertEpisode
+
+    with session_scope() as session:
+        return list(session.execute(
+            select(AlertEpisode.is_open).where(AlertEpisode.rule_id == rule_id)
+            .order_by(AlertEpisode.opened_at)
+        ).scalars())
+
+
+def _planned_rules() -> set[str]:
+    from app.alerts.models import AlertDeliveryMember
+
+    with session_scope() as session:
+        return set(session.execute(select(AlertDeliveryMember.rule_id)).scalars())
+
+
+@pytest.mark.parametrize("before,standing", [
+    ("override", "override.fires"),
+    ("suppressed", "ops.coverage_risk_masking"),
+], ids=["override", "coverage-masking"])
+def test_an_outage_neither_resolves_nor_announces_a_standing_decision(
+        isolated_db, tmp_path, monkeypatch, before, standing):
+    """The watchdog's input reports the outage and leaves the decisions alone."""
+    _outage_arc(tmp_path, monkeypatch, before=before)
+
+    assert _episodes("ops.recompute_outage") == [True]     # the watchdog's own alert
+    assert _episodes(standing) == [True]                   # not resolved by a default
+    assert _episodes("override.resolves") == []
+    assert "override.resolves" not in _planned_rules()
+
+
+def test_the_recovery_observation_leaves_an_active_override_alone(
+        isolated_db, tmp_path, monkeypatch):
+    """Override active before, during and after the outage: nothing to say."""
+    _outage_arc(tmp_path, monkeypatch, before="override", after="override")
+
+    assert _episodes("ops.recompute_outage") == [False]    # the outage is over
+    assert _episodes("override.fires") == [True]           # the override is not
+    assert _episodes("override.resolves") == []
+    assert "override.resolves" not in _planned_rules()
+
+
+def test_an_override_that_fired_during_an_outage_is_announced_by_the_next_recompute(
+        isolated_db, tmp_path, monkeypatch):
+    """The first recompute after the outage is judged against the snapshot
+    before it (lineage), and the recovery observation minutes later must not
+    close the P1 episode it opened: its 48 h reminder hangs on that episode."""
+    _outage_arc(tmp_path, monkeypatch, before="quiet", after="override")
+
+    assert _episodes("ops.recompute_outage") == [False]
+    assert _episodes("override.fires") == [True]
+    planned = _planned_rules()
+    assert "override.fires" in planned
+    assert "override.resolves" not in planned
+
+
 def test_a_retry_does_not_change_the_mode_the_work_ran_in(isolated_db):
     """An interrupted shadow evaluation must not come back live.
 
