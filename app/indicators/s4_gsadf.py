@@ -46,8 +46,9 @@ WHAT/HOW/WHY/references/caveats: see app.references.REGISTRY["s4"]; summary:
 CAVEAT (verbatim): The CONTESTED flag is currently permanent because of
 Chen-Chen-Huang (2026): under hump-shaped GPT fundamentals the test
 spuriously rejects 93-100% of the time. We expose the binary decision plus
-the p-value (per the ASA p-value statement, Wasserstein & Lazar 2016) rather
-than pretending to a graded posterior we cannot honestly calibrate.
+the statistic and its 90% and 95% critical values (no p-value is computed;
+cf. the ASA p-value statement, Wasserstein & Lazar 2016) rather than
+pretending to a graded posterior we cannot honestly calibrate.
 
 EPISTEMIC GUARDRAILS: the five, verbatim, are in app/references.py.
 """

@@ -168,10 +168,13 @@ REGISTRY: dict[str, Methodology] = {
             "S&P Dow Jones Indices concentration data",
             "JPMAM Guide to the Markets (cross-check)",
         ],
+        # Concentration is an input of no red flag: red flag 4 is breadth below
+        # 50 % while the index is near its high (engine/aggregate.py,
+        # evaluate_red_flags; see the d1 caveat).
         caveats=[
             "The lo/hi anchors are judgmental (chosen to bracket the 2000-peak ~27% and a plausible "
             "extreme ~41-44%), not estimated from a labeled crash dataset; concentration has weak "
-            "standalone timing power. It also feeds red-flag #4 in combination with breadth.",
+            "standalone timing power.",
             "Some data vendors report '36.4%' as the information-technology sector weight — the S2 "
             "input is the sum of the top-10 individual holding weights, read from the holdings XLSX, "
             "not a sector table.",
@@ -207,12 +210,16 @@ REGISTRY: dict[str, Methodology] = {
             "Greenwood, R., Shleifer, A. & You, Y. (2019). 'Bubbles for Fama.' Journal of "
             "Financial Economics 131(1): 20-43. doi:10.1016/j.jfineco.2018.09.002",
         ],
+        # The Magnificent-7 figure is the one the indicator was scoped with; no
+        # code computes it, so the sentence is dated instead of saying "currently".
+        # app/indicators/s3_semis_gsy.py quotes this caveat verbatim.
         caveats=[
             "The 53%/80% crash frequencies are Fama-French-49 industry-level base rates, NOT "
-            "calibrated to this specific AI episode. The whole-market Magnificent-7 basket does "
-            "not currently meet the run-up threshold (~0 pp net two-year run-up), so the indicator "
-            "is deliberately scoped to semiconductors only; applying the GSY threshold to the broad "
-            "index would understate the signal because the mega-caps are already the market."
+            "calibrated to this specific AI episode. When the indicator was scoped (July 2026) the "
+            "whole-market Magnificent-7 basket did not meet the run-up threshold (~0 pp net two-year "
+            "run-up; the service does not recompute that figure), so the indicator is deliberately "
+            "scoped to semiconductors only; applying the GSY threshold to the broad index would "
+            "understate the signal because the mega-caps are already the market."
         ],
     ),
     "s4": Methodology(
@@ -221,9 +228,11 @@ REGISTRY: dict[str, Methodology] = {
         weight=0.07,
         grounding="contested",
         block="S",
+        # One series is tested: the Nasdaq-100 through its QQQ proxy
+        # (services/compute.py hands run_gsadf nothing else). SMH is S3's input.
         what=(
             "A recursive right-tailed unit-root test (Phillips-Shi-Yu) for explosive "
-            "(faster-than-exponential) dynamics in Nasdaq-100 and SMH monthly log prices. Since "
+            "(faster-than-exponential) dynamics in Nasdaq-100 monthly log prices (QQQ proxy). Since "
             "v4.0-s4-endpoint the SCORED statistic is the backward SADF at the LAST observation — a "
             "present-tense read of the current regime — rather than the GSADF supremum over every "
             "endpoint in the sample, which answers the historical question 'was there ever an "
@@ -302,15 +311,21 @@ REGISTRY: dict[str, Methodology] = {
             "Wasserstein, R. L. & Lazar, N. A. (2016). 'The ASA Statement on p-Values: Context, "
             "Process, and Purpose.' The American Statistician 70(2): 129-133. "
             "doi:10.1080/00031305.2016.1154108",
-            "Chen, Chen & Huang (2026). arXiv:2604.25826 (flag: verify at build time)",
-            "Basele, Phillips & Shi (2025). Cowles Foundation Discussion Paper d2430 "
-            "(flag: verify at build time)",
+            # Both verified on 2026-07-14 (VERIFIED_CITATIONS; UNVERIFIED_CITATIONS
+            # is empty), so neither carries a "verify at build time" flag.
+            "Chen, Chen & Huang (2026). arXiv:2604.25826",
+            "Basele, Phillips & Shi (2025). Cowles Foundation Discussion Paper d2430",
         ],
+        # What is exposed is what exists: the R script returns the statistic and
+        # its critical values (engine/gsadf_runner.py, GsadfOutput); nothing in
+        # the service computes a p-value. app/indicators/s4_gsadf.py quotes this
+        # caveat verbatim.
         caveats=[
             "The CONTESTED flag is currently permanent because of Chen-Chen-Huang (2026): under "
             "hump-shaped GPT fundamentals the test spuriously rejects 93-100% of the time. We expose "
-            "the binary decision plus the p-value (per the ASA p-value statement, Wasserstein & "
-            "Lazar 2016) rather than pretending to a graded posterior we cannot honestly calibrate."
+            "the binary decision plus the statistic and its 90% and 95% critical values (no p-value "
+            "is computed; cf. the ASA p-value statement, Wasserstein & Lazar 2016) rather than "
+            "pretending to a graded posterior we cannot honestly calibrate."
         ],
     ),
     "s5": Methodology(
@@ -319,10 +334,21 @@ REGISTRY: dict[str, Methodology] = {
         weight=0.13,
         grounding="literature-grounded",
         block="S",
+        # The score is 1 - percentile(excess bond premium at t-2), see `how`: it
+        # reads the pricing of two years ago, not the spreads of the day. In
+        # production S5 rose from 0.52 to 0.85 on 2026-11-05 (the premium of two
+        # years earlier went from -0.06 to -0.33 pp) while HY OAS stood at 334 bps,
+        # 75 above its three-year low. The digest's model reads this text
+        # (message_engine/context.py); it is kept under context.MAX_TEXT so that
+        # the prompt carries all of it.
         what=(
-            "The tightness of high-yield credit spreads read as late-cycle sentiment fragility: "
-            "aggressively priced credit risk today predicts subsequent spread widening and an "
-            "economic downturn roughly two years out."
+            "How cheaply credit risk was priced TWO YEARS AGO, read as late-cycle sentiment "
+            "fragility: the Fed's excess bond premium (the part of corporate bond spreads that "
+            "expected defaults do not explain) as it stood 24 months back, ranked against its "
+            "history since 1973; a credit spread of two years ago stands in when the premium cannot "
+            "be read. Aggressively priced credit predicts spread widening and an economic downturn "
+            "roughly two years later, so the reading of two years ago speaks about the present; it "
+            "does not follow the spreads of the day."
         ),
         how=(
             "PREFERRED input (v3.3.1): the Fed's Excess Bond Premium (Gilchrist-Zakrajsek, monthly "
@@ -370,7 +396,11 @@ REGISTRY: dict[str, Methodology] = {
             "Primary (v3.3.0): full-universe constituent computation — S&P 500 membership from "
             "the SSGA SPY holdings XLSX, daily closes for the whole US market from the "
             "Polygon/Massive grouped-daily endpoint (1 call/day, daily_close cache), "
-            "pct = 100*#{close > SMA200}/N with a binomial CI on partial coverage. No fallback "
+            # No interval is computed: v3.7.8 removed the binomial one (the names
+            # not yet resolved are no random sample) for the bounds in
+            # sources/breadth.py, _breadth_identification_bounds_pct.
+            "pct = 100*#{close > SMA200}/N; on partial coverage the note carries worst-case "
+            "full-universe identification bounds (display only, never scored). No fallback "
             "(since 2026-09-28): without Polygon, D1 is dropped and its block renormalized. "
             "sub_score = max(0.05, clip((hi - pct)/(hi - lo), 0, 1)) with baseline lo = 35, "
             "hi = 90 and a 0.05 soft floor (v3.3.0 — hi=75 clipped normal bull-market breadth "
@@ -460,8 +490,7 @@ REGISTRY: dict[str, Methodology] = {
             "revenue-stall-plus-cash-burn releases the full sub-score."
         ),
         references=[
-            "BIS (2026), Annual Economic Report (buildout/AI-capex context) "
-            "(flag: verify at build time)",
+            "BIS (2026), Annual Economic Report (buildout/AI-capex context)",  # verified 2026-07-14
             "General buildout-analogy literature (railroad/telecom capital-cycle studies)",
         ],
         caveats=[
