@@ -82,7 +82,9 @@ P2   ATOMIC APPLY       one write txn, CAS every state row  ──────�
 Each phase has its own exception boundary and none may roll back T1 — a scoring
 snapshot is never held hostage to the alert layer. P0a and P0b are separate
 because a lost sidecar is a permanent hole in the replay record, while a lost
-evaluation is simply retried.
+evaluation is simply retried. The recovery job does it (:15/:45,
+`app/jobs/alert_recovery.py`): it re-runs the newest recompute's evaluation
+while it has not committed, at most `ALERTS_EVAL_RETRY_MAX` (2) times.
 
 P1 holds no write lock. On a single-writer SQLite database, doing rule
 evaluation and history reads inside the write transaction would block the next
@@ -412,6 +414,18 @@ next transition (tests/test_alert_recovery.py::test_promotion_resolves_the_repla
 | lease live | in progress | leave it alone |
 | lease expired, `plan_applied=0` | died before applying anything | `ABANDONED`; safe to retry under the same logical identity |
 | lease expired, `plan_applied=1` | applied a plan but never recorded finishing | **never auto-repaired** — needs a human |
+
+A run that ends `TIMED_OUT`, `CONFLICT` or `FAILED` has applied nothing either:
+the apply is one transaction. The recovery job re-runs it, and an `ABANDONED`
+run whoever swept it, for the newest recompute only, because the decisions of
+an older input would be applied to a state a later input has already moved
+(`tests/test_alert_recovery.py::test_an_older_input_is_not_rerun_once_a_newer_one_exists`).
+`recover-evaluations --once` and `POST /admin/alerts/recover` sweep; the job's
+next run re-runs. Past the budget the recovery component reports `degraded`
+with `retries_budget_exhausted` until a newer recompute exists. A watchdog
+input's evaluation is not the job's: the watchdog evaluates its own input
+again on every pass while the outage lasts, and its recovery observation while
+the outage episode is open.
 
 `recover-leases --once` is the separate delivery-lease sweep. An expired
 `LEASED` row with no `request_started_at` is definitely pre-wire and returns to

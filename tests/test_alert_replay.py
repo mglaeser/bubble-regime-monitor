@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import itertools
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -136,6 +138,23 @@ def test_replay_derives_time_from_the_input_not_from_the_clock(tmp_path, artifac
     summary = _run(tmp_path, artifacts)
     assert summary.window_first == "2026-08-14T22:00:00+00:00"
     assert summary.window_last == "2026-08-15T14:00:00+00:00"
+
+
+def test_a_slow_host_does_not_change_a_replay(tmp_path, artifacts, monkeypatch):
+    """`now` comes from each input's own `computed_at`, never from a clock
+    (docs/ALERT_SYSTEM.md, section 12, "It is deterministic")."""
+    from app.alerts import engine
+
+    quiet = _run(tmp_path, artifacts, name="quiet.db")
+    # Every look at the clock is 2 s later: each evaluation overruns the
+    # production budget of 1,500 ms (ALERTS_EVAL_BUDGET_MS). Replacing the
+    # engine's `time` name keeps the stepping clock away from SQLAlchemy.
+    ticks = itertools.count(step=2.0)
+    monkeypatch.setattr(engine, "time", SimpleNamespace(monotonic=lambda: next(ticks)))
+    slow = _run(tmp_path, artifacts, name="slow.db")
+
+    assert slow.evaluations_timed_out == 0
+    assert slow.to_json() == quiet.to_json()
 
 
 # ---------------------------------------------------------------------------

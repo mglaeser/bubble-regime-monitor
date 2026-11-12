@@ -10,8 +10,8 @@ implied by call order elsewhere:
 P0a and P0b are independent transactions on purpose. If claiming an evaluation
 fails, the evidence must still be on disk — a lost sidecar is a hole in the
 replay record that can never be filled, while a lost evaluation is simply
-retried. And neither may roll back T1: a scoring snapshot is never held
-hostage to the alert layer.
+retried (by the recovery job, `app/jobs/alert_recovery.py`). And neither may
+roll back T1: a scoring snapshot is never held hostage to the alert layer.
 
 Everything here runs AFTER commit, under its own exception boundary. A failure
 is logged and swallowed: `run_recompute` must complete.
