@@ -26,7 +26,9 @@ def isolated_db(tmp_path, monkeypatch):
     """Point the app at a throwaway SQLite file and reset cached singletons."""
     db_path = tmp_path / "test.db"
     monkeypatch.setenv("DB_URL", f"sqlite:///{db_path}")
-    monkeypatch.setenv("MC_SAMPLES", "20000")
+    # The suite draws 20 000 samples where the artifact says 100 000 (speed),
+    # on the pipeline's own constant: no environment variable sets the count.
+    monkeypatch.setattr("app.services.compute.MC_SAMPLES", 20_000)
     monkeypatch.setenv("FRED_API_KEY", "")
     for name in ("LLM_API_BASE_URL", "LLM_API_KEY", "LLM_MODEL", "LLM_AUTH_HEADER"):
         monkeypatch.setenv(name, "")

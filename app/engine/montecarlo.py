@@ -1,7 +1,7 @@
 """Seeded Monte Carlo over weights, anchors, and the structural/trigger split.
 
-Per draw (spec section 5.3), with N = MC_SAMPLES (default 100 000) and
-seed = MC_SEED (default 20260711):
+Per draw (spec section 5.3), with N = 100 000 and seed = 20260711 (the frozen
+artifact's monte_carlo.samples and monte_carlo.seed; neither is a setting):
 
 - Block weights ~ Dirichlet(base_weights * 50) (independently for S and D).
 - CAPE percentile window W ~ integers U[20, 40].

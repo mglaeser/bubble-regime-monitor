@@ -10,13 +10,6 @@ from typing import Literal
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from app import methodology as _M
-
-
-def _frozen_mc(key: str) -> int:
-    """MC default sourced from the canonical frozen artifact (F-01/L-07)."""
-    return _M.get_path("monte_carlo", key)
-
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
@@ -179,19 +172,30 @@ class Settings(BaseSettings):
     alerts_message_retention_days: int = 400
     alerts_busy_timeout_ms: int = 5000
 
-    # Runtime. mc_samples / mc_seed DEFAULT to the canonical frozen artifact
-    # (F-01/L-07) so the runtime MC seed is causally the frozen value; env vars
-    # may still override for operational runs.
+    # Runtime. The Monte Carlo's seed and sample count are NOT settings
+    # (AGENTS.md ground rule 6: reproducibility is pinned). They were, and a
+    # snapshot records the artifact's hash and version only: MC_SEED=1 moved
+    # the golden inputs' median from 53.4119 to 53.4515 and MC_SAMPLES=2000 to
+    # 53.3795 while that hash (bfb3d9a5) stayed the same - the hole the NOTE
+    # below closed for the asymmetric contested rule. app/services/compute.py
+    # reads both from the frozen artifact. On the production evidence nothing
+    # published moves: snapshots 494-496 (2026-10-21 18:00 to 2026-10-22
+    # 02:00, the three that carry every Monte Carlo input) reproduce to the
+    # last digit with seed 20260711 and 100 000 draws; seed 1 would be about
+    # 0.02 off, 2 000 draws about 0.13. A host that still sets one of the two
+    # - .env.example carried both lines, with the artifact's values - is told
+    # to remove it (RETIRED_ENV_KEYS below).
     tz: str = "UTC"
     # Set by the test suite (conftest): skips the boot warm-up threads and the
     # scheduler in lifespan. Leaked daemon threads (hy-oas-seed /
     # breadth-backfill) crossing test boundaries corrupted other tests'
     # throwaway sqlite DBs on CI ("file is not a database", intermittent).
     testing: bool = False
-    mc_samples: int = _frozen_mc("samples")
-    mc_seed: int = _frozen_mc("seed")
     db_url: str = "sqlite:////data/bubble.db"
     log_level: str = "INFO"
+    # Stays a setting: an operator's lever of record (docs/ALERT_STAGE0_AUDIT.md,
+    # finding 3), and every snapshot shows its position as flag 1's state
+    # (BLOCKED while contested).
     gsadf_contested: bool = True
     # NOTE: there is deliberately NO runtime switch for the asymmetric contested
     # rule. An earlier revision had one, and the panel refuted it: "runtime flag
@@ -367,6 +371,10 @@ RETIRED_ENV_KEYS: dict[str, str] = {
     "ALERTS_PUBLIC_READ_RATE_LIMIT": (
         "removed unapplied (owner decision D3e, 2026-10-03): every alert read is limited to "
         "60/minute per client, like the other reads, so remove this key"),
+    **{key: ("removed (AGENTS.md ground rule 6, 2026-11-12): the Monte Carlo runs the seed and "
+             "the sample count of frozen_methodology.json (monte_carlo.seed, "
+             "monte_carlo.samples) whatever the environment says, so remove this key")
+       for key in ("MC_SAMPLES", "MC_SEED")},
 }
 
 
