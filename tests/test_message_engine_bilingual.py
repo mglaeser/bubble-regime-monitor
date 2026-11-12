@@ -118,6 +118,24 @@ class TestComposeInGerman:
         assert out.source == "fallback"
         assert out.text == "bubblegauge: Vorsichtsstufe auf trim gewechselt (vorher: hold). Nächster Lauf 14:00 UTC."
 
+    @pytest.mark.parametrize("language, name", [("de", "German"), ("en", "English")])
+    def test_a_number_is_written_as_the_language_writes_it(self, language, name):
+        """The facts are Python floats ("51.1"); German writes "51,1". The
+        prompt asks for each number as the message's language writes it,
+        the digits as given: the language decides the decimal mark, with no
+        rule of our own per language and no check on the model's text.
+        Production's 36 generated German digests of 2026-10-05..11-10 wrote
+        the point on 19 ("51.1%"), the comma on 13 ("41,8 %") and no decimal
+        on 4, never both in one text."""
+        entry = composer.library()["prompts"]["daily_digest"]
+        prompt = composer.prompt_for("daily_digest", entry, {"median": 55, "d1_value": 51.1}, Channel.IMESSAGE,
+                                     _settings(message_language=language))
+        write = prompt.split("\n\n")[-1]
+        assert write.startswith(f"WRITE: one message in {name},")
+        assert f"each number written as {name} writes it (its decimal mark included) with the digits as given" in write
+        # the fact itself stays the number Python writes, and no number may be invented
+        assert "  d1_value = 51.1" in prompt and "Use the numbers exactly as given and invent none" in prompt
+
     def test_the_setting_reaches_the_daily_digest_service(self, monkeypatch):
         monkeypatch.setenv("IMESSAGE_ENABLED", "true")
         monkeypatch.setenv("IMESSAGE_API_BASE_URL", "https://messages.example.com")

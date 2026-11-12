@@ -544,6 +544,7 @@ def _snapshot(**over) -> types.SimpleNamespace:
             "block_s": {"indicators": {"s1": {"sub_score": 0.8}, "s2": {"sub_score": None}}},
             "block_d": {"indicators": {"d1": {"sub_score": 0.11}}}, "judgment_call": "Valuations are stretched.",
             "band5": 52.3, "band95": 66.0, "red_flag_meta": {}, "override_required_count": 3,
+            "override_fireable_universe_count": 3,
             "v_state": "contango", "v_multiplier": 1.0, "data_degraded": False}
     base.update(over)
     return types.SimpleNamespace(**base)
@@ -1152,9 +1153,10 @@ class TestRoundTwoOn145:
     def test_the_unwired_entries_are_gone_and_the_library_is_re_signed(self):
         lib = composer.library()
         assert not self.GONE & set(lib["prompts"]) and len(lib["prompts"]) == 23
-        # re-signed since on the owner's request of 2026-10-04 (tests/test_digest_change_context.py)
-        assert lib["version"] == "1.3.0" and lib["status"].startswith("SIGNED 2026-10-04")
-        assert "Previously: SIGNED 2026-10-01" in lib["status"]
+        # re-signed since on the owner's requests of 2026-10-04 and 2026-11-11
+        # (tests/test_digest_change_context.py); every earlier signature stays behind "Previously:"
+        assert lib["version"] == "1.4.0" and lib["status"].startswith("SIGNED 2026-11-12 mglaeser - ")
+        assert "Previously: SIGNED 2026-10-04" in lib["status"] and "Previously: SIGNED 2026-10-01" in lib["status"]
         assert not any("llm" in entry for entry in lib["prompts"].values())
 
 

@@ -30,7 +30,10 @@ converge, and 57 review rounds on #121 and 20 on #124 showed it.
   name, which fills the template too (`typed_facts`, #126 round 14);
   the references for the trigger - the methodology and sources of its
   indicators (`app/message_engine/context.py`, repo-authored text only);
-  and how to write: one message, in `MESSAGE_LANGUAGE`, for its channel
+  and how to write: one message, in `MESSAGE_LANGUAGE` with each number
+  written as that language writes it (the digits as given: of production's
+  36 generated German digests of 2026-10-05 to 11-10, 19 carried the facts'
+  decimal point and 13 a comma), for its channel
   only, without links, within the channel's length and alphabet as the
   check counts them (septets and GSM-7 on SMS, where `[ \ ] ^ { | } ~ €`
   count as two; code points on iMessage, in printable ASCII and Latin-1,
@@ -580,10 +583,10 @@ by setting. `MESSAGE_LANGUAGE` (`en` | `de`) is that switch, one setting so
 the two paths never disagree in a single day's messages. The alert phrase
 set carries both languages since v3.5 (docs/ALERT_SYSTEM.md). The prompt
 library carries, per entry, `translations.<lang>` with its `fallback`
-template; the composer asks the model to write in the selected language and
-sends that language's template otherwise. An entry without a translation
-for the selected language renders in the library's own language: the
-owner's words in one language beat no words at all.
+template; the composer asks the model to write in the selected language,
+numbers included, and sends that language's template otherwise. An entry
+without a translation for the selected language renders in the library's
+own language: the owner's words in one language beat no words at all.
 
 ## Decision 28 — the digest's model is handed what the API serves (the owner, 2026-10-04)
 
@@ -596,15 +599,32 @@ the daily digest alone, so the digest is what changed:
 
 - **The facts** (`app/services/digest.py`, `digest_facts`). Beside the
   headline, what `GET /api/v1/score` serves: the 5-95 range, the band lines
-  and the headline's distance from them, each warning flag and its reading
-  minus its threshold, the override's rule, each trend's distance from its
-  10-month average, the VIX term structure, both blocks out of 100, five
-  readings by their own values (CAPE, the top-10 share, the semiconductors'
-  run-up, breadth, the margin-debt growth) and whether data is degraded.
+  and the headline's distance from them, each warning flag's state as the
+  snapshot's flag contract types it (`red_flag_meta`: ACTIVE, INACTIVE,
+  BLOCKED, UNKNOWN) and its reading minus its threshold, the override's rule
+  and the contract's count of flags that can fire, each trend's distance
+  from its 10-month average, the VIX term structure, both blocks out of 100,
+  five readings by their own values (CAPE, the top-10 share, the
+  semiconductors' run-up, breadth, the margin-debt growth) and whether a
+  block's coverage is degraded (the coverage gate's verdict: more than a
+  third of a block's weight dropped or stale, which suppresses the band
+  unless the override fired). A flag is its state and not its active bit,
+  because the bit reads "active False" for a blocked and an unknown flag
+  alike: flag 1 is BLOCKED and 3 of 4 flags can fire in all 490 of
+  production's snapshots that carry the contract, and the digest of
+  2026-11-05 put the contested test "0.22 unter der Warnschwelle", a
+  threshold whose crossing fires nothing. The coverage line said "some data
+  degraded", and read False beside a stale indicator on 27 of the 37 digest
+  mornings of 2026-10-05 to 11-10.
   And the change: the newest snapshot 22 to 30 hours older - yesterday's
   same slot, or the one before when it was missed - with its headline, band,
-  override, flags and trends and each sub-score's change, and the newest 166
-  to 174 hours older - last week's - with its headline, band and flag count.
+  override, flags, trends and VIX term structure (state and multiplier) and
+  each sub-score's change, and the newest 166 to 174 hours older - last
+  week's - with its headline, band and flag count. The earlier term
+  structure is there because its multiplier scales the whole timing block
+  (`D = min(D_raw * V, 1)`): on 6 of the 37 digest mornings of 2026-10-05 to
+  11-10 the state had changed and that alone moved the point score by 1.19
+  to 3.46, and none of the six digests could name it.
   Nothing older: after an outage the change is left out rather than called
   a day's. Every fact stays a number, a truth
   value or the monitor's own word (decision 16), and the judgment is passed
@@ -614,14 +634,16 @@ the daily digest alone, so the digest is what changed:
   prompt adds the framework the methodology endpoint serves
   (`app.references.FRAMEWORK`) with each leg's caveat: repo-authored text
   only (AGENTS.md ground rule 1).
-- **The prompt** (library 1.3.0, re-signed on the owner's instruction). One
+- **The prompt** (library 1.4.0, re-signed on the owner's instruction). One
   point, chosen by what changed since a day earlier - the band, the
-  override, a flag, a trend - else a clear move of the headline, else the
-  biggest driver or the line the reading sits close to; explained with what
-  changed, which indicators moved it, what they measure, and where it
-  leaves the reading against the band lines, the thresholds and the trend
-  rule. iMessage holds 350 code points (`MESSAGE_ENGINE_IMESSAGE_MAX_CHARS`);
-  SMS stays one GSM-7 segment of 150 septets, and the template is unchanged.
+  override, a flag, a trend, the volatility term structure - else a clear
+  move of the headline, else the biggest driver or the line the reading sits
+  close to; explained with what changed, what moved it (the indicators whose
+  sub-scores changed, or the term structure's multiplier), what they
+  measure, and where it leaves the reading against the band lines, the
+  thresholds and the trend rule. iMessage holds 350 code points
+  (`MESSAGE_ENGINE_IMESSAGE_MAX_CHARS`); SMS stays one GSM-7 segment of 150
+  septets, and the template is unchanged.
 - **The effort.** The model reasons as hard as it can (`composer._EFFORT =
   "max"`; the owner, 2026-10-04: "Please have reasoning on max"). With an
   effort the gateway also asks for the reasoning summary, and that summary

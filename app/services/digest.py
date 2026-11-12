@@ -98,12 +98,31 @@ def _trend(snap: Snapshot, asset: str) -> object:
 
 
 def _readings(snap: Snapshot) -> dict[str, object]:
-    """What the score API serves beside the headline (GET /api/v1/score):
+    """What the score API serves beside the headline (GET /api/v1/score),
+    the flags as the snapshot's flag contract types them (red_flag_meta):
     the wide range, the band lines and the score's distance from them, each
-    warning flag and its reading minus its threshold, the override's rule,
-    each trend's distance from its 10-month average, the VIX term structure,
-    both blocks out of 100, five readings by their own values, and whether
-    data is degraded."""
+    warning flag's state and its reading minus its threshold, the override's
+    rule and how many flags can fire, each trend's distance from its
+    10-month average, the VIX term structure, both blocks out of 100, five
+    readings by their own values, and whether a block's coverage is
+    degraded.
+
+    A FLAG IS ITS CONTRACT STATE, not its active bit: the contract keeps
+    ACTIVE, INACTIVE, UNKNOWN (a required input is unavailable) and BLOCKED
+    (governance forbids firing) apart and counts the flags that can fire
+    (snapshot_contract.RedFlagFact, docs/ALERT_STAGE0_AUDIT.md), and the bit
+    read "active False" for the last two alike. Flag 1 is BLOCKED and 3 of 4
+    flags can fire in all 490 of production's snapshots that carry the
+    contract (2026-08-20..11-10), so every digest was told "flag 1: active
+    False" beside a distance and "0 of 4 ... at 3 or more"; the one of
+    2026-11-05 put the contested test "0.22 unter der Warnschwelle", a
+    threshold whose crossing fires nothing. A snapshot older than the
+    contract has no state and no count: both are None, a dash in DATA.
+
+    `data_degraded` is the coverage gate's verdict (compute._coverage_gate:
+    more than a third of a block's weight dropped or stale), True in exactly
+    the 53 of 615 snapshots whose band reads "suppressed (block degraded)";
+    a stale or dropped indicator below that line leaves it False."""
     median = round(snap.median)
     flags = _flags(snap)
     trend = snap.trend_states or {}
@@ -116,8 +135,9 @@ def _readings(snap: Snapshot) -> dict[str, object]:
         "trim_line_gap": median - TRIM_LINE,
         "derisk_line_gap": median - DERISK_LINE,
         "override_required": snap.override_required_count,
+        "override_fireable": snap.override_fireable_universe_count,
         "override_floor": OVERRIDE_FLOOR,
-        **{f"{flag}_active": (flags.get(flag) or {}).get("active") for flag in FLAGS},
+        **{f"{flag}_state": (flags.get(flag) or {}).get("state") for flag in FLAGS},
         **{f"{flag}_distance": _number((flags.get(flag) or {}).get("distance_to_threshold"), 2)
            for flag in FLAGS},
         "spy_distance_pct": _number(trend.get("SPY", {}).get("faber_distance_pct"), 1),
@@ -133,15 +153,24 @@ def _readings(snap: Snapshot) -> dict[str, object]:
 
 def _a_day_earlier(snap: Snapshot, then: Snapshot | None) -> dict[str, object]:
     """Yesterday's reading beside today's: the headline and its change, the
-    band, the override, the flags and the trends as they were, and each
-    sub-score's change, so a change can be explained. None throughout when
-    there is no snapshot that old."""
+    band, the override, the flags, the trends and the VIX term structure as
+    they were, and each sub-score's change, so a change can be explained.
+    None throughout when there is no snapshot that old.
+
+    The term structure is carried because its multiplier scales the whole
+    timing block (D = min(D_raw * V, 1), app/indicators/v_vix.py): a change
+    of state moves the score while no sub-score moves. On 6 of the 37 digest
+    mornings of 2026-10-05..11-10 the state differed from the day-earlier
+    slot and the multiplier alone moved the point score by 1.19 to 3.46; the
+    facts held today's state with nothing to compare it with, and none of the
+    six digests named it."""
     now_subs = {**_sub_scores(snap.block_s, SUB_SCORES["s"]), **_sub_scores(snap.block_d, SUB_SCORES["d"])}
     if then is None:
         return {"median_1d_ago": None, "median_1d_change": None, "band_1d_ago": None,
                 "override_fired_1d_ago": None, "red_flag_count_1d_ago": None,
-                **{f"{flag}_active_1d_ago": None for flag in FLAGS},
+                **{f"{flag}_state_1d_ago": None for flag in FLAGS},
                 "spy_trend_1d_ago": None, "qqq_trend_1d_ago": None,
+                "vol_state_1d_ago": None, "vol_multiplier_1d_ago": None,
                 **{f"{key}_1d_change": None for key in now_subs}}
     then_subs = {**_sub_scores(then.block_s, SUB_SCORES["s"]), **_sub_scores(then.block_d, SUB_SCORES["d"])}
     flags = _flags(then)
@@ -151,9 +180,11 @@ def _a_day_earlier(snap: Snapshot, then: Snapshot | None) -> dict[str, object]:
         "band_1d_ago": then.action_band,
         "override_fired_1d_ago": bool(then.override_fired),
         "red_flag_count_1d_ago": then.red_flag_count,
-        **{f"{flag}_active_1d_ago": (flags.get(flag) or {}).get("active") for flag in FLAGS},
+        **{f"{flag}_state_1d_ago": (flags.get(flag) or {}).get("state") for flag in FLAGS},
         "spy_trend_1d_ago": _trend(then, "SPY"),
         "qqq_trend_1d_ago": _trend(then, "QQQ"),
+        "vol_state_1d_ago": then.v_state,
+        "vol_multiplier_1d_ago": _number(then.v_multiplier, 2),
         **{f"{key}_1d_change": _change(now, then_subs[key]) for key, now in now_subs.items()},
     }
 
