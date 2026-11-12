@@ -14,12 +14,13 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Request
 
-from app.security import require_read_access
+from app.security import READ_RATE_LIMIT, limiter, require_read_access
 from app.services import replay
 
 router = APIRouter(prefix="/api/v1/replay", tags=["replay"])
 
 
 @router.get("/evidence", summary="RM-1: methodology stamp + append-only outcome summary")
+@limiter.limit(READ_RATE_LIMIT)
 def evidence(request: Request, _: None = Depends(require_read_access)) -> dict[str, Any]:
     return {"data": replay.evidence_summary(), "meta": {}}

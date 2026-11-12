@@ -143,3 +143,48 @@ def test_score_history(client_with_snapshot):
     body = resp.json()
     assert isinstance(body["data"], list) and body["data"]
     assert "median" in body["data"][0]
+
+
+def test_every_public_read_answers_429_after_sixty_requests(client, monkeypatch):
+    """README: "Reads rate-limited 60/min/IP". SECURITY.md: the reads under
+    `GET /api/v1/*` outside the operator paths are public and rate-limited.
+
+    Asked of the application, per route: every GET operation its schema lists
+    under /api/v1/ outside /api/v1/admin/ and /api/v1/alerts answers sixty
+    requests from one address and refuses the sixty-first. The limit is counted
+    when the handler is entered, so a 404 or a 503 counts as well. Measured
+    before /api/v1/replay/evidence carried the limit: 11 of the 12 routes
+    answered 429 at request 61, that one answered 200 seventy times.
+
+    The alert reads are not asked here: they answer 401 without the admin key
+    before the limit is counted, and with it six of the fourteen cost 0.36 to
+    0.60 s per request (measured: 142 to 203 s for all 26 reads, 2 to 4 s for
+    these 12). Their pin is
+    tests/test_alert_addendum.py::test_every_alert_read_endpoint_is_rate_limited.
+    """
+    import re
+
+    from app.config import get_settings
+    from app.security import limiter
+
+    monkeypatch.setenv("READ_ENDPOINTS_PUBLIC", "true")
+    get_settings.cache_clear()
+    operator_paths = ("/api/v1/admin/", "/api/v1/alerts")
+    reads = sorted(
+        re.sub(r"\{[^}]+\}", "no-such-id", path)
+        for path, operations in client.app.openapi()["paths"].items()
+        if "get" in operations and path.startswith("/api/v1/")
+        and not path.startswith(operator_paths))
+    # A filter that selects nothing must not pass.
+    assert "/api/v1/replay/evidence" in reads and len(reads) >= 12, reads
+
+    not_limited = {}
+    try:
+        for path in reads:
+            limiter.reset()   # one in-memory limiter for the whole test process
+            statuses = [client.get(path).status_code for _ in range(61)]
+            if 429 in statuses[:60] or statuses[60] != 429:
+                not_limited[path] = sorted(set(statuses))
+    finally:
+        limiter.reset()
+    assert not_limited == {}, f"public reads without the 60/minute limit: {not_limited}"

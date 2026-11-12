@@ -10,6 +10,15 @@ from slowapi.util import get_remote_address
 
 from app.config import get_settings
 
+# The read limit is the @limiter.limit(READ_RATE_LIMIT) decorator on each read;
+# tests/test_api_contract.py asks every public read under /api/v1/ for its 429.
+# default_limits stays empty because a default limit does not reach the API.
+# Measured with default_limits=[READ_RATE_LIMIT] (fastapi 0.141.1, slowapi
+# 0.1.10, 70 requests from one address): /docs, /redoc and /openapi.json
+# answered 429 at request 61; /api/v1/replay/evidence (then without the
+# decorator), /, /healthz and /readyz never did. slowapi's middleware looks for
+# the handler among the application's top-level routes and exempts a request
+# whose handler it does not find, and an included router is not such a route.
 limiter = Limiter(key_func=get_remote_address, default_limits=[])
 
 READ_RATE_LIMIT = "60/minute"

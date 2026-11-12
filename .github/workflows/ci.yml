@@ -85,19 +85,23 @@ jobs:
           # DEPTH is pinned separately, because the ratchet only ever blocks a
           # RISE -- so a config loosening lowers the count, passes, and then
           # invites lowering the ceiling to match, locking the loosening in.
-          # Same shape as the byte-identical .secrets.baseline: [tool.mypy] is
-          # pinned in .mypy-config.pinned, and changing it fails the build until
-          # that file is updated in the same commit, deliberately.
+          # scripts/regime/mypy_pin.py compares the [tool.mypy] table, as the
+          # TOML library parses it (sub-tables included), with the table in
+          # .mypy-config.pinned; changing it fails the build until that file is
+          # updated in the same commit, deliberately. Measured on the step this
+          # replaces (a regular expression that cut the section at the first
+          # `[`, then `mypy app`; mypy 2.3.1, 126 source files):
+          #   as committed                                         116 errors, passed
+          #   [[tool.mypy.overrides]] module = ["app.*"],
+          #     ignore_errors = true appended to pyproject.toml      0 errors, passed,
+          #     and the step advised "lower MYPY_CEILING to 0"
+          #   a mypy.ini without strict, pyproject.toml untouched   33 errors, passed
+          # A mypy.ini outranks pyproject.toml, so the step names the file.
+          # The pin runs before `set +e`: its failure fails the step.
         run: |
-          python -c "import pathlib,re; s=pathlib.Path('pyproject.toml').read_text(); m=re.search(r'(?ms)^\[tool\.mypy\].*?(?=^\[(?!tool\.mypy)|\Z)', s); pathlib.Path('/tmp/mypy-config.actual').write_text(m.group(0).rstrip()+chr(10) if m else 'MISSING')"
-          if ! diff -u <(grep -v '^#' .mypy-config.pinned | sed '/^$/d') /tmp/mypy-config.actual; then
-            echo "::error::[tool.mypy] no longer matches .mypy-config.pinned."
-            echo "::error::This gate counts errors; it cannot see strictness. Re-derive"
-            echo "::error::MYPY_CEILING under the new config and update both in one commit."
-            exit 1
-          fi
+          python -m scripts.regime.mypy_pin
           set +e
-          mypy app > /tmp/mypy.txt 2>&1
+          mypy --config-file pyproject.toml app > /tmp/mypy.txt 2>&1
           rc=$?
           set -e
           tail -1 /tmp/mypy.txt

@@ -1,4 +1,5 @@
-# The [tool.mypy] section, pinned BYTE-IDENTICAL.
+# The [tool.mypy] table, pinned: compared as the table mypy parses,
+# per-module overrides included.
 #
 # The type-check gate in .github/workflows/ci.yml counts ERRORS and can only
 # ever block a RISE. It cannot see STRICTNESS. Measured: flipping
@@ -7,14 +8,28 @@
 # the gate passes, and it then advises lowering MYPY_CEILING to match, which
 # would lock the loosening in.
 #
-# So depth is pinned the same way .secrets.baseline pins the secret gate:
-# by bytes. Changing [tool.mypy] fails the build until this file is updated
+# So depth is pinned. scripts/regime/mypy_pin.py compares [tool.mypy] in
+# pyproject.toml with the table below, each as the table mypy parses,
+# per-module overrides included, and the step runs
+# `mypy --config-file pyproject.toml app`, so that table is the one mypy
+# reads. Changing [tool.mypy] fails the build until this file is updated
 # in the same commit, with MYPY_CEILING re-derived under the new config.
+#
+# The comparison was by bytes, of a section cut out with a regular
+# expression that ended at the first `[`. Measured on that step (mypy 2.3.1,
+# 126 source files, ceiling 116): a [[tool.mypy.overrides]] table with
+# module = ["app.*"] and ignore_errors = true passed at 0 errors, and a
+# mypy.ini without strict beside an unchanged pyproject.toml passed at 33.
+# The same keys in another order now pass: the table is the contract.
+#
+# Outside this pin: a per-file `# mypy:` line and `# type: ignore` comments.
+# They are in the diff of the file they loosen; `app/` holds no `# mypy:`
+# line (2026-11-11).
 #
 # A SHA-256 of the section was the first attempt. The repository's own secret
 # scan rejected it -- a 64-char hex digest is indistinguishable from a
 # credential -- and a `pragma: allowlist secret` would have taught the next
-# reader to wave that shape through (see commit 391aead). Bytes, not a hash.
+# reader to wave that shape through (see commit 391aead). The table, not a hash.
 
 [tool.mypy]
 python_version = "3.12"
