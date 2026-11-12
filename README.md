@@ -30,6 +30,8 @@ git clone https://github.com/mglaeser/bubble-regime-monitor.git && cd bubble-reg
 
 > **API keys (v3.1).** As of v3.1, bubblegauge's price layer requires two free API keys. Sign up (free, ~1 minute each) at **https://www.tiingo.com** (`TIINGO_API_KEY`) and **https://twelvedata.com** (`TWELVE_DATA_API_KEY`) and place both in your `.env`. Tiingo is the primary source for ETF/equity prices; Twelve Data is the backup. Neither free tier serves raw stock-index levels, so the S&P 500 and Nasdaq-100 are represented by their ETF proxies (SPY and QQQ). For the Nasdaq-100, FRED serves the native index level free on the `FRED_API_KEY` this service already requires — `NASDAQ100`, 10,239 non-missing daily observations from 1986-01-02, against QQQ's start of 1999-03 (measured 2026-08-22). FRED's `SP500` is a rolling 10-year window and is the wrong instrument for the S&P proxy. Note the licence: FRED marks the Nasdaq OMX series copyright, personal use, redistribution by permission. The service does not read it since the S4 real-index shadow went (2026-09-28). An optional Alpha Vantage key (`ALPHAVANTAGE_API_KEY`, 25 requests/day) adds a thin emergency fallback for the four core tickers only.
 
+In `.env`, a comment stands on its own line, never after a value. Podman's `--env-file` reader (compose's `env_file`, the Quadlet's `EnvironmentFile=`) takes everything after the first `=` as the value, so `SMS_DAILY_HOUR=8  # UTC hour` reaches the service as that whole string and it does not boot. `.env.example` and the blocks below are written that way.
+
 Rootless Podman notes: the `:Z` suffix on the `./data:/data` bind mount applies the SELinux label (required on Fedora/RHEL rootless Podman). For boot persistence: `podman generate systemd --new --name bubblegauge` (or a Quadlet `.container` file in `~/.config/containers/systemd/`) and `systemctl --user enable --now`.
 
 ## Architecture
@@ -174,10 +176,14 @@ Two transports can carry it, and **exactly one sends**. If both switches are on,
 
 ```dotenv
 IMESSAGE_ENABLED=true
-IMESSAGE_API_BASE_URL=https://messages.example.com   # origin only, no path
-IMESSAGE_API_KEY=imp_...                             # scoped key: messages:send, NOT admin
-IMESSAGE_RECIPIENT=+49151...                         # or an Apple-ID email
-SMS_DAILY_HOUR=8                                     # UTC hour (default 08:00)
+# origin only, no path
+IMESSAGE_API_BASE_URL=https://messages.example.com
+# scoped key: messages:send, NOT admin
+IMESSAGE_API_KEY=imp_...
+# or an Apple-ID email
+IMESSAGE_RECIPIENT=+49151...
+# UTC hour (default 08:00)
+SMS_DAILY_HOUR=8
 ```
 
 **The switch alone does nothing.** iMessage is selected only when the URL, key and recipient are *all* set. Turning it on with any of them blank leaves a working SMS digest sending over SMS rather than silently stopping it, and the incomplete state is reported at boot, on the health projection as `imessage_enabled_but_unconfigured`, and by `alerts preflight`.
@@ -194,11 +200,16 @@ Create a sipgate **Personal Access Token** with the `sessions:sms:write` scope, 
 
 ```dotenv
 SMS_ENABLED=true
-SIPGATE_TOKEN_ID=token-XXXX        # PAT id (Basic-auth username)
-SIPGATE_TOKEN=...                  # PAT secret (Basic-auth password)
-SIPGATE_SMS_ID=s0                  # your Web SMS extension
-SIPGATE_RECIPIENT=+49151...        # E.164
-SMS_DAILY_HOUR=8                   # UTC hour (default 08:00)
+# PAT id (Basic-auth username)
+SIPGATE_TOKEN_ID=token-XXXX
+# PAT secret (Basic-auth password)
+SIPGATE_TOKEN=...
+# your Web SMS extension
+SIPGATE_SMS_ID=s0
+# E.164
+SIPGATE_RECIPIENT=+49151...
+# UTC hour (default 08:00)
+SMS_DAILY_HOUR=8
 ```
 
 The engine-off digest is capped at 150 characters (`SMS_MAX_LEN`), inside one 160-septet GSM-7 segment, and ASCII-coerced so a stray Unicode character cannot halve the limit. The same cap applies over iMessage, where the proxy would accept 4000 Unicode code points, so that digest is identical on both transports. With the engine on, the digest is held to its channel instead: 150 GSM-7 septets over SMS, 350 characters over iMessage (`MESSAGE_ENGINE_IMESSAGE_MAX_CHARS`).
@@ -208,10 +219,14 @@ The engine-off digest is capped at 150 characters (`SMS_MAX_LEN`), inside one 16
 The digest tells you the score. This tells you when there is no new score to tell you about.
 
 ```dotenv
-FAILURE_ALERTS_ENABLED=true    # default; sends over whichever transport above is on
-FAILURE_ALERT_REPEAT_H=24      # the alarm repeats this often while the outage lasts
-FAILURE_ALERT_STATE_PATH=/data/failure-alert-state.json   # outage memory across restarts
-FAILURE_ALERT_STUCK_AFTER_H=4  # a run holding the lock this long is reported wedged
+# default; sends over whichever transport above is on
+FAILURE_ALERTS_ENABLED=true
+# the alarm repeats this often while the outage lasts
+FAILURE_ALERT_REPEAT_H=24
+# outage memory across restarts
+FAILURE_ALERT_STATE_PATH=/data/failure-alert-state.json
+# a run holding the lock this long is reported wedged
+FAILURE_ALERT_STUCK_AFTER_H=4
 ```
 
 Every recompute — scheduled or manual — reports its outcome. A run that raises, or that completes without producing a snapshot, sends one compressed message over the transport the digest uses:
