@@ -1451,7 +1451,7 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
 
 
 def persist_snapshot(data: SnapshotData, raw: RawInputs) -> int:
-    """Write snapshot + indicator_readings + source_health; return snapshot id.
+    """Write snapshot + indicator_readings; return snapshot id.
 
     No network call sits between the computation and its commit. The row
     carries the previous snapshot's judgment note, marked stale, until
@@ -1580,12 +1580,25 @@ def persist_snapshot(data: SnapshotData, raw: RawInputs) -> int:
                 data_source=ind.data_source, fallback_used=ind.fallback_used,
                 dropped=ind.dropped, note=ind.note, timestamp=now,
             ))
-        for h in raw.source_health:
-            session.add(SourceHealth(source=h["source"], ok=h["ok"], latency_ms=h["latency_ms"],
-                                     http_status=h["http_status"], checked_at=now, note=h["note"]))
         session.flush()
         snap_id = snap.id
     return snap_id
+
+
+def persist_source_health(raw: RawInputs) -> None:
+    """Write the gather's per-source health, whatever becomes of the run.
+
+    GET /readyz and the status page show the newest row per source and call it
+    the latest gather's. Written with the snapshot, in its transaction, it was
+    the latest snapshot's (production to 2026-11-10: 11,048 rows at 615 times,
+    each a snapshot's computed_at): a gather whose run could not score left no
+    row, and both pages kept showing the run before it."""
+    now = datetime.now(UTC)
+    with session_scope() as session:
+        session.add_all(
+            SourceHealth(source=h["source"], ok=h["ok"], latency_ms=h["latency_ms"],
+                         http_status=h["http_status"], checked_at=now, note=h["note"])
+            for h in raw.source_health)
 
 
 def write_judgment(snap_id: int, data: SnapshotData) -> None:
@@ -1611,12 +1624,18 @@ def write_judgment(snap_id: int, data: SnapshotData) -> None:
 
 
 def run_recompute() -> int | None:
-    """Full recompute: gather -> compute -> persist -> alert capture ->
-    Parquet export -> feed -> judgment note.
+    """Full recompute: gather -> source health -> compute -> persist -> alert
+    capture -> Parquet export -> feed -> judgment note.
 
     Returns the snapshot id, or None if scoring was impossible (an entire
     block empty). Never raises upstream failures."""
     raw = gather_inputs()
+    try:
+        persist_source_health(raw)
+    except Exception as exc:
+        # The health rows must not cost the score: "database is locked" has
+        # occurred (2026-11-01 06:15, on the alert dispatcher's heartbeat).
+        log.warning("source_health_write_failed", error=sanitize(exc, limit=300))
     try:
         # The real evaluation date: without it a completed month is invisible
         # until the next month's first bar lands.
