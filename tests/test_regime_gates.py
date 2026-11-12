@@ -147,6 +147,31 @@ class TestSeparationCheck:
         text = (ROOT / ".github" / "CODEOWNERS").read_text(encoding="utf-8")
         assert separation_check.uncovered(text) == []
 
+    def test_every_protected_surface_exists(self):
+        # `governance/` ("the constitution and its attested hash") was listed
+        # and owned while the directory was gone, and the check answered "all
+        # 9 policy-carrying surfaces are owned".
+        missing = [path for path, _ in separation_check.PROTECTED if not (ROOT / path).exists()]
+        assert missing == []
+        assert separation_check.absent(ROOT) == []
+
+    def test_the_constitution_is_protected(self):
+        # AGENTS.md calls itself the constitution; the two pin files are what
+        # the type-check step and the secret scan compare against.
+        protected = dict(separation_check.PROTECTED)
+        assert {"AGENTS.md", ".mypy-config.pinned", ".secrets.baseline"} <= protected.keys()
+        owned = separation_check.owned_patterns(
+            (ROOT / ".github" / "CODEOWNERS").read_text(encoding="utf-8"))
+        assert {"/AGENTS.md", "/.mypy-config.pinned", "/.secrets.baseline"} <= set(owned)
+
+    def test_an_absent_surface_blocks(self, tmp_path, monkeypatch, capsys):
+        # Every surface owned (the committed CODEOWNERS), none of them there.
+        monkeypatch.setattr(separation_check, "ROOT", tmp_path)
+        assert separation_check.main([]) == 1
+        err = capsys.readouterr().err
+        for path, _ in separation_check.PROTECTED:
+            assert f"  {path}\n" in err, f"{path} is absent and was not named"
+
 
 class TestAuthzCoverage:
     def test_a_non_auth_dependency_does_not_count(self):

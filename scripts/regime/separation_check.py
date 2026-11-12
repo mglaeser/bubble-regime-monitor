@@ -12,9 +12,10 @@ separation cannot be a second human, so it is structural instead:
   - and CODEOWNERS enumerates the surfaces that carry policy.
 
 This file guards the third one. It fails CI when a path that carries policy has
-no owner entry — which is how that list stops silently rotting as the
-repository grows. It does NOT claim that Code Owner review is enforced; it is
-not, and audit/06-residual-risk-register.md records why.
+no owner entry, or is not in the repository — which is how that list stops
+silently rotting as the repository grows. It does NOT claim that Code Owner
+review is enforced; it is not, and audit/06-residual-risk-register.md records
+why.
 
 Deliberately a path-coverage check and not a pattern-equality check: CODEOWNERS
 may legitimately be broader than this list. It may never be narrower.
@@ -23,6 +24,7 @@ may legitimately be broader than this list. It may never be narrower.
 from __future__ import annotations
 
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -30,10 +32,21 @@ CODEOWNERS = ROOT / ".github" / "CODEOWNERS"
 
 # Every surface whose change alters what the pipeline ALLOWS, rather than what
 # the product computes. Each entry is (path, why it carries policy).
+#
+# `governance/` ("the constitution and its attested hash") stood in this list
+# and in CODEOWNERS with no directory behind it: its last files left the
+# repository on 2026-08-17 (d6d1647, the retired midterm-panel records), the
+# day this check was written, and the check answered "all 9 policy-carrying
+# surfaces are owned". A listed path that is not there is a line nobody
+# checks, so `absent` blocks on one. The constitution is AGENTS.md, which was
+# in neither list; nor were the two files the type check and the secret scan
+# compare against.
 PROTECTED: tuple[tuple[str, str], ...] = (
     (".github/", "workflow definitions and the CODEOWNERS list itself"),
     ("scripts/", "the review panel and the regime gates"),
-    ("governance/", "the constitution and its attested hash"),
+    ("AGENTS.md", "the constitution: the frozen invariants and the gate every change passes"),
+    (".mypy-config.pinned", "the pinned depth of the type check"),
+    (".secrets.baseline", "what the secret scan accepts"),
     ("audit/", "the 2026-07 audit's findings ledger, which the findings gate reports"),
     ("frozen_methodology.json", "the frozen scoring methodology (F-01/L-07)"),
     ("app/methodology.py", "the code that reads the frozen methodology"),
@@ -85,6 +98,11 @@ def uncovered(text: str) -> list[tuple[str, str]]:
             if not any(covers(pat, p) for pat in patterns)]
 
 
+def absent(root: Path) -> list[tuple[str, str]]:
+    """Protected paths that are not in the repository at `root`."""
+    return [(p, why) for p, why in PROTECTED if not (root / p).exists()]
+
+
 def selftest() -> int:
     def expect(cond: bool, msg: str) -> None:
         if not cond:
@@ -110,7 +128,18 @@ def selftest() -> int:
     full = "".join(f"{p if p.startswith('/') else '/' + p} @m\n" for p, _ in PROTECTED)
     expect(not uncovered(full), "a CODEOWNERS naming every protected path must pass")
 
-    print("   OK selftest: owned_patterns + covers + uncovered")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        expect(absent(root) == list(PROTECTED), "in an empty tree every protected path is absent")
+        for p, _ in PROTECTED:
+            if p.endswith("/"):
+                (root / p).mkdir(parents=True)
+            else:
+                (root / p).parent.mkdir(parents=True, exist_ok=True)
+                (root / p).touch()
+        expect(absent(root) == [], "a tree holding every protected path has none absent")
+
+    print("   OK selftest: owned_patterns + covers + uncovered + absent")
     return 0
 
 
@@ -127,8 +156,17 @@ def main(argv: list[str]) -> int:
               "CODEOWNERS entry:", file=sys.stderr)
         for path, why in missing:
             print(f"  {path}\n      {why}", file=sys.stderr)
+    gone = absent(ROOT)
+    if gone:
+        print("BLOCK separation check (B-35): these protected surfaces are not in the "
+              "repository — a protected surface that is not there is a line nobody checks:",
+              file=sys.stderr)
+        for path, why in gone:
+            print(f"  {path}\n      {why}", file=sys.stderr)
+    if missing or gone:
         return 1
-    print(f"Separation check: all {len(PROTECTED)} policy-carrying surfaces are owned in CODEOWNERS.")
+    print(f"Separation check: all {len(PROTECTED)} policy-carrying surfaces exist and are "
+          "owned in CODEOWNERS.")
     return 0
 
 
