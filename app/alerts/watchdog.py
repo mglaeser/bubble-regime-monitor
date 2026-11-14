@@ -139,11 +139,12 @@ def run_once(*, now: datetime | None = None) -> dict[str, object]:
         capture_slot = verdict.expected_slot_key if verdict.firing else None
         capture_missed = verdict.missed_slots
         if not verdict.firing and open_outage is not None and last is not None:
-            # A FALSE observation is what resolves the open outage. Stopping
-            # after the firing capture leaves the episode open forever once a
-            # healthy recompute arrives, because the ordinary snapshot sidecar
-            # carries no missed_recompute_slots source. Prefix the recovered
-            # slot so it cannot collide with the firing input for that slot.
+            # The recompute's own evaluation ends the outage: its input reads
+            # no missed slot (`sources._missed_recompute_slots`). This FALSE
+            # observation ends one whose recompute was not evaluated (capture
+            # off, an evaluation that did not commit), so it does not stay
+            # open until the next slot. Prefix the recovered slot so it cannot
+            # collide with the firing input for that slot.
             recovered_slot = slot_key(slot_at_or_before(last.computed_at))
             capture_slot = f"recovery:{recovered_slot}"
             capture_missed = 0

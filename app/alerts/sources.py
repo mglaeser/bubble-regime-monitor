@@ -241,6 +241,40 @@ def _evidence_reader(
     return read
 
 
+def _missed_recompute_slots(inp: AlertInput) -> SourceValue:
+    """The watchdog's count; on an input built from a snapshot, none.
+
+    A snapshot exists because its slot ran, and the watchdog's own count at
+    that instant is zero (`watchdog.evaluate_outage` counts the scheduled
+    slots since the newest snapshot). So the outage rule is decided on every
+    input, and the first recompute after an outage ends it.
+
+    The count used to come from the watchdog's evidence alone, and the rule
+    was UNKNOWN on every recompute. `flapping_projection` leaves UNKNOWN out,
+    so the rule's window of six states held the watchdog's inputs only,
+    however far apart: after two short outages the third read
+    [F, N, F, F, N, F], four flips, and was suppressed as FLAPPING. Run with
+    the real watchdog, engine and dispatcher, three outages of three missed
+    slots, 36 hours apart: 2 of 3 announced; with this reader 3 of 3
+    (tests/test_alert_recovery.py::test_every_separate_recompute_outage_is_announced).
+    Production, 2026-09-20 .. 11-10: UNKNOWN in 305 of 305 committed
+    evaluations (305 of the 501 alert events); no outage reached the
+    threshold, so no alert was lost.
+
+    An input is evaluated when it is captured, so the recompute that reads 0
+    is the newest snapshot. The one exception: the recovery job re-runs an
+    evaluation that died mid-run (`recovery.recover_evaluations`), which can
+    be an older recompute's during a later outage. That ends the outage
+    episode early, and the next missed slot opens a new one (run: reopened
+    four hours later; its message is held by the six-hour cooldown, the
+    first one having been sent).
+    """
+    source_id, domain = "missed_recompute_slots", obs.DOMAIN_WATCHDOG_SLOT
+    if inp.snapshot_id is not None:
+        return _snapshot_value(source_id, domain, 0, inp)
+    return _from_evidence(source_id, domain, inp)
+
+
 def _spec(
     source_id: str,
     kind: SourceKind,
@@ -449,8 +483,9 @@ _SPECS: tuple[SourceSpec, ...] = (
           read=_evidence_reader("skew", obs.DOMAIN_SKEW)),
     # --- operations --------------------------------------------------------
     _spec("missed_recompute_slots", "count", obs.DOMAIN_WATCHDOG_SLOT, authoritative=False,
-          description="Consecutive missed recompute slots, from the watchdog input.",
-          read=_evidence_reader("missed_recompute_slots", obs.DOMAIN_WATCHDOG_SLOT)),
+          description="Consecutive missed recompute slots: the watchdog's count, "
+                      "and none on an input built from a snapshot.",
+          read=_missed_recompute_slots),
     _spec("falsification_outcome_count", "count", obs.DOMAIN_FALSIFICATION, authoritative=False,
           description="Append-only falsification outcomes recorded so far.",
           read=lambda inp: _snapshot_value(
