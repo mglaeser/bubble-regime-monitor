@@ -205,9 +205,18 @@ def admin_evaluate(
                             detail="ALERTS_MODE=disabled; pass shadow=true or enable a mode",
                             headers=ERROR_HEADERS)
 
+    from app.alerts.errors import AlertingUnavailable
     from app.services.alert_integration import evaluate_input
 
-    outcome = evaluate_input(input_identity, mode=mode)
+    # No artifacts load in this mode - live with nothing promoted (the state
+    # after every release that changes the ruleset, until the operator
+    # promotes), or no valid ruleset at all: refused with 503, as send-test
+    # refuses the same state. Unhandled, it was a 500.
+    try:
+        outcome = evaluate_input(input_identity, mode=mode)
+    except AlertingUnavailable as exc:
+        raise HTTPException(status_code=503, detail=exc.redacted(),
+                            headers=ERROR_HEADERS) from exc
     if outcome is None:
         raise HTTPException(status_code=404, detail="no captured sidecar with that identity",
                             headers=ERROR_HEADERS)

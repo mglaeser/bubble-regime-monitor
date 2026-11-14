@@ -1307,6 +1307,97 @@ def test_the_stored_legacy_pair_is_audit_data_not_wording(isolated_db):
         assert loaded.phrase_set.version == "v3.5"
 
 
+def test_registered_ruleset_bytes_this_build_refuses_are_audit_data_not_rules(
+        isolated_db, monkeypatch):
+    """The ruleset half of the test above. A ruleset declares the service
+    versions it supports (the shipped one 3.8.0..3.99.99), so a build outside
+    that range refuses the registered bytes. load_by_hash then finds nothing,
+    as for a row that is gone and as its docstring says; the promoted fallback
+    finds nothing usable; and loading refuses with AlertingUnavailable, the
+    one error every caller of the loaders fails closed on. A RulesetInvalid
+    raised out of the rebuild passed those callers: the alert routes answered
+    500 (AGENTS.md rule 3) and a dispatch pass left its per-delivery boundary."""
+    from app.alerts.artifacts import (
+        load_active,
+        load_active_for_mode,
+        load_by_hash,
+        load_promoted,
+        validate_from_disk,
+    )
+    from app.alerts.errors import AlertingUnavailable
+    from app.alerts.models import AlertRulesetRegistry
+    from app.config import get_settings
+    from app.db import session_scope
+    from tests.conftest import register_promoted
+
+    with session_scope() as session:
+        promoted = register_promoted(session, validate_from_disk(), now=NOW)
+        assert load_promoted(session).ruleset.rules_sha256 == promoted
+    monkeypatch.setenv("SERVICE_VERSION", "4.0.0")
+    get_settings.cache_clear()                     # isolated_db clears it again
+
+    with session_scope() as session:
+        row = session.get(AlertRulesetRegistry, promoted)
+        assert (row.min_service_version, row.max_service_version) == ("3.8.0", "3.99.99")
+        assert load_by_hash(session, promoted) is None
+        assert load_promoted(session) is None
+        with pytest.raises(AlertingUnavailable, match="candidate and registry both unusable"):
+            load_active(session)
+        with pytest.raises(AlertingUnavailable):
+            load_active_for_mode(session, mode="live")
+
+
+def test_work_queued_under_ruleset_bytes_this_build_refuses_fails_its_render_and_the_pass_goes_on(
+        isolated_db, tmp_path, monkeypatch):
+    """The dispatcher's side of the test above. An alert planned under a
+    ruleset this build refuses cannot be worded from its origin any more: it
+    ends RENDER_FAILED - visible, never sent, never retried - and the same
+    pass goes on to the next row. The raise ended the pass at that row and
+    left it leased, so every later pass would have ended there as well."""
+    from app.alerts.artifacts import load_active
+    from app.alerts.canonical import new_ulid
+    from app.alerts.dispatcher import dispatch_once
+    from app.alerts.enums import TransportStatus
+    from app.alerts.models import AlertDelivery
+    from app.alerts.repository import utc_ms
+    from app.config import get_settings
+    from app.db import session_scope
+    from tests.test_alert_end_to_end import _evaluate, _stage3_shadow
+
+    _stage3_shadow(tmp_path, monkeypatch, "refused-by-the-build")
+    base = datetime(2026, 8, 20, 6, 0, tzinfo=UTC)
+    _evaluate("de-risk", base + timedelta(hours=4), _evaluate("trim", base, None))
+    queued_test = base + timedelta(hours=4, minutes=30)
+    with session_scope() as session:
+        artifacts = load_active(session)
+        alert_id = session.query(AlertDelivery).one().delivery_id
+        test_id = new_ulid(utc_ms(queued_test))
+        session.add(AlertDelivery(
+            delivery_id=test_id, dedupe_key=f"v1|TEST|{test_id}", dedupe_version=1,
+            mode="shadow", live_profile="default",
+            planning_rules_sha256=artifacts.ruleset.rules_sha256,
+            delivery_kind=DeliveryKind.TEST, priority=4,
+            transport_status=TransportStatus.PENDING,
+            planning_state=PlanningState.READY, not_before=queued_test,
+            created_at=queued_test, updated_at=queued_test, attempts=0,
+            recipient_ref="default"))
+    monkeypatch.setenv("SERVICE_VERSION", "4.0.0")
+    get_settings.cache_clear()                     # isolated_db clears it again
+
+    sender = NullSender()
+    report = dispatch_once(session_scope, phrase_set=artifacts.phrase_set, mode="shadow",
+                           live_profile="default", sender=sender,
+                           now=base + timedelta(hours=5))
+
+    assert (report.claimed, report.render_failed, report.sent) == (2, 1, 1)
+    assert [body for _ref, body in sender.sent] == [
+        artifacts.phrase_set.headlines["TEST_MESSAGE"].text]
+    with session_scope() as session:
+        alert = session.get(AlertDelivery, alert_id)
+        assert (alert.transport_status, alert.attempts) == (TransportStatus.RENDER_FAILED, 0)
+        assert session.get(AlertDelivery, test_id).transport_status == TransportStatus.SENT
+
+
 def test_work_queued_under_the_stored_legacy_pair_fails_its_render_and_the_pass_goes_on(
         isolated_db):
     """A delivery planned under the superseded legacy pair cannot be worded

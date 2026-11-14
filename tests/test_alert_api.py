@@ -893,6 +893,9 @@ def test_alert_errors_use_the_one_format(client, monkeypatch, tmp_path):
         get_settings.cache_clear()
         errors["a live send-test with nothing promoted"] = (503, client.post(
             "/api/v1/admin/alerts/send-test", headers=admin))
+        errors["a live evaluation with nothing promoted"] = (503, client.post(
+            "/api/v1/admin/alerts/evaluate", json=dict(unknown_input, shadow=False),
+            headers=admin))
         monkeypatch.delenv("ALERTS_MODE")
         monkeypatch.setenv("ALERTS_RULES_PATH", str(broken))  # and the registry holds none
         get_settings.cache_clear()
@@ -930,6 +933,58 @@ def test_alert_errors_use_the_one_format(client, monkeypatch, tmp_path):
     # candidate's here, the image's own in test_alert_promotion.py.
     promotion = errors["a promotion of an invalid ruleset"][1].json()["detail"]
     assert promotion.startswith("ruleset invalid: "), promotion
+
+
+def test_alert_routes_refuse_and_never_500_while_no_artifacts_load(client, monkeypatch):
+    """AGENTS.md rule 3, in the two states where no artifacts load. Live mode
+    with nothing promoted - the state after every release that changes the
+    ruleset, until the operator promotes: an evaluation is refused with 503,
+    as a send-test is. And promoted bytes this build refuses (a service
+    version outside the range the ruleset declares, 3.8.0..3.99.99) beside a
+    candidate it refuses too: health answers, and says the artifacts are
+    unavailable; every route that needs them answers 503 in the one error
+    format."""
+    from datetime import UTC, datetime
+
+    from app.alerts.artifacts import validate_from_disk
+    from app.config import get_settings
+    from app.db import session_scope
+    from tests.conftest import register_promoted
+
+    admin = {"X-API-Key": TEST_ADMIN_KEY}
+    evaluate = {"input_identity": "0" * 64, "shadow": False}
+    monkeypatch.setenv("ALERTS_MODE", "live")
+    get_settings.cache_clear()                     # the client fixture clears it again
+
+    unpromoted = client.post("/api/v1/admin/alerts/evaluate", json=evaluate, headers=admin)
+    assert unpromoted.status_code == 503
+    assert "PROMOTED" in unpromoted.json()["detail"]
+    assert unpromoted.headers["cache-control"] == "no-store"
+
+    with session_scope() as session:
+        register_promoted(session, validate_from_disk(),
+                          now=datetime(2026, 10, 1, tzinfo=UTC))
+    monkeypatch.setenv("SERVICE_VERSION", "4.0.0")
+    get_settings.cache_clear()
+
+    health = client.get("/api/v1/alerts/health", headers=admin)
+    assert health.status_code == 200
+    assert (health.json()["status"], health.json()["artifact_source"]) == (
+        "critical", "unavailable")
+    answers = {f"GET {read}": client.get(f"/api/v1/alerts/{read}", headers=admin)
+               for read in ("overview", "mechanisms", "mechanisms/" + "0" * 64,
+                            "rules/no-such-rule/instances", "ruleset")}
+    answers |= {
+        "evaluate": client.post(
+            "/api/v1/admin/alerts/evaluate", json=evaluate, headers=admin),
+        "evaluate in shadow": client.post(
+            "/api/v1/admin/alerts/evaluate", json=dict(evaluate, shadow=True), headers=admin),
+        "send-test": client.post("/api/v1/admin/alerts/send-test", headers=admin),
+        "render": client.post("/api/v1/admin/alerts/render", headers=admin),
+    }
+    assert {case: r.status_code for case, r in answers.items() if r.status_code != 503} == {}
+    assert {case: sorted(r.json()) for case, r in answers.items()
+            if set(r.json()) != {"detail"}} == {}
 
 
 def _seed_listings(*moments) -> dict[str, list[str]]:

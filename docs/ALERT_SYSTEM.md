@@ -782,6 +782,18 @@ ends `RENDER_FAILED`, while the rest of the dispatch pass goes on
 (tests/test_alert_delivery.py::test_work_queued_under_the_stored_legacy_pair_fails_its_render_and_the_pass_goes_on).
 Production's registry holds one such set - v3.4, under the superseded rules
 v3.2.2 - with nothing queued under it (read-only, 2026-10-04).
+Registered ruleset bytes this build refuses - a service version outside the
+range the ruleset declares, for one - rebuild to nothing in the same way: live
+mode then finds no promoted ruleset and refuses; where the candidate on disk
+is refused as well, health reports the artifacts unavailable and the routes
+that need them answer 503; and an alert queued under those bytes ends
+`RENDER_FAILED` while the pass goes on
+(tests/test_alert_delivery.py::test_registered_ruleset_bytes_this_build_refuses_are_audit_data_not_rules,
+::test_work_queued_under_ruleset_bytes_this_build_refuses_fails_its_render_and_the_pass_goes_on,
+tests/test_alert_api.py::test_alert_routes_refuse_and_never_500_while_no_artifacts_load).
+An evaluation requested in live mode while nothing is promoted is refused the
+same way (503). Production's promoted rules, v3.2.3, declare 3.8.0..3.99.99
+and the service is 3.9.0 (read-only, 2026-11-11).
 
 ## 12. Replay (the Stage 1 gate)
 
