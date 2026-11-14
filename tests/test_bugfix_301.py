@@ -61,21 +61,11 @@ class TestFinraParser:
 
 
 class TestD2Guards:
-    def test_stale_over_90d_uses_cached_reading(self, isolated_db):
-        from app.services.compute import compute_snapshot
-
-        raw = make_golden_raw_inputs()
-        raw.margin_as_of = (datetime.now(UTC) - timedelta(days=200)).date().isoformat()
-        raw.margin_cached = {"value": 53.7, "sub_score": 0.49,
-                             "timestamp": "2026-06-01T06:00:00+00:00"}
-        data = compute_snapshot(raw, mc_samples=2_000, mc_seed=1)
-        d2 = data.indicators["d2"]
-        assert not d2.dropped
-        assert d2.sub_score == pytest.approx(0.49)
-        assert "cached reading" in (d2.note or "")
-        assert "rollover: unknown" in (d2.note or "")
-
-    def test_stale_over_90d_without_cache_drops(self, isolated_db):
+    # The stored reading's tier (served while its own month is inside the 75d
+    # SLA, then dropped) is pinned in tests/test_d2_cached_reading.py. The test
+    # that stood here pinned what that tier ends: an undated stored reading
+    # scored for a file 200 days old, with no limit on its age.
+    def test_older_than_the_sla_without_a_stored_reading_drops(self, isolated_db):
         from app.services.compute import compute_snapshot
 
         raw = make_golden_raw_inputs()
@@ -90,8 +80,8 @@ class TestD2Guards:
         raw = make_golden_raw_inputs()
         # descending recent months => rollover pattern present in the data...
         raw.margin_balances = [900_000 + i * 40_000 for i in range(11)] + [1_400_000, 1_390_000, 1_380_000]
-        # ...and a ~71-day age is the FRESHEST possible FINRA reading (monthly,
-        # ~3-week lag), so within the 75d SLA it must NOT be flagged stale.
+        # ...and a 71-day age (the next month posted late) is inside the 75d
+        # SLA, so it must NOT be flagged stale.
         raw.margin_as_of = (datetime.now(UTC) - timedelta(days=71)).date().isoformat()
         data = compute_snapshot(raw, mc_samples=2_000, mc_seed=1)
         assert not data.indicators["d2"].dropped
