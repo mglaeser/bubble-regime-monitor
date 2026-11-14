@@ -83,11 +83,13 @@ Fast fear signals: {fast_alarm}.
 #: The keys the prompt's structures carry: the gauges the template names, the four
 #: warning flags (aggregate.RedFlags.as_dict) and the fast alarm's readings
 #: (legs.FastAlarm.as_dict, whose term structure is a word and is typed as one).
+#: The day of the VRP (vrp_as_of) is a date string out of FRED's payload and no
+#: reading: it is not among them (AGENTS.md ground rule 1).
 GAUGES_S = ("s1", "s2", "s3", "s4", "s5")
 GAUGES_D = ("d1", "d2", "d3", "d4")
 FLAGS = ("gsadf_explosive_noncontested", "semi_runup_ge_150pp", "hy_oas_widen_gt_100bps",
          "breadth_lt_50_near_ath")
-FAST_SIGNALS = ("vrp", "vrp_flag", "vrp_sane", "skew")
+FAST_SIGNALS = ("vrp", "vrp_flag", "skew")
 
 
 @dataclass
@@ -162,8 +164,11 @@ def generate(median: float, iqr: tuple[float, float], band: str,
     IN/OUT/unknown, three term structures, numbers, truth values and None - so
     their prompts read as before, but for the fast alarm's two fixed labels
     (vrp_units, skew_label): they are text and no reading, and are not handed
-    on. A term structure compute could not read ("unknown", in none of the 615)
-    reads None, as a gauge without a reading does.
+    on. Nor is the `vrp_sane` those snapshots carry: the fast alarm publishes
+    no such verdict any more (the comment at legs.VRP_UNITS says why; it read
+    false on 320 of the 605 that had it). A term structure compute could not
+    read ("unknown", in none of the 615) reads None, as a gauge without a
+    reading does.
     """
     # imported here, as run_completion imports the gateway: the engine does not
     # load the message engine at import time

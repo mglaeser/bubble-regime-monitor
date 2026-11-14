@@ -15,7 +15,8 @@ honest expectation is drawdown reduction, not return enhancement. See also
 Moskowitz, Ooi & Pedersen (2012, JFE) and Huang, Li, Wang & Zhou (2020, JFE).
 
 Leg 3 — Fast Alarm: (a) VIX term-structure state; (b) Variance Risk Premium
-VRP = VIX^2 - RealizedVariance_21d(SPY), annualized, flag if VRP <= 0;
+VRP = VIX^2 - RealizedVariance_21d(SPY), annualized, flag if VRP <= 0, both
+legs of one session (closes_through);
 (c) CBOE SKEW level. CAVEAT (verbatim): Bilello's analysis shows SKEW in its
 top 5% (>~131) has had ~zero forward predictive value -> LABEL: COINCIDENT
 CONTEXT ONLY.
@@ -227,11 +228,19 @@ def variance_risk_premium(vix_level: float, daily_spy_closes: list[float]) -> fl
     return (iv - rv) * 1e4
 
 
-# VRP is annualized VIX^2 - realized variance, expressed in variance points
-# (pct^2); empirical readings run roughly single digits to low tens. Values
-# outside this band signal a units/data error rather than a real regime.
+# The VRP is annualised implied less annualised realised variance, in percent
+# squared: a VIX of 16 against 10 % realised volatility reads 256 - 100 = 156.
+# The unit is published beside the value.
+#
+# No verdict on the magnitude is published with it. Until 2026-11 `vrp_sane`
+# called a value outside -50..150 "a units/data error", a band that fits the
+# monthly scale (VIX^2 / 12, "single digits to low tens") and not this one: in
+# production it read false on 320 of the 605 snapshots that carried it, the
+# median reading (153.6) among them, and on all six whose vrp_flag was set.
+# Nothing read it. No wider band replaces it: the value runs from thousands
+# above zero on a jump of the VIX (80^2 = 6400) to thousands below in a crash
+# (VIX 60 against 90 % realised: -4500), so a magnitude cannot tell a wrong unit.
 VRP_UNITS = "annualized_variance_pts_pct2"
-VRP_SANE_LO, VRP_SANE_HI = -50.0, 150.0
 
 
 @dataclass
@@ -241,21 +250,59 @@ class FastAlarm:
     vrp_flag: bool
     skew: float | None
     skew_label: str = "coincident context only"
+    vrp_as_of: str | None = None   # the session both legs of the VRP close on
 
     def as_dict(self) -> dict[str, object]:
         return {
             "term_structure": self.term_structure,
             "vrp": self.vrp,
+            "vrp_as_of": self.vrp_as_of,
             "vrp_units": VRP_UNITS,
             "vrp_flag": self.vrp_flag,
-            "vrp_sane": self.vrp is None or VRP_SANE_LO <= self.vrp <= VRP_SANE_HI,
             "skew": self.skew,
             "skew_label": self.skew_label,
         }
 
 
+def closes_through(daily: list[tuple[str, float]] | None, day: str | None) -> list[float] | None:
+    """The closes up to and including the bar dated `day`, or None when the
+    series has no bar on that day.
+
+    The VRP is one session's: implied variance at a day's close less the
+    variance realised up to that same close. The VIX level is FRED's VIXCLS,
+    which FRED posts the next business afternoon (first read by the 14:00 or
+    18:00 UTC run); the price series holds that close from the night before.
+    Until 2026-11 the newest of each was taken, whatever the two dates.
+    Production, 213 recomputes from 2026-10-06 to 11-10: the dates agreed in
+    118. On 2026-11-05 SPY fell 4.4 % and the VIX closed at 28.18; the next
+    four runs published -119.00 with the flag set (16.61^2, the close of
+    11-04, less the 394.9 realised through 11-05), where the pair of 11-04 is
+    +124.32 and that of 11-05 +399.22. On 2026-11-10 four runs published
+    +202.16 (25.64^2 of 11-06 less 455.3 through 11-09) where the pair of
+    11-09 is -58.45.
+
+    No bar on the day, or no day (the CBOE quote that stands in when FRED
+    fails has none), is no pair and gives no premium: never the nearest other
+    day's closes. On 2026-10-21 18:00 to 10-22 02:00 UTC FRED was down and the
+    undated quote gave 175.41, 177.08, 177.08 between 198.49 before and after.
+
+    Those 213 runs under this rule: 163 stay unflagged, the four of -119.00
+    read +124.32 dated 11-04, the two of -58.45 keep their value and flag, and
+    44 have no premium - the 3 of the undated quote, and 41 whose price series
+    did not yet hold the day FRED's close was of."""
+    if not daily or not day:
+        return None
+    for i in range(len(daily) - 1, -1, -1):
+        if daily[i][0][:10] == day[:10]:
+            return [close for _, close in daily[: i + 1]]
+    return None
+
+
 def fast_alarm(term_structure_state: str, vix_level: float | None,
-               daily_spy_closes: list[float] | None, skew: float | None) -> FastAlarm:
+               daily_spy_closes: list[float] | None, skew: float | None,
+               vrp_as_of: str | None = None) -> FastAlarm:
+    """`daily_spy_closes` are SPY's closes through the day `vix_level` closed
+    on (closes_through), and `vrp_as_of` is that day."""
     vrp: float | None = None
     if vix_level is not None and daily_spy_closes:
         vrp = variance_risk_premium(vix_level, daily_spy_closes)
@@ -264,4 +311,5 @@ def fast_alarm(term_structure_state: str, vix_level: float | None,
         vrp=round(vrp, 2) if vrp is not None else None,
         vrp_flag=vrp is not None and vrp <= 0.0,
         skew=skew,
+        vrp_as_of=vrp_as_of[:10] if vrp is not None and vrp_as_of else None,
     )

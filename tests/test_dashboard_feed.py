@@ -216,7 +216,25 @@ class TestBuildFeedGolden:
         assert m["vix_level"]["as_of"] == as_of
         assert m["vix_level"]["stale"] is (None if as_of is None else False)
         assert m["vrp"]["source"] == f"{source}+spy_realized"
-        assert m["vrp"]["as_of"] is None        # what dates the VRP is not decided here
+
+    def test_the_feed_dates_the_vrp_by_its_session(self, isolated_db, patched_sources):
+        """The VRP is the level's close against SPY's closes through that same
+        day (legs.closes_through), and the feed row carries that day. It
+        published as_of null: on 2026-11-06 02:00 to 14:00 UTC -119.00, the VIX
+        of 11-04 against SPY through 11-05, with nothing to tell the two days
+        apart."""
+        from app.services.compute import compute_snapshot
+        from tests.conftest import make_golden_raw_inputs
+
+        raw = make_golden_raw_inputs()
+        day = datetime.now(UTC).date() - timedelta(days=3)
+        raw.spy_daily = [((day - timedelta(days=29 - i)).isoformat(), 400.0 + i) for i in range(30)]
+        raw.vix_level_as_of = raw.spy_daily[-2][0]
+        data = compute_snapshot(raw, mc_samples=2_000, mc_seed=20260711)
+        vrp = df.build_feed(raw, data)["metrics"]["vrp"]
+        assert vrp["value"] == data.fast_alarm["vrp"] is not None
+        assert vrp["as_of"] == data.fast_alarm["vrp_as_of"] == raw.vix_level_as_of
+        assert vrp["stale"] is False            # four days old: a daily market value ages at 7
 
 
 class TestDegradation:

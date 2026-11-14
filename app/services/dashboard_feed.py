@@ -372,9 +372,10 @@ def build_feed(raw: Any, data: Any) -> dict[str, Any]:
     # raw.vix_as_of dates the VIX / VIX3M ratio only: the New York session the
     # pair was measured in. It was None on every production run until the
     # ratio got that date, so the VRP and SKEW below, which are other
-    # readings, published as_of null and stale null and still do. A Friday
-    # close read on Monday morning is 3 calendar days old: the ratio ages as
-    # every other daily market value here does.
+    # readings, published as_of null and stale null; SKEW still does, and the
+    # VRP carries the day of its own two legs. A Friday close read on Monday
+    # morning is 3 calendar days old: the ratio ages as every other daily
+    # market value here does.
     # The level is FRED's VIXCLS close of an earlier session (the CBOE quote
     # only when FRED fails), with its own source and date. The feed said
     # "cboe" and no date: on 2026-11-10 22:02 UTC it published 19.92, the
@@ -390,10 +391,12 @@ def build_feed(raw: Any, data: Any) -> dict[str, Any]:
                                   detail={"state": data.v_state},
                                   available=data.v_ratio is not None)
     fa = data.fast_alarm or {}
-    # The VRP is computed from that level, so it names the level's source.
-    # What dates it (the level's day or SPY's last close) is not decided here.
+    # The VRP is computed from that level, so it names the level's source, and
+    # it is one session's (legs.closes_through): the level's close against the
+    # variance SPY realised through that same day, which is the day it carries.
     m["vrp"] = _scalar(fa.get("vrp"), fa.get("vrp_units", "annualized_variance_pts_pct2"),
-                       None, f"{raw.vix_level_source}+spy_realized")
+                       fa.get("vrp_as_of"), f"{raw.vix_level_source}+spy_realized",
+                       sla_days=SLA_DAILY)
     m["skew"] = _scalar(raw.skew, "level", None, "cboe")
     qqq_last = _last_pair(raw.qqq_daily or [])
     m["qqq_close"] = _scalar(qqq_last[1] if qqq_last else None, "USD",

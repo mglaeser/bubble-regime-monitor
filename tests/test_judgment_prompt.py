@@ -104,13 +104,17 @@ def test_the_monitors_own_values_reach_the_prompt(monkeypatch):
 def test_what_the_producers_hand_over_reaches_the_prompt_but_the_two_labels(monkeypatch):
     """The keys the prompt's structures carry are the producers': the registry's
     gauges, the four warning flags, the fast alarm's readings. Of all they hand
-    over only the fast alarm's two fixed labels are text, and those stay out."""
+    over only the fast alarm's two fixed labels and the day of its VRP are text,
+    and those stay out: the day is a date out of FRED's payload, and no text
+    from outside enters a prompt (AGENTS.md ground rule 1)."""
     assert sorted(judgment.GAUGES_S + judgment.GAUGES_D) == GAUGES
     flags = aggregate.RedFlags(breadth_lt_50_near_ath=True).as_dict()
-    alarm = legs.fast_alarm("flat", 20.0, [100.0 + day for day in range(30)], 150.34).as_dict()
+    alarm = legs.fast_alarm("flat", 20.0, [100.0 + day for day in range(30)], 150.34,
+                            vrp_as_of="2026-11-09").as_dict()
     prompt = _prompt(monkeypatch, red_flag_detail=flags, fast_alarm=alarm)
     assert f"Warning flags tripped: {flags}." in prompt
-    labels = [alarm.pop("vrp_units"), alarm.pop("skew_label")]
+    labels = [alarm.pop("vrp_units"), alarm.pop("skew_label"), alarm.pop("vrp_as_of")]
+    assert labels[2] == "2026-11-09" and "2026-11-09" not in prompt
     assert all(isinstance(label, str) for label in labels)
     assert not any(isinstance(reading, str) for key, reading in alarm.items() if key != "term_structure")
     assert f"Fast fear signals: {alarm}." in prompt
@@ -120,7 +124,9 @@ def test_what_the_producers_hand_over_reaches_the_prompt_but_the_two_labels(monk
 
 def test_the_pipelines_own_hand_over_passes_whole(isolated_db, monkeypatch):
     """What compute.persist_snapshot hands over is typed already: the type rule
-    drops nothing of it (it logs every drop), and every reading is there."""
+    drops nothing of it (it logs every drop), and every reading is there. The
+    day of the VRP, a date out of FRED's payload, is in what the snapshot serves
+    and not in the prompt (AGENTS.md ground rule 1)."""
     from app.message_engine import composer
     from app.services.compute import compute_snapshot, persist_snapshot
     from tests.conftest import make_golden_raw_inputs
@@ -130,7 +136,12 @@ def test_the_pipelines_own_hand_over_passes_whole(isolated_db, monkeypatch):
     monkeypatch.setattr(judgment, "run_completion", lambda prompt: seen.append(prompt) or "Calm.")
     monkeypatch.setattr(composer.log, "warning", lambda event, **kw: dropped.append({"event": event, **kw}))
     raw = make_golden_raw_inputs()
-    persist_snapshot(compute_snapshot(raw, mc_samples=2_000, mc_seed=20260711), raw)
+    # the level closed on the day of SPY's last bar, so the VRP has both its legs
+    raw.vix_level_as_of = raw.spy_daily[-1][0]
+    data = compute_snapshot(raw, mc_samples=2_000, mc_seed=20260711)
+    assert data.fast_alarm["vrp"] is not None and data.fast_alarm["vrp_as_of"] == raw.vix_level_as_of
+    persist_snapshot(data, raw)
     readings = seen[0].split("Headline:")[1]
     assert dropped == [] and "None" not in readings.replace("None means no reading today", "")
+    assert raw.vix_level_as_of not in seen[0]
     assert "status: trim." in readings and "SPY IN, QQQ IN" in readings and "'term_structure': 'contango'" in readings
