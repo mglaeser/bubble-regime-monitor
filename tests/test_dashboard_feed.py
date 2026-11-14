@@ -8,7 +8,7 @@ Per DASHBOARD_FEED_SPEC.md sign-off: frozen key inventory; points ALWAYS length
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -42,8 +42,7 @@ def fake_fred(series_id):
 def fake_td(symbol, interval, outputsize):
     if interval == "1month":  # BTC monthly: SHORT history -> left-pad expected
         return [(f"{m}-01", 40_000.0 + i * 500) for i, m in enumerate(_months_now(24))]
-    spot = {"XAU/USD": 3350.0, "XAG/USD": 39.5, "USD/JPY": 156.2,
-            "USD/CHF": 0.874, "BTC/USD": 96_000.0}
+    spot = {"XAU/USD": 3350.0, "USD/JPY": 156.2, "USD/CHF": 0.874, "BTC/USD": 96_000.0}
     return [(datetime.now(UTC).date().isoformat(), spot.get(symbol, 1.0))]
 
 
@@ -82,7 +81,8 @@ class TestBuildFeedGolden:
         feed = df.build_feed(raw, data)
         assert sorted(feed["series"].keys()) == sorted(df.SERIES_KEYS)
         assert sorted(feed["metrics"].keys()) == sorted(df.METRIC_KEYS)
-        assert len(df.SERIES_KEYS) == 13 and len(df.METRIC_KEYS) == 33  # v3.7.0 +fear_greed; D13 -2 IMF keys
+        # v3.7.0 +fear_greed; D13 -2 IMF keys; 2026-11 -3 (TestSpotIsSpotOrNotServed)
+        assert len(df.SERIES_KEYS) == 13 and len(df.METRIC_KEYS) == 30
 
     def test_points_always_61_and_left_padded(self, snapshot, patched_sources):
         raw, data = snapshot
@@ -119,12 +119,10 @@ class TestBuildFeedGolden:
         feed = df.build_feed(raw, data)
         m = feed["metrics"]
         assert m["gold_spot"]["source"] == "twelvedata:XAU/USD"      # true spot (1A)
-        assert m["gold_silver_ratio"]["value"] == pytest.approx(3350.0 / 39.5, rel=1e-3)
         assert m["btc_ath"]["value"] >= m["btc_spot"]["value"]        # spot included in basis
         assert m["btc_drawdown_pct"]["value"] <= 0.0
         assert m["usd_broad_index_ytd_pct"]["value"] is not None
         assert m["mmf_total_assets_usd"]["unit"] == "USD_mn"
-        assert m["ndx_close"]["available"] is False                   # never fabricated
         # ECY consistency with S1 inputs
         assert m["excess_cape_yield"]["value"] == pytest.approx(
             (1.0 / raw.cape - raw.real10y_decimal) * 100.0, abs=0.05)
@@ -199,7 +197,7 @@ class TestDegradation:
         # neighbours unaffected
         assert feed["series"]["qqq"]["available"] is True
         assert feed["series"]["silver"]["available"] is True
-        # spot keeps its true-spot source; the ETF fallback is only for spot failure
+        # the spot quote is its own source: a failed GLD series does not touch it
         assert feed["metrics"]["gold_spot"]["available"] is True
 
     def test_the_imf_reserve_keys_left_the_contract(self, snapshot, patched_sources):
@@ -212,23 +210,92 @@ class TestDegradation:
             assert key not in m and key not in df.METRIC_KEYS
         assert m["mmf_total_assets_usd"]["unit"] == "USD_mn"    # neighbours unaffected
 
-    def test_spot_failure_falls_back_to_labeled_etf_close(self, snapshot, patched_sources,
-                                                          monkeypatch):
+
+class TestSpotIsSpotOrNotServed:
+    """DASHBOARD_FEED_SPEC.md: keys name the concept, nothing is ever fabricated
+    (what cannot be served ships available:false, value:null) and one failed
+    source degrades only its item. So a spot key carries the spot quote or no
+    value: an ETF close is a price per fund share, not per ounce."""
+
+    def test_a_spot_key_never_carries_an_etf_share_price(self, snapshot, patched_sources,
+                                                         monkeypatch):
+        """Reverses the ETF fallback of decision 1A (amended 2026-11,
+        DASHBOARD_FEED_SPEC.md section 1). Until then a failed XAU/USD quote made
+        `gold_spot` the GLD close with a note. On 2026-11-10 that close was
+        369.36 USD beside a spot quote of 4033.09 USD: a GLD share is 0.0916
+        ounces. The companion page labels this metric "Gold spot" whenever it
+        is available and numeric and shows source and note only as a hover
+        title (checked at its main of 2026-09-28), so the fallback would have
+        read as a gold price of 369 USD. The XAU/USD quote failed on 0 of 222
+        recomputes (2026-10-05 to 11-10), so this pins the failure path; the
+        published value does not change."""
         raw, data = snapshot
 
-        def td_no_metals(symbol, interval, outputsize):
-            if symbol in ("XAU/USD", "XAG/USD"):
-                raise RuntimeError("symbol not on plan")
+        def td_no_gold(symbol, interval, outputsize):
+            if symbol == "XAU/USD":
+                raise RuntimeError("quote failed")
             return fake_td(symbol, interval, outputsize)
 
-        monkeypatch.setattr(df, "_td_series", td_no_metals)
+        monkeypatch.setattr(df, "_td_series", td_no_gold)
         feed = df.build_feed(raw, data)
         gs = feed["metrics"]["gold_spot"]
-        # 1A: fallback must be clearly detectable via source/note
-        assert gs["available"] is True
-        assert gs["source"].startswith("tiingo:")
-        assert "NOT spot" in gs["note"]
-        assert "ETF" in feed["metrics"]["gold_silver_ratio"]["note"]
+        assert gs["available"] is False and gs["value"] is None
+        assert gs["source"] == "twelvedata:XAU/USD"
+        assert gs["note"].startswith("source failed")
+        # the GLD series is the labelled ETF, and what is derived on its basis stays
+        assert feed["series"]["gold"]["available"] is True
+        assert feed["metrics"]["gold_ttm_pct"]["available"] is True
+
+    def test_a_fallback_is_the_same_quantity(self, snapshot, patched_sources, monkeypatch):
+        """A fallback may only be a second source of the same quantity. The
+        Fed's H.10 rate is the exchange rate the quote is; the metal and the
+        coin have no second source here, so they ship unavailable."""
+        raw, data = snapshot
+
+        def td_down(symbol, interval, outputsize):
+            raise RuntimeError("twelvedata down")
+
+        monkeypatch.setattr(df, "_td_series", td_down)
+        m = df.build_feed(raw, data)["metrics"]
+        assert m["usdjpy"]["available"] is True and m["usdjpy"]["source"] == "fred:DEXJPUS"
+        assert m["usdchf"]["available"] is True and m["usdchf"]["source"] == "fred:DEXSZUS"
+        for key in ("gold_spot", "btc_spot"):
+            assert m[key]["available"] is False and m[key]["value"] is None, key
+
+    def test_three_unservable_keys_left_the_contract(self, snapshot, patched_sources):
+        """`ndx_close` shipped available:false on every payload since v3.4.0:
+        the service reads no raw index, `qqq_close` is the proxy. `silver_spot`
+        never carried a spot price: XAG/USD is not on the Twelve Data plan
+        (HTTP 404 on 222 of 222 recomputes, 2026-10-05 to 11-10), so it was
+        the SLV close on 14 of 14 retained payloads, a price per fund share.
+        `gold_silver_ratio` therefore divided USD per ounce by USD per share:
+        4033.09 / 46.48 = 86.77 on 2026-11-10, where both legs on ETF closes
+        would have read 369.36 / 46.48 = 7.95. The three keys leave the
+        contract as the two IMF keys did (D13), rather than ship unavailable
+        or on a mixed basis for good."""
+        raw, data = snapshot
+        m = df.build_feed(raw, data)["metrics"]
+        for key in ("ndx_close", "silver_spot", "gold_silver_ratio"):
+            assert key not in m and key not in df.METRIC_KEYS
+        assert len(df.METRIC_KEYS) == 30
+        assert m["gold_spot"]["source"] == "twelvedata:XAU/USD"     # neighbours unaffected
+        assert m["qqq_close"]["available"] is True
+
+    def test_the_build_asks_only_for_symbols_it_serves(self, snapshot, patched_sources,
+                                                       monkeypatch):
+        """The build asks Twelve Data five times: the BTC/USD monthly bars and
+        four daily quotes. The sixth request, XAG/USD, answered 404 on every
+        recompute and was 222 of the 263 warning lines of five weeks."""
+        raw, data = snapshot
+        asked: list[str] = []
+
+        def recording(symbol, interval, outputsize):
+            asked.append(symbol)
+            return fake_td(symbol, interval, outputsize)
+
+        monkeypatch.setattr(df, "_td_series", recording)
+        df.build_feed(raw, data)
+        assert sorted(asked) == ["BTC/USD", "BTC/USD", "USD/CHF", "USD/JPY", "XAU/USD"]
 
 
 class TestFeedEndpoint:
@@ -276,3 +343,29 @@ class TestFeedEndpoint:
         r = client.get("/api/v1/dashboard/feed?sections=bogus")
         assert r.status_code == 200                      # unknown section ignored
         assert "series" in r.json()["data"]
+
+    def test_a_payload_stored_before_three_keys_left_is_replaced_by_the_next_build(
+            self, client, snapshot, patched_sources):
+        """No migration for the stored payloads: the endpoint serves the newest
+        row only, and the first recompute after the deploy writes one without
+        `ndx_close`, `silver_spot` and `gold_silver_ratio`. The retained rows
+        of the old shape (14 are kept) rotate out and are not served again."""
+        from app.db import session_scope
+        from app.models import DashboardFeed
+
+        old = {"anchor_month": "2026-11", "anchor_partial": True, "series": {},
+               "metrics": {"gold_silver_ratio": {"value": 86.77, "available": True},
+                           "silver_spot": {"value": 46.48, "available": True},
+                           "ndx_close": {"value": None, "available": False}}}
+        with session_scope() as s:
+            s.add(DashboardFeed(computed_at=datetime.now(UTC) - timedelta(hours=4),
+                                payload=json.dumps(old)))
+        before = client.get("/api/v1/dashboard/feed").json()["data"]["metrics"]
+        assert before["gold_silver_ratio"]["value"] == 86.77
+
+        raw, data = snapshot
+        df.build_and_persist_feed(raw, data)
+        served = client.get("/api/v1/dashboard/feed").json()["data"]["metrics"]
+        assert sorted(served) == sorted(df.METRIC_KEYS)
+        for key in ("ndx_close", "silver_spot", "gold_silver_ratio"):
+            assert key not in served
