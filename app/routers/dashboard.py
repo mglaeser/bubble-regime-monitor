@@ -8,7 +8,8 @@ Semantics (dashboard-side sign-off 2026-07-15):
     (each degraded item ships available:false inside a 200);
   * ?sections=series,metrics and ?symbols=<keys> filter the payload; every
     final key is accepted and UNKNOWN keys are silently ignored, never a 4xx;
-  * Cache-Control: public, max-age=900.
+  * Cache-Control: max-age=900, public while reads are public and private
+    when they are keyed (app.security.read_cache_control).
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ from sqlalchemy import select
 from app.config import get_settings
 from app.db import session_scope
 from app.models import DashboardFeed
-from app.security import READ_RATE_LIMIT, limiter, require_read_access
+from app.security import READ_RATE_LIMIT, limiter, read_cache_control, require_read_access
 
 router = APIRouter(prefix="/api/v1/dashboard", tags=["dashboard"])
 
@@ -73,7 +74,7 @@ def get_feed(request: Request, response: Response,
                     payload[section] = {k: v for k, v in payload[section].items()
                                         if k in wanted}
 
-    response.headers["Cache-Control"] = "public, max-age=900"
+    response.headers["Cache-Control"] = read_cache_control(900)
     return {
         "data": payload,
         "meta": {

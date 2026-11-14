@@ -71,3 +71,16 @@ def require_read_access(request: Request, x_api_key: str | None = Header(default
     _require_configured_key(settings.admin_api_key)
     if not _key_matches(x_api_key, settings.admin_api_key):
         raise HTTPException(status_code=401, detail="reads require X-API-Key")
+
+
+def read_cache_control(max_age: int) -> str:
+    """Cache-Control for a reply behind `require_read_access`.
+
+    'public' only while the read surface itself is public; a keyed reply must
+    never be shared-cacheable (cross-vendor panel finding, PR #95). One helper
+    beside the guard it follows, for every read that sets a cache lifetime:
+    the two content routes and the dashboard feed, which answered a keyed
+    request with the literal "public, max-age=900". It reads the guard's own
+    setting and changes no access decision."""
+    scope = "public" if get_settings().read_endpoints_public else "private"
+    return f"{scope}, max-age={max_age}"

@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from sqlalchemy import select
+from sqlalchemy import ColumnElement, func, select
 
 from app.config import get_settings
 from app.content_registry import gauge_display
@@ -43,6 +43,15 @@ def _parse_date_bound(value: str | None, field: str) -> datetime | None:
             status_code=422,
             detail=f"{field} must be an ISO-8601 date (e.g. 2026-01-31); got {value!r}",
         ) from exc
+
+
+def _names_a_day(value: str) -> bool:
+    """True when a bound is a date without a time (`date.fromisoformat` reads it)."""
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
 
 
 def _meta(snap: Snapshot | None) -> dict[str, Any]:
@@ -132,38 +141,55 @@ def get_score(request: Request, _: None = Depends(require_read_access)) -> dict[
 def get_history(
     request: Request,
     from_: str | None = Query(None, alias="from", description="ISO date lower bound (inclusive)"),
-    to: str | None = Query(None, description="ISO date upper bound (inclusive)"),
+    to: str | None = Query(None, description="ISO date upper bound (inclusive: a date covers its whole day)"),
     granularity: str = Query("raw", pattern="^(raw|daily|monthly)$",
                              description="raw = every snapshot; daily/monthly = last snapshot per period"),
-    limit: int = Query(1000, ge=1, le=10000, description="Maximum rows returned (most recent kept)"),
+    limit: int = Query(1000, ge=1, le=10000,
+                       description="Maximum rows returned (most recent kept): snapshots for raw, days or months otherwise"),
     _: None = Depends(require_read_access),
 ) -> dict[str, Any]:
     from_dt = _parse_date_bound(from_, "from")
     to_dt = _parse_date_bound(to, "to")
-    with session_scope() as session:
-        q = select(Snapshot)
-        if from_dt is not None:
-            q = q.where(Snapshot.computed_at >= from_dt)
-        if to_dt is not None:
-            # 'to' is inclusive of the whole day; guard the +1-day arithmetic
+    within: list[ColumnElement[bool]] = []
+    if from_dt is not None:
+        within.append(Snapshot.computed_at >= from_dt)
+    if to is not None and to_dt is not None:
+        if _names_a_day(to):
+            # a date is inclusive of its whole day; guard the +1-day arithmetic
             # against OverflowError near datetime.max (e.g. ?to=9999-12-31),
             # which otherwise surfaced as a 500 (found by adversarial verification).
             try:
-                upper = to_dt + timedelta(days=1)
+                within.append(Snapshot.computed_at < to_dt + timedelta(days=1))
             except OverflowError:
-                upper = datetime.max
-            q = q.where(Snapshot.computed_at < upper)
-        # filter + newest-first limit in SQL, then restore chronological order
-        q = q.order_by(Snapshot.computed_at.desc()).limit(limit)
+                pass  # no row is later than the last day there is
+        else:
+            # A bound with a time is the instant it names (_parse_date_bound).
+            # The day was added to every `to`, so ?to=2026-11-10T06:00:00
+            # answered with the snapshots up to 2026-11-11 02:00.
+            within.append(Snapshot.computed_at <= to_dt)
+    newest_first = Snapshot.computed_at.desc()
+    with session_scope() as session:
+        if granularity == "raw":
+            q = select(Snapshot).where(*within).order_by(newest_first).limit(limit)
+        else:
+            # The last snapshot of each UTC day or month, and `limit` counts
+            # those periods: the reduction is the database's GROUP BY, so the
+            # limit can only apply to what is returned. Limiting the snapshots
+            # first and reducing them afterwards answered daily&limit=30 with
+            # 5 days on the production rows (615 snapshots, six a day, on
+            # 2026-11-10), and would have answered the dashboard's own call,
+            # granularity=daily&limit=1000, with a sliding 167 days from the
+            # 1,001st snapshot on (mid-January 2027). strftime reads the UTC
+            # text every row is stored as (app/models.py:TZDateTime; the
+            # service is SQLite-only). A period's last snapshot is found by
+            # its computed_at: one recompute runs at a time, and no two of
+            # the 615 production rows share one.
+            period = func.strftime("%Y-%m-%d" if granularity == "daily" else "%Y-%m", Snapshot.computed_at)
+            last = func.max(Snapshot.computed_at)
+            last_of_each = select(last).where(*within).group_by(period).order_by(last.desc()).limit(limit)
+            q = select(Snapshot).where(Snapshot.computed_at.in_(last_of_each)).order_by(newest_first)
+        # newest-first in SQL, then restore chronological order
         rows = list(reversed(session.execute(q).scalars().all()))
-
-    if granularity != "raw":
-        keyfn = (lambda s: s.computed_at.date().isoformat()) if granularity == "daily" \
-            else (lambda s: s.computed_at.strftime("%Y-%m"))
-        last_per: dict[str, Snapshot] = {}
-        for s in rows:
-            last_per[keyfn(s)] = s
-        rows = sorted(last_per.values(), key=lambda s: s.computed_at)
 
     data = [
         {

@@ -18,6 +18,7 @@ from typing import Any
 
 from sqlalchemy import select
 
+from app.alerts.watchdog import evaluate_outage
 from app.config import get_settings
 from app.db import session_scope
 from app.engine.recompute_slots import schedule_display
@@ -166,7 +167,8 @@ def _indicators_block(live: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _science_audit(snap: Snapshot | None, sources: list[dict[str, Any]],
-                   providers: list[dict[str, Any]], live: dict[str, dict[str, Any]]) -> dict[str, Any]:
+                   providers: list[dict[str, Any]], live: dict[str, dict[str, Any]],
+                   last_run: dict[str, Any] | None, now: datetime) -> dict[str, Any]:
     """Severity-ranked flags: static known issues + live degradations."""
     flags: list[dict[str, Any]] = [dict(k) for k in KNOWN_ISSUES]
 
@@ -199,22 +201,48 @@ def _science_audit(snap: Snapshot | None, sources: list[dict[str, Any]],
                 "detail": f"{p['consecutive_failures']} consecutive failures; retrying after "
                           f"{p['cooldown_until']}.", "ref": "sources.prices"})
 
+    # The number's own age. A recompute that fails leaves the last snapshot
+    # in place, and every surface keeps serving it: production held one for
+    # 60 h (from 2026-07-27), 24 h (08-01), 344 h (08-06 to 08-20) and 16 h
+    # (08-28) while this audit listed no flag for it. The failed run's error
+    # text stays where it is (recompute.last); the flag carries none of it.
+    if last_run and last_run.get("error"):
+        flags.append({"id": "recompute-failed", "severity": "error", "category": "service-state",
+                      "title": "The last recompute failed",
+                      "detail": f"The run that ended {last_run.get('finished_at')} produced no snapshot; "
+                                "any number shown is from an earlier run.", "ref": "scheduler"})
+
     # live snapshot degradations
     if snap is None:
         flags.append({"id": "no-snapshot", "severity": "warn", "category": "service-state",
                       "title": "No snapshot computed yet",
-                      "detail": "Trigger POST /api/v1/admin/refresh or wait for the 4-hourly "
-                                "(02/06/10/14/18/22 UTC) schedule.", "ref": "scheduler"})
+                      "detail": "Trigger POST /api/v1/admin/refresh or wait for the schedule: "
+                                f"{schedule_display()}.", "ref": "scheduler"})
     else:
+        # Old by the outage alert's own condition (app/alerts/watchdog.py: two
+        # scheduled recomputes missed and 90 minutes more), so the page and the
+        # alert agree. One missed slot raises nothing.
+        outage = evaluate_outage(last_snapshot_at=snap.computed_at, now=now)
+        if outage.firing:
+            flags.append({"id": "snapshot-old", "severity": "error", "category": "service-state",
+                          "title": "The snapshot is old: no recompute has replaced it",
+                          "detail": f"Computed {_iso(snap.computed_at)}; {outage.missed_slots} scheduled "
+                                    f"recomputes ({schedule_display()}) have passed without a new one. "
+                                    "Every number here is that old.", "ref": "scheduler"})
         coverage = (snap.data_freshness or {}).get("_coverage", {})
         for block_id in ("S", "D"):
             if isinstance(coverage.get(block_id), dict) and coverage[block_id].get("degraded"):
+                # A fired override keeps the band at de-risk on degraded data
+                # (compute.py, v3.7.3 A-03): the flag does not call that band
+                # suppressed.
+                band = ("the fired override keeps the action band at de-risk." if snap.override_fired
+                        else "the action band is suppressed.")
                 flags.append({
                     "id": f"coverage-{block_id}", "severity": "error", "category": "block-degraded",
                     "title": f"Block {block_id} coverage degraded",
                     "detail": f"More than 1/3 of Block {block_id}'s nominal weight is dropped or "
-                              f"stale (coverage {coverage[block_id].get('coverage')}); the action "
-                              "band is suppressed.", "ref": "coverage gate"})
+                              f"stale (coverage {coverage[block_id].get('coverage')}); {band}",
+                    "ref": "coverage gate"})
         for ind_id, lv in live.items():
             if lv.get("dropped"):
                 flags.append({
@@ -283,25 +311,29 @@ def build_status() -> dict[str, Any]:
     health = _latest_source_health()
     sources = _sources_block(health)
     providers = _providers_block()
-    audit = _science_audit(snap, sources, providers, live)
 
+    last_run: dict[str, Any] | None
     try:
         from app.routers.admin import _last, recompute_lock
 
-        recompute = {"running": recompute_lock.locked(), "last": _last}
+        # one copy: the recompute thread rewrites the record when a run starts
+        running, last_run = recompute_lock.locked(), dict(_last)
     except Exception:
-        recompute = {"running": False, "last": None}
+        running, last_run = False, None
+
+    now = datetime.now(UTC)
+    audit = _science_audit(snap, sources, providers, live, last_run, now)
 
     return {
         "service": {
             "name": "bubblegauge", "version": settings.service_version,
-            "now": _iso(datetime.now(UTC)),
+            "now": _iso(now),
             "recompute_schedule": schedule_display(),
             "sms_enabled": settings.sms_enabled,
             "docs": {"swagger": "/docs", "redoc": "/redoc", "openapi": "/openapi.json"},
         },
         "snapshot": snap_summary,
-        "recompute": recompute,
+        "recompute": {"running": running, "last": last_run},
         "sources": sources,
         "feed_sources": _feed_sources_block(),
         "providers": providers,

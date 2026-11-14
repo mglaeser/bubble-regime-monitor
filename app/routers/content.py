@@ -23,7 +23,7 @@ from app.content_registry import (
     dynamic_slots_payload,
 )
 from app.schemas import Meta
-from app.security import READ_RATE_LIMIT, limiter, require_read_access
+from app.security import READ_RATE_LIMIT, limiter, read_cache_control, require_read_access
 
 router = APIRouter(prefix="/api/v1/content", tags=["content"])
 
@@ -39,18 +39,11 @@ def _meta() -> dict[str, Any]:
     ).model_dump(mode="json")
 
 
-def _cache_control(max_age: int) -> str:
-    # 'public' only while the read surface itself is public; a keyed reply must
-    # never be shared-cacheable (cross-vendor panel finding, PR #95).
-    scope = "public" if get_settings().read_endpoints_public else "private"
-    return f"{scope}, max-age={max_age}"
-
-
 @router.get("/dashboard", summary="Static UI content blocks (slug-keyed), served as a resource")
 @limiter.limit(READ_RATE_LIMIT)
 def get_dashboard_content(request: Request, response: Response,
                           _: None = Depends(require_read_access)) -> dict[str, Any]:
-    response.headers["Cache-Control"] = _cache_control(300)
+    response.headers["Cache-Control"] = read_cache_control(300)
     # ONE artifact snapshot per response: blocks and version stay coherent.
     return {"data": dashboard_payload(), "meta": _meta()}
 
@@ -59,7 +52,7 @@ def get_dashboard_content(request: Request, response: Response,
 @limiter.limit(READ_RATE_LIMIT)
 def get_dynamic_content(request: Request, response: Response,
                         _: None = Depends(require_read_access)) -> dict[str, Any]:
-    response.headers["Cache-Control"] = _cache_control(60)
+    response.headers["Cache-Control"] = read_cache_control(60)
     return {"data": {"slots": dynamic_slots_payload(),
                      "marker": DYNAMIC_MARKER,
                      "content_version": artifact_view()[1]},

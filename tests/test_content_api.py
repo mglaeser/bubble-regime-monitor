@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime
 
 import pytest
 from fastapi.testclient import TestClient
@@ -135,15 +136,28 @@ class TestCacheScope:
         r = client.get("/api/v1/content/dashboard")
         assert r.headers["cache-control"].startswith("public, ")
 
-    def test_private_when_reads_are_keyed(self, monkeypatch):
-        # A keyed reply must never be shared-cacheable (panel finding, PR #95).
-        from app.routers import content as content_router
+    @pytest.mark.parametrize("path, max_age", [("/api/v1/content/dashboard", 300),
+                                               ("/api/v1/content/dynamic", 60),
+                                               ("/api/v1/dashboard/feed", 900)])
+    def test_private_when_reads_are_keyed(self, client, monkeypatch, path, max_age):
+        """A keyed reply must never be shared-cacheable (panel finding, PR
+        #95), on every read that sets a cache lifetime: a shared cache would
+        hand it to a caller without a key. The dashboard feed answered a keyed
+        request with "public, max-age=900"; that fix had reached the two
+        content routes only."""
+        from app.config import get_settings
+        from app.db import session_scope
+        from app.models import DashboardFeed
+        from tests.conftest import TEST_ADMIN_KEY
 
-        class _Keyed:
-            read_endpoints_public = False
-
-        monkeypatch.setattr(content_router, "get_settings", lambda: _Keyed())
-        assert content_router._cache_control(300) == "private, max-age=300"
+        with session_scope() as session:
+            session.add(DashboardFeed(computed_at=datetime.now(UTC), payload="{}"))
+        monkeypatch.setenv("READ_ENDPOINTS_PUBLIC", "false")
+        get_settings.cache_clear()  # isolated_db clears it again on the way out
+        assert client.get(path).status_code == 401
+        keyed = client.get(path, headers={"X-API-Key": TEST_ADMIN_KEY})
+        assert keyed.status_code == 200
+        assert keyed.headers["cache-control"] == f"private, max-age={max_age}"
 
 
 class TestBlockArtifact:
