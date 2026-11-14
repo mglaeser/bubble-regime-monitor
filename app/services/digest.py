@@ -94,7 +94,25 @@ def _flags(snap: Snapshot) -> dict[str, Any]:
 
 
 def _trend(snap: Snapshot, asset: str) -> object:
-    return (snap.trend_states or {}).get(asset, {}).get("faber_10mo", "?")
+    """The trend rule's state for `asset`: IN or OUT at the last completed
+    month-end (legs.month_end_faber, stored as `faber_month_end_state`), which
+    the alert rules read too (app/alerts/input_builder.py), or "unknown" when
+    it is not there - fewer than ten completed months, or a snapshot from
+    before the key was stored (id 145, 2026-08-23; the digest reads snapshots
+    at most 174 hours old).
+
+    NOT `faber_10mo`: that stands the running month's latest close in for a
+    month-end close, a preview that can flip back before the month closes.
+    Until 2026-11 it was read here and worded as the state. From 2026-11-03
+    02:00 to 11-10 22:00 UTC it read OUT for QQQ in all 48 of production's
+    snapshots (the latest close 0.3 to 4.9 percent below the average) while
+    the rule's state was IN, at October's close. All eight digests of those
+    mornings were handed "QQQ OUT": "QQQ von IN auf OUT: 0.3% unter dem
+    10-Monats-Mittel; SPY bleibt IN." (11-03), "10-Monats-Trend unverändert:
+    SPY IN, QQQ OUT." (11-04), the template's "SPY IN, QQQ OUT." (11-09). No
+    trend alert fired, correctly. The dip itself stays in the facts as what it
+    is, the latest close's distance (`spy_distance_pct`, `qqq_distance_pct`)."""
+    return (snap.trend_states or {}).get(asset, {}).get("faber_month_end_state") or "unknown"
 
 
 def _readings(snap: Snapshot) -> dict[str, object]:
@@ -102,8 +120,9 @@ def _readings(snap: Snapshot) -> dict[str, object]:
     the flags as the snapshot's flag contract types them (red_flag_meta):
     the wide range, the band lines and the score's distance from them, each
     warning flag's state and its reading minus its threshold, the override's
-    rule and how many flags can fire, each trend's distance from its
-    10-month average, the VIX term structure, both blocks out of 100, five
+    rule and how many flags can fire, the latest close's distance from each
+    trend's 10-month average (the running month's preview; the rule's state
+    is `_trend`), the VIX term structure, both blocks out of 100, five
     readings by their own values, and whether a block's coverage is
     degraded.
 

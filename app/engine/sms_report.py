@@ -48,10 +48,18 @@ def _clip_to_sms(body: str, limit: int) -> str:
 
 
 def deterministic_report(snap: Snapshot, limit: int) -> str:
-    """The digest built purely from snapshot fields."""
+    """The digest built purely from snapshot fields.
+
+    The trend words are the Faber rule's state at the last completed
+    month-end (legs.month_end_faber), which the alert rules read, or
+    "unknown" without one - as the engine's facts carry them
+    (app/services/digest.py:_trend, with the production evidence). Not
+    `faber_10mo`, the running month's preview: the template that mirrors
+    this one read "SPY IN, QQQ OUT." on 2026-11-09 while the rule's state
+    for QQQ was IN."""
     trend = snap.trend_states or {}
-    spy = trend.get("SPY", {}).get("faber_10mo", "?")
-    qqq = trend.get("QQQ", {}).get("faber_10mo", "?")
+    spy = trend.get("SPY", {}).get("faber_month_end_state") or "unknown"
+    qqq = trend.get("QQQ", {}).get("faber_month_end_state") or "unknown"
     override = " OVERRIDE" if snap.override_fired else ""
     core = (f"bubblegauge {round(snap.median)}/100 {snap.action_band}{override}. "
             f"range {round(snap.iqr_lo)}-{round(snap.iqr_hi)}. "

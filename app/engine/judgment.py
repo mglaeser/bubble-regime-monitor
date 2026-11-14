@@ -42,6 +42,15 @@ log = get_logger(__name__)
 # registry's two blocks, the plain-word form of what app/references.py says it measures
 # (s5 is read two years back; d2's "rollover" is the borrowing falling from its peak;
 # d3's gate caps the reading); tests/test_judgment_prompt.py holds that each has its line.
+#
+# THE TREND LINE CARRIES THE RULE'S STATE, and says how it is read. Faber's rule is
+# read at month-end: compute hands over `faber_month_end_state` (legs.month_end_faber,
+# completed months only), the state the alert rules read. Until 2026-11 it handed over
+# `faber_10mo`, the running month's preview, under "Long-term trend (still in the
+# market?)": "SPY IN, QQQ OUT" in all 48 of production's prompts from 2026-11-03 02:00
+# to 11-10 22:00 UTC, while the rule's state for QQQ was IN (October's close) and no
+# trend alert fired. None of those 48 judgments names the trend; the digest, handed
+# the same preview, did (app/services/digest.py:_trend).
 PROMPT_TEMPLATE = """You are writing a one-line note for a research bubble-regime monitor, for a
 COMPLETE NON-EXPERT with no finance background — write it so a smart 15-year-old
 could follow it.
@@ -75,7 +84,7 @@ Each gauge below reads from 0 to 1; the higher, the more bubble-like. None means
   d4 = a pattern test for tech share prices speeding up toward a breaking point (prone to early and false alarms)
 Fear-gauge multiplier: {v} (1.0 = calm; above 1.0 = near-term fear has risen close to or above longer-term fear, which scales the combined "turn near" reading up).
 Warning flags tripped: {red_flag_detail}. Emergency override tripped: {override}.
-Long-term trend (still in the market?): SPY {spy_state}, QQQ {qqq_state}.
+Long-term trend rule, read once a month (IN = the last finished month closed above its 10-month average, OUT = at or below it, unknown = no reading): SPY {spy_state}, QQQ {qqq_state}.
 Fast fear signals: {fast_alarm}.
 """
 
