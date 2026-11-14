@@ -41,7 +41,7 @@ from app.sources.prices import (
 log = get_logger(__name__)
 
 MIN_RESOLVED = 25       # below this, the pct is too noisy to publish
-POLYGON_TARGET_DAYS = 210   # >= 200 needed for a 200-DMA (a little slack)
+POLYGON_TARGET_DAYS = 210   # sessions the sweep keeps and the read uses: 200 for the mean, 10 of slack
 POLYGON_PACE_SECONDS = 12.0  # Polygon free tier: 5 requests/minute
 POLYGON_MAX_CALENDAR_DAYS = 330  # ~210 trading days back, incl. weekends/holidays
 # (v3.7.8/B-05 removed the binomial-CI + finite-population-correction path: the
@@ -78,7 +78,8 @@ def sp500_symbols() -> list[str]:
 
 def _breadth_from_daily_close() -> tuple[int, int, int, date | None]:
     """(above, counted, universe, obs_date) — the %>200-DMA cross-section on ONE
-    common observation date (v3.7.6/B-07), read from the cache alone.
+    common observation date (v3.7.6/B-07), read from the cache alone: from the
+    newest POLYGON_TARGET_DAYS stored sessions, in which a member needs 200 closes.
 
     The constituents are the symbols stored for the observation date, and
     `universe` is their number. The sweep stores a day for its SSGA list only, in
@@ -102,10 +103,11 @@ def _breadth_from_daily_close() -> tuple[int, int, int, date | None]:
     before its band is suppressed. That is executed on the production rows, not
     observed: SSGA answered on all 615 recomputes.
 
-    The stored day gives the reading the downloaded list gave: (306, 491, 504) on
-    the production rows of 2026-11-09, the published 62.32 % with bounds
-    [60.71, 63.29]. Replayed over the 604 stored Polygon readings, each against
-    the cache as it was at that moment, 598 values are equal. The other 6
+    The stored day gives the reading the downloaded list gave. Measured without
+    the window below: (306, 491, 504) on the production rows of 2026-11-09, the
+    published 62.32 % with bounds [60.71, 63.29]; and replayed over the 604
+    stored Polygon readings, each against the cache as it was at that moment,
+    598 values are equal. The other 6
     (2026-09-21 14:01 to 09-22 10:01 UTC) read 243/496 = 48.99 % where
     243/493 = 49.29 % is stored: BLDR, TAP and TTD left the list on 09-21 while
     the newest stored day was 09-18, when all three were members. Red flag 4 is
@@ -123,14 +125,34 @@ def _breadth_from_daily_close() -> tuple[int, int, int, date | None]:
     obs_date is that common date, never a later per-symbol date."""
     by_sym: dict[str, dict[date, float]] = {}
     with session_scope() as session:
+        # Only the newest POLYGON_TARGET_DAYS stored sessions are read, the ones
+        # the sweep maintains. The table keeps older rows, and the last 200
+        # closes a symbol has reached back into them across any gap. In
+        # production on 2026-11-09 BNY had 223 closes: 104 of a security near
+        # 10 USD that last traded on 2026-02-06, and 119 of the bank that trades
+        # under the ticker since 2026-05-21. 81 of the 200 closes behind its mean
+        # were the other security's (mean 94.02, close 151.23), so it was counted
+        # above its mean whatever the truth. Inside the window it has 139 closes
+        # and is not counted until it has 200, on 2027-03-09, all its own by
+        # then. 2026-11-09 reads 305/490 = 62.24 % instead of 306/491 = 62.32 %,
+        # and each of the 201 stored readings since 2026-10-08 reads 0.07 to
+        # 0.11 pp lower, none across the 50 % of red flag 4. BNY is the only
+        # member this changes. The bound is 200 closes in 210 sessions, not
+        # every one of the last 200 sessions: OKE lacks 2 of the 210 and stays
+        # counted.
+        window = session.execute(
+            select(DailyClose.date).distinct().order_by(DailyClose.date.desc())
+            .limit(POLYGON_TARGET_DAYS)
+        ).scalars().all()
+        if not window:
+            return 0, 0, 0, None
         rows = session.execute(
             select(DailyClose.symbol, DailyClose.date, DailyClose.close)
+            .where(DailyClose.date >= window[-1])
             .order_by(DailyClose.symbol, DailyClose.date)
         ).all()
     for sym, d, close in rows:
         by_sym.setdefault(sym, {})[d] = close
-    if not by_sym:
-        return 0, 0, 0, None
     # Eligibility is by USABLE symbols, not bare presence (v3.7.7/§2.2b): a symbol
     # is usable on date d only if it has >= 200 closes up to and including d. The
     # common cross-section date is the LATEST date backed by >= MIN_RESOLVED usable
