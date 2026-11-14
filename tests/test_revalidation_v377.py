@@ -38,9 +38,10 @@ def test_b07_short_history_symbol_excluded(isolated_db):
         _insert_daily(sym, date(2026, 7, 14), 205)     # 25 usable symbols
     _insert_daily("SHORT", date(2026, 7, 14), 50)      # present on 07-14, <200 history
 
-    above, counted, obs_date = _breadth_from_daily_close([*syms, "SHORT"])
+    above, counted, universe, obs_date = _breadth_from_daily_close()
     assert obs_date == date(2026, 7, 14)
     assert counted == 25                                # SHORT excluded from denominator
+    assert universe == 26                               # and in the universe: stored for 07-14
     assert 0 <= above <= 25
 
 
@@ -58,7 +59,7 @@ def test_b07b_common_date_requires_usable_not_present(isolated_db):
     for sym in short:
         _insert_daily(sym, date(2026, 7, 14), 50)
 
-    above, counted, obs_date = _breadth_from_daily_close([*good, *short])
+    above, counted, universe, obs_date = _breadth_from_daily_close()
     # v3.7.6 chose 07-14 (30 present) and then counted==0 -> silent TD degrade.
     # v3.7.7 must choose the latest date with >=25 USABLE symbols = 2026-07-10.
     assert obs_date == date(2026, 7, 10)
@@ -69,11 +70,10 @@ def test_b07b_no_usable_date_returns_none(isolated_db):
     from app.sources.breadth import _breadth_from_daily_close
 
     # 30 symbols present on a single date but none with >=200 history: no date is
-    # backed by >=MIN_RESOLVED usable symbols -> (0,0,None), never a 1-symbol date.
+    # backed by >=MIN_RESOLVED usable symbols -> (0,0,0,None), never a 1-symbol date.
     for i in range(30):
         _insert_daily(f"S{i:03d}", date(2026, 7, 14), 50)
-    above, counted, obs_date = _breadth_from_daily_close([f"S{i:03d}" for i in range(30)])
-    assert (above, counted, obs_date) == (0, 0, None)
+    assert _breadth_from_daily_close() == (0, 0, 0, None)
 
 
 # ---- §2.3  S5 provisional-lag flag on ALL THREE s5 paths ---------------------
