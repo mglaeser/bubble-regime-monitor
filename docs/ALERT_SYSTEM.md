@@ -801,9 +801,15 @@ Stage 1's gate is *deterministic replay; no PII; no scoring regression*.
 
 ```bash
 python -m scripts.alert_replay --state-db /tmp/replay.db          # committed stage
-python -m scripts.alert_replay --state-db /tmp/replay.db --stage 3 --out report.json
-python -m app.alerts.cli dryrun --state-db /tmp/replay.db --from 2026-01-01
+python -m scripts.alert_replay --state-db /tmp/replay-stage3.db --stage 3 --out report.json
+python -m app.alerts.cli dryrun --state-db /tmp/replay-2026.db --from 2026-01-01
 ```
+
+`--state-db` must name a path that does not exist: a replay creates its state
+database and deletes nothing, so a file that is there - the app's own database
+included - is refused (exit 1, `REPLAY_STATE_EXISTS`;
+tests/test_alert_replay.py::test_a_replay_refuses_a_state_path_that_exists_and_leaves_it,
+::test_the_cli_refuses_the_apps_own_database_as_state).
 
 Exit 0 means every check the run could make held; exit 1 means one failed, or
 the artifacts are invalid.
@@ -814,8 +820,9 @@ Three properties are structural rather than a matter of care:
   `alert_input_snapshot` rows and archived artifact bytes. `app/alerts/replay.py`
   imports no provider, no HTTP client and no sender, and a test walks the
   import graph so the guarantee cannot be quietly lost.
-- **It cannot touch production.** State goes into a throwaway database opened
-  through its own engine; the source database is only ever selected from. Mode
+- **It cannot touch production.** State goes into a database the replay
+  creates and never replaces; the source is read through connections that
+  refuse every statement that would change it. Mode
   is `dryrun`, which is its own state namespace — shadow and live never see a
   replay's episodes.
 - **It is deterministic.** `now` comes from each input's own `computed_at`,
