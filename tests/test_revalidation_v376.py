@@ -81,13 +81,14 @@ def test_b07_common_cross_section(isolated_db):
     for sym in good:
         _insert_daily(sym, date(2026, 7, 14))
     _insert_daily("LAG", date(2026, 7, 10))
-    above, counted, obs_date = _breadth_from_daily_close([*good, "LAG"])
+    above, counted, universe, obs_date = _breadth_from_daily_close()
 
     # (i)/(iv) one common date and obs_date IS that date (never a later per-symbol max)
     assert obs_date == date(2026, 7, 14)
     # (ii)/(iii) LAG lacks a close on the common date -> excluded from BOTH
     # numerator and denominator, so only the 25 present constituents are counted.
     assert counted == 25
+    assert universe == 25                           # nor is it in that date's universe
     assert 0 <= above <= counted
 
 
@@ -100,8 +101,7 @@ def test_b02_polygon_none_obsdate_is_not_today(isolated_db, monkeypatch):
         polygon_api_key = "x"
 
     monkeypatch.setattr(breadth, "get_settings", lambda: _S())
-    monkeypatch.setattr(breadth, "sp500_symbols", lambda: [f"S{i:03d}" for i in range(30)])
-    monkeypatch.setattr(breadth, "_breadth_from_daily_close", lambda syms: (10, 25, None))
+    monkeypatch.setattr(breadth, "_breadth_from_daily_close", lambda: (10, 25, 30, None))
     res = breadth.pct_above_200dma()
     assert res.provenance.as_of is None            # never `or today`
     assert res.metadata["common_date"] is None
