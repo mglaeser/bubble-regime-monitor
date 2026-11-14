@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import pytest
 
 
@@ -193,14 +195,35 @@ class TestS5BaaProxy:
 
 
 class TestVrpUnits:
-    def test_fast_alarm_exposes_units_and_sanity(self):
+    """Leg 3's VRP = VIX^2 - RealizedVariance_21d(SPY), annualised, flag if
+    VRP <= 0 (app/engine/legs.py; README, Leg 3), in percent squared."""
+
+    @staticmethod
+    def _closes(realised_vol_pct: float) -> list[float]:
+        """30 closes whose daily log return is +/- vol / sqrt(252)."""
+        step = realised_vol_pct / 100.0 / math.sqrt(252.0)
+        return [100.0 * math.exp(step * (i % 2)) for i in range(30)]
+
+    @pytest.mark.parametrize(("vix", "realised_vol_pct", "vrp"), [
+        (16.0, 10.0, 156.0),      # an ordinary day: 256 - 100
+        (14.0, 6.0, 160.0),       # a quiet one: 196 - 36
+        (60.0, 90.0, -4500.0),    # a crash: realised above implied
+    ])
+    def test_the_vrp_is_annualised_percent_squared(self, vix, realised_vol_pct, vrp):
         from app.engine.legs import fast_alarm
 
-        # ~0.8%/day alternating moves -> realistic ~13% annualized realized vol,
-        # so VRP lands in the sane band (a 0-vol series would legitimately flag).
-        closes = [100.0]
-        for i in range(30):
-            closes.append(closes[-1] * (1.008 if i % 2 == 0 else 0.992))
-        fa = fast_alarm("contango", 14.0, closes, 128.0).as_dict()
+        fa = fast_alarm("contango", vix, self._closes(realised_vol_pct), 128.0).as_dict()
+        assert fa["vrp"] == pytest.approx(vrp, abs=0.01)
         assert fa["vrp_units"] == "annualized_variance_pts_pct2"
-        assert fa["vrp_sane"] is True
+        assert fa["vrp_flag"] is (vrp <= 0)
+
+    def test_the_flag_is_the_one_verdict_on_the_vrp(self):
+        """Leg 3 publishes the VRP, its unit and the flag of its rule (VRP <= 0).
+        Until 2026-11 a second truth value, `vrp_sane`, read false outside
+        -50..150, a band on the monthly scale: false on 320 of production's 605
+        snapshots, the median reading (153.6) among them, on all six with the
+        flag set, and on each of the three cases above."""
+        from app.engine.legs import fast_alarm
+
+        fa = fast_alarm("contango", 16.0, self._closes(10.0), 128.0).as_dict()
+        assert {key for key, value in fa.items() if isinstance(value, bool)} == {"vrp_flag"}
