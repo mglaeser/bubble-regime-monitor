@@ -7,7 +7,9 @@ The specification these are written from:
     an error or a timeout "the snapshot keeps the last successful text with
     stale:true";
   - GET /readyz (app/routers/health.py): "Per-source health matrix from the
-    latest gather".
+    latest gather";
+  - AGENTS.md, "Delete before you add": dead code is "removed, not
+    maintained".
 
 Production, the 222 recomputes from 2026-10-05 to 2026-11-10 (journal and
 database): the alert capture was committed 4.5 to 40.2 s after the snapshot
@@ -27,6 +29,13 @@ distinct times, each the computed_at of one of the 615 snapshots: the matrix
 was the latest snapshot's, and a gather whose run could not score left no row.
 The journal since 2026-10-05 has no such run (0 recompute_impossible beside
 222 recompute_done); it is the run after which an operator opens the page.
+
+Beside the database every run also wrote one parquet file for its snapshot,
+15 of the row's columns. Nothing read them: no reader in app, scripts, deploy
+or docs, and no retention - 530 files in 92 date directories, 17 MB on the
+production host by 2026-11-11, the first of 2026-07-30, six more a day. The
+database is the record; `bubblegauge export snapshots --format parquet`
+(app/alerts/reports.py) writes a parquet file on request.
 """
 
 from __future__ import annotations
@@ -198,3 +207,13 @@ def test_a_failed_health_write_does_not_cost_the_score(recompute, monkeypatch):
 
     assert recompute.run() is not None
     assert recompute.on_disk() == {"snapshots": 1, "sidecars": 1}
+
+
+def test_a_snapshot_is_written_to_the_database_and_nowhere_else(recompute, isolated_db):
+    recompute.run()
+    assert recompute.on_disk() == {"snapshots": 1, "sidecars": 1}
+    # The database's directory holds the database file (and what SQLite keeps
+    # under its name) and nothing else: no `snapshots/date=.../*.parquet`.
+    beside = sorted(p.name for p in isolated_db.parent.iterdir()
+                    if not p.name.startswith(isolated_db.name))
+    assert beside == []

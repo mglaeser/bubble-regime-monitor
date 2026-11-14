@@ -49,7 +49,6 @@
 | Store | Location | Contents |
 |---|---|---|
 | Primary DB | **SQLite** `/data/bubble.db` (`DB_URL`), Alembic migrations 0001→0004 | `snapshot` (score history), `daily_close` (Polygon breadth), `breadth_symbol_cache` (Twelve Data), series caches, `hy_oas_history`, source-health/provenance rows |
-| Filesystem | `data/snapshots/` | optional Parquet exports (disabled without pyarrow) |
 | Caches | none external (no Redis/Memcached) | — |
 | Vector store | **none** | — |
 

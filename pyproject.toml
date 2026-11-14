@@ -41,7 +41,7 @@ dependencies = [
     "linkify-it-py==2.2.0",
     "phonenumberslite==9.0.40",
     "lppls==0.6.24",
-    # The Parquet snapshot export (app/services/backfill.py, `bubblegauge
+    # The Parquet export of the CLI (app/alerts/reports.py, `bubblegauge
     # export snapshots --format parquet`).
     "pyarrow>=16.0",
 ]
