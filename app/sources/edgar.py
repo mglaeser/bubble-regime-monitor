@@ -42,6 +42,18 @@ def _minus_one_year(d: date) -> date:
 BASE = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
 MIN_INTERVAL_S = 0.125  # 8 req/s self-cap
 
+# The tags an issuer may report each figure under. duration_facts reads the one
+# in use today (its newest fact ends last), not the first one present.
+# Why, from production, 2026-07-11 to 2026-11-10 (615 snapshots): D3's value is
+# the mean of five issuers' TTM capex/OCF and changes when one of them files.
+# Three of the four calendar-quarter filers moved it by +0.012 to +0.035 on each
+# quarterly filing, the fourth by -0.0008 and -0.0004. A capex figure that no
+# longer changes over a growing OCF does that (6.7bn over 140bn growing 9 % in
+# the quarter: -0.0040 for the issuer, -0.0008 for the mean). So the series
+# says one issuer was read at the capex of the year it left its tag, at a ratio
+# near 0.05; its payload was not read for this change.
+# What reading it at the ratio it files moves in the published score, in
+# numbers: tests/test_d3_tag_in_use.py.
 OCF_TAGS = [
     "NetCashProvidedByUsedInOperatingActivities",
     "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations",
@@ -82,25 +94,31 @@ def _companyfacts(cik: str) -> dict[str, Any]:
 
 
 def duration_facts(facts: dict[str, Any], tags: list[str]) -> list[Fact]:
-    """All USD duration facts for the first matching tag, deduped, oldest first.
+    """All USD duration facts of the tag the issuer reports under today, deduped,
+    oldest first.
+
+    An issuer that changes its tag keeps the old one in companyfacts for ever,
+    so the first tag present is not the tag in use. Of the candidates it is the
+    one whose newest fact ends last; the list order decides a tie, so an issuer
+    that reports two of them for the same periods is read under the earlier.
 
     Later filings win on (start, end) collisions, so restatements replace
     originals."""
     usgaap = facts.get("facts", {}).get("us-gaap", {})
+    newest: list[Fact] = []
     for tag in tags:
-        if tag not in usgaap:
-            continue
         seen: dict[tuple[date, date], Fact] = {}
-        for u in usgaap[tag].get("units", {}).get("USD", []):
+        for u in usgaap.get(tag, {}).get("units", {}).get("USD", []):
             try:
                 f = Fact(date.fromisoformat(u["start"]), date.fromisoformat(u["end"]),
                          float(u["val"]))
             except (KeyError, TypeError, ValueError):
                 continue
             seen[(f.start, f.end)] = f
-        if seen:
-            return sorted(seen.values(), key=lambda f: (f.end, f.duration))
-    return []
+        found = sorted(seen.values(), key=lambda f: (f.end, f.duration))
+        if found and (not newest or found[-1].end > newest[-1].end):
+            newest = found
+    return newest
 
 
 def ttm(facts_list: list[Fact]) -> tuple[float, date] | None:
@@ -151,7 +169,9 @@ def hyperscaler_readings() -> SourceResult:
             continue
         ocf = ttm(duration_facts(facts, OCF_TAGS))
         capex = ttm(duration_facts(facts, CAPEX_TAGS))
-        if ocf is None or capex is None or ocf[0] <= 0:
+        # One ratio, one period: capex that ends on another date than the OCF
+        # is not this issuer's TTM capex/OCF, so the issuer has no reading.
+        if ocf is None or capex is None or ocf[0] <= 0 or capex[1] != ocf[1]:
             continue
         ocf_ttm, as_of = ocf
         rev_yoy = annual_yoy(duration_facts(facts, REVENUE_TAGS))
