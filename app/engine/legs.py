@@ -228,11 +228,19 @@ def variance_risk_premium(vix_level: float, daily_spy_closes: list[float]) -> fl
     return (iv - rv) * 1e4
 
 
-# VRP is annualized VIX^2 - realized variance, expressed in variance points
-# (pct^2); empirical readings run roughly single digits to low tens. Values
-# outside this band signal a units/data error rather than a real regime.
+# The VRP is annualised implied less annualised realised variance, in percent
+# squared: a VIX of 16 against 10 % realised volatility reads 256 - 100 = 156.
+# The unit is published beside the value.
+#
+# No verdict on the magnitude is published with it. Until 2026-11 `vrp_sane`
+# called a value outside -50..150 "a units/data error", a band that fits the
+# monthly scale (VIX^2 / 12, "single digits to low tens") and not this one: in
+# production it read false on 320 of the 605 snapshots that carried it, the
+# median reading (153.6) among them, and on all six whose vrp_flag was set.
+# Nothing read it. No wider band replaces it: the value runs from thousands
+# above zero on a jump of the VIX (80^2 = 6400) to thousands below in a crash
+# (VIX 60 against 90 % realised: -4500), so a magnitude cannot tell a wrong unit.
 VRP_UNITS = "annualized_variance_pts_pct2"
-VRP_SANE_LO, VRP_SANE_HI = -50.0, 150.0
 
 
 @dataclass
@@ -251,7 +259,6 @@ class FastAlarm:
             "vrp_as_of": self.vrp_as_of,
             "vrp_units": VRP_UNITS,
             "vrp_flag": self.vrp_flag,
-            "vrp_sane": self.vrp is None or VRP_SANE_LO <= self.vrp <= VRP_SANE_HI,
             "skew": self.skew,
             "skew_label": self.skew_label,
         }
