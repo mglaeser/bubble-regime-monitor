@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 from scripts.regime import authz_coverage, findings_gate, separation_check
 
@@ -64,29 +65,69 @@ class TestFindingsGateComputesRatherThanAsserts:
         t = findings_gate.tally([{"id": "X", "verdict": "PARTIAL", "band": "STOP-SHIP"}])
         assert t["open_by_band"]["STOP-SHIP"] == 1
 
-    def test_the_real_ledger_is_not_eligible_and_says_why(self):
-        t = findings_gate.tally(findings_gate.load_findings())
-        eligible, why = findings_gate.production_eligible(t)
-        assert eligible is False, "blocking findings are open; this must not compute true"
-        assert why, "a refusal must carry its reason"
+    # No test requires the committed ledger to hold open findings. Two did
+    # ("the real ledger is not eligible", "`--admission` refuses on the real
+    # ledger"), and the CI job deploy-admission-proof with them. Executed on
+    # that code: with the ledger's 15 blocking records closed, `--admission`
+    # exits 0 and all three are red. The ledger (audit/03-findings.json) was
+    # last edited on 2026-07-14, and among the 15 are records whose stated
+    # evidence is false today (A-08: no pip-audit and no detect-secrets in the
+    # repository; B-04: no lock file).
 
-    def test_admission_refuses_on_the_real_ledger(self):
-        out = subprocess.run([sys.executable, "-m", "scripts.regime.findings_gate", "--admission"],
-                             capture_output=True, text=True, cwd=ROOT, check=False)
-        assert out.returncode == 1
-        assert "REFUSE deploy admission" in out.stderr
+    def test_the_ledger_can_be_corrected_without_turning_the_gate_red(self, tmp_path, monkeypatch):
+        # The committed records, each one closed with a control named: the
+        # limit of every correction. Both modes the gate has accept it.
+        closed = [{**record, "verdict": "PASS", "standing_control": "pinned by a test"}
+                  for record in findings_gate.load_findings(findings_gate.FINDINGS_PATH)]
+        assert closed, "the committed ledger holds no record"
+        ledger = tmp_path / "03-findings.json"
+        ledger.write_text(json.dumps(closed), encoding="utf-8")
+        monkeypatch.setattr(findings_gate, "FINDINGS_PATH", ledger)
+        assert findings_gate.main([]) == 0
+        assert findings_gate.main(["--strict"]) == 0
 
-    def test_an_unreadable_ledger_refuses_rather_than_admits(self, tmp_path, monkeypatch):
+    def test_an_unknown_argument_is_refused(self, capsys):
+        # A caller that still passes the removed `--admission` must fail: it
+        # must not get the report's exit 0 and take it for an admission.
+        with pytest.raises(SystemExit) as refused:
+            findings_gate.main(["--admission"])
+        assert refused.value.code == 2
+        captured = capsys.readouterr()
+        assert "--admission" in captured.err
+        assert captured.out == "", "a refused call must not print the tally"
+
+    def test_ci_proves_no_deploy_admission_that_the_release_does_not_run(self):
+        # ci.yml's own rule: a decorative gate "reads as control and is not".
+        # The job deploy-admission-proof ran `findings_gate --admission` and was
+        # green when it refused, while deploy/release.sh, which releases every
+        # merge to main, never ran it. The parsed workflow holds no comments,
+        # so the reason written where the job stood does not trip this.
+        proven = []
+        for path in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
+            workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
+            proven += [f"{path.name}: {job}: {step.get('name', '?')}"
+                       for job, body in workflow["jobs"].items()
+                       for step in body.get("steps", ())
+                       if "--admission" in str(step.get("run", ""))]
+        release = (ROOT / "deploy" / "release.sh").read_text(encoding="utf-8")
+        assert not proven or "findings_gate" in release, (
+            f"CI proves a deploy admission the release never asks for: {proven}")
+
+    def test_an_unreadable_ledger_refuses_rather_than_admits(self, tmp_path, monkeypatch, capsys):
         bad = tmp_path / "03-findings.json"
         bad.write_text("{ not json", encoding="utf-8")
         monkeypatch.setattr(findings_gate, "FINDINGS_PATH", bad)
-        assert findings_gate.main(["--admission"]) == 1
+        assert findings_gate.main([]) == 1
+        assert "cannot evaluate the ledger" in capsys.readouterr().err
+        assert findings_gate.main(["--strict"]) == 1
 
-    def test_a_ledger_that_is_not_a_list_refuses(self, tmp_path, monkeypatch):
+    def test_a_ledger_that_is_not_a_list_refuses(self, tmp_path, monkeypatch, capsys):
         bad = tmp_path / "03-findings.json"
         bad.write_text(json.dumps({"A-01": {}}), encoding="utf-8")
         monkeypatch.setattr(findings_gate, "FINDINGS_PATH", bad)
-        assert findings_gate.main(["--admission"]) == 1
+        assert findings_gate.main([]) == 1
+        assert "cannot evaluate the ledger" in capsys.readouterr().err
+        assert findings_gate.main(["--strict"]) == 1
 
 
 class TestSeparationCheck:
@@ -105,6 +146,31 @@ class TestSeparationCheck:
     def test_every_protected_surface_is_currently_owned(self):
         text = (ROOT / ".github" / "CODEOWNERS").read_text(encoding="utf-8")
         assert separation_check.uncovered(text) == []
+
+    def test_every_protected_surface_exists(self):
+        # `governance/` ("the constitution and its attested hash") was listed
+        # and owned while the directory was gone, and the check answered "all
+        # 9 policy-carrying surfaces are owned".
+        missing = [path for path, _ in separation_check.PROTECTED if not (ROOT / path).exists()]
+        assert missing == []
+        assert separation_check.absent(ROOT) == []
+
+    def test_the_constitution_is_protected(self):
+        # AGENTS.md calls itself the constitution; the two pin files are what
+        # the type-check step and the secret scan compare against.
+        protected = dict(separation_check.PROTECTED)
+        assert {"AGENTS.md", ".mypy-config.pinned", ".secrets.baseline"} <= protected.keys()
+        owned = separation_check.owned_patterns(
+            (ROOT / ".github" / "CODEOWNERS").read_text(encoding="utf-8"))
+        assert {"/AGENTS.md", "/.mypy-config.pinned", "/.secrets.baseline"} <= set(owned)
+
+    def test_an_absent_surface_blocks(self, tmp_path, monkeypatch, capsys):
+        # Every surface owned (the committed CODEOWNERS), none of them there.
+        monkeypatch.setattr(separation_check, "ROOT", tmp_path)
+        assert separation_check.main([]) == 1
+        err = capsys.readouterr().err
+        for path, _ in separation_check.PROTECTED:
+            assert f"  {path}\n" in err, f"{path} is absent and was not named"
 
 
 class TestAuthzCoverage:
@@ -149,23 +215,12 @@ class TestStrictModeIsActuallyReachable:
     it is not a reason for the code path to be untested.
     """
 
-    import json as _json
-
     @staticmethod
     def _gate_with(tmp_path, monkeypatch, records):
-        import json
-
-        from scripts.regime import findings_gate as fg
         path = tmp_path / "03-findings.json"
         path.write_text(json.dumps(records), encoding="utf-8")
-        # load_findings binds FINDINGS_PATH as a DEFAULT ARGUMENT, so patching
-        # the module attribute does not reach it -- the gate reads the real
-        # 119-record ledger and the assertions silently describe production
-        # instead of the fixture. Patching load_findings is what redirects it,
-        # and that binding is a fair part of why --strict went uncovered.
-        monkeypatch.setattr(fg, "FINDINGS_PATH", path)
-        monkeypatch.setattr(fg, "load_findings", lambda p=path: json.loads(p.read_text()))
-        return fg
+        monkeypatch.setattr(findings_gate, "FINDINGS_PATH", path)
+        return findings_gate
 
     def test_strict_blocks_on_an_open_blocking_band(self, tmp_path, monkeypatch, capsys):
         fg = self._gate_with(tmp_path, monkeypatch, [
@@ -199,9 +254,3 @@ class TestStrictModeIsActuallyReachable:
         fg = self._gate_with(tmp_path, monkeypatch, [
             {"id": "A-1", "verdict": "FAIL", "band": "STOP-SHIP"}])
         assert fg.main([]) == 0
-
-    def test_admission_still_refuses_where_strict_does(self, tmp_path, monkeypatch, capsys):
-        fg = self._gate_with(tmp_path, monkeypatch, [
-            {"id": "A-1", "verdict": "FAIL", "band": "STOP-SHIP"}])
-        assert fg.main(["--admission"]) == 1
-        assert "REFUSE deploy admission" in capsys.readouterr().err
