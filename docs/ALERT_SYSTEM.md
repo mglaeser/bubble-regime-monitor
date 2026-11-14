@@ -714,7 +714,10 @@ The HTTP operator actions are admin-scoped and `no-store`:
   market condition), it is outside the non-P1 budgets, and its body is the
   reviewed `TEST_MESSAGE` fragment. It goes through the ordinary dispatcher —
   same claim, same admission, same classification — because a test that
-  bypassed the pipeline would prove the wrong thing.
+  bypassed the pipeline would prove the wrong thing. While alerting is
+  disabled it queues nothing and answers 409: no dispatcher pass runs then,
+  and no later mode reads a row queued in that one
+  (tests/test_alert_api.py::test_a_send_test_while_alerting_is_disabled_is_refused).
 
 No route sends an UNKNOWN delivery again (owner decision D2f, 2026-10-03).
 Until then `POST /api/v1/admin/alerts/deliveries/{id}/retry` was the only way

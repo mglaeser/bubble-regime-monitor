@@ -852,9 +852,9 @@ def test_alert_errors_use_the_one_format(client, monkeypatch, tmp_path):
     service's one format, FastAPI's `{"detail": ...}` as `application/json` -
     what every other route, the key guard and FastAPI's own 422 answer. Every
     error an alert route raises, each in a state that raises it: an id that
-    does not exist, a reused Idempotency-Key, evaluation with alerting
-    disabled, live mode with nothing promoted, no loadable ruleset, a phrase
-    set that is not JSON."""
+    does not exist, a reused Idempotency-Key, evaluation or a send-test with
+    alerting disabled, live mode with nothing promoted, no loadable ruleset, a
+    phrase set that is not JSON."""
     from app.config import get_settings
 
     admin = {"X-API-Key": TEST_ADMIN_KEY}
@@ -883,6 +883,8 @@ def test_alert_errors_use_the_one_format(client, monkeypatch, tmp_path):
         "evaluation with alerting disabled": (409, client.post(
             "/api/v1/admin/alerts/evaluate", json=dict(unknown_input, shadow=False),
             headers=admin)),
+        "a send-test with alerting disabled": (409, client.post(
+            "/api/v1/admin/alerts/send-test", headers=admin)),
     }
     broken = tmp_path / "broken.yaml"
     broken.write_text("meta: {this: is not a ruleset}\n", encoding="utf-8")
@@ -1674,12 +1676,14 @@ def test_admin_test_render_previews_reviewed_bytes_without_queueing(client):
     assert denied.status_code == 401
 
 
-def test_send_test_queues_an_audited_memberless_test_delivery(client):
+def test_send_test_queues_an_audited_memberless_test_delivery(client, monkeypatch):
     """TEST is the one kind allowed zero members, and it stays out of budgets.
 
     Inventing an episode to hang the test on would put a fake market event in
     the audit trail; counting it against the caps would spend the operator's
-    budget on proving the wire.
+    budget on proving the wire. In shadow mode, where a dispatcher runs: while
+    alerting is disabled the route queues nothing
+    (test_a_send_test_while_alerting_is_disabled_is_refused).
     """
     from datetime import timedelta
 
@@ -1691,8 +1695,11 @@ def test_send_test_queues_an_audited_memberless_test_delivery(client):
     from app.alerts.enums import DeliveryKind, TransportStatus
     from app.alerts.models import AlertDelivery, AlertDeliveryMember, AlertEvent
     from app.alerts.sender import NullSender
+    from app.config import get_settings
     from app.db import session_scope
 
+    monkeypatch.setenv("ALERTS_MODE", "shadow")
+    get_settings.cache_clear()                     # the client fixture clears it again
     response = client.post("/api/v1/admin/alerts/send-test",
                            headers={"X-API-Key": TEST_ADMIN_KEY})
     assert response.status_code == 200
@@ -1753,6 +1760,34 @@ def test_send_test_requires_the_admin_scope(client):
     for key in (WRITE_KEY, "not-the-admin-key"):
         assert client.post("/api/v1/admin/alerts/send-test",
                            headers={"X-API-Key": key}).status_code == 401
+
+
+def test_a_send_test_while_alerting_is_disabled_is_refused(client):
+    """README, "On request": the test alert is "sent by the next dispatcher
+    pass", and ALERTS_MODE governs "every alert, the recompute-outage and test
+    alerts included". While it is `disabled` no pass runs, and no later mode
+    reads a row queued in this one. So nothing may be queued and the answer
+    may not say it will be sent: 409, as an evaluation in the same state, and
+    no delivery row."""
+    from sqlalchemy import func, select
+
+    from app.alerts.models import AlertDelivery, AlertEvent
+    from app.config import get_settings
+    from app.db import session_scope
+    from app.jobs.alert_dispatch import run_once
+
+    assert get_settings().alerts_mode == "disabled"
+    assert run_once()["status"] == "skipped"
+
+    response = client.post("/api/v1/admin/alerts/send-test",
+                           headers={"X-API-Key": TEST_ADMIN_KEY})
+
+    assert response.status_code == 409
+    assert "ALERTS_MODE=disabled" in response.json()["detail"]
+    assert response.headers["Cache-Control"] == "no-store"
+    with session_scope() as session:
+        assert session.scalar(select(func.count()).select_from(AlertDelivery)) == 0
+        assert session.scalar(select(func.count()).select_from(AlertEvent)) == 0
 
 
 def test_no_route_sends_an_unknown_delivery_again(client):

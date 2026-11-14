@@ -261,7 +261,7 @@ Everything bubblegauge sends to a person, by itself or on request. Times are UTC
 |---|---|
 | `POST /api/v1/admin/send-sms` | The daily digest now. With the engine off it goes out even when both transport switches are off, over whichever transport has credentials and a recipient (iMessage first); with the engine on it needs the chosen transport, like the scheduled run. Either way it needs live admission. |
 | `POST /api/v1/admin/refresh` | A recompute, and with it whatever a recompute sends: alerts, the failure alarm or the all-clear, the ping. |
-| `POST /api/v1/admin/alerts/send-test` | A P4 test alert, `bubblegauge Testnachricht.` / `bubblegauge test message.`, sent by the next dispatcher pass, exempt from quiet hours and the budget. It reaches a phone only in `live`. |
+| `POST /api/v1/admin/alerts/send-test` | A P4 test alert, `bubblegauge Testnachricht.` / `bubblegauge test message.`, sent by the next dispatcher pass, exempt from quiet hours and the budget. It reaches a phone only in `live`. While `ALERTS_MODE` is `disabled` it is refused (409): no dispatcher pass would send it. |
 | `POST /api/v1/admin/alerts/evaluate` with `shadow=false` | One evaluation in `ALERTS_MODE` (409 while disabled); in `live` its alerts are sent as above. |
 | `bubblegauge alerts dispatch --once` · `watchdog --once` (CLI) | One dispatcher pass; one outage check, which can raise the recompute-outage alert. `bubblegauge alerts evaluate` always runs in shadow and sends nothing. |
 

@@ -373,6 +373,15 @@ def send_test(response: Response,
 
     _no_store(response)
     settings = get_settings()
+    if settings.alerts_mode == "disabled":
+        # No dispatcher pass runs while alerting is disabled
+        # (`app.jobs.alert_dispatch.run_once`), and no later mode reads a row
+        # queued in this one. The route used to queue it and answer that the
+        # dispatcher sends it on its next pass. Refused before anything is
+        # written, as an evaluation is in this mode.
+        raise HTTPException(status_code=409,
+                            detail="ALERTS_MODE=disabled; no dispatcher runs to send a test",
+                            headers=ERROR_HEADERS)
     now = datetime.now(UTC)
 
     from app.alerts.errors import AlertingUnavailable
