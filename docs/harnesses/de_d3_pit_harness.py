@@ -40,8 +40,9 @@ OCF_POLICIES = ("D0_DROP", "D1_DROP_AND_DEBIT_QUALITY", "D2_DISTRESS_FLAG_ONLY",
 def _pit_ttm(facts: dict, tags: list[str], as_of: date) -> float | None:
     """TTM sum of the newest four non-overlapping quarterly duration values
     with filed <= as_of (annual values used when quarters are unavailable)."""
-    rows = []
+    rows: list[tuple[date, date, float]] = []
     for tag in tags:
+        found = []
         for unit_rows in (facts.get("facts", {}).get("us-gaap", {})
                           .get(tag, {}).get("units", {}) or {}).values():
             for r in unit_rows:
@@ -52,9 +53,11 @@ def _pit_ttm(facts: dict, tags: list[str], as_of: date) -> float | None:
                 except (KeyError, ValueError):
                     continue
                 if filed <= as_of and end <= as_of:
-                    rows.append((start, end, float(r["val"])))
-        if rows:
-            break
+                    found.append((start, end, float(r["val"])))
+        # The tag the issuer filed under as of that date, as in
+        # edgar.duration_facts: the newest fact decides, the list order a tie.
+        if found and (not rows or max(r[1] for r in found) > max(r[1] for r in rows)):
+            rows = found
     if not rows:
         return None
     rows.sort(key=lambda r: r[1])
