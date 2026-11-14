@@ -267,7 +267,7 @@ class TestRoundTwoOn126:
         assert "(before: -)" in out.text
 
     @pytest.mark.parametrize("name, value", [
-        ("spy_trend", "IN"), ("spy_trend", "OUT"), ("spy_trend", "unknown"), ("spy_trend", "?"),
+        ("spy_trend", "IN"), ("spy_trend", "OUT"), ("spy_trend", "unknown"),
         ("action_band", "de-risk"), ("action_band", "suppressed (block degraded)")])
     def test_the_monitors_own_values_stay(self, monkeypatch, name, value):
         """Since owner decision D7 a word is its own fact's (composer.WORDS);
@@ -540,9 +540,11 @@ class TestRoundEightOn126:
 def _snapshot(**over) -> types.SimpleNamespace:
     """The snapshot fields digest_facts reads, as production stores them."""
     base = {"median": 59.4, "action_band": "trim", "override_fired": False, "iqr_lo": 57.2, "iqr_hi": 61.1,
-            "red_flag_count": 1, "trend_states": {"SPY": {"faber_10mo": "IN"}, "QQQ": {"faber_10mo": "IN"}},
+            "red_flag_count": 1, "trend_states": {"SPY": {"faber_month_end_state": "IN"},
+                                                  "QQQ": {"faber_month_end_state": "IN"}},
             "block_s": {"indicators": {"s1": {"sub_score": 0.8}, "s2": {"sub_score": None}}},
             "block_d": {"indicators": {"d1": {"sub_score": 0.11}}}, "judgment_call": "Valuations are stretched.",
+            "judgment_stale": False,  # digest_facts hands on this snapshot's note only
             "band5": 52.3, "band95": 66.0, "red_flag_meta": {}, "override_required_count": 3,
             "override_fireable_universe_count": 3,
             "v_state": "contango", "v_multiplier": 1.0, "data_degraded": False}
@@ -558,15 +560,26 @@ class TestRoundNineOn126:
     unknown twice; "up" and "flat" were #118's fixture words. The same sweep
     over production found the real erasure, the display band "suppressed
     (block degraded)" (30 snapshots). And "T14:payload" was exempt as an ISO
-    time; only a time after its date is."""
+    time; only a time after its date is.
+
+    Since 2026-11 the digest's trend is the rule's state at the last completed
+    month-end: its producer is legs.month_end_faber (IN, OUT, or None without
+    ten completed months, which the digest words "unknown"), no longer
+    legs.faber_state's preview of the running month, and the digest's "?" for
+    a missing preview is gone (tests/test_digest_change_context.py,
+    TestTheTrendIsTheRulesState)."""
 
     def test_the_digests_trend_values_are_the_producers(self):
-        rising = [float(i) for i in range(1, 13)]
-        values = {legs.faber_state(rising), legs.faber_state(rising[::-1]), "unknown", "?"}
-        assert values == {"IN", "OUT", "unknown", "?"}
-        for value in values:
-            trends = {"SPY": {"faber_10mo": value}, "QQQ": {"faber_10mo": value}}
-            assert composer.typed("spy_trend", digest_facts(_snapshot(trend_states=trends))["spy_trend"]) == value
+        months = [(f"2025-{month:02d}-28", float(month)) for month in range(1, 13)]
+        falling = [(day, 13.0 - close) for day, close in months]
+        states = {legs.month_end_faber(series, as_of_month="2026-01", feed_current=True)[0]
+                  for series in (months, falling, months[:6])}
+        assert states == {"IN", "OUT", None}
+        for state in states:
+            trends = {"SPY": {"faber_month_end_state": state}, "QQQ": {"faber_month_end_state": state}}
+            fact = digest_facts(_snapshot(trend_states=trends))["spy_trend"]
+            assert fact == (state or "unknown") and composer.typed("spy_trend", fact) == fact
+        assert composer.WORDS["spy_trend"] == {"IN", "OUT", "unknown"}
 
     @pytest.mark.parametrize("band", ["hold", "trim", "de-risk", "suppressed (block degraded)",
                                       "de-risk (data degraded)"])
@@ -1033,6 +1046,8 @@ class TestTypedFacts:
         ("F_NEXT_CHECK", "22:00", "22:00"), ("F_BAND_PREVIOUS", "suppressed", "suppressed"),
         ("median", float("nan"), None), ("median", float("inf"), None), ("median", "59", None),
         ("action_band", "IN", None), ("spy_trend", "trim", None), ("override_suffix", " override", None),
+        # the digest's old word for a missing trend preview; no producer writes it (2026-11)
+        ("spy_trend", "?", None),
         ("F_NEXT_CHECK", "14:30", None), ("F_BAND_BASE", "suppressed", None), ("median", {"v": 59}, None),
         ("median", [59], None), ("undeclared_word", "trim", None), ("median", None, None)])
     def test_a_fact_is_a_number_a_truth_value_its_own_word_or_the_judgment(self, name, value, expected):
@@ -1159,9 +1174,12 @@ class TestRoundTwoOn145:
         lib = composer.library()
         assert not self.GONE & set(lib["prompts"]) and len(lib["prompts"]) == 23
         # re-signed since on the owner's requests of 2026-10-04 and 2026-11-11
-        # (tests/test_digest_change_context.py); every earlier signature stays behind "Previously:"
-        assert lib["version"] == "1.4.0" and lib["status"].startswith("SIGNED 2026-11-12 mglaeser - ")
-        assert "Previously: SIGNED 2026-10-04" in lib["status"] and "Previously: SIGNED 2026-10-01" in lib["status"]
+        # (tests/test_digest_change_context.py); every earlier signature stays behind "Previously:".
+        # 1.5.0 declares the trend as the rule's month-end state and the distance as a preview.
+        assert lib["version"] == "1.5.0" and lib["status"].startswith("SIGNED 2026-11-14 mglaeser - ")
+        assert "month-end" in lib["status"].split(" Previously: ")[0]
+        assert [signed[:17] for signed in lib["status"].split(" Previously: ")[1:]] == [
+            "SIGNED 2026-11-12", "SIGNED 2026-10-04", "SIGNED 2026-10-01", "SIGNED 2026-09-28"]
         assert not any("llm" in entry for entry in lib["prompts"].values())
 
 

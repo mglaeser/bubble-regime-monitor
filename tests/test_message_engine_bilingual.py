@@ -73,7 +73,8 @@ class TestComposeInGerman:
                         v_multiplier=1.0, v_state="contango", fast_alarm={}, judgment_stale=False,
                         data_freshness={}, action_band="trim", override_fired=False, red_flag_count=2,
                         block_s={"indicators": {}}, block_d={"indicators": {}},
-                        trend_states={"SPY": {"faber_10mo": "IN"}, "QQQ": {"faber_10mo": "IN"}},
+                        trend_states={"SPY": {"faber_month_end_state": "IN"},
+                                      "QQQ": {"faber_month_end_state": "IN"}},
                         judgment_call=None)
 
     @pytest.mark.parametrize("language, name, reply", [

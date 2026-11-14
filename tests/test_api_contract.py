@@ -93,6 +93,19 @@ def test_legs_endpoints(client_with_snapshot):
     trend = client_with_snapshot.get("/api/v1/legs/trend")
     assert trend.status_code == 200
     assert "Zakamulin" in trend.json()["data"]["caveat"]
+    # The rule text says which of the served keys is the rule's state and which
+    # a preview. One sentence ("IN if last monthly close > 10-month SMA") stood
+    # for all of them, while `faber_10mo` reads the running month's latest close
+    # and disagreed with `faber_month_end_state` in 48 of production's snapshots
+    # (QQQ, 2026-11-03..11-10).
+    rule = {key: text for key, _, text in
+            (clause.strip().partition(": ") for clause in trend.json()["data"]["rule"].split(";"))}
+    states = trend.json()["data"]["states"]["SPY"]
+    assert set(rule) == {"faber_month_end_state", "faber_10mo", "faber_distance_pct", "sma200"} <= set(states)
+    assert "last completed month" in rule["faber_month_end_state"] and "Faber 2007" in rule["faber_month_end_state"]
+    assert "faber_month_end_period" in rule["faber_month_end_state"]
+    assert "running month" in rule["faber_10mo"] and "preview" in rule["faber_10mo"]
+    assert "percent" in rule["faber_distance_pct"] and "200-day" in rule["sma200"]
 
     alarm = client_with_snapshot.get("/api/v1/legs/fast-alarm")
     assert alarm.status_code == 200

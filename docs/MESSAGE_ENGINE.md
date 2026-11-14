@@ -42,7 +42,8 @@ converge, and 57 review rounds on #121 and 20 on #124 showed it.
   (owner decision D7, 2026-09-28; `composer.typed`): a finite number, a
   truth value, one of the monitor's own words for that fact
   (`composer.WORDS`: the digest's band as the snapshot displays it,
-  "suppressed (block degraded)" too; the trend states; the band and the
+  "suppressed (block degraded)" too; the trend rule's states - IN, OUT or
+  "unknown", at the last completed month-end; the band and the
   trends a day and a week earlier; the VIX term structure's state; the
   override suffix; the alert contract's band states, assets and recompute
   slot times), or the prior judgment, redacted and capped at 300
@@ -605,8 +606,9 @@ the daily digest alone, so the digest is what changed:
   and the headline's distance from them, each warning flag's state as the
   snapshot's flag contract types it (`red_flag_meta`: ACTIVE, INACTIVE,
   BLOCKED, UNKNOWN) and its reading minus its threshold, the override's rule
-  and the contract's count of flags that can fire, each trend's distance
-  from its 10-month average, the VIX term structure, both blocks out of 100,
+  and the contract's count of flags that can fire, the latest close's
+  distance from each trend's 10-month average (the running month's preview),
+  the VIX term structure, both blocks out of 100,
   five readings by their own values (CAPE, the top-10 share, the
   semiconductors' run-up, breadth, the margin-debt growth) and whether a
   block's coverage is degraded (the coverage gate's verdict: more than a
@@ -619,9 +621,21 @@ the daily digest alone, so the digest is what changed:
   threshold whose crossing fires nothing. The coverage line said "some data
   degraded", and read False beside a stale indicator on 27 of the 37 digest
   mornings of 2026-10-05 to 11-10.
+  The trend facts (`spy_trend`, `qqq_trend`, today and a day earlier) are
+  the Faber rule's state at the last completed month-end
+  (`legs.month_end_faber`, the state the alert rules read), or "unknown"
+  without ten completed months. Until library 1.5.0 they were `faber_10mo`,
+  the running month's preview: it read OUT for QQQ in production's 48
+  snapshots of 2026-11-03 to 11-10 while the rule's state was IN and no
+  trend alert fired, and three of those eight mornings' digests worded it
+  as the state ("QQQ von IN auf OUT" on 11-03, "SPY IN, QQQ OUT" on 11-04
+  and, as the template, on 11-09). The DATA names the state as read at
+  month-end only, and the two distances as a preview that changes no state
+  before the month closes.
   And the change: the newest snapshot 22 to 30 hours older - yesterday's
   same slot, or the one before when it was missed - with its headline, band,
-  override, flags, trends and VIX term structure (state and multiplier) and
+  override, flags, the trend rule's states and VIX term structure (state
+  and multiplier) and
   each sub-score's change, and the newest 166 to 174 hours older - last
   week's - with its headline, band and flag count. The earlier term
   structure is there because its multiplier scales the whole timing block
@@ -631,13 +645,18 @@ the daily digest alone, so the digest is what changed:
   Nothing older: after an outage the change is left out rather than called
   a day's. Every fact stays a number, a truth
   value or the monitor's own word (decision 16), and the judgment is passed
-  whole, at its own 300-character cap.
+  whole, at its own 300-character cap, when it was written for this
+  snapshot. A stale one - the last successful note, kept when the
+  judgment's call failed - is left out and the fact reads "n/a": it was
+  written for an earlier snapshot's numbers (58 of production's 615
+  snapshots hold one, in runs of up to 3.5 days; the digest of 2026-10-01
+  was handed the note of the slot before).
 - **The references** (`app/message_engine/context.py`). Each indicator's
   grounding and first caveat join its methodology record, and the digest's
   prompt adds the framework the methodology endpoint serves
   (`app.references.FRAMEWORK`) with each leg's caveat: repo-authored text
   only (AGENTS.md ground rule 1).
-- **The prompt** (library 1.4.0, re-signed on the owner's instruction). One
+- **The prompt** (library 1.5.0, re-signed on the owner's instruction). One
   point, chosen by what changed since a day earlier - the band, the
   override, a flag, a trend, the volatility term structure - else a clear
   move of the headline, else the biggest driver or the line the reading sits
