@@ -83,6 +83,8 @@ Fast fear signals: {fast_alarm}.
 #: The keys the prompt's structures carry: the gauges the template names, the four
 #: warning flags (aggregate.RedFlags.as_dict) and the fast alarm's readings
 #: (legs.FastAlarm.as_dict, whose term structure is a word and is typed as one).
+#: The day of the VRP (vrp_as_of) is a date string out of FRED's payload and no
+#: reading: it is not among them (AGENTS.md ground rule 1).
 GAUGES_S = ("s1", "s2", "s3", "s4", "s5")
 GAUGES_D = ("d1", "d2", "d3", "d4")
 FLAGS = ("gsadf_explosive_noncontested", "semi_runup_ge_150pp", "hy_oas_widen_gt_100bps",
