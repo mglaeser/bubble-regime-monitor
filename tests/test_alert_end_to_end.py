@@ -369,6 +369,25 @@ def _dispatch(sender, at: datetime):
                          live_profile="default", sender=sender, now=at)
 
 
+def test_the_recompute_outage_alert_counts_whole_slots(tmp_path, monkeypatch):
+    """README, "Recompute-outage alert": `Kein Rechenlauf seit {n} Slots.`,
+    built from "the number of missed slots"."""
+    from app.alerts.sender import NullSender
+    from app.alerts.watchdog import run_once
+
+    _stage3_shadow(tmp_path, monkeypatch, "outage-count")
+    monday = datetime(2026, 11, 2, 6, 0, tzinfo=UTC)             # 07:00 in Berlin
+    _evaluate("trim", monday, None)
+    # 10:00 and 14:00 do not run; the watchdog passes 100 minutes after the
+    # second, past its 90-minute grace.
+    fired = run_once(now=monday + timedelta(hours=8, minutes=100))
+    assert fired["firing"] is True
+    sender = NullSender()
+    _dispatch(sender, monday + timedelta(hours=8, minutes=101))
+    assert [message for _recipient, message in sender.sent] == [
+        "Kein Rechenlauf seit 2 Slots."]
+
+
 def test_an_unknown_alert_blocks_nothing_and_the_next_episode_is_planned(
         tmp_path, monkeypatch):
     """The P1 band alert goes out over sipgate and its answer is lost: it may

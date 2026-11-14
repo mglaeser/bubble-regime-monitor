@@ -181,8 +181,42 @@ def test_typed_fact_builders_use_persisted_red_flags_labels_and_watchdog_evidenc
         "F_RF_COUNT": "2",
         "F_RF_REQUIRED": "3",
         "F_RF3_DISTANCE": "12.5",
-        "F_MISSED_SLOTS": "3.0",
+        "F_MISSED_SLOTS": "3",
     }
+
+
+@pytest.mark.parametrize("missed", [2, 3, 10, 99])
+def test_the_missed_slot_count_is_a_whole_number_within_its_reviewed_width(
+        ruleset, phrase_set, missed):
+    """README, "Recompute-outage alert": built from "the number of missed
+    slots", text `Kein Rechenlauf seit {n} Slots.` The phrase set reviews the
+    fact at two characters ("Ausgefallene Rechenlaeufe in Folge")."""
+    from app.alerts.input_builder import build_watchdog_input
+
+    rule = ruleset.rule("ops.recompute_outage")
+    assert rule is not None and rule.render is not None
+    # what app/alerts/watchdog.py run_once persists
+    trigger = build_watchdog_input(
+        expected_slot_key="2026-11-03T10:00:00+00:00", missed_slots=missed,
+        built_at=datetime(2026, 11, 3, 11, 40, tzinfo=UTC), service_version="test",
+        last_snapshot=None)
+    member = build_member_context(
+        episode_id="01K00000000000000000000000",
+        rule_id=rule.rule_id,
+        priority=rule.priority,
+        trigger=trigger,
+        current=trigger,
+        labels=rule.labels,
+        authorized_fact_ids=frozenset(rule.render.allowed_fact_ids),
+        authorized_phrase_codes=frozenset(),
+        required_caveat_codes=(),
+        condition_status="STILL_FIRING",
+        origin_phrase_set_version=phrase_set.version,
+        origin_phrase_set_sha256=phrase_set.sha256,
+        origin_rules_sha256=ruleset.rules_sha256,
+    )
+    assert member.facts == {"F_MISSED_SLOTS": str(missed)}
+    assert len(member.facts["F_MISSED_SLOTS"]) <= phrase_set.facts["F_MISSED_SLOTS"].max_width
 
 
 def test_labelled_rules_use_labels_in_their_stable_fingerprint(ruleset):

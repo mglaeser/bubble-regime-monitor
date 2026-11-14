@@ -1183,13 +1183,16 @@ class TestRoundThreeOn145:
         from app.alerts import render_context, sources
 
         numbers = {"F_HEADLINE_MEDIAN", "F_RF_COUNT", "F_RF_REQUIRED", "F_RF3_DISTANCE"}   # float | int | None
-        evidence = {"F_BREADTH": "indicator.d1.breadth", "F_D2": "indicator.d2.finra_release",
-                    "F_S3": "indicator.s3.semi_runup", "F_MISSED_SLOTS": "ops.recompute_slot"}
+        # the builder per fact: a measurement as stored, the slot count whole
+        evidence = {"F_BREADTH": ("_evidence_value", "indicator.d1.breadth"),
+                    "F_D2": ("_evidence_value", "indicator.d2.finra_release"),
+                    "F_S3": ("_evidence_value", "indicator.s3.semi_runup"),
+                    "F_MISSED_SLOTS": ("_evidence_count", "ops.recompute_slot")}
         builders = Path(render_context.__file__).read_text(encoding="utf-8")
         specs = [spec for value in vars(sources).values() if isinstance(value, tuple)
                  for spec in value if isinstance(spec, sources.SourceSpec)]
-        for fact, domain in evidence.items():
-            assert f'"{fact}": _evidence_value("{domain}")' in builders
+        for fact, (builder, domain) in evidence.items():
+            assert f'"{fact}": {builder}("{domain}")' in builders
             kinds = {str(getattr(spec.kind, "value", spec.kind)) for spec in specs if spec.domain == domain}
             assert kinds and kinds <= {"number", "count"}, (domain, kinds)
         declared = {fact for entry in composer.library()["prompts"].values()

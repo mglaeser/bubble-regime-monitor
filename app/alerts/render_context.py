@@ -175,6 +175,24 @@ def _evidence_value(domain: str, *, attribute: str = "value") -> FactBuilder:
     return build
 
 
+def _evidence_count(domain: str) -> FactBuilder:
+    """An evidence value that counts something, as a whole number.
+
+    Evidence values are stored as floats (`dto.EvidenceModel.value`), and
+    `_format` prints a float with one decimal: the outage alert read "Kein
+    Rechenlauf seit 2.0 Slots.", and 10 missed slots took four characters
+    where the phrase set reviews the fact at two. Production has sent no
+    outage alert; its one watchdog sidecar (2026-08-29) stores 3.0.
+    """
+    value = _evidence_value(domain)
+
+    def build(trigger: AlertInput, source: AlertInput,
+              previous: AlertInput | None, labels: dict[str, str]) -> Any:
+        raw = value(trigger, source, previous, labels)
+        return int(raw) if isinstance(raw, float) else raw
+    return build
+
+
 def _label(name: str) -> FactBuilder:
     return lambda _trigger, _source, _previous, labels: labels.get(name)
 
@@ -233,7 +251,7 @@ MEMBER_FACT_BUILDERS: dict[str, FactBuilder] = {
     "F_HY_OAS": _evidence_value("credit.hy_oas.daily"),
     "F_RF3_DISTANCE_EVIDENCE": _evidence_value(
         "credit.hy_oas.daily", attribute="distance_to_threshold"),
-    "F_MISSED_SLOTS": _evidence_value("ops.recompute_slot"),
+    "F_MISSED_SLOTS": _evidence_count("ops.recompute_slot"),
     "F_NEXT_CHECK": _next_check,
 }
 
