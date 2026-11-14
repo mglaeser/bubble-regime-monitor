@@ -1,6 +1,12 @@
 """v3.7.3 remediation patches (validated against the 2026-07-17 spec):
 A-03 override-wins-band, B breadth increment/as_of, A-01 freshness state,
-H-01 hyperscaler quality, H-04 leap-safe TTM, O-01 snapshots path.
+H-01 hyperscaler quality, H-04 leap-safe TTM.
+
+The release's sixth patch, O-01, kept the directory of the per-snapshot
+parquet files absolute. Its test went with that export and its path helper
+(app/services/backfill.py): nothing read the files
+(tests/test_recompute_order.py,
+test_a_snapshot_is_written_to_the_database_and_nowhere_else).
 
 Methodology unchanged — these are safety/observability/hardening fixes; the
 golden fixture (52.43) is untouched."""
@@ -8,7 +14,6 @@ golden fixture (52.43) is untouched."""
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
-from pathlib import Path
 
 import pytest
 
@@ -182,13 +187,3 @@ def test_h04_leap_day_prior_year_is_safe():
 
     assert _minus_one_year(date(2024, 2, 29)) == date(2023, 2, 28)   # no ValueError
     assert _minus_one_year(date(2025, 3, 31)) == date(2024, 3, 31)   # normal case
-
-
-# ---- O-01: snapshots dir is absolute for an absolute DB URL ----------------
-
-def test_o01_snapshots_dir_absolute_for_absolute_db_url(monkeypatch):
-    from app.config import get_settings
-    from app.services.backfill import snapshots_dir
-
-    monkeypatch.setattr(get_settings(), "db_url", "sqlite:////data/bubble.db", raising=False)
-    assert snapshots_dir() == Path("/data/snapshots")   # was CWD-relative data/snapshots
