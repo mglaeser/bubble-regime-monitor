@@ -645,7 +645,12 @@ the daily digest alone, so the digest is what changed:
   Nothing older: after an outage the change is left out rather than called
   a day's. Every fact stays a number, a truth
   value or the monitor's own word (decision 16), and the judgment is passed
-  whole, at its own 300-character cap.
+  whole, at its own 300-character cap, when it was written for this
+  snapshot. A stale one - the last successful note, kept when the
+  judgment's call failed - is left out and the fact reads "n/a": it was
+  written for an earlier snapshot's numbers (58 of production's 615
+  snapshots hold one, in runs of up to 3.5 days; the digest of 2026-10-01
+  was handed the note of the slot before).
 - **The references** (`app/message_engine/context.py`). Each indicator's
   grounding and first caveat join its methodology record, and the digest's
   prompt adds the framework the methodology endpoint serves

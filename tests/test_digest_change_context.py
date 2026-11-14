@@ -215,6 +215,28 @@ class TestWhatTheApiServes:
         assert 180 < len(stored) <= 300 == composer.JUDGMENT_MAX
         assert composer.typed("judgment", stored) == stored
 
+    def test_a_stale_judgment_is_not_handed_on_as_todays_note(self):
+        """When the judgment's call fails the snapshot keeps the LAST
+        successful text with judgment_stale = True (app/engine/judgment.py:
+        "persist the last successful text with stale:true"): a note written
+        for an earlier snapshot's numbers. The score API serves the flag
+        beside the text; the digest dropped the flag and handed the text on
+        as the "plain-language note you may draw on". Production: 58 of 615
+        snapshots hold a stale text, in runs of up to 22 (2026-09-02 22:01 to
+        09-06 10:01 UTC, one note for 3.5 days), and one of the 58 digest
+        attempts was handed one: 2026-10-01 08:00, the 06:01 snapshot with
+        the 02:00 note, which the digest gave as its "Größter Treiber"."""
+        snap = _snapshot()
+        assert digest.digest_facts(snap)["judgment"] == "A few giants carry the market."
+        snap.judgment_stale = True
+        facts = digest.digest_facts(snap)
+        assert facts["judgment"] == "n/a"
+        prompt = composer.prompt_for("daily_digest", _entry(), facts, Channel.IMESSAGE,
+                                     Settings(_env_file=None, message_engine_enabled=True))
+        assert "plain-language note you may draw on: n/a" in prompt and "A few giants" not in prompt
+        # what the snapshot stores and the score API serves is untouched: the text with its flag
+        assert (snap.judgment_call, snap.judgment_stale) == ("A few giants carry the market.", True)
+
     def test_the_volatility_states_are_the_producers(self):
         ratios = [0.5, 0.94, 0.95, 0.97, 1.0, 1.01, 2.0]
         assert {v_vix.state(r) for r in ratios} == composer.WORDS["vol_state"]

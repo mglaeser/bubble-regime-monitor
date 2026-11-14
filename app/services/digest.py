@@ -231,8 +231,19 @@ def digest_facts(snap: Snapshot, *, day: Snapshot | None = None,
     week earlier (`day`, `week`), so the model can say what changed (the
     owner, 2026-10-04: as much information as the API gives, and more context
     when something changes). Every fact is a number, a truth value, one of
-    the monitor's own words or the judgment (owner decision D7;
+    the monitor's own words or this snapshot's judgment (owner decision D7;
     app/message_engine/composer.py, WORDS).
+
+    A STALE JUDGMENT IS NOT HANDED ON. When the judgment's call fails, the
+    snapshot keeps the last successful text with `judgment_stale` set
+    (app/engine/judgment.py): a note written for an earlier snapshot's
+    numbers. The score API serves it with that flag; here the flag was
+    dropped, and the text reached the model as the "plain-language note you
+    may draw on". 58 of production's 615 snapshots hold a stale text, in runs
+    of up to 22 (2026-09-02 22:01 to 09-06 10:01 UTC, one note for 3.5 days),
+    and one of the 58 digest attempts was handed one (2026-10-01 08:00: the
+    02:00 note under the 06:01 snapshot). The fact then reads "n/a", as it
+    does when there is no judgment.
     """
     from app.services.engine_delivery import RED_FLAG_TOTAL, SCORE_SCALE_MAX
 
@@ -250,7 +261,7 @@ def digest_facts(snap: Snapshot, *, day: Snapshot | None = None,
         "qqq_trend": _trend(snap, "QQQ"),
         **_sub_scores(snap.block_s, SUB_SCORES["s"]),
         **_sub_scores(snap.block_d, SUB_SCORES["d"]),
-        "judgment": snap.judgment_call or "n/a",
+        "judgment": (None if snap.judgment_stale else snap.judgment_call) or "n/a",
         **_readings(snap),
         **_a_day_earlier(snap, day),
         **_a_week_earlier(snap, week),
