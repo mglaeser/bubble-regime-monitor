@@ -447,7 +447,7 @@ GET  /api/v1/alerts/ruleset
 GET  /api/v1/alerts/health
 GET  /api/v1/alerts/silences
 POST   /api/v1/alerts/silences        Idempotency-Key honoured; 409 on reuse with a different body
-DELETE /api/v1/alerts/silences/{id}
+DELETE /api/v1/alerts/silences/{id}   ends it now; one that has not started is withdrawn
 POST /api/v1/admin/alerts/evaluate    one sidecar, shadow by default
 POST /api/v1/admin/alerts/promote
 POST /api/v1/admin/alerts/recover

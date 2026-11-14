@@ -1292,6 +1292,68 @@ def test_silence_create_list_and_end(client):
     assert ended.status_code == 200
 
 
+def test_a_scheduled_silence_can_be_withdrawn(client):
+    """README: "A silenced rule, instance or bucket gets no alert" - every
+    priority, P1 included - and AGENTS.md rule 3. A silence that has not
+    started silenced nothing yet, and the table admits no empty window to
+    expire it into (ck_alert_silence_window, ends_at > starts_at): ending it
+    removes it. It is listed nowhere and withholds nothing when its start
+    comes."""
+    from datetime import timedelta
+
+    from app.alerts.models import AlertSilence
+    from app.alerts.repository import load_active_silences
+    from app.db import session_scope
+
+    everything = {"matcher_kind": "ALL", "matcher_value": "*", "duration_seconds": 3600,
+                  "comment": "maintenance, called off", "starts_in_seconds": 7200}
+    created = client.post("/api/v1/alerts/silences", json=everything,
+                          headers={"X-API-Key": WRITE_KEY})
+    assert created.status_code == 201
+    silence_id = created.json()["silence_id"]
+    with session_scope() as session:
+        once_started = session.get(AlertSilence, silence_id).starts_at + timedelta(minutes=1)
+        assert load_active_silences(session, now=once_started).all is True
+
+    withdrawn = client.delete(f"/api/v1/alerts/silences/{silence_id}",
+                              headers={"X-API-Key": WRITE_KEY})
+
+    assert withdrawn.status_code == 200
+    assert withdrawn.json() == {"silence_id": silence_id, "ended": True}
+    listing = client.get("/api/v1/alerts/silences", headers={"X-API-Key": TEST_ADMIN_KEY})
+    assert listing.json()["items"] == []
+    with session_scope() as session:
+        assert load_active_silences(session, now=once_started).all is False
+
+
+def test_ending_a_silence_keeps_its_record_and_ending_it_again_changes_nothing(client):
+    """The record of what was silenced, and until when, survives the end of a
+    silence: one that started keeps its row, ended at the moment of the
+    request, and a second DELETE - of a silence that has ended - leaves that
+    end where it was."""
+    from datetime import UTC, datetime
+
+    from app.alerts.models import AlertSilence
+    from app.db import session_scope
+
+    body = {"matcher_kind": "ALL", "matcher_value": "*", "duration_seconds": 3600,
+            "comment": "maintenance"}
+    silence_id = client.post("/api/v1/alerts/silences", json=body,
+                             headers={"X-API-Key": WRITE_KEY}).json()["silence_id"]
+
+    assert client.delete(f"/api/v1/alerts/silences/{silence_id}",
+                         headers={"X-API-Key": WRITE_KEY}).status_code == 200
+    with session_scope() as session:
+        row = session.get(AlertSilence, silence_id)
+        started_at, ended_at = row.starts_at, row.ends_at
+    assert started_at < ended_at <= datetime.now(UTC)
+
+    assert client.delete(f"/api/v1/alerts/silences/{silence_id}",
+                         headers={"X-API-Key": WRITE_KEY}).status_code == 200
+    with session_scope() as session:
+        assert session.get(AlertSilence, silence_id).ends_at == ended_at
+
+
 def test_instance_silence_is_persisted_in_canonical_lowercase(client):
     """Fingerprint comparison is byte-exact, so storage must be canonical."""
     from sqlalchemy import select

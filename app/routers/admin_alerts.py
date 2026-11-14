@@ -147,14 +147,33 @@ def delete_silence(response: Response, silence_id: str,
                    _: None = Depends(require_alerts_write)) -> Any:
     _no_store(response)
     now = datetime.now(UTC)
+    withdrawn = False
     with session_scope() as session:
         row = session.get(AlertSilence, silence_id)
         if row is None:
             raise HTTPException(status_code=404, detail="no silence with that id",
                                 headers=ERROR_HEADERS)
-        # Expire rather than delete: the audit trail of what was silenced, by
-        # whom and when must survive.
-        row.ends_at = max(now, row.starts_at)
+        if now <= row.starts_at:
+            # It has not started: it silenced nothing, so there is no record
+            # of a silence to keep, and the table admits no empty window to
+            # expire it into (ck_alert_silence_window, ends_at > starts_at;
+            # hence `<=`). Writing ends_at = starts_at, as this route did,
+            # failed that check: the DELETE answered 500 and the silence
+            # stayed in force, for every priority, P1 included. Removed, it is
+            # listed nowhere and matches nothing; the log line below is the
+            # trace of the withdrawal. (A POST replayed under its
+            # Idempotency-Key still names it, as it names a silence that was
+            # ended.) Production holds no silence and no idempotency record
+            # (0 rows each, read-only, 2026-11-11).
+            session.delete(row)
+            withdrawn = True
+        elif now < row.ends_at:
+            # Expire rather than delete: the audit trail of what was silenced,
+            # by whom and when must survive.
+            row.ends_at = now
+        # One that has ended keeps the end it had: that end is the record.
+    if withdrawn:
+        log.info("alert_silence_withdrawn", silence_id=silence_id)
     return {"silence_id": silence_id, "ended": True}
 
 
