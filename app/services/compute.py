@@ -63,7 +63,7 @@ from app.indicators import (
 from app.logging_conf import get_logger
 from app.models import HyOasHistory, Snapshot, SourceHealth
 from app.redaction import sanitize
-from app.references import REGISTRY
+from app.references import REGISTRY, SOURCE_REGISTRY
 
 log = get_logger(__name__)
 
@@ -146,13 +146,14 @@ def _age_days(as_of_iso: str | None) -> int | None:
         return None
 
 
-def _past_sla(indicator_id: str, as_of_iso: str | None, today: date) -> bool | None:
-    """Is a reading dated `as_of_iso` past its indicator's freshness SLA on `today`?
+def _older_than(as_of_iso: str | None, limit: int, today: date, *,
+                in_sessions: bool) -> bool | None:
+    """Is a reading dated `as_of_iso` more than `limit` days old on `today`,
+    counted in NYSE sessions or in calendar days?
 
-    None when the date or the SLA is unknown. A reading dated after `today`
-    (clock skew, bad vintage) is past it (v3.7.3/O-06)."""
-    sla = FRESHNESS_SLA_DAYS.get(indicator_id)
-    if not as_of_iso or sla is None:
+    None when the date is unknown. A reading dated after `today` (clock skew,
+    bad vintage) counts as older (v3.7.3/O-06)."""
+    if not as_of_iso:
         return None
     try:
         as_of = date.fromisoformat(as_of_iso[:10])
@@ -160,9 +161,41 @@ def _past_sla(indicator_id: str, as_of_iso: str | None, today: date) -> bool | N
         return None
     if as_of > today:
         return True
-    if indicator_id in SESSION_AGED:
-        return trading_days_after(as_of, today) > sla
-    return (today - as_of).days > sla
+    age = trading_days_after(as_of, today) if in_sessions else (today - as_of).days
+    return age > limit
+
+
+def _past_sla(indicator_id: str, as_of_iso: str | None, today: date) -> bool | None:
+    """Is a reading dated `as_of_iso` past its indicator's freshness SLA on `today`?
+
+    None when the date or the SLA is unknown."""
+    sla = FRESHNESS_SLA_DAYS.get(indicator_id)
+    if sla is None:
+        return None
+    return _older_than(as_of_iso, sla, today, in_sessions=indicator_id in SESSION_AGED)
+
+
+# Red flag 3 reads FRED's daily HY OAS (BAMLH0A0HYM2) on every run, whichever
+# tier S5 is scored on, so its record carries that reading's own freshness: the
+# SLA of the registry row that documents the series, counted in NYSE sessions
+# like the other daily market readings.
+# The record used to take S5's state, and S5 is scored on the Fed's monthly
+# Excess Bond Premium (45 days from the month's end) whenever that file
+# arrives. Production, the 490 snapshots with the typed contract (2026-08-20 to
+# 2026-11-10): 128 said STALE, all from 2026-09-15 to 2026-10-06 while the Fed
+# had skipped one release, and on each of them the spread was 1 or 2 sessions
+# old. Over all 490 it was 1 session old on 267, 2 on 218 and 3 on 5 (the
+# Tuesday after Columbus Day, bond market closed, and one FRED outage), so
+# counted this way all 490 are FRESH. Counted in calendar days 101 would be
+# STALE: Thursday's spread on a Monday and Friday's on a Tuesday morning are 4
+# days old. The other way round a spread that stopped stayed FRESH for as long
+# as the EBP was.
+# The flag's value, its fireability and the override are the frozen rule's and
+# do not change: only data_state does. No rule, message or digest fact reads
+# rf3's data_state, so stored snapshots keep the label they were published with.
+# A registry without the row fails here, at import; the test names the key.
+HY_OAS_SLA_DAYS: int = next(
+    spec.sla_days for spec in SOURCE_REGISTRY if spec.key == "fred_hyoas")
 
 
 def _month_end_iso(yyyy_mm: str) -> str:
@@ -1540,7 +1573,10 @@ def persist_snapshot(data: SnapshotData, raw: RawInputs) -> int:
         hy_oas_bps=raw.hy_oas_bps,
         hy_oas_tight_bps=data.hy_oas_tight_bps,
         hy_oas_as_of=raw.hy_oas_as_of,
-        hy_oas_stale=_ind_stale("s5"),
+        # The spread's own age on the day the record is stamped with, not S5's
+        # state: see HY_OAS_SLA_DAYS.
+        hy_oas_stale=_older_than(raw.hy_oas_as_of, HY_OAS_SLA_DAYS, now.date(),
+                                 in_sessions=True),
         breadth_pct=raw.breadth_pct,
         breadth_as_of=raw.breadth_as_of,
         breadth_stale=_ind_stale("d1"),
