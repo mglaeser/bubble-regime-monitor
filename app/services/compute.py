@@ -1141,8 +1141,12 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         # FIDELITY quality 0.3 (v3.3.2): right construct family (a market credit
         # spread) but the FRED-truncated 3yr window makes its percentile
         # regime-limited — the weakest usable tier of the s5 chain.
+        # fallback_used is True, as on the proxy tier above: the chain is EBP,
+        # then the proxy, then this tier. It said False, left from when HY OAS
+        # was the first tier. Production to 2026-11-10: the tier served 11
+        # snapshots, the last on 2026-07-15, before the EBP was read; none since.
         indicators["s5"] = IndicatorOutput("s5", oas_t2, sub, False,
-                                           "fred_BAMLH0A0HYM2", False, note=s5_note,
+                                           "fred_BAMLH0A0HYM2", True, note=s5_note,
                                            as_of=raw.hy_oas_as_of, quality=0.3,
                                            extra=_s5_extra(
                                                "fred_BAMLH0A0HYM2", sub,
