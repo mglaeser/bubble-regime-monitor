@@ -893,6 +893,38 @@ def test_evaluation_commits_and_opens_an_episode(isolated_db):
     assert episodes[0].is_open is True
 
 
+@pytest.mark.parametrize("budget_ms,status", [(1500, "COMMITTED"), (-1, "TIMED_OUT")])
+def test_an_evaluation_row_records_when_it_finished(isolated_db, monkeypatch, budget_ms, status):
+    """`finished_at` is when the run ended: its start plus what it took. Health
+    publishes the two as `last_started_at` and `last_completed_at`."""
+    from types import SimpleNamespace
+
+    from app.alerts import engine
+    from app.alerts.models import AlertEvaluation
+    from app.db import session_scope
+
+    # The engine's clock: 10.0 s when the run starts and when its deadline is
+    # set, 750 ms later at every reading after that.
+    readings = iter([10.0, 10.0])
+    monkeypatch.setattr(
+        engine, "time", SimpleNamespace(monotonic=lambda: next(readings, 10.75)))
+    artifacts = _artifacts()
+    alert_input = make_input(identity="finished")
+    _store_input(alert_input, NOW)
+    with session_scope() as session:
+        register_promoted(session, artifacts, now=NOW)
+
+    outcome = engine.run_evaluation(
+        session_scope, alert_input=alert_input, current=artifacts.ruleset,
+        mode="shadow", live_profile="default", now=NOW, budget_ms=budget_ms)
+
+    assert outcome.status == status
+    with session_scope() as session:
+        row = session.get(AlertEvaluation, outcome.evaluation_id)
+        assert row.duration_ms == 750
+        assert row.finished_at - row.started_at == timedelta(milliseconds=750)
+
+
 def test_evaluation_idempotency(isolated_db):
     artifacts = _artifacts()
     inp = make_input(identity="i1", effective="trim")
