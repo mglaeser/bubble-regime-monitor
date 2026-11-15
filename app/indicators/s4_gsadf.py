@@ -172,16 +172,18 @@ def sub_score(stat: float | None, cv90: float | None, cv95: float | None,
         # rejecting and still fails to reject, that is stronger evidence of no
         # explosiveness, not weaker. Capping a non-rejection at 0.25 therefore
         # discards the one reading the critique gives most reason to trust --
-        # and, at the live statistic, RAISES the sub-score above what the test
-        # returned (0.25 against SUB_NULL 0.05), so the "conservative cap" is
-        # currently a floor that pushes the headline UP.
+        # and RAISES the sub-score above what the test returned (0.25 against
+        # SUB_NULL 0.05), so for a non-rejection the "conservative cap" is a
+        # floor that pushes the headline UP.
         #
         # With this on: a rejection is still capped (the critique bites there);
         # a non-rejection passes through at SUB_NULL. Enabling it was
         # score-shifting and went through the ceremony (v4.1, 2026-08-23):
-        # version bump, artifact re-pin, measured delta recorded -- live
-        # headline 53.30 -> 51.82 at the reading of the day, action band
-        # unchanged. Setting contested_rule = "symmetric" restores the cap.
+        # version bump, artifact re-pin, measured delta recorded -- 53.30 ->
+        # 51.82 on the golden raw inputs with the July statistic, action band
+        # unchanged; production had no step at release, its reading was a
+        # rejection (app/references.py, CHANGELOG v3.9.0). Setting
+        # contested_rule = "symmetric" restores the cap.
         #
         # Residual, stated: a non-rejection can also mean LOW POWER rather than
         # genuine absence, and Chen et al. establish size distortion, not power
