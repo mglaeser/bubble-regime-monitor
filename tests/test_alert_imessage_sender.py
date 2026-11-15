@@ -400,6 +400,24 @@ def test_only_failures_that_wrote_nothing_are_auto_retryable(monkeypatch, exc,
     assert result.request_started is not retryable
 
 
+def test_the_never_sent_classes_are_the_alert_senders():
+    """`app.notify.NEVER_SENT` is this line, named once for the senders of
+    `app/notify/`: the failure alarm reads it through their `unanswered` and
+    may not import `app/alerts/` (it has to work when the alert machinery is
+    the broken thing). Two lists of one fact must not drift apart, so every
+    httpx class the classifier names is "not accepted" exactly when it is in
+    the tuple."""
+    from app.alerts.sender import _classify_exception
+    from app.notify import NEVER_SENT
+
+    for cls in (httpx.ConnectError, httpx.ConnectTimeout, httpx.ProxyError, httpx.PoolTimeout,
+                httpx.ReadTimeout, httpx.ReadError, httpx.RemoteProtocolError,
+                httpx.WriteError, httpx.WriteTimeout):
+        landed_nowhere = (_classify_exception(cls("x"), request_started=True).outcome
+                          == SenderOutcome.DEFINITE_TRANSIENT_NOT_ACCEPTED)
+        assert landed_nowhere == issubclass(cls, NEVER_SENT), cls
+
+
 def test_a_correlation_id_is_redacted_like_any_other_proxy_string(monkeypatch):
     """It is server-controlled text that lands on the delivery row.
 

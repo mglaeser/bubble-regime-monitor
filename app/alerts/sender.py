@@ -21,8 +21,10 @@ Exactly-once delivery is not promised, and this file does not pretend
 otherwise. It makes the uncertainty visible instead.
 
 The daily digest, the failure alarm and the deploy note send through
-`app/notify/` (`imessage.py`, `sipgate.py`), whose result is only ok or not;
-this is the alert dispatcher's sender.
+`app/notify/` (`imessage.py`, `sipgate.py`), whose result is ok or not and,
+for a failure, whether the request may have gone out unanswered
+(`unanswered`), which only the failure alarm reads; this is the alert
+dispatcher's sender.
 """
 
 from __future__ import annotations

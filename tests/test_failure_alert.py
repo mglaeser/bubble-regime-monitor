@@ -9,9 +9,11 @@ times (the obvious overcorrection).
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 from datetime import UTC, datetime, timedelta
 
+import httpx
 import pytest
 
 from app.services import failure_alert
@@ -29,13 +31,46 @@ _REAL_SNAPSHOT_AGE = failure_alert._last_snapshot_age
 
 
 class _Result:
-    """Stands in for ImessageResult / SmsResult — same three fields read."""
+    """Stands in for ImessageResult / SmsResult — the four fields read."""
 
-    def __init__(self, ok=True, status_code=202, error=None):
+    def __init__(self, ok=True, status_code=202, error=None, unanswered=False):
         self.ok = ok
         self.status_code = status_code
         self.error = error
+        self.unanswered = unanswered
         self.operation_id = "0d1e5f8a-1111-4222-8333-444455556666"
+
+
+def _client_raising(exc):
+    """An httpx.Client whose POST raises `exc`: the transport's own code runs
+    and classifies the failure, and nothing leaves the host."""
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def post(self, *a, **k):
+            raise exc
+
+    return _Client
+
+
+#: What httpx raises once the request has been handed over (the answer is lost
+#: or late), and what it raises when no connection ever carried the request.
+_ANSWER_NEVER_CAME = [httpx.ReadTimeout("timed out"), httpx.ReadError("reset"),
+                      httpx.RemoteProtocolError("closed"), httpx.WriteTimeout("slow")]
+_NEVER_LEFT = [httpx.ConnectError("refused"), httpx.ConnectTimeout("no route"),
+               httpx.PoolTimeout("pool"), httpx.ProxyError("tunnel")]
+
+
+def _class_name(exc: Exception) -> str:
+    return type(exc).__name__
 
 
 @pytest.fixture()
@@ -743,7 +778,33 @@ class TestTheCrashGapBetweenSendingAndRecording:
     """A process that dies between handing the message to the transport and
     recording the result leaves the delivery UNKNOWN, and unknown must still
     earn the all-clear: the record is marked announced BEFORE the send. A
-    transport that answers "not delivered" is the known case and undoes it."""
+    transport that answers "not delivered" is the known case and undoes it.
+
+    A send whose answer never came is unknown in the same way. The transports
+    turn every exception into "not ok" without a status, so a read timeout
+    after the request was handed over looked like a refused connection, and
+    the mark was undone on both. Executed with the mark undone on every failed
+    send: after a ReadTimeout the state file held `announced: false`, the next
+    success returned `noop` and removed the record, and an alarm the proxy
+    delivered late would have stayed on the phone with no "OK" behind it.
+
+    The line between the two is the one the alert sender draws
+    (`app/alerts/sender.py:_classify_exception`), by exception class: a
+    connection that was never made or never taken from the pool
+    (`app.notify.NEVER_SENT`) sent nothing and must not earn an all-clear
+    (#139 round 1: no all-clear for an alarm nobody received); any other
+    failure may have reached the provider. The coarser rule, "keep the mark
+    whenever there is no status", fails
+    `test_a_request_that_never_left_does_not_earn_one` in all four cases
+    (executed). An answer, whatever its status, stays "not delivered"
+    (`test_a_transport_that_says_no_does_not_earn_one`): only what an
+    exception means is at issue here.
+
+    Not observed in production (2026-10-05 to 2026-11-10: none of 222
+    recomputes failed, so no alarm was sent; the proxy answered all 21 alert
+    deliveries in 1.04 to 2.08 s, the read cap being 30 s). The two halves
+    share a cause, though: a degraded network fails the data pulls and loses
+    the proxy's answer."""
 
     def test_a_crash_mid_send_still_earns_an_all_clear(self, monkeypatch, sent):
         """The marker is written BEFORE the transport call, so it survives."""
@@ -781,6 +842,92 @@ class TestTheCrashGapBetweenSendingAndRecording:
         notify_recompute_outcome(EBP_ERROR)
         state = json.loads(failure_alert._state_path().read_text())
         assert state["announced"] is True
+
+    @staticmethod
+    def _through_the_real_transport(monkeypatch, exc):
+        """The real `send_imessage` over a client that raises `exc`."""
+        import app.notify.imessage as im
+
+        monkeypatch.setattr(failure_alert, "send_imessage", im.send_imessage)
+        monkeypatch.setattr(im.httpx, "Client", _client_raising(exc))
+
+    @pytest.mark.parametrize("exc", _ANSWER_NEVER_CAME, ids=_class_name)
+    def test_a_send_whose_answer_never_came_still_earns_an_all_clear(self, monkeypatch, sent, exc):
+        self._through_the_real_transport(monkeypatch, exc)
+        assert notify_recompute_outcome(EBP_ERROR)["status"] == "failed"
+        state = json.loads(failure_alert._state_path().read_text())
+        assert state["announced"] is True, "the alarm may be on the phone"
+        assert state["last_sent"] is None, "and the repeat clock has not started"
+
+        # a new process
+        failure_alert._current = None
+        failure_alert._loaded = False
+        monkeypatch.setattr(failure_alert, "send_imessage",
+                            lambda text: sent.append(text) or _Result())
+        result = notify_recompute_outcome(None)
+        assert result["status"] == "sent" and result["kind"] == "recovery"
+        assert sent[-1].startswith("bubblegauge OK")
+
+    @pytest.mark.parametrize("exc", _NEVER_LEFT, ids=_class_name)
+    def test_a_request_that_never_left_does_not_earn_one(self, monkeypatch, sent, exc):
+        """The fence against the coarser rule: with no connection nothing was
+        sent, so nobody was told and nothing is owed."""
+        self._through_the_real_transport(monkeypatch, exc)
+        assert notify_recompute_outcome(EBP_ERROR)["status"] == "failed"
+        state = json.loads(failure_alert._state_path().read_text())
+        assert state["announced"] is False and state["last_sent"] is None
+        assert notify_recompute_outcome(None)["status"] == "noop"
+        assert sent == []
+
+    def test_an_unanswered_alarm_is_sent_again_at_the_next_failure(self, monkeypatch, sent):
+        """Unknown is not delivered either: the repeat clock stays unset, so
+        the next failed recompute sends the alarm again. A second alarm is the
+        smaller mistake than a day of silence about an outage."""
+        self._through_the_real_transport(monkeypatch, httpx.ReadTimeout("timed out"))
+        assert notify_recompute_outcome(EBP_ERROR)["status"] == "failed"
+        monkeypatch.setattr(failure_alert, "send_imessage",
+                            lambda text: sent.append(text) or _Result())
+        assert notify_recompute_outcome(EBP_ERROR)["status"] == "sent"
+        assert len(sent) == 1 and "x2" in sent[0]
+
+    def test_a_no_after_an_unanswered_alarm_keeps_the_debt(self, monkeypatch, sent):
+        """The second attempt is answered "not delivered". That is known for
+        the second attempt only: the first may still have arrived."""
+        self._through_the_real_transport(monkeypatch, httpx.ReadTimeout("timed out"))
+        notify_recompute_outcome(EBP_ERROR)
+        monkeypatch.setattr(failure_alert, "send_imessage",
+                            lambda text: _Result(ok=False, status_code=503, error="down"))
+        assert notify_recompute_outcome(EBP_ERROR)["status"] == "failed"
+        assert json.loads(failure_alert._state_path().read_text())["announced"] is True
+
+    def test_a_sender_that_raises_leaves_the_delivery_unknown(self, monkeypatch, sent):
+        """The transports promise never to raise. One that does, raised
+        somewhere mid-send, and nobody knows on which side of the wire."""
+        def _explode(text):
+            raise RuntimeError("transport exploded")
+
+        monkeypatch.setattr(failure_alert, "send_imessage", _explode)
+        assert notify_recompute_outcome(EBP_ERROR)["status"] == "failed"
+        assert json.loads(failure_alert._state_path().read_text())["announced"] is True
+
+    @pytest.mark.parametrize("exc, announced", [(httpx.ReadTimeout("timed out"), True),
+                                                 (httpx.ConnectError("refused"), False)],
+                             ids=["ReadTimeout", "ConnectError"])
+    def test_the_same_holds_on_sipgate(self, monkeypatch, sent, exc, announced):
+        import app.notify.sipgate as sg
+        from app.config import get_settings
+
+        monkeypatch.setenv("IMESSAGE_ENABLED", "false")
+        monkeypatch.setenv("SMS_ENABLED", "true")
+        monkeypatch.setenv("SIPGATE_TOKEN_ID", "token-id")
+        monkeypatch.setenv("SIPGATE_TOKEN", "token-secret")
+        monkeypatch.setenv("SIPGATE_RECIPIENT", os.environ["IMESSAGE_RECIPIENT"])   # the fixture's
+        get_settings.cache_clear()
+        monkeypatch.setattr(failure_alert, "send_sms", sg.send_sms)
+        monkeypatch.setattr(sg.httpx, "Client", _client_raising(exc))
+        result = notify_recompute_outcome(EBP_ERROR)
+        assert result["status"] == "failed" and result["transport"] == "sipgate"
+        assert json.loads(failure_alert._state_path().read_text())["announced"] is announced
 
 
 class TestThePreconditionIsHonouredUnderTheLock:
@@ -955,8 +1102,8 @@ class TestAnUnknownTransportIsNotAnSMS:
     destination is not a fallback. Panel finding on #64."""
 
     def test_an_unknown_transport_sends_nothing(self, monkeypatch, sent):
-        ok, status, error = failure_alert._send("carrier-pigeon", "hello")
-        assert ok is False and sent == []
+        ok, status, error, unanswered = failure_alert._send("carrier-pigeon", "hello")
+        assert ok is False and unanswered is False and sent == []
         assert "unknown transport" in (error or "")
 
 class TestTheWatchdogDoesNotInflateTheCount:
@@ -1454,7 +1601,7 @@ class TestRoundFiveOn139:
 
         failure_alert._current, failure_alert._loaded = None, False       # a new process
         monkeypatch.setattr(failure_alert, "_send",
-                            lambda transport, text: (sent.append(text) is None, 202, None))
+                            lambda transport, text: (sent.append(text) is None, 202, None, False))
         result = notify_recompute_outcome("a new failure inside the quiet period")
         assert result["status"] == "sent" and "FAILING" in sent[-1]
 

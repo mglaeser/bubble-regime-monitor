@@ -19,6 +19,7 @@ import httpx
 
 from app.config import get_settings
 from app.logging_conf import get_logger
+from app.notify import NEVER_SENT
 from app.redaction import sanitize
 
 log = get_logger(__name__)
@@ -41,6 +42,9 @@ class SmsResult:
     ok: bool
     status_code: int | None
     error: str | None = None
+    #: As `ImessageResult.unanswered`: no answer was read and the request may
+    #: have reached sipgate (every failure of the send except `NEVER_SENT`).
+    unanswered: bool = False
 
 
 def send_sms(message: str, *, recipient: str | None = None) -> SmsResult:
@@ -69,7 +73,8 @@ def send_sms(message: str, *, recipient: str | None = None) -> SmsResult:
         # and sipgate auth is a Basic-auth pair an error string can echo.
         detail = sanitize(str(exc), limit=200)
         log.warning("sipgate_send_failed", error_class=type(exc).__name__, error=detail)
-        return SmsResult(ok=False, status_code=None, error=detail)
+        return SmsResult(ok=False, status_code=None, error=detail,
+                         unanswered=not isinstance(exc, NEVER_SENT))
 
     # The endpoint returns 204 No Content on success; accept any 2xx.
     ok = 200 <= resp.status_code < 300
