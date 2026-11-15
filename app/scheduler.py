@@ -124,8 +124,13 @@ def start() -> BackgroundScheduler:
                                        timezone="UTC"),
                            id="alert_dispatch", replace_existing=True,
                            coalesce=True, misfire_grace_time=120, max_instances=1)
-        # Every 30 minutes, offset off the recompute and breadth hours so the
-        # three jobs never contend for the single SQLite writer.
+        # Every 30 minutes at :15/:45, away from the recompute's :00. It is not
+        # alone on the database then: the dispatcher polls every 20 s and runs
+        # beside it, and the writer's lock and busy_timeout order the two (the
+        # later one waits up to ALERTS_BUSY_TIMEOUT_MS). Once in the service
+        # log from 2026-10-05 to 2026-11-10 that wait ran out: on 2026-11-01
+        # at 06:15 UTC this job took about 9 s, and the dispatcher's heartbeat
+        # write gave up after 5 s with "database is locked".
         _scheduler.add_job(_alert_recovery_job,
                            CronTrigger(minute="15,45", timezone="UTC"),
                            id="alert_recovery", replace_existing=True,
@@ -136,7 +141,10 @@ def start() -> BackgroundScheduler:
                            CronTrigger(minute="10,40", timezone="UTC"),
                            id="alert_watchdog", replace_existing=True,
                            coalesce=True, misfire_grace_time=1800, max_instances=1)
-        # Wedged-recompute watchdog, on :05/:35 so it contends with nothing.
+        # Wedged-recompute watchdog, on :05/:35, minutes no other half-hourly
+        # job has. It writes nothing to the database (the run's state is in
+        # memory; only a wedged run makes it read the newest snapshot's time),
+        # so it waits for no writer.
         # Its own job precisely BECAUSE the recompute job is max_instances=1: a
         # wedged run makes APScheduler skip that job's firings, so anything
         # hanging off them cannot report it. This one keeps running while the

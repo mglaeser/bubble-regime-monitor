@@ -915,6 +915,33 @@ def test_busy_timeout_is_configured(isolated_db):
     assert fks == 1
 
 
+def test_the_lock_wait_is_the_services_setting_and_the_drivers_default_is_the_same(
+        isolated_db, monkeypatch):
+    """What app/db.py and docs/ALERT_SYSTEM.md say about busy_timeout, executed.
+    Python's sqlite3 driver already waits 5000 ms for a held lock, so on this
+    stack SQLite did not answer SQLITE_BUSY at once before the pragma either.
+    What the pragma adds is that the wait is ALERTS_BUSY_TIMEOUT_MS."""
+    import sqlite3
+
+    import sqlalchemy
+
+    from app.config import Settings, get_settings
+    from app.db import get_engine, reset_engine
+
+    plain = sqlite3.connect(":memory:")
+    try:
+        assert plain.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+    finally:
+        plain.close()
+    assert Settings.model_fields["alerts_busy_timeout_ms"].default == 5000
+
+    monkeypatch.setenv("ALERTS_BUSY_TIMEOUT_MS", "1234")
+    get_settings.cache_clear()
+    reset_engine()
+    with get_engine().connect() as conn:
+        assert conn.execute(sqlalchemy.text("PRAGMA busy_timeout")).scalar_one() == 1234
+
+
 def test_an_inert_confirmation_basis_is_reported_not_silently_accepted(ruleset):
     """A basis naming an economic period is enforced by the candidate latch,
     and mandate 8.1 scopes that latch to `count > 1`.

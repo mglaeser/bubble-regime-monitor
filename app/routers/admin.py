@@ -1,9 +1,11 @@
 """POST /api/v1/admin/refresh — manual recompute; requires X-API-Key.
 
 The recompute runs in a BACKGROUND thread and this endpoint returns 202
-immediately: a full gather takes many minutes (R GSADF simulation, LPPLS
-fits), and a synchronous handler invited hung curls and accidental
-concurrent recomputes. A single-flight lock guarantees at
+immediately: a recompute takes one to six minutes (the sources, the GSADF
+test on cached critical values, the LPPLS fit and the model's note; 1.4 to
+5.7 minutes from the slot's :00 on the 222 scheduled runs of 2026-10-05 to
+2026-11-10, median 2.7), and a synchronous handler invited hung curls and
+accidental concurrent recomputes. A single-flight lock guarantees at
 most one recompute at a time (shared with the scheduler); a request while
 one is running reports `already_running` instead of stacking another.
 """
@@ -162,9 +164,11 @@ def run_recompute_guarded() -> None:
     status_code=202,
     summary="Start a full recompute in the background (X-API-Key required)",
     description=(
-        "Returns immediately with 202. The recompute takes minutes (breadth sweep, "
-        "GSADF simulation, LPPLS). Poll GET /api/v1/admin/refresh/status or GET "
-        "/api/v1/score for the result. At most one recompute runs at a time."
+        # The breadth sweep is not part of it: that is a scheduler job of its
+        # own (app/scheduler.py), and the recompute reads the cache it fills.
+        "Returns immediately with 202. The recompute takes minutes (the LPPLS fit, "
+        "the GSADF test, the model's note). Poll GET /api/v1/admin/refresh/status or "
+        "GET /api/v1/score for the result. At most one recompute runs at a time."
     ),
 )
 def refresh(_: None = Depends(require_admin_key)) -> dict[str, Any]:
