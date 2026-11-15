@@ -774,7 +774,14 @@ refuses a set without them. Both values are built
 from one rule-authorized typed fact at the same reviewed display precision;
 the complete trigger view, compatible current view, and every visible delta
 remain separate in the render-context hash. Scheduling metadata such as
-`F_NEXT_CHECK` cannot manufacture a material market change.
+`F_NEXT_CHECK` cannot manufacture a material market change. In a bundle the
+trigger and current values are shown for a member the message names; a member
+that is only counted is not described, while a caveat without facts
+(`DATA_DEGRADED`, `UNKNOWN_AT_RENDER`, `CONTEXT_STALE`) is about the message
+and stays
+(tests/test_alert_render_contract.py::test_a_member_the_message_only_counts_is_not_described,
+`::test_a_counted_members_caveat_about_the_message_stays`). Production has
+sent no bundle yet: 21 deliveries, one member each (read-only, 2026-11-11).
 
 Current facts join a render only when their schema and methodology match the
 trigger's (17.4) — otherwise the member renders from trigger facts with
