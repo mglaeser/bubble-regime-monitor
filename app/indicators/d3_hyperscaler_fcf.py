@@ -7,13 +7,14 @@ WHAT/HOW/WHY/references/caveats: see app.references.REGISTRY["d3"]; summary:
         (EDGAR companyfacts; OCF = NetCashProvidedByUsedInOperatingActivities,
         capex = PaymentsToAcquirePropertyPlantAndEquipment, tag variants handled)
     base = clip((r - 0.5)/(1.0 - 0.5), 0, 1)
-    GATE: full base only if any hyperscaler's cloud-segment revenue YoY < 15%
-          WHILE its TTM FCF < 0; otherwise cap sub_score <= 0.30.
+    GATE: full base only if any hyperscaler's total revenue grew less than
+          15% between its last two fiscal years WHILE its TTM FCF < 0;
+          otherwise cap sub_score <= 0.30.
 
-CAVEAT (verbatim): Cloud-segment revenue is best-effort from XBRL segment
-data; when it is unavailable the total-revenue proxy is deliberately
-conservative (harder to trip the gate), which biases the indicator toward
-under-alarming — documented as such.
+CAVEAT: the growth is the group's total revenue, not its cloud segment's
+(EDGAR companyfacts carries no segment figures), so the gate trips more
+easily than one on segment growth would. The sentence of record is
+REGISTRY["d3"].caveats.
 
 EPISTEMIC GUARDRAILS: the five, verbatim, are in app/references.py.
 """
@@ -40,17 +41,22 @@ CIKS: dict[str, str] = {
 class HyperscalerReading:
     ticker: str
     capex_ocf_ttm: float
-    cloud_revenue_yoy_pct: float | None  # None => total-revenue proxy was also unavailable
+    # The group's total revenue growth between its last two fiscal years, in
+    # percent: the only growth the EDGAR adapter reads. None => unknown (the
+    # payload has no two fiscal years of revenue). There is no "proxy used"
+    # flag: total revenue stands in for nothing. The flag that was here
+    # (revenue_proxy_used) was True whenever a growth figure existed, and no
+    # code read it.
+    revenue_yoy_pct: float | None
     ttm_fcf: float
-    revenue_proxy_used: bool = False
 
 
 def gate_fired(readings: list[HyperscalerReading]) -> bool:
-    """True only if ANY hyperscaler has segment revenue YoY < 15% WHILE TTM FCF < 0."""
+    """True only if ANY hyperscaler's total revenue YoY < 15% WHILE its TTM FCF < 0."""
     for r in readings:
-        if r.cloud_revenue_yoy_pct is None:
+        if r.revenue_yoy_pct is None:
             continue  # conservative: unknown growth cannot trip the gate
-        if r.cloud_revenue_yoy_pct < GATE_REVENUE_YOY_THRESHOLD and r.ttm_fcf < 0.0:
+        if r.revenue_yoy_pct < GATE_REVENUE_YOY_THRESHOLD and r.ttm_fcf < 0.0:
             return True
     return False
 
