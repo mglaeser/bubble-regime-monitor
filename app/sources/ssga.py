@@ -5,12 +5,14 @@ https://www.ssga.com/us/en/institutional/library-content/products/fund-data/etfs
 
 The S2 input is the sum of the top-10 INDIVIDUAL HOLDING weights — not a
 sector-table figure. Fallback chain: Slickcharts scrape, then JPMAM Guide to
-the Markets cross-check (manual).
+the Markets cross-check (manual). The reading is dated by the workbook's own
+holdings date; Slickcharts states no day, so a weight from it is undated.
 """
 
 from __future__ import annotations
 
 import io
+from datetime import datetime
 
 import pandas as pd
 
@@ -41,6 +43,24 @@ def _top10_from_xlsx(content: bytes) -> float:
     if not 5.0 < top10 < 80.0:
         raise SourceError(f"SSGA XLSX: implausible top-10 sum {top10}")
     return top10
+
+
+def _as_of_from_xlsx(content: bytes) -> str | None:
+    """The holdings date the workbook states above its header row, as an ISO
+    date; None when it states none.
+
+    Row 3 of the file reads `Holdings: | As of 12-Nov-2026` (taken 2026-11-14,
+    a Saturday: the file published on a session states the session before it).
+    Only a cell in exactly that layout is the date. The footer's "as of the
+    date indicated" is not one, and a cell in another layout is not guessed
+    at."""
+    head = pd.read_excel(io.BytesIO(content), header=None, nrows=20)
+    for cell in head.to_numpy().ravel():
+        try:
+            return datetime.strptime(str(cell).strip(), "As of %d-%b-%Y").date().isoformat()
+        except ValueError:
+            continue
+    return None
 
 
 def _constituents_from_xlsx(content: bytes) -> list[str]:
@@ -130,7 +150,9 @@ def top10_concentration() -> SourceResult:
     """Top-10 S&P 500 holdings weight (percent), with fallback chain."""
     try:
         resp = fetch("ssga_spy_xlsx", XLSX_URL)
-        return SourceResult(_top10_from_xlsx(resp.content), Provenance(source="ssga_spy_xlsx"))
+        return SourceResult(_top10_from_xlsx(resp.content),
+                            Provenance(source="ssga_spy_xlsx",
+                                       as_of=_as_of_from_xlsx(resp.content)))
     except Exception as primary_err:
         try:
             resp = fetch("slickcharts", SLICKCHARTS_URL)

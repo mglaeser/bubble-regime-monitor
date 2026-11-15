@@ -1,14 +1,16 @@
 """Shiller CAPE adapter (S1 raw input).
 
 Fallback chain: multpl scrape -> shillerdata.com ie_data.xls (compute CAPE
-from real price / 10-yr avg real EPS). Freshness SLA 35 days. GuruFocus,
-once the second tier, answers 403 since 2026-09.
+from real price / 10-yr avg real EPS). Freshness SLA 35 days. The current
+value is dated by multpl's own stamp; the spreadsheet states no day, so a value
+from it is undated. GuruFocus, once the second tier, answers 403 since 2026-09.
 """
 
 from __future__ import annotations
 
 import io
 import re
+from datetime import UTC, date, datetime
 
 import pandas as pd
 
@@ -31,6 +33,33 @@ def _current_from_multpl(html: str) -> float:
     return cape
 
 
+def _as_of_from_multpl(html: str, today: date) -> str | None:
+    """The day multpl stamps its current value with, as an ISO date; None when
+    the page carries no stamp this reads.
+
+    The stamp (`<div id="timestamp">4:00 PM EST, Fri Nov 13</div>`, taken
+    2026-11-14) names a weekday, a month and a day in New York, and no year.
+    The year is the run's or the one before (a stamp of 31 December read on 1
+    January): the later of the two in which that day is not after the run's
+    day (UTC, never behind New York's) and falls on the stamped weekday.
+    `strptime` reads the weekday and does not hold the date to it, so the
+    comparison is made here; without it a stamp that stood still for a year
+    would read as this year's day. A stamp that fits neither year is no date.
+    Never the day of the fetch."""
+    m = re.search(r'id="timestamp"[^>]*>([^<]+)<', html)
+    if not m:
+        return None
+    stamp = m.group(1).rsplit(",", 1)[-1].strip()      # "Fri Nov 13"
+    for year in (today.year, today.year - 1):
+        try:
+            day = datetime.strptime(f"{stamp} {year}", "%a %b %d %Y").date()
+        except ValueError:
+            continue
+        if day <= today and day.strftime("%a") == stamp[:3]:
+            return day.isoformat()
+    return None
+
+
 def _history_from_shillerdata(content: bytes) -> list[float]:
     df = pd.read_excel(io.BytesIO(content), sheet_name="Data", header=7)
     cape_col = next((c for c in df.columns if "CAPE" in str(c).upper()), None)
@@ -44,8 +73,10 @@ def current_cape() -> SourceResult:
     """Current CAPE with the multpl -> shillerdata chain."""
     errors: list[str] = []
     try:
-        return SourceResult(_current_from_multpl(fetch("multpl", MULTPL_URL).text),
-                            Provenance(source="multpl"))
+        html = fetch("multpl", MULTPL_URL).text
+        return SourceResult(_current_from_multpl(html),
+                            Provenance(source="multpl",
+                                       as_of=_as_of_from_multpl(html, datetime.now(UTC).date())))
     except Exception as e:
         errors.append(f"multpl: {e}")
     try:
