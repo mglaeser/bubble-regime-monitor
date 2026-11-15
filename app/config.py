@@ -45,14 +45,15 @@ class Settings(BaseSettings):
     admin_api_key: str = "change-me-to-a-long-random-string"
     read_endpoints_public: bool = True
 
-    # SEC EDGAR etiquette (MANDATORY, format: "Name email").
-    # SEC_EDGAR_UA is the v3.1 name; SEC_USER_AGENT remains accepted.
+    # SEC EDGAR etiquette (MANDATORY, format: "Name email"): the contact every
+    # companyfacts request carries, D3's one source (HTTP 200 on 615 of 615
+    # production recomputes, 2026-07-11 to 2026-11-10). One setting, the name
+    # the template fills. SEC_EDGAR_UA, a second name that won when it was set,
+    # went: no backward compatibility (the owner's ruling of 2026-09-20,
+    # AGENTS.md). A leftover SEC_EDGAR_UA changes nothing and is reported
+    # (RETIRED_ENV_KEYS below): a host that kept its contact only there sends
+    # this default until the contact stands in SEC_USER_AGENT.
     sec_user_agent: str = "bubblegauge-monitor admin@example.com"
-    sec_edgar_ua: str = ""
-
-    @property
-    def effective_sec_ua(self) -> str:
-        return self.sec_edgar_ua or self.sec_user_agent
 
     # The SMS transport, the sipgate REST API v2 (POST /sessions/sms), for the
     # daily digest, the failure alarm and the alerts when iMessage is not
@@ -367,6 +368,10 @@ RETIRED_ENV_KEYS: dict[str, str] = {
     "ALERTS_PUBLIC_READ_RATE_LIMIT": (
         "removed unapplied (owner decision D3e, 2026-10-03): every alert read is limited to "
         "60/minute per client, like the other reads, so remove this key"),
+    "SEC_EDGAR_UA": (
+        "removed as the second name of the SEC contact (no backward compatibility, the "
+        "owner's ruling of 2026-09-20): SEC_USER_AGENT alone names it, so put the contact "
+        "there and remove this key"),
 }
 
 
