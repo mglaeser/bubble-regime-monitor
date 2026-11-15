@@ -858,8 +858,8 @@ stage.
 
 ### The committed evidence
 
-`docs/alert-stage1-gate.json` is a replay of a synthetic history at stages 1,
-3, and 4. CI regenerates it and fails on any difference:
+`docs/alert-stage1-gate.json` is a replay of a synthetic history at stages 1
+and 3. CI regenerates it and fails on any difference:
 
 ```bash
 python -m scripts.export_alert_stage1_gate           # write
@@ -917,6 +917,20 @@ cooldown, so neither plans a message and `COOLDOWN` reads `6`. The second
 change without the first fails the gate (non-P1 `6 > 5` per 24 h and `10 > 8`
 per 168 h): the arc's two repeats would be planned, which production does not
 do.
+
+A second regeneration of 2026-11 removes the stage-4 run, 95 of the file's 284
+lines; the runs of stages 1 and 3, the bound hashes, the history and the
+catalogue keep their bytes. Stage 4 was the legacy daily-digest cutover,
+deleted with its switch (owner decision D2c, section 11), and no rule is gated
+on it: the same 29 of the 90 shipped rules are active at stage 3 and at stage
+4 (43 name both stages in `enabled_in_stages`, 47 neither). So its run
+repeated the stage-3 run in every field but `evaluated_at_stage` and the note
+of a forward-looking replay. Over production's 307 inputs since the promotion
+of 2026-09-20 the two replays plan the same 22 alerts, and their summaries
+differ in those two fields and the hash of the re-stamped ruleset, which a run
+in the artifact does not carry (read-only copy of 2026-11-10;
+tests/test_alert_replay.py::test_the_gate_replays_stage_1_and_the_committed_stage_and_no_deleted_stage).
+`--stage 4` remains a stage the command line can replay, like any other.
 
 `tests/fixtures/alert_replay_history.json` declares the **arc** — twenty
 recompute slots through hold → trim → de-risk → recovery, with two blind slots
