@@ -208,9 +208,24 @@ code points (`MESSAGE_ENGINE_IMESSAGE_MAX_CHARS`), emoji allowed, cannot
 compute that column at all.
 Relaxing the constraint would weaken a live SMS invariant to make room for a
 different channel. Instead the engine persists its own rows: code-point count,
-emoji count, channel, source (`generated` | `fallback` | `deterministic`),
-every attempt including timeouts and rejections (Q46: full rows, 90-day
-retention). The alert schema is untouched.
+channel, source (`generated` | `fallback`; a `deterministic` text asks no
+model and writes no row, decision 8), every attempt including timeouts and
+rejections (Q46: full rows). The alert schema is untouched.
+
+Q46 also set a retention of 90 days for these rows. It is not built: no code
+deletes an attempt, and the rows are kept. They are the governor's state
+(decision 3), read at any age: four failed calls of 100 to 103 days ago and
+one of ten minutes ago, with no success since, are the five strikes that open
+the breaker, and without the four the model is asked
+(`tests/test_message_governor.py::test_a_run_of_failures_older_than_90_days_still_opens_the_breaker`).
+So a sweep by age alone changes a decision; one that spares the breaker's run
+is a rule of its own, for a table that held 58 rows in 0.04 MB after 52 days
+in production (2026-11-11), about 0.3 MB a year. The first row turns 90 days
+old on 2026-12-18. Whether Q46's 90 days are built or struck is the owner's
+ruling to make. Two columns of the table carry nothing: `emoji_count` was
+never written and is NULL, and `iteration` is 1, on all 58 rows - the emoji
+cap the first was made for went with the validator (decision 24), and a
+compose asks the model once (decision 27).
 
 ## Decision 5 — admission is a GATE, not a re-modelled delivery
 

@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import threading
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
+from sqlalchemy import delete
 
 from app.config import Settings
 from app.db import session_scope
@@ -386,3 +388,63 @@ class TestRoundSevenOn140:
         _row(gov.Outcome.TECHNICAL_ERROR, minutes_ago=30, finished_minutes_ago=29)
         decision, _claim = _reserve()
         assert decision.may_ask
+
+
+def test_a_run_of_failures_older_than_90_days_still_opens_the_breaker():
+    """The attempt rows are the governor's state at any age (app/models.py: "A
+    dropped row would silently hand a failing model more attempts"). Ruling
+    Q46 also set a retention of 90 days for them, which is not built
+    (docs/MESSAGE_ENGINE.md, decision 4), and this is why a sweep by age alone
+    could not be it: four failed calls of 100 to 103 days ago and one of ten
+    minutes ago, with no success since, are the five strikes that open the
+    breaker, and with the rows older than 90 days deleted the same call is
+    admitted."""
+    day = 24 * 60
+    for days in (103, 102, 101, 100):
+        _row(gov.Outcome.TECHNICAL_ERROR, minutes_ago=days * day, finished_minutes_ago=days * day)
+    _row(gov.Outcome.TECHNICAL_ERROR, minutes_ago=10, finished_minutes_ago=10)
+
+    decision, claim = _reserve()
+    assert (decision.may_ask, decision.reason, claim) == (
+        False, "breaker open: 5 failed calls in a row", None)
+
+    with session_scope() as s:
+        s.execute(delete(MessageEngineAttempt).where(
+            MessageEngineAttempt.started_at < NOW - timedelta(days=90)))
+    decision, claim = _reserve()
+    assert decision.may_ask and claim is not None
+
+
+@pytest.mark.parametrize("settings, priority, trigger", [
+    ({"message_engine_enabled": False}, 2, "daily_digest"),
+    ({}, gov.P1, "daily_digest"),
+    ({}, 2, "NOT_A_TRIGGER"),
+], ids=["the engine off", "a P1", "the bare event"])
+def test_a_deterministic_text_writes_no_row(monkeypatch, settings, priority, trigger):
+    """What a row's `source` can be: `generated` or `fallback`. A deterministic
+    text asks no model and writes no attempt row (docs/MESSAGE_ENGINE.md,
+    decisions 4 and 8), so no row carries that word: production held 50
+    `generated`, 4 `fallback` and 4 failed calls without a source on
+    2026-11-11."""
+    from app.message_engine import composer
+    from app.message_engine.checks import Channel
+
+    monkeypatch.setattr(composer, "complete",
+                        lambda **_kw: (_ for _ in ()).throw(AssertionError("no model is asked")))
+    out = composer.compose(trigger=trigger, channel=Channel.IMESSAGE, priority=priority,
+                           facts={"median": 59}, lib=composer.library(), settings=_settings(**settings))
+    assert out.source == "deterministic"
+    with session_scope() as s:
+        assert s.query(MessageEngineAttempt).count() == 0
+
+
+def test_the_document_declares_no_retention_that_nothing_performs():
+    """Ruling Q46 set 90 days for the attempt rows, and no code deletes one.
+    docs/MESSAGE_ENGINE.md decision 4 says that the retention is not built and
+    cites the test above for why a sweep by age alone would be wrong; it does
+    not declare the 90 days as a property of the rows."""
+    document = (Path(__file__).resolve().parents[1] / "docs" / "MESSAGE_ENGINE.md").read_text(encoding="utf-8")
+    decision = " ".join(document.split("\n## Decision 4 ")[1].split("\n## ")[0].split())
+    assert "90-day retention" not in decision
+    assert ("tests/test_message_governor.py::"
+            "test_a_run_of_failures_older_than_90_days_still_opens_the_breaker") in decision
