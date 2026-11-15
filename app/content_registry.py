@@ -606,71 +606,18 @@ def _save_haven_slots() -> list[DynamicSlot]:
     return slots
 
 
-#: The ONLY slots a language model may write. Everything else is filled from
-#: computed data, and this is an ALLOWLIST rather than a denylist on purpose:
-#: a slot added later without thought is data-filled, which is the safe way to
-#: be wrong.
-#:
-#: Twenty of the excluded slots carry hard numeric contracts - signed
-#: two-decimal coefficients, bounded percentages, 0.00-1.00 weights. Those are
-#: STATISTICS, and the founding invariant of this program is that the model
-#: never writes a number. The rest are stamps, dates and short labels that a
-#: computation already knows exactly; asking a model to restate them can only
-#: introduce error.
-#:
-#: Phase D generates prose for these and for none of the others, so the
-#: dynamic-prompt library has an entry per member of this set.
-MODEL_WRITABLE_SLOTS: frozenset[str] = frozenset({
-    "analytics.clock.dotcom.caption",
-    "analytics.clock.gold-lead.caption",
-    "analytics.clock.lppl.caption",
-    "analytics.clock.weighted.caption",
-    "analytics.granger.summary",
-    "analytics.hedgeweight.btc.reason",
-    "analytics.hedgeweight.cash.reason",
-    "analytics.hedgeweight.chf.reason",
-    "analytics.hedgeweight.gold.reason",
-    "analytics.hedgeweight.jpy.reason",
-    "analytics.hedgeweight.usd.reason",
-    "analytics.hedgeweight.ust10y.reason",
-    "analytics.hedgeweight.verdict",
-    "analytics.markov.states",
-    "atlas.crises.ai2026.cause",
-    "atlas.crises.ai2026.highlight",
-    "atlas.explorer.potential-banner.freshness",
-    "atlas.matrix.bonds.ai2026",
-    "atlas.matrix.btc.ai2026",
-    "atlas.matrix.cash.ai2026",
-    "atlas.matrix.gold.ai2026",
-    "atlas.matrix.jpy.ai2026",
-    "audit_note",
-    "dashboard_regime_note",
-    "gauge.badge.live_tip",
-    "gauge.badge.partial_tip",
-    "gauge.badge.static",
-    "gauge.hero.run_line",
-    "gauge.judgment_call",
-    "gauge.live_backfill.banner",
-    "gauge.live_backfill.editorial_line",
-    "gauge.live_backfill.static_note",
-    "gauge.metric.note",
-    "gauge.status.audit_flag.detail",
-    "gauge.status.audit_flag.title",
-    "gauge.verdict.detail",
-    "gauge.verdict.distance",
-    "gauge.verdict.lead",
-    "headline_note",
-})
-
-
-def model_may_write(slug: str) -> bool:
-    """Whether Phase D may put GENERATED text in this slot.
-
-    Fail-closed: an unknown slug is not writable.
-    """
-    return slug in MODEL_WRITABLE_SLOTS
-
-
+#: Nothing writes a slot: every slot serves its placeholder, and no module of
+#: the content API reaches a model (tests/test_content_api.py::TestDynamicContent
+#: ::test_no_model_writes_a_slot). Until 2026-11 an allowlist of 39
+#: "model-writable" slots stood here, with a prompt per member in
+#: config/dynamic_prompts.v1.json, for a generation stage that was never built:
+#: nothing read the library, 41 of the 46 facts its prompts declared had no
+#: producer in app/, and its rules named the content validator that the owner's
+#: ruling of 2026-09-25 removed. Both went by the rule the owner set for the
+#: message library's nine unwired entries on 2026-10-01 (docs/MESSAGE_ENGINE.md,
+#: decision 24): an entry returns, with typed facts, when a caller is wired.
+#: Whoever wires a model to a slot says first which slots it may write; a
+#: statistic is computed, never model-written.
 DYNAMIC_SLOTS: tuple[DynamicSlot, ...] = (
     DynamicSlot(
         slug="headline_note",
@@ -731,9 +678,6 @@ def dynamic_slots_payload() -> dict[str, dict[str, Any]]:
             "purpose": s.purpose,
             "as_of": s.as_of,
             "constraints": {"max_len": s.max_len, "regex": s.regex},
-            # So a consumer can tell a generated line from a computed one
-            # without knowing the registry by heart.
-            "writer": "model" if model_may_write(s.slug) else "data",
         }
         for s in DYNAMIC_SLOTS
     }

@@ -82,7 +82,7 @@ and stays `generated`). The status page implements it (`.dyn.generated`,
 
 ```
 GET /api/v1/content/dashboard   static blocks {slug: {kind, text|items|entries}}
-GET /api/v1/content/dynamic     dynamic slots {slug: {text, source, provenance, updated_at, purpose, as_of, constraints, writer}} + marker
+GET /api/v1/content/dynamic     dynamic slots {slug: {text, source, provenance, updated_at, purpose, as_of, constraints}} + marker
 ```
 
 v1 completeness is the full code-anchored manifest (`app/content_manifest.py`):
