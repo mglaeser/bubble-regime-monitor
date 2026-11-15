@@ -10,7 +10,7 @@ mirrors the series for display only.
 ROW ORDER IS NOT ASSUMED. The live file lists months NEWEST-FIRST, which a
 naive column read once inverted into a -22% "YoY" computed across the series
 start (Jan 1997). Rows are parsed as (date, debit) PAIRS and sorted by date
-ascending; a parseable date column is mandatory.
+ascending; a date column in ISO 8601 (the file's "YYYY-MM") is mandatory.
 """
 
 from __future__ import annotations
@@ -53,7 +53,25 @@ def parse_debit_balances(content: bytes) -> tuple[list[float], list[str], str]:
     for j in range(raw.shape[1]):
         if j == debit_col:
             continue
-        dates = pd.to_datetime(body.iloc[:, j], errors="coerce")
+        # The month cells are ISO 8601 text ("2026-09"), and format="ISO8601"
+        # is pandas' own parameter for that. A date is what pandas reads as
+        # ISO 8601: "2026-09", a full "2026-09-01" and a date-typed cell, each
+        # into its own month. (The stricter "%Y-%m" would only add a refusal
+        # of the full date, which names the same month.)
+        # Without a format pandas guesses one from the first cell and fills
+        # the day the cell lacks from TODAY. On 2026-10-31, with September (30
+        # days) the newest month, the guess failed and all six recomputes
+        # logged "Could not infer format" (6 of 222 parses since 2026-10-05;
+        # D2 was unchanged at 31.39); it does so on every date whose day the
+        # newest month lacks (next: 2026-12-31). And a guess takes other
+        # spellings as a healthy read: of thirty years of months, "Sep-26",
+        # the spelling of FINRA's web table, came back as 36 months ending
+        # 1999-12; "1/9/2026" as 30 Januaries; a column of numbers as one
+        # month, January 1970. Each of those now ends in "no parseable date
+        # column" below. So do the spellings the guess happened to read right
+        # ("Sep 2026", "9/2026"): the file does not carry them, and each
+        # warned on every parse (tests/test_sources.py::TestFinraMonths).
+        dates = pd.to_datetime(body.iloc[:, j], format="ISO8601", errors="coerce")
         if (values.notna() & dates.notna()).sum() >= 13:
             date_series = dates
             break

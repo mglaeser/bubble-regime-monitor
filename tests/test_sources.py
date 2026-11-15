@@ -95,6 +95,105 @@ class TestStaleness:
         assert payload["stale"] is False and payload["age_days"] == 0
 
 
+def _xlsx(rows: list[list]) -> bytes:
+    """An .xlsx file with the given rows on its first sheet."""
+    import io
+
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    for row in rows:
+        ws.append(row)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _finra_xlsx(month_cells: list) -> bytes:
+    """Shaped like FINRA's margin statistics: the header row, then one row per
+    month cell. The debit balance of row i is 900,000 + i."""
+    header = ["Year-Month", "Debit Balances in Customers' Securities Margin Accounts",
+              "Free Credit Balances in Customers' Cash Accounts",
+              "Free Credit Balances in Customers' Securities Margin Accounts"]
+    return _xlsx([header] + [[cell, 900_000.0 + i, 150_000.0 + i, 180_000.0 + i]
+                             for i, cell in enumerate(month_cells)])
+
+
+_MONTH_ABBR = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split()
+
+
+class TestFinraMonths:
+    """app/sources/finra.py: "Rows are parsed as (date, debit) PAIRS and sorted
+    by date ascending", and a date column is mandatory. The file's month cells
+    are ISO 8601 text ("2026-09"); a column in another spelling is not a date
+    column, and the pull fails instead of returning other months."""
+
+    def test_months_are_read_as_iso_year_month_without_a_guess(self):
+        """A guard, not a red-to-green pin: a format guess takes the day the
+        cell lacks from the system clock, which a test cannot set, and it
+        warns only when that day does not exist in the newest month (for this
+        file, September: on the 31st of a month). Read as ISO 8601 there is no
+        guess, on any day."""
+        import warnings
+
+        from app.sources.finra import parse_debit_balances
+
+        months = [(y, m) for y in (2024, 2025, 2026) for m in range(1, 13)][:33]      # 2024-01 .. 2026-09
+        cells = [f"{y}-{m:02d}" for y, m in reversed(months)]                        # newest first, as served
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            values, labels, as_of = parse_debit_balances(_finra_xlsx(cells))
+        assert labels == [f"{y}-{m:02d}" for y, m in months]
+        assert as_of == "2026-09-30"
+        assert len(values) == 33 and values[-1] == 900_000.0                         # the first row is the newest
+
+    @pytest.mark.parametrize("spell", [
+        lambda y, m: f"{_MONTH_ABBR[m - 1]}-{y % 100:02d}",      # Sep-26, the spelling of FINRA's web table
+        lambda y, m: f"{m:02d}-{y % 100:02d}",                   # 09-26
+        lambda y, m: f"{y}{m:02d}",                              # 202609 as text
+        lambda y, m: y * 100 + m,                                # 202609 as a number
+        lambda y, m: f"1/{m}/{y}",                               # 1/9/2026, day first
+    ], ids=["Mon-YY", "MM-YY", "YYYYMM-text", "YYYYMM-number", "D/M/YYYY"])
+    def test_months_in_another_spelling_are_a_failure_not_a_guess(self, spell):
+        """Thirty years of months, 1997-01 .. 2026-12, newest first. Guessed,
+        these files came back as a healthy pull of other months: "Sep-26" and
+        "09-26" as 36 months ending 1999-12, "202609" as 144 months (132 of
+        them in the wrong month) ending 2012-12, the number 202609 as the one
+        month 1970-01, "1/9/2026" as 30 Januaries."""
+        from app.sources.finra import parse_debit_balances
+
+        months = [(y, m) for y in range(1997, 2027) for m in range(1, 13)]
+        with pytest.raises(SourceError, match="no parseable date column"):
+            parse_debit_balances(_finra_xlsx([spell(y, m) for y, m in reversed(months)]))
+
+    @pytest.mark.parametrize("spell", [
+        lambda y, m: f"{_MONTH_ABBR[m - 1]} {y}",                # Sep 2026
+        lambda y, m: f"{m}/{y}",                                 # 9/2026
+    ], ids=["Mon YYYY", "M/YYYY"])
+    def test_a_spelling_the_guess_happened_to_read_right_is_not_a_date_either(self, spell):
+        """The narrowing of the contract, pinned: the guess read these two
+        into the right months, with its warning on every parse. They are not
+        ISO 8601 and not what FINRA sends, and what counts as a date is what
+        pandas reads as ISO 8601, so the pull fails on them as well."""
+        from app.sources.finra import parse_debit_balances
+
+        months = [(y, m) for y in range(1997, 2027) for m in range(1, 13)]
+        with pytest.raises(SourceError, match="no parseable date column"):
+            parse_debit_balances(_finra_xlsx([spell(y, m) for y, m in reversed(months)]))
+
+    def test_a_file_without_a_date_column_is_a_failure_not_january_1970(self):
+        """The debit column and one more column of numbers. Guessed, the
+        numbers were dates (nanoseconds after 1970-01-01) and the pull came
+        back healthy with the one month "1970-01"."""
+        from app.sources.finra import parse_debit_balances
+
+        header = ["Debit Balances in Customers' Securities Margin Accounts",
+                  "Free Credit Balances in Customers' Cash Accounts"]
+        with pytest.raises(SourceError, match="no parseable date column"):
+            parse_debit_balances(_xlsx([header] + [[900_000.0 + i, 150_000.0 + i] for i in range(30)]))
+
+
 class _Response:
     def __init__(self, text: str = "", content: bytes = b"", payload: dict | None = None):
         self.text, self.content, self._payload = text, content, payload
