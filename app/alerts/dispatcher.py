@@ -29,7 +29,9 @@ from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
+from tenacity import Retrying, retry_if_exception_type, stop_after_attempt
 
 from app.alerts.artifacts import load_by_hash, registered_phrase_set
 from app.alerts.budgets import BUDGETED_KINDS, LIMITS, check_budget
@@ -761,32 +763,52 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
     completed_at = max(attempt_now, _utc_clock_value(clock))
 
     # -- 6: classify ---------------------------------------------------------
-    with session_factory() as session:
-        delivery = session.get(AlertDelivery, delivery_id)
-        if delivery is None:
-            return
+    def record_outcome() -> bool:
+        with session_factory() as session:
+            delivery = session.get(AlertDelivery, delivery_id)
+            if delivery is None:
+                return False
+            if outcome.is_success:
+                mark_sent(session, delivery, now=completed_at,
+                          http_status=outcome.http_status)
+            elif outcome.is_ambiguous:
+                mark_unknown(session, delivery, now=completed_at,
+                             reason=outcome.error_message_redacted or "ambiguous outcome",
+                             error_code=outcome.error_code)
+            elif outcome.may_retry_automatically:
+                mark_transient(session, delivery, now=completed_at,
+                               error_code=outcome.error_code,
+                               message=outcome.error_message_redacted,
+                               http_status=outcome.http_status)
+            else:
+                mark_permanent(session, delivery, now=completed_at,
+                               error_code=outcome.error_code,
+                               message=outcome.error_message_redacted,
+                               http_status=outcome.http_status)
+            return True
 
-        if outcome.is_success:
-            mark_sent(session, delivery, now=completed_at,
-                      http_status=outcome.http_status)
-            report.sent += 1
-        elif outcome.is_ambiguous:
-            mark_unknown(session, delivery, now=completed_at,
-                         reason=outcome.error_message_redacted or "ambiguous outcome",
-                         error_code=outcome.error_code)
-            report.unknown += 1
-        elif outcome.may_retry_automatically:
-            mark_transient(session, delivery, now=completed_at,
-                           error_code=outcome.error_code,
-                           message=outcome.error_message_redacted,
-                           http_status=outcome.http_status)
-            report.failed += 1
-        else:
-            mark_permanent(session, delivery, now=completed_at,
-                           error_code=outcome.error_code,
-                           message=outcome.error_message_redacted,
-                           http_status=outcome.http_status)
-            report.failed += 1
+    # The outcome is known and nothing is sent again to record it, so a
+    # database that refuses the write is asked again: three tries in all, each
+    # a new transaction that waits the busy timeout (ALERTS_BUSY_TIMEOUT_MS)
+    # inside SQLite, so no wait of our own between them - 15 s at the
+    # production timeout, inside the 120 s lease. A refused try fails at its
+    # first write, before anything is committed, so a later one records the
+    # outcome once; a line a `mark_*` function logs is repeated by it. Only
+    # after the third does the error reach the caller as before: the row stays
+    # SENDING and the lease sweep calls it UNKNOWN, which is terminal (owner
+    # decision D2f) - for a 202 a sent alert with no cooldown, for a 429 an
+    # alert never retried. One writer held the lock past the timeout once in
+    # five weeks of production logs (2026-11-01, the dispatcher's heartbeat
+    # write); the outcome write ran 21 times in seven weeks and never met it.
+    if not Retrying(retry=retry_if_exception_type(OperationalError),
+                    stop=stop_after_attempt(3), reraise=True)(record_outcome):
+        return
+    if outcome.is_success:
+        report.sent += 1
+    elif outcome.is_ambiguous:
+        report.unknown += 1
+    else:
+        report.failed += 1
 
 
 def _heartbeat(report: DispatchReport, *, mode: str,

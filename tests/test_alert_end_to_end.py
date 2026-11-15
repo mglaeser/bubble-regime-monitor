@@ -451,6 +451,142 @@ def test_the_same_reminder_generation_is_not_planned_again_after_an_unknown(
     get_settings.cache_clear()
 
 
+class _AnswersWhileAnotherWriterHoldsTheDatabase:
+    """A transport that answers with `outcome`. By the time it answers, another
+    connection holds SQLite's write lock (`BEGIN IMMEDIATE`), as a recompute or
+    an evaluation can while the request is on the wire: the send happens
+    outside any transaction. No thread and no sleep."""
+
+    def __init__(self, db_path, outcome: str, http_status: int) -> None:
+        self.db_path, self.outcome, self.http_status = db_path, outcome, http_status
+        self.other = None
+        self.calls = 0
+
+    def send(self, message, *, recipient_ref, idempotency_key=None):
+        import sqlite3
+
+        from app.alerts.sender import SendResult
+
+        self.calls += 1
+        self.other = sqlite3.connect(str(self.db_path), isolation_level=None)
+        self.other.execute("BEGIN IMMEDIATE")
+        return SendResult(outcome=self.outcome, http_status=self.http_status,
+                          request_started=True)
+
+    def let_go(self) -> None:
+        if self.other is not None:
+            self.other.execute("ROLLBACK")
+            self.other.close()
+            self.other = None
+
+
+def _dispatch_while_busy(sender, at: datetime, *, free_after_refusals: int):
+    """One pass with `sender`. The other writer lets go once the database has
+    refused `free_after_refusals` of the pass's transactions. Returns the
+    report and SQLite's message for each refused transaction."""
+    from contextlib import contextmanager
+
+    from sqlalchemy.exc import OperationalError
+
+    from app.alerts.artifacts import load_active
+    from app.alerts.dispatcher import dispatch_once
+
+    refused: list[str] = []
+
+    @contextmanager
+    def scope():
+        try:
+            with session_scope() as session:
+                yield session
+        except OperationalError as exc:
+            refused.append(str(exc.orig))
+            if len(refused) >= free_after_refusals:
+                sender.let_go()
+            raise
+
+    with session_scope() as session:
+        phrase_set = load_active(session).phrase_set
+    try:
+        report = dispatch_once(scope, phrase_set=phrase_set, mode="shadow",
+                               live_profile="default", sender=sender, now=at)
+    finally:
+        sender.let_go()
+    return report, refused
+
+
+def _a_p1_waits_with_a_short_busy_timeout(tmp_path, monkeypatch, name: str) -> datetime:
+    """The band alert is queued; the database waits 100 ms for a lock
+    (production: 5000). Returns the time of the pass."""
+    from app.db import reset_engine
+
+    monkeypatch.setenv("ALERTS_BUSY_TIMEOUT_MS", "100")
+    _stage3_shadow(tmp_path, monkeypatch, name)
+    reset_engine()
+    base = datetime(2026, 8, 20, 6, 0, tzinfo=UTC)
+    _evaluate("de-risk", base + timedelta(hours=4), _evaluate("trim", base, None))
+    return base + timedelta(hours=4, minutes=1)
+
+
+@pytest.mark.parametrize("outcome,http_status,expected", [
+    ("CONFIRMED_SUCCESS", 202, TransportStatus.SENT),
+    ("DEFINITE_TRANSIENT_NOT_ACCEPTED", 429, TransportStatus.RETRY_DUE),
+])
+def test_a_known_outcome_is_recorded_once_the_database_is_free_again(
+        isolated_db, tmp_path, monkeypatch, outcome, http_status, expected):
+    """README, 'Counts as sent': 202 with an accepted send operation; a 429 is
+    retried. Neither depends on whether another writer held the database
+    longer than the busy timeout at that moment. The outcome is in memory, so
+    it is written at the next try and nothing is sent again: one provider
+    call, one attempt, the report counts it once, and a sent alert starts its
+    cooldown. Without the second try the row stayed SENDING and the lease
+    sweep called it UNKNOWN - terminal (owner decision D2f), although the
+    answer was known."""
+    from app.config import get_settings
+
+    at = _a_p1_waits_with_a_short_busy_timeout(tmp_path, monkeypatch, f"busy-{http_status}")
+    sender = _AnswersWhileAnotherWriterHoldsTheDatabase(isolated_db, outcome, http_status)
+
+    report, refused = _dispatch_while_busy(sender, at, free_after_refusals=1)
+
+    with session_scope() as session:
+        row = session.query(AlertDelivery).one()
+        member = session.query(AlertDeliveryMember).filter_by(
+            delivery_id=row.delivery_id).one()
+        memory = session.get(AlertInstanceNotificationState,
+                             (row.mode, row.live_profile, member.instance_fingerprint))
+        assert row.transport_status == expected
+        assert (row.attempts, sender.calls) == (1, 1)
+        assert (memory.last_sent_at is not None) == (expected == TransportStatus.SENT)
+    assert len(refused) == 1 and "database is locked" in refused[0]
+    assert (report.sent, report.failed, report.unknown) == (
+        (1, 0, 0) if expected == TransportStatus.SENT else (0, 1, 0))
+    get_settings.cache_clear()
+
+
+def test_a_database_that_stays_busy_still_fails_the_pass_and_sends_once(
+        isolated_db, tmp_path, monkeypatch):
+    """The last resort is unchanged: when the database never frees, the error
+    reaches the job, nothing is sent again, the row stays SENDING, and the
+    lease sweep calls it UNKNOWN (terminal, owner decision D2f)."""
+    from sqlalchemy.exc import OperationalError
+
+    from app.alerts.outbox import recover_leases
+    from app.config import get_settings
+
+    at = _a_p1_waits_with_a_short_busy_timeout(tmp_path, monkeypatch, "stays-busy")
+    sender = _AnswersWhileAnotherWriterHoldsTheDatabase(
+        isolated_db, "CONFIRMED_SUCCESS", 202)
+
+    with pytest.raises(OperationalError, match="database is locked"):
+        _dispatch_while_busy(sender, at, free_after_refusals=99)
+
+    assert sender.calls == 1
+    with session_scope() as session:
+        assert session.query(AlertDelivery).one().transport_status == TransportStatus.SENDING
+        assert recover_leases(session, now=at + timedelta(seconds=121))["unknown"] == 1
+    get_settings.cache_clear()
+
+
 # --- a reminder belongs to its episode ------------------------------------------
 
 
