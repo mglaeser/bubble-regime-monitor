@@ -359,7 +359,7 @@ bubblegauge alerts preflight                  # pre-stage checks
 bubblegauge alerts ruleset                    # active ruleset summary
 bubblegauge alerts health
 bubblegauge alerts pending                    # open episodes
-bubblegauge alerts evaluate --input-identity ID [--shadow]
+bubblegauge alerts evaluate --input-identity ID   # always shadow; sends nothing
 bubblegauge alerts explain --evaluation-id ID
 bubblegauge alerts recover-evaluations --once
 bubblegauge alerts recover-leases --once
@@ -511,12 +511,13 @@ run must be `COMMITTED`, have atomically applied its plan, and have a sane
 completion timestamp no more than ten hours old. Disabled mode explicitly
 reports the evaluator as not required.
 
-The health projection also reports the latest and p95 evaluation duration, P1
-enqueue-to-provider-attempt p95, rolling LLM cap/call/fallback evidence,
-missing typed sidecars, overdue or malformed outbox holds, the UNKNOWN
-deliveries, SQLite WAL/foreign-key/busy-timeout/RETURNING
+The health projection also reports the latest and p95 evaluation duration, the
+P1 enqueue-to-provider-attempt p95 of the last 30 days (null when no P1 was
+attempted in them), missing typed sidecars, overdue or malformed outbox holds,
+the UNKNOWN deliveries, SQLite WAL/foreign-key/busy-timeout/RETURNING
 capabilities, the Alembic revision, required partial indexes and immutability
-triggers, and live artifact/promotion agreement. Missing scheduler components
+triggers, and live artifact/promotion agreement (the rules and the phrase set:
+the live gate requires both). Missing scheduler components
 or required schema objects are critical; sidecar gaps, overdue holds and P1
 latency above 60 seconds are degraded rather than silently green. An UNKNOWN
 delivery is counted and degrades nothing: it is terminal, and no operator step
@@ -542,10 +543,24 @@ reason instead of pretending to evaluate.
 ## 11a. Retention: two horizons
 
 ```bash
-ALERTS_MESSAGE_RETENTION_DAYS=400    # rendered message BODIES
-ALERTS_METADATA_RETENTION_DAYS=800   # the audit trail
+ALERTS_MESSAGE_RETENTION_DAYS=400    # the TEXT of a rendered message
+ALERTS_METADATA_RETENTION_DAYS=800   # the rows of alert_event
 python -m app.alerts.cli retention [--dry-run]
 ```
+
+The job runs daily at 03:25 UTC and has these two effects and no third. The
+long sweep deletes `alert_event` rows and no row of any other table: sidecars
+(`alert_input_snapshot`, what a replay reads), evaluations, episodes,
+deliveries with their members and renders, confirmation observations and the
+registries have no horizon and are kept. Outside the alert system only
+`dashboard_feed` loses rows, to its own writer, which keeps the newest 14
+payloads: snapshots, indicator readings, the breadth closes, source health and
+the message engine's attempts are kept. That is a decision by size.
+Production on 2026-11-11, four months of snapshots and 82 days of alert
+capture: the database is 35.8 MB and grows about 90 MB a year, of which
+sidecars are about 32 MB, snapshots 29 MB, the breadth closes 14 MB and
+`alert_event` 3 MB
+(`tests/test_alert_retention.py::test_retention_deletes_events_and_no_row_of_another_table`).
 
 The short sweep **redacts, it does not delete**. An `alert_render` row carries
 the phrase-set provenance it was planned under, the render source, the septet
@@ -560,13 +575,17 @@ same moment `body_redacted_at` goes from NULL to set. A rewrite still aborts, a
 second redaction still aborts, and `gsm7_septets` is left alone so the length
 of what was sent stays auditable after the text is gone.
 
-Two things are never swept: a body whose delivery is not yet terminal (a retry
-could still reuse that exact render), and events belonging to an open episode
-(the trail explaining a still-firing mechanism is the one most likely to be
-needed) or to a delivery not yet terminal. `UNKNOWN` is terminal (owner
-decision D2f): nothing sends it again, so its body and its events expire on
-these horizons as any settled delivery's do. Inverted horizons — metadata
-shorter than messages — are refused outright rather than half-applied.
+Within the two sweeps, two things are spared at any age: a body whose delivery
+is not yet terminal (a retry could still reuse that exact render), and events
+belonging to an open episode (the trail explaining a still-firing mechanism is
+the one most likely to be needed) or to a delivery not yet terminal
+(`tests/test_alert_retention.py::test_an_event_of_an_open_episode_is_kept_at_any_age`).
+`UNKNOWN` is terminal (owner decision D2f): nothing sends it again, so its
+body and its events expire on these horizons as any settled delivery's do.
+Inverted horizons — metadata
+shorter than messages — are refused outright rather than half-applied, and the
+run says so: its status is `refused`, the retention heartbeat is critical, and
+`alerts retention` exits 1.
 
 ---
 

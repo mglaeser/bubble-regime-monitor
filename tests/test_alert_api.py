@@ -301,25 +301,87 @@ def test_health_fails_closed_when_render_authority_is_missing(client):
         == ["uq_alert_render_delivery"]
 
 
+def _sent_p1s(history) -> None:
+    """SENT P1 alerts in the client's namespace (disabled/default), one per
+    `(age, latency)`: queued `age` before now, put on the wire `latency` later."""
+    from datetime import UTC, datetime
+
+    from app.alerts.artifacts import load_active, register
+    from app.alerts.canonical import new_ulid
+    from app.alerts.enums import DeliveryKind, PlanningState, Priority, TransportStatus
+    from app.alerts.models import AlertDelivery
+    from app.alerts.repository import utc_ms
+    from app.db import session_scope
+
+    now = datetime.now(UTC)
+    with session_scope() as session:
+        rules_sha256 = register(session, load_active(session))
+        for index, (age, latency) in enumerate(history):
+            queued = now - age
+            session.add(AlertDelivery(
+                delivery_id=new_ulid(utc_ms(queued)), dedupe_key=f"sent-p1-{index}",
+                dedupe_version=1, mode="disabled", live_profile="default",
+                planning_rules_sha256=rules_sha256, delivery_kind=DeliveryKind.TEST,
+                priority=Priority.P1, transport_status=TransportStatus.SENT,
+                planning_state=PlanningState.NONE, not_before=queued, created_at=queued,
+                updated_at=queued + latency, attempts=1,
+                request_started_at=queued + latency, sent_at=queued + latency,
+                recipient_ref="default"))
+
+
+def _p1_latency(client) -> tuple[int | None, list[str]]:
+    payload = client.get(
+        "/api/v1/alerts/health", headers={"X-API-Key": TEST_ADMIN_KEY}).json()
+    return (payload["outbox"]["p1_enqueue_to_attempt_p95_ms"],
+            [c for c in payload["conditions"] if "P1 enqueue-to-attempt" in c])
+
+
 def test_health_computes_p1_enqueue_to_attempt_latency(client):
     from datetime import timedelta
 
-    from app.alerts.enums import Priority, TransportStatus
-    from app.alerts.models import AlertDelivery
-    from app.db import session_scope
+    _sent_p1s([(timedelta(minutes=5), timedelta(milliseconds=1250))])
 
-    with session_scope() as session:
-        delivery_id = _unknown_delivery(session)
-        delivery = session.get(AlertDelivery, delivery_id)
-        delivery.mode = "disabled"
-        delivery.priority = Priority.P1
-        delivery.transport_status = TransportStatus.SENT
-        delivery.request_started_at = delivery.created_at + timedelta(milliseconds=1250)
-        delivery.sent_at = delivery.request_started_at
+    assert _p1_latency(client) == (1250, [])
 
-    payload = client.get(
-        "/api/v1/alerts/health", headers={"X-API-Key": TEST_ADMIN_KEY}).json()
-    assert payload["outbox"]["p1_enqueue_to_attempt_p95_ms"] == 1250
+
+def test_health_judges_the_p1_latency_of_the_last_thirty_days(client):
+    """docs/ALERT_SYSTEM.md, section 11: the P1 enqueue-to-provider-attempt p95
+    of the last 30 days. One slow send eight months ago is not the latency of
+    today: under 20 samples the nearest-rank p95 is the maximum, so over every
+    P1 ever sent it kept the condition until 19 prompt ones had followed."""
+    from datetime import timedelta
+
+    _sent_p1s([(timedelta(days=240), timedelta(seconds=95)),
+               (timedelta(days=1), timedelta(seconds=12))])
+
+    assert _p1_latency(client) == (12_000, [])
+
+
+def test_health_shows_a_recent_p1_regression_behind_a_long_history(client):
+    """The other half: a hundred prompt P1s of a year ago do not hide that the
+    last five each waited five minutes."""
+    from datetime import timedelta
+
+    _sent_p1s([(timedelta(days=400 - n), timedelta(seconds=10)) for n in range(100)]
+              + [(timedelta(days=5 - n), timedelta(seconds=300)) for n in range(5)])
+
+    p95, conditions = _p1_latency(client)
+    assert p95 == 300_000
+    assert conditions == ["outbox: P1 enqueue-to-attempt p95 of the last 30 days is "
+                          "300000ms, above the 60000ms target"]
+
+
+def test_health_judges_a_p1_by_when_it_was_attempted_not_when_it_was_queued(client):
+    """The 30 days are counted on the attempt. A P1 queued 40 days ago and put
+    on the wire yesterday is the lateness this figure exists to show; a window
+    on the queueing time would be the one that drops it."""
+    from datetime import timedelta
+
+    _sent_p1s([(timedelta(days=40), timedelta(days=39))])
+
+    p95, conditions = _p1_latency(client)
+    assert p95 == 39 * 24 * 3600 * 1000
+    assert len(conditions) == 1
 
 
 def test_health_counts_and_heartbeats_are_scoped_to_the_active_namespace(client):
@@ -1468,9 +1530,9 @@ def test_health_says_out_loud_when_the_watchdog_has_never_run(client):
     """An absent heartbeat is the loudest failure, and it used to be the quietest.
 
     The watchdog records liveness on every run, and health lists the heartbeats
-    that EXIST. So a watchdog that has never run once — because its systemd
-    timer was never installed on the host, which is the recorded state of this
-    deployment — produced no row, and no row rendered as nothing at all.
+    that EXIST. So a watchdog that has never run once — because neither the
+    host timer nor the in-process job has run — produced no row, and no row
+    rendered as nothing at all.
 
     Absence of a monitor must read as a fault, not as silence. This is the same
     property the notifier enforces at the transport layer, one level up.

@@ -145,9 +145,13 @@ def start() -> BackgroundScheduler:
                            CronTrigger(minute="5,35", timezone="UTC"),
                            id="stuck_watchdog", replace_existing=True,
                            coalesce=True, misfire_grace_time=1800, max_instances=1)
-        # Metadata is retained for at least 800 days and message bodies for the
-        # shorter configured horizon. Daily is frequent enough to bound disk
-        # growth without making deletion part of a delivery transaction.
+        # Once a day: the text of a settled render is emptied at the message
+        # horizon and a settled alert_event row is deleted at the metadata
+        # horizon (app/alerts/retention.py). The job touches no other table
+        # and does not bound the database, which grows about 90 MB a year
+        # (production, 2026-11-11: 35.8 MB, of which alert_event is 0.4 MB).
+        # A job of its own, so that deletion is no part of a delivery
+        # transaction.
         _scheduler.add_job(_alert_retention_job,
                            CronTrigger(hour=3, minute=25, timezone="UTC"),
                            id="alert_retention", replace_existing=True,
