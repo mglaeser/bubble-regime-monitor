@@ -1003,13 +1003,32 @@ CHANGELOG: list[dict[str, str]] = [
         "PENDING_HOST, never silently omitted. All candidate thresholds exercised are the "
         "operator's previously enumerated candidates; nothing is recommended or pinned.",
     },
+    # v3.9.0 quotes two kinds of numbers and names each. 53.30 -> 51.82 is a
+    # fixture measurement, not a production headline: compute_snapshot on the
+    # test suite's golden raw inputs with the endpoint measured for the release
+    # put in (1.1315 against cv90 1.1393), contested rule on against off;
+    # tests/test_changelog_states_production.py recomputes it. Production (the
+    # stored snapshots): id 144, 2026-08-23 18:01 UTC, v3.8.0, median 51.41, s4
+    # 0.25; id 145, 22:02 UTC, the first of v3.9.0, median 51.51, s4 0.25 at
+    # endpoint 1.2681 against cv90 1.1425, a rejection, which the rule leaves
+    # capped. The span is a replay of the 471 v3.9.0 snapshots to 2026-11-10
+    # from their stored sub-scores (recomputed point score == stored on all
+    # 471): s4 at 0.05 against 0.25 gives -1.32 .. -1.98 points, mean -1.54.
     {
         "version": "v3.9.0",
-        "score": "SCORE-SHIFTING at v4.1 — live headline 53.30 -> 51.82 (delta -1.48); action band "
-        "UNCHANGED at 'trim'. The golden fixture stays 52.43 ONLY because it supplies no GSADF "
-        "input and floors under either rule — that is a property of the fixture, not evidence of "
-        "score-neutrality. THE FALL IS A POLICY CORRECTION, NOT MARKET IMPROVEMENT: the contested "
-        "cap sat ABOVE what the test returned, so it was a floor pushing the headline UP.",
+        "score": "SCORE-SHIFTING RULE at v4.1, with no step at release in production. Measured for "
+        "the release on the test suite's golden raw inputs with the 2026-07 statistic put in "
+        "(endpoint 1.1315 against cv90 1.1393): point score 53.30 -> 51.82 (delta -1.48), action "
+        "band unchanged at 'trim'; neither number was the production headline at release. In "
+        "production the release did not move s4: the first v3.9.0 snapshot (2026-08-23 22:02 UTC) "
+        "scored the endpoint at 1.2681 against cv90 1.1425, a contested rejection, so s4 stayed "
+        "0.25, and the median read 51.51 after 51.41. The rule acts when the endpoint statistic is "
+        "not above cv90: replayed on the 471 v3.9.0 snapshots stored to 2026-11-10, s4 at 0.05 "
+        "instead of 0.25 lowers the point score by 1.32 to 1.98 points (mean 1.54). The golden "
+        "fixture stays 52.43 ONLY because it supplies no GSADF input and floors under either rule "
+        "— that is a property of the fixture, not evidence of score-neutrality. A FALL OF THAT "
+        "SIZE AT A CROSSING IS THE POLICY, NOT MARKET IMPROVEMENT: the contested cap sat ABOVE "
+        "what the test returned, so it was a floor pushing the headline UP.",
         "notes": "v4.0 (methodology unchanged): s4 scores the BSADF at the LAST observation against "
         "the endpoint row of the simulated BSADF CVs, not the GSADF sup over all endpoints. The sup "
         "answers a historical question and its verdict flips with the window length it is handed "
@@ -1018,10 +1037,11 @@ CHANGELOG: list[dict[str, str]] = [
         "gsadf.contested_rule='asymmetric' releases a contested NON-rejection to 0.05 while a "
         "contested REJECTION stays capped at 0.25, because Chen et al. (2026) establish SIZE "
         "distortion, which bounds false positives and says nothing against a non-rejection. "
-        "CAVEATS OF RECORD: on the SCORED (nominal) instrument the live endpoint is 1.1315 against "
-        "cv90 1.1393 — a non-rejection by 0.7 percent of the critical value, so one data revision "
-        "moves 1.48 points; and Chen et al. measure the SUPREMUM, so endpoint-level size distortion "
-        "is ASSUMED, not shown. Both are recorded in the frozen artifact. "
+        "CAVEATS OF RECORD: on the SCORED (nominal) instrument the endpoint measured for the "
+        "release (2026-07) was 1.1315 against cv90 1.1393 — a non-rejection by 0.7 percent of the "
+        "critical value, so one data revision moves about 1.5 points; and Chen et al. measure the "
+        "SUPREMUM, so endpoint-level size distortion is ASSUMED, not shown. Both are recorded in "
+        "the frozen artifact. "
         "2026-11, SCORE-SHIFTING ON DEPLOY (service version, frozen artifact and methodology "
         "version unchanged; no frozen constant moves): s4 is fitted on the month-end closes of "
         "COMPLETED months and dated by the last of them. The vendor's monthly series ends with the "
