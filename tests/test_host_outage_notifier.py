@@ -123,6 +123,16 @@ def test_the_watchdog_unit_escalates_its_own_failure():
     assert "bubblegauge-alert-watchdog-failed.service" in unit
 
 
+def test_the_watchdog_unit_fails_on_exit_1():
+    """The host run exits 1 for an outage the alert path did not take
+    (`app.alerts.watchdog.main`). The notice starts only if the unit counts
+    that code as a failure: 0 and 2 are its successes, and nothing else."""
+    unit = (SCRIPT.parent / "systemd" / "bubblegauge-alert-watchdog.service").read_text()
+    statuses = [line.split("=", 1)[1].split() for line in unit.splitlines()
+                if line.startswith("SuccessExitStatus=")]
+    assert statuses == [["0", "2"]]
+
+
 def test_the_escalation_unit_exists_and_runs_the_notifier():
     failed = SCRIPT.parent / "systemd" / "bubblegauge-alert-watchdog-failed.service"
     assert failed.is_file(), f"{failed} is missing"

@@ -13,7 +13,10 @@
 #   systemctl --user daemon-reload
 #   systemctl --user enable --now bubblegauge-alert-watchdog.timer
 #
-# Exit codes: 0 = healthy, 2 = outage detected (recorded as a watchdog input).
+# Exit codes (app/alerts/watchdog.py decides them): 0 = healthy, 2 = outage
+# detected and handed to the alert path (the run passes the outbox itself and
+# sends what is due), 1 = outage detected and the alert path did not take it:
+# the unit fails and OnFailure= reports it.
 
 [Unit]
 Description=bubblegauge alert watchdog (missed recompute slots)
@@ -28,6 +31,8 @@ Type=oneshot
 # Adjust the container name and, if the service runs directly, the working
 # directory and interpreter.
 ExecStart=/usr/bin/podman exec bubblegauge python -m app.alerts.watchdog --once
-# A non-zero exit means "outage detected", not "the unit failed".
+# Exit 2 means "outage detected and handed to the alert path", not "the unit
+# failed". Exit 1 is not listed and must not be: it is the outage the alert
+# path did not take, and the failed unit is what reports it.
 SuccessExitStatus=0 2
 TimeoutStartSec=120

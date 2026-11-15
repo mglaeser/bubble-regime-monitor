@@ -1369,6 +1369,134 @@ def test_the_watchdog_wires_its_status_helper_into_the_heartbeat():
     assert '"critical" if verdict.firing else "ok"' not in source
 
 
+# The host run, `python -m app.alerts.watchdog --once`.
+#
+# The spec: the recompute-outage alert is "checked by the host's watchdog timer
+# every 30 minutes and in the app at :10/:40" (README), and the host unit exists
+# because "a watchdog that only runs as a callback after a successful recompute
+# cannot notice that recomputes have stopped - which is the failure it exists to
+# catch" (deploy/systemd/bubblegauge-alert-watchdog.service). The outbox is
+# drained by a job of the application's scheduler. When that scheduler is what
+# stopped, the host run is the only process left to send what it planned.
+
+_HOST_RUN_DAY = datetime(2026, 11, 9, tzinfo=UTC)       # a Monday
+#: The last recompute is the 02:00 one; 06:00 and 10:00 are missed and the 90
+#: minutes after the second have passed. 11:32 UTC is outside quiet hours.
+_HOST_RUN_AT = _HOST_RUN_DAY + timedelta(hours=11, minutes=32)
+
+
+def _host_run(monkeypatch, *, mode: str = "live", promoted: bool = True) -> int:
+    """`main([])` at 11:32 UTC with the last recompute at 02:00."""
+    from app.alerts import watchdog
+    from app.alerts.artifacts import validate_from_disk
+    from app.config import get_settings
+    from tests.test_alert_end_to_end import _snapshot
+
+    monkeypatch.setenv("ALERTS_MODE", mode)
+    get_settings.cache_clear()
+    with session_scope() as session:
+        if promoted:
+            register_promoted(session, validate_from_disk(),
+                              now=_HOST_RUN_DAY - timedelta(days=30))
+        _snapshot(session, computed_at=_HOST_RUN_DAY + timedelta(hours=2, seconds=40),
+                  effective="trim", prev_id=None)
+    check = watchdog.run_once
+    monkeypatch.setattr(watchdog, "run_once", lambda: check(now=_HOST_RUN_AT))
+    return watchdog.main([])
+
+
+def _recording_sender(monkeypatch):
+    """The dispatcher re-reads the wall clock for quiet hours and builds the
+    live sender, so the pass gets a fixed instant and a sender that records.
+    Nothing else of the path is replaced."""
+    import app.alerts.dispatcher as dispatcher
+    from app.alerts.sender import NullSender
+
+    sender = NullSender()
+    real = dispatcher.dispatch_once
+    monkeypatch.setattr(dispatcher, "dispatch_once", lambda scope, **kw: real(
+        scope, **{**kw, "sender": sender, "now": _HOST_RUN_AT + timedelta(minutes=1)}))
+    return sender
+
+
+def _outbox_passes(monkeypatch) -> list[int]:
+    from app.jobs import alert_dispatch
+
+    passes: list[int] = []
+    monkeypatch.setattr(alert_dispatch, "run_once", lambda: passes.append(1) or {})
+    return passes
+
+
+def _delivery_states() -> list[str]:
+    from app.alerts.models import AlertDelivery
+
+    with session_scope() as session:
+        return [str(row.transport_status)
+                for row in session.execute(select(AlertDelivery)).scalars().all()]
+
+
+def test_the_host_run_sends_the_outage_alert_it_planned(isolated_db, monkeypatch):
+    """Executed on the entry point alone before it passed the outbox (no
+    scheduler, a run every 30 minutes from 02:32 to 20:02 UTC): 36 runs, 18 of
+    them firing and exiting 2, one alert READY and PENDING after eight hours,
+    nothing sent."""
+    sender = _recording_sender(monkeypatch)
+
+    assert _host_run(monkeypatch) == 2
+    assert _delivery_states() == ["SENT"]
+    assert len(sender.sent) == 1
+
+
+def test_the_host_run_fails_for_an_outage_the_alert_path_did_not_take(
+        isolated_db, monkeypatch):
+    """Live mode with nothing promoted: the evaluation refuses, nothing is
+    planned, and an outbox pass has nothing to send. The unit counts 0 and 2 as
+    success, so only another code starts its `OnFailure=`, the host notice."""
+    passes = _outbox_passes(monkeypatch)
+
+    assert _host_run(monkeypatch, promoted=False) == 1
+    assert _delivery_states() == []
+    assert passes == []
+
+
+def test_the_host_run_fails_when_its_outbox_pass_raises(isolated_db, monkeypatch):
+    from app.jobs import alert_dispatch
+
+    def locked() -> dict[str, object]:
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(alert_dispatch, "run_once", locked)
+
+    assert _host_run(monkeypatch) == 1
+    assert _delivery_states() == ["PENDING"]
+
+
+def test_with_alerting_disabled_the_host_run_reports_the_outage_as_before(
+        isolated_db, monkeypatch):
+    """Nothing is evaluated in this mode, so there is nothing to send."""
+    passes = _outbox_passes(monkeypatch)
+
+    assert _host_run(monkeypatch, mode="disabled", promoted=False) == 2
+    assert passes == []
+
+
+def test_a_quiet_host_run_passes_no_outbox(isolated_db, monkeypatch):
+    """The 48 runs of a normal day capture nothing, and stay what they were."""
+    from app.alerts import watchdog
+    from app.config import get_settings
+    from tests.test_alert_end_to_end import _snapshot
+
+    monkeypatch.setenv("ALERTS_MODE", "live")
+    get_settings.cache_clear()
+    passes = _outbox_passes(monkeypatch)
+    with session_scope() as session:
+        _snapshot(session, computed_at=datetime.now(UTC) - timedelta(minutes=5),
+                  effective="trim", prev_id=None)
+
+    assert watchdog.main([]) == 0
+    assert passes == []
+
+
 def test_an_evaluation_that_returns_a_failure_is_not_counted_as_retried(
         isolated_db, monkeypatch):
     """"It did not throw" is not the same as "it worked".

@@ -364,7 +364,7 @@ bubblegauge alerts explain --evaluation-id ID
 bubblegauge alerts recover-evaluations --once
 bubblegauge alerts recover-leases --once
 bubblegauge alerts reconcile-sidecars
-bubblegauge alerts watchdog --once             # exit 2 = outage detected
+bubblegauge alerts watchdog --once             # exit 2 = outage detected and handed on; 1 = detected, not announced
 bubblegauge alerts dispatch --once             # one outbox pass
 
 bubblegauge export snapshots --all --format parquet --out snapshots.parquet
@@ -532,7 +532,8 @@ records the actual resulting volume. Mandatory event recall is measured
 against the five frozen catalogue entries (section 11b).
 
 Operational mechanisms use the strongest producer that actually exists. The
-recompute watchdog captures and evaluates its own typed input; recovery and the
+recompute watchdog captures and evaluates its own typed input, and its host run
+sends what that planned; recovery and the
 dispatcher persist their real outcomes. Inventory-only mechanisms whose typed
 producer or calibration is unavailable remain disabled with an explicit
 reason instead of pretending to evaluate.
