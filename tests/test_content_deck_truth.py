@@ -14,6 +14,36 @@ the premium it reads (24 monthly prints back) moved from -0.06 to -0.33 pp;
 the high-yield spread stood at 332 to 348 bps that week, 73 to 89 bps above
 its low (259 bps, January 2025) in the history the service keeps since July
 2023. 601 of the 615 S5 readings come from the excess bond premium.
+
+The changelog case and the override case are about the deck's version table
+and the red-flag header. The table's tip says it is shown "so you never
+mistake a methodology change for a market event"; the table ended at 3.1.0,
+before the three releases the served changelog (app/references.py, CHANGELOG)
+marks as moving the score. What each of the three rows states, in the same 615
+snapshots:
+
+  - 3.3.0: id 10 (2026-07-14 06:10 UTC, service 3.2.0) median 32.83, band
+    hold; id 11 (15:12 UTC, 3.3.0) median 45.46, band trim. The raw readings
+    of breadth, LPPLS and the semis run-up are identical in the two runs. The
+    aggregation of 3.3.0 on id 10's own sub-scores gives a point score of
+    44.69 against the stored 32.70: 11.99 of the step's 12.67 points.
+  - 3.3.2: id 14 (2026-07-15 18:11 UTC, 3.3.0) median 48.84; id 15 (22:25
+    UTC, 3.3.2) median 51.85. No snapshot carries 3.3.1: its move of S5 to the
+    excess bond premium went live in the same deploy. Of the point score's
+    +3.01 (48.88 to 51.89), D4 alone (0.20 to 0.27) is +1.05, S5 alone (0.21
+    on the high-yield spread tier to 0.45 on the excess bond premium) +1.77
+    and S3 +0.17, so the row names D4 and S5.
+  - 3.9.0: id 144 (2026-08-23 18:01 UTC, 3.8.0) median 51.41; id 145 (22:02
+    UTC, 3.9.0) median 51.51, S4 at 0.25 in both. On the 471 snapshots of
+    3.9.0, replayed from their stored sub-scores (the recomputed point score
+    equals the stored one on all 471), S4 at 0.05 instead of 0.25 lowers the
+    point score by 1.32 to 1.98 points, mean 1.54.
+
+The header said "If at least 3 of 4 fire" and no more. The GSADF flag was
+BLOCKED (not fireable) on all 490 snapshots that carry the typed flag
+contract, each with override_required_count 3 and
+override_fireable_universe_count 3. The override fired on none of the 615,
+and at most one flag was active at a time (breadth, on 176).
 """
 
 from __future__ import annotations
@@ -132,3 +162,43 @@ def test_the_s5_gloss_describes_the_reading_of_two_years_ago():
     said = " ".join(s5["entries"].values())
     assert not re.search(r"25-year|as of \w+ 20\d\d|spreads (are|were) ", said, re.I), said
     assert "as_of" not in s5
+
+
+def test_the_changelog_reaches_every_score_shifting_release():
+    from app.references import CHANGELOG
+
+    # The served changelog (GET /api/v1/meta/methodology) opens the `score`
+    # field of a release that moved the score with one of these marks. The
+    # deck's table says why it is shown (changelog.tip), so it has a row for
+    # each of them; a release marked this way later needs its row too.
+    marks = ("METHODOLOGY CHANGE", "D4 METHOD CHANGE", "SCORE-SHIFTING")
+    shifting = [entry["version"] for entry in CHANGELOG if entry["score"].startswith(marks)]
+    assert {"v3.3.0", "v3.3.2", "v3.9.0"} <= set(shifting)   # the marks select them
+
+    deck = _deck()
+    assert "never mistake a methodology change for a market event" in deck["changelog.tip"]["text"]
+    shown = {row["v"].removeprefix("v") for row in deck["changelog"]["items"]}
+    assert [version for version in shifting if version.removeprefix("v") not in shown] == []
+
+
+def test_the_override_line_says_what_fires_while_s4_is_contested():
+    from app.config import Settings
+    from app.engine.aggregate import evaluate_red_flags
+
+    # What the service does: GSADF_CONTESTED is true unless the operator sets
+    # it, a contested GSADF flag does not fire whatever the statistic reads,
+    # and the override needs three flags. So it fires only when the three
+    # other flags fire together; one of them calm and it does not.
+    assert Settings.model_fields["gsadf_contested"].default is True
+    firing = {"gsadf_explosive_p05": True, "gsadf_contested": True, "semi_runup_pp": 200.0,
+              "hy_oas_bps": 500.0, "hy_oas_3yr_tight_bps": 300.0, "breadth_pct": 40.0,
+              "index_within_2pct_of_ath": True}
+    flags = evaluate_red_flags(**firing)
+    assert not flags.gsadf_explosive_noncontested
+    assert flags.override_fired
+    for calm in ({"semi_runup_pp": 100.0}, {"hy_oas_bps": 350.0}, {"breadth_pct": 60.0}):
+        assert not evaluate_red_flags(**{**firing, **calm}).override_fired
+
+    # The header states the rule (3 of 4); it must also say what that needs
+    # under the standing setting.
+    assert "all three others" in _deck()["redflag.header"]["text"]
