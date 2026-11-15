@@ -123,7 +123,14 @@ SLA_MONTHLY_BAR = 35  # TD 1month bars are DATED AT MONTH START (live capture:
                       # so a 7d SLA would flag the freshest bar stale
 SLA_CAPE = 45
 SLA_FINRA = 75
-SLA_QUARTERLY = 120  # Z.1 MMF assets
+# Z.1 MMF assets. FRED dates a quarter at its first day and the Z.1 release
+# comes about 10 weeks after the quarter ends, so the newest quarter is about
+# 163 days old on the day it appears and about 255 on the day the next release
+# replaces it. 290 = that and five weeks of a late release: stale says a release
+# was missed. At 120 it was true on every payload (14 of 14 retained,
+# 2026-11-08 to 11-10, as_of 2026-04-01, 221 to 223 days; and in the capture of
+# 2026-07-15, as_of 2026-01-01, 195 days).
+SLA_QUARTERLY = 290
 
 
 def _series_item(key: str, name: str, kind: str, unit: str, source: str,
@@ -487,7 +494,8 @@ def build_feed(raw: Any, data: Any) -> dict[str, Any]:
     m["ust10y_yield_pct"] = _fred_scalar_from(fred_cache.get("DGS10"), "pct", "DGS10", SLA_DAILY)
     m["tbill3m_yield_pct"] = _fred_scalar_from(fred_cache.get("DTB3"), "pct", "DTB3", SLA_DAILY)
 
-    # MMF assets (decision 5A): quarterly Z.1, honestly ~1 quarter stale.
+    # MMF assets (decision 5A): quarterly Z.1, always about a quarter behind;
+    # `stale` turns true only past SLA_QUARTERLY, when a release was missed.
     try:
         mmf = _fred_series("MMMFFAQ027S")
         m["mmf_total_assets_usd"] = _fred_scalar_from(

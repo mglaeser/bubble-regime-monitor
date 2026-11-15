@@ -22,7 +22,7 @@
 | 2A | Fed Broad Dollar Index, never DXY | key `usd_broad_index`, source `fred:DTWEXBGS`, name "US dollar (Fed Broad Dollar Index)", note says **NOT ICE DXY** |
 | 3A | FRED monthly series + TD fresh scalars | `usdjpy`/`usdchf` *series* from FRED H.10 (10-day stale SLA); *scalars* from TD `USD/JPY`/`USD/CHF` with automatic FRED fallback |
 | 4B | **TR rate series in addition to yields** | `ust10y_tr` (IEF, dividend-adjusted) and `tbill3m_tr` (BIL) as `kind:"total_return"`, labeled ETF proxies — alongside `ust10y_yield`/`tbill3m_yield` (`kind:"yield"`) |
-| 5A | FRED quarterly Z.1 MMF assets | `mmf_total_assets_usd`, unit `USD_mn`, note states ~1-quarter publication lag, 120-day stale SLA |
+| 5A | FRED quarterly Z.1 MMF assets | `mmf_total_assets_usd`, unit `USD_mn`, note states ~1-quarter publication lag, 290-day stale SLA counted from FRED's date for the quarter (its first day), so `stale` means a release was missed |
 | keys | concept-named | `gold`, `silver`, `btc`, `ust10y_tr` … — proxies live in `name`/`source`/`note`, never the key |
 
 **Confirmations (as requested):**
@@ -88,7 +88,7 @@ GET /api/v1/dashboard/feed?sections=series&symbols=qqq,gold,btc
 ## 4 · Refresh, freshness, failure
 
 - Built **inside the twice-daily recompute (06:00/18:00 UTC), strictly after the score persists** — a feed failure never touches scoring; the endpoint then serves the previous payload. Manual `POST /api/v1/admin/refresh` also rebuilds it. **No on-request upstream pulls, ever** (cached read of a persisted row; migration 0005, table `dashboard_feed`).
-- Stale SLAs: daily market data 7 d · FRED H.10 FX 10 d · CAPE 45 d · FINRA 75 d · quarterly MMF 120 d. `stale` is null when `as_of` is unknown.
+- Stale SLAs: daily market data 7 d · FRED H.10 FX 10 d · CAPE 45 d · FINRA 75 d · quarterly MMF 290 d (the newest quarter is about 163 to 255 days old by FRED's date). `stale` is null when `as_of` is unknown.
 - Quota cost per recompute: ~6 Tiingo requests, ~6 Twelve Data credits (through the existing per-minute throttle and credit governor), ~6 FRED series. Negligible against all limits.
 - Tests: golden-fixture build (frozen inventories, 61-point pad, honest kinds), one-source-down degradation (200 + `available:false`), spot→ETF fallback labeling, endpoint 503/filters/lenient-params. 206 tests green.
 
@@ -169,7 +169,7 @@ Envelope (real): `"meta": {"computed_at": "2026-07-15T23:29:51.060987+00:00", "s
 
 **Full-payload artifact:** [`docs/dashboard-feed-capture2.json`](docs/dashboard-feed-capture2.json) (committed; captured from the live endpoint at the timestamp above, validated 12 series x 61 points + 34 metrics) is the complete byte contract. Integrate against it plus the live endpoint.
 
-Provider date conventions visible in the real bytes (both intentional): Tiingo monthly bars are dated at month **end** — the in-progress month carries the forward end-of-month date (`2026-07-31`) — while Twelve Data 1-month bars are dated at month **start** (`2026-07-01`); `anchor_partial` plus the per-series stale SLAs cover both.
+Provider date conventions visible in the real bytes (both intentional): Tiingo monthly bars are dated at month **end** — the in-progress month carries the forward end-of-month date (`2026-07-31`) — while Twelve Data 1-month bars are dated at month **start** (`2026-07-01`); `anchor_partial` marks the open month. While a month runs the six Tiingo series and `gold_ttm_pct` carry that forward date as `as_of`, so their `stale` can turn true from the eighth day after the month ends and not before; the `btc` series has the same monthly resolution through its 35-day SLA.
 
 ## 5-legacy · The pre-capture representative sketch (superseded by the real bytes above)
 
