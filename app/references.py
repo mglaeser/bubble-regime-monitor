@@ -399,9 +399,17 @@ REGISTRY: dict[str, Methodology] = {
         weight=0.13,
         grounding="judgmental",
         block="D",
+        # `what`, `why` and the first caveat are what the digest's model reads
+        # for D2 (app/message_engine/context.py). They describe the number the
+        # code computes: it follows the growth rate, and the rollover is the
+        # balances falling two months running, not growth turning down.
+        # Production, 2026-07-11 to 2026-11-10: growth 53.7 -> 31.4 % with "no
+        # rollover" 609 times and a confirmed one never; the sub-score fell
+        # from 0.492 to 0.109, 3.30 headline points (tests/test_d2_registry.py).
         what=(
-            "FINRA customer margin debit balances: year-over-year growth plus a "
-            "rollover-confirmation multiplier, read as a deleveraging-confirmation signal."
+            "FINRA customer margin debit balances: their year-over-year growth, counted in full "
+            "while the balances have fallen two months running and scaled down otherwise. The "
+            "reading follows the growth rate, so it falls when growth slows."
         ),
         how=(
             "Parse the FINRA margin-statistics XLSX debit-balance column; yoy = 12-month % change "
@@ -410,11 +418,11 @@ REGISTRY: dict[str, Methodology] = {
             "sub_score = base * mult."
         ),
         why=(
-            "Rapid leverage expansion marks exuberance, and the rollover — margin debt YoY turning "
-            "down — is the confirmation that deleveraging has begun; at the 2000, 2007, and 2021 "
-            "peaks, margin-debt YoY rolled over 2-6 months before or at the index peak. Because the "
-            "level itself trends mechanically with the market, only the rate of change and the "
-            "rollover carry signal."
+            "Rapid leverage expansion marks exuberance, and the rollover — the balances themselves "
+            "falling two months running — is the confirmation that deleveraging has begun; at the "
+            "2000, 2007, and 2021 peaks, margin-debt YoY rolled over 2-6 months before or at the "
+            "index peak. Because the level itself trends mechanically with the market, only the "
+            "rate of change and the rollover carry signal."
         ),
         references=[
             "FINRA Rule 4521 margin statistics",
@@ -426,7 +434,17 @@ REGISTRY: dict[str, Methodology] = {
             "returns and a 1-2 month lag versus stocks -> this is confirmation-only, low weight. "
             "There is a 3-4 week publication lag (published ~third week of the following month) and "
             "no true fallback source — cache and tolerate staleness (MacroMicro mirrors the same "
-            "series for display only)."
+            "series for display only).",
+            # Second, so the prompt still reads the caveat above (it takes
+            # caveats[0]); the endpoints serve both. The numbers are the
+            # artifact's anchor 25, span 35 and multipliers 1.0 / 0.6:
+            # 46 = 25 + 0.6 * 35 (tests/test_d2_registry.py computes them).
+            "The sub-score is high only while year-over-year growth is still high; once leverage "
+            "has unwound it reads 0. Growth at or below 25% reads 0 with or without a confirmed "
+            "rollover, and a confirmed rollover reads above the unconfirmed maximum of 0.6 only "
+            "while growth is still above 46%. While no rollover is confirmed, a falling reading "
+            "means that margin debt is growing more slowly; it does not say that the risk of a "
+            "turn has fallen.",
         ],
     ),
     "d3": Methodology(
