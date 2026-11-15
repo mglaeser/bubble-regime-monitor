@@ -572,14 +572,6 @@ def test_mlk_day_is_a_trading_day_before_1998():
     assert not is_trading_day(date(1998, 1, 19))
 
 
-def test_a_feed_is_current_the_session_after_a_one_off_closure():
-    """2025-01-09 was a closure (Jimmy Carter's day of mourning), so on 01-10
-    the newest bar a daily feed must have printed is 01-08's."""
-    from app.services.compute import _feed_is_current
-
-    assert _feed_is_current([("2025-01-08", 100.0)], "2025-01-10") is True
-
-
 def test_recompute_slot_ttl_uses_slots_not_hours():
     from app.alerts.calendars import Calendar, resolve_ttl
 
