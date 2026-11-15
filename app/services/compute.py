@@ -303,8 +303,9 @@ class RawInputs:
 
     index_within_2pct_of_ath: bool = False
 
-    # last good (non-dropped) D2 reading from a prior snapshot, for the
-    # margin >90d staleness guard: {"value", "sub_score", "timestamp"}
+    # D2's newest stored reading that was computed from FINRA's file (never a
+    # cached one), with the reference month it was computed from:
+    # {"value", "sub_score", "as_of"} (last_finra_reading)
     margin_cached: dict[str, Any] | None = None
 
     source_health: list[dict[str, Any]] = field(default_factory=list)
@@ -445,6 +446,38 @@ def _track(raw: RawInputs, source: str, fn: Any) -> Any:
         raw.gather_errors[source] = sanitize(exc, limit=300)
         log.warning("gather_failed", source=source, error=sanitize(exc))
         return None
+
+
+def last_finra_reading() -> dict[str, Any] | None:
+    """D2's newest stored reading that was computed from FINRA's file, with the
+    reference month it was computed from.
+
+    A cached reading is stored with fallback_used, so it is never read back:
+    the reading served is the last one the file gave, and its age keeps
+    counting from that file's reference month. Without the filter each cached
+    row cited the cached row before it (production, 2026-07-16: the 18:03 UTC
+    note read "serving cached reading from 2026-07-16T06:04:27", itself a
+    cached row; the file's reading was the one of 2026-07-15 23:29).
+
+    The month is the stored payload's own as_of (block_d.indicators.d2);
+    indicator_readings has no date column. All 615 production payloads carry
+    it. A row without it yields as_of None, which compute_snapshot does not
+    serve."""
+    from app.models import IndicatorReading
+
+    with session_scope() as session:
+        row = session.execute(
+            select(IndicatorReading)
+            .where(IndicatorReading.indicator_id == "d2",
+                   IndicatorReading.dropped.is_(False),
+                   IndicatorReading.fallback_used.is_(False),
+                   IndicatorReading.sub_score.is_not(None))
+            .order_by(IndicatorReading.timestamp.desc()).limit(1)
+        ).scalars().first()
+        if row is None:
+            return None
+        stored = ((row.snapshot.block_d or {}).get("indicators") or {}).get("d2") or {}
+        return {"value": row.value, "sub_score": row.sub_score, "as_of": stored.get("as_of")}
 
 
 def gather_inputs() -> RawInputs:
@@ -661,19 +694,7 @@ def gather_inputs() -> RawInputs:
         raw.margin_balances = r.value
         raw.margin_months = getattr(r, "months", None)   # for calendar YoY (C-07)
         raw.margin_as_of = r.provenance.as_of
-    from app.models import IndicatorReading
-
-    with session_scope() as session:
-        cached_d2 = session.execute(
-            select(IndicatorReading)
-            .where(IndicatorReading.indicator_id == "d2",
-                   IndicatorReading.dropped.is_(False),
-                   IndicatorReading.sub_score.is_not(None))
-            .order_by(IndicatorReading.timestamp.desc()).limit(1)
-        ).scalars().first()
-        if cached_d2:
-            raw.margin_cached = {"value": cached_d2.value, "sub_score": cached_d2.sub_score,
-                                 "timestamp": cached_d2.timestamp.isoformat()}
+    raw.margin_cached = last_finra_reading()
 
     r = _track(raw, "sec_edgar", edgar_src.hyperscaler_readings)
     if r:
@@ -1124,16 +1145,22 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
                 margin_yoy = d2_margin.yoy_pct(raw.margin_balances)
         except ValueError as exc:
             log.warning("margin_yoy_calendar_gap", error=str(exc)[:120])
-    # FINRA SLA: 75 days tolerates one skipped monthly publication (series
-    # posts ~3 weeks after month-end). Beyond that, never compute a YoY.
+    # FINRA SLA: 75 days from the reference month-end. The series posts ~3
+    # weeks after month-end (in production a month appeared 14 to 20 days
+    # after its end), so the month in hand stays inside the SLA while the next
+    # one arrives up to 44 days after its own end. One skipped publication is
+    # generally NOT covered: the file after it arrives two months plus that
+    # lag, 73 to 82 days, after the month in hand ended, and D2 is dropped
+    # until it does. Beyond the SLA, never compute a YoY.
     if margin_yoy is not None and (margin_age is None or margin_age <= 75):
         yoy = margin_yoy
         # Within the FINRA SLA (75 days) the rollover confirmation is asserted
-        # normally. FINRA posts monthly ~3 weeks after month-end, so the FRESHEST
-        # possible reading is routinely ~45-75 days old — a ~71-day age is as
-        # current as the series ever gets, NOT stale. (Data older than the SLA
-        # never reaches here; it takes the cached branch below, which reports
-        # rollover as unknown.)
+        # normally. FINRA posts monthly ~3 weeks after month-end, so between
+        # two publications the month in hand is routinely up to ~7 weeks old
+        # (14 to 46 days in production, dated by month-end) — as current as
+        # the series gets, NOT stale. (A file older than the SLA never reaches
+        # here: below, D2 is served from a stored reading only while that
+        # reading's own month is inside the SLA, and dropped otherwise.)
         # Rollover confirmation is CALENDAR-aware when dated months are available
         # (v3.7.7/§3.1): on a publication gap the positional [-3:]/[-12:] windows
         # straddle the hole and could flip the D2 multiplier (0.6<->1.0) from
@@ -1167,28 +1194,55 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
                    "rollover_assertable": rolled_state is not None,
                    "multiplier": d2_margin.multiplier(rolled),
                    "release_period": raw.margin_as_of})
-    elif raw.margin_cached is not None:
-        # Guard (a): data older than 90 days (or missing) never feeds a YoY
-        # across a broken window — serve the last good cached reading.
+    elif (raw.margin_cached is not None
+          and (cached_age := _age_days(raw.margin_cached.get("as_of"))) is not None
+          and 0 <= cached_age <= FRESHNESS_SLA_DAYS["d2"]):
+        # FINRA's file could not be read, or it lacks the month a year back:
+        # serve the last reading computed from the file, dated by its own
+        # reference month, while that month is inside the SLA (the same test
+        # as IndicatorOutput.stale). It is a tier of the fallback chain
+        # (AGENTS.md rule 3), not a placeholder (rule 4): the service computed
+        # it from the file, it keeps its date, and it ends with the SLA.
+        # Its date is the reading's, not the failed fetch's: with as_of None
+        # the coverage gate cannot count it as fresh, and Block D coverage
+        # reads 0.87 instead of 1.0 although the month is weeks old.
+        # One failed pull must not drop D2: replayed on the stored series (605
+        # snapshots, 2026-07-14 .. 2026-11-10, point score), dropping it steps
+        # the headline at once by -1.68 to +3.37 points (median +2.10) and
+        # changes the band word on 130 snapshots (127 of them trim -> de-risk).
         sub = float(raw.margin_cached["sub_score"])
         sub_d["d2"] = sub
         mc_in.d2_sub = sub
-        reason = (f"reference month {raw.margin_as_of} older than 75d SLA"
-                  if margin_age is not None and margin_age > 75 else "margin statistics unavailable")
+        cached_as_of = raw.margin_cached["as_of"]
         indicators["d2"] = IndicatorOutput(
             "d2", raw.margin_cached.get("value"), sub, False, "finra_xlsx (cached)", True,
-            note=f"{reason}; serving cached reading from {raw.margin_cached['timestamp']}; "
-                 "rollover: unknown",
-            as_of=raw.margin_as_of,
+            note=f"margin statistics unavailable; serving the reading of reference month "
+                 f"{cached_as_of}; rollover: unknown",
+            as_of=cached_as_of,
             # A cached reading says so in prose already; say it in a field too.
             extra={"yoy_pct": raw.margin_cached.get("value"),
                    "rollover_state": None,
                    "rollover_assertable": False,
                    "multiplier": None,
-                   "release_period": raw.margin_as_of})
+                   "release_period": cached_as_of})
     else:
+        # Margin debt older than its SLA is not scored, from the file or from a
+        # stored reading: D2 is dropped and Block D renormalized, the rule the
+        # gate above applies to the file. Production, 2026-07-16 (the month
+        # was then dated by its first day): the file's month read 76 days old,
+        # the gate refused its YoY, and the sub-score stored from that same
+        # month was scored for two more recomputes.
+        # A stored reading with no end keeps one sub-score in the headline for
+        # as long as the file is unreadable, and that is not harmless either:
+        # on the same stored series a D2 frozen at July's 0.492 starts level
+        # with the live headline and reads 3.30 points above it by 2026-11-10
+        # (52.11 against 48.81; band word different on 138 snapshots). So the
+        # reading is carried for the SLA and then dropped, a step of the size
+        # given above on that day.
+        reason = (f"reference month {raw.margin_as_of} older than 75d SLA"
+                  if margin_age is not None and margin_age > 75 else "margin statistics unavailable")
         indicators["d2"] = IndicatorOutput("d2", None, None, True, "finra_xlsx", False,
-                                           note="margin statistics unavailable, no cached reading; "
+                                           note=f"{reason}, no reading inside the SLA; "
                                                 "dropped (no true fallback)")
 
     # ---- D3 hyperscaler FCF ----

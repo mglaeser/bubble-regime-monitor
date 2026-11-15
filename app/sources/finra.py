@@ -2,10 +2,11 @@
 
 URL: https://www.finra.org/sites/default/files/2021-03/margin-statistics.xlsx
 Published third week of the month following the reference month; FINRA states
-"data feeds are not available" — there is NO true fallback: cache and
-tolerate staleness (the engine's operative D2 freshness SLA is 75 days, which
-covers one skipped publication; as_of is the reference month-END). MacroMicro
-mirrors the series for display only.
+"data feeds are not available" — there is NO true fallback: when the file
+cannot be read, the engine serves the last reading it computed from it while
+that reading's reference month is inside the D2 freshness SLA (75 days from
+the reference month-END, which is as_of), then drops D2. MacroMicro mirrors
+the series for display only.
 
 ROW ORDER IS NOT ASSUMED. The live file lists months NEWEST-FIRST, which a
 naive column read once inverted into a -22% "YoY" computed across the series
