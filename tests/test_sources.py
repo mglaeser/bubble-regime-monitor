@@ -304,6 +304,41 @@ class TestSourceChains:
         assert result.value[-1] == pytest.approx(13.00)
 
 
+def _slickcharts_table(weights: list[float], last_row: str = "") -> str:
+    rows = "".join(f"<tr><td>{i}</td><td>Co{i}</td><td>SY{i}</td><td>{w:.2f}%</td></tr>"
+                   for i, w in enumerate(weights, 1))
+    return f"<table><tr><th>#</th><th>Company</th><th>Symbol</th><th>Weight</th></tr>{rows}{last_row}</table>"
+
+
+class TestSlickchartsFallback:
+    """README "Data sources" and app/sources/ssga.py: the S2 input is the sum
+    of the top-10 INDIVIDUAL HOLDING weights, from SSGA's holdings file or,
+    when that fails, from Slickcharts' holdings table."""
+
+    # 71 holdings; the ten largest add up to 44.2.
+    WEIGHTS = [10.4, 7.9, 6.5, 4.2, 3.9, 3.0, 2.5, 2.2, 1.9, 1.7] + [1.5] + [0.1] * 60
+
+    def test_a_holding_above_ten_percent_is_counted(self):
+        """With single weights cut at 10 % the fallback read 35.3 here: the
+        10.4 left out and the eleventh name (1.5) counted in its place. SSGA's
+        file with the same weights reads 44.2."""
+        from app.sources.ssga import _top10_from_slickcharts, _top10_from_xlsx
+
+        assert _top10_from_slickcharts(_slickcharts_table(self.WEIGHTS)) == pytest.approx(44.2, abs=0.01)
+        ssga = _xlsx([["Name", "Ticker", "Weight"]] + [[f"Co{i}", f"SY{i}", w] for i, w in enumerate(self.WEIGHTS, 1)])
+        assert _top10_from_xlsx(ssga) == pytest.approx(44.2, abs=0.01)
+
+    def test_a_total_row_fails_the_check_of_the_sum(self):
+        """The cut also kept out a row that is no holding. The check of the
+        sum (5 < sum < 80) answers that row: with a 100 % total the ten largest
+        rows add up to 142.5, and the read fails instead of scoring."""
+        from app.sources.ssga import _top10_from_slickcharts
+
+        total = "<tr><td></td><td>Total</td><td></td><td>100.00%</td></tr>"
+        with pytest.raises(SourceError, match="implausible top-10 sum 142.5"):
+            _top10_from_slickcharts(_slickcharts_table(self.WEIGHTS, last_row=total))
+
+
 class TestBreadthIsPolygonOnly:
     """Owner decision D9 (2026-09-28): breadth comes from Polygon grouped-daily
     only. Without a Polygon key there is no sweep to fall back to: the refresh

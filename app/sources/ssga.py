@@ -114,8 +114,20 @@ def _top10_from_slickcharts(html: str) -> float:
             continue
         cleaned = df[wcol].astype(str).str.replace("%", "", regex=False).str.strip()
         weights = pd.to_numeric(cleaned, errors="coerce").dropna()
-        # single-name index weights only (no S&P 500 name exceeds ~8%)
-        weights = weights[(weights > 0.0) & (weights <= 10.0)]
+        # No ceiling on a single weight: the ten largest rows of the holdings
+        # table are the answer, whatever they are. A cut at 10 % stood here
+        # ("no S&P 500 name exceeds ~8%") and left a larger name out of the sum
+        # without a word: 10.4 and nine others, 44.2 in all, came back as 35.3
+        # (S2 sub-score 0.75 for 1.00), while the SSGA path, which never had
+        # the cut, reads 44.2 from the same weights. The largest weight in
+        # SSGA's file of 2026-11-12 is 7.90 %. The fallback has not run in
+        # production (SSGA served 615 of 615 snapshots), so no published score
+        # moves. What the cut also kept out, a row that is no holding (a 100 %
+        # total), now fails the check of the sum below: the fallback gives no
+        # reading where it used to leave that row out. The cut went with the
+        # audit of 2026-11-11, whose findings the owner asked to have
+        # implemented (tests/test_sources.py::TestSlickchartsFallback).
+        weights = weights[weights > 0.0]
         if len(weights) >= 10 and (best is None or len(weights) > len(best)):
             best = weights
     if best is None:
