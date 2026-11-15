@@ -2479,3 +2479,125 @@ def test_the_ledger_sink_cannot_carry_a_workflow_command():
         assert not line.lstrip().startswith("::")  # the runner's TrimStart
         assert line.lstrip().startswith("defect "), (
             "the non-whitespace label is the guard TrimStart cannot remove")
+
+
+class TestTheDocumentDescribesThisPanel:
+    """docs/INDEPENDENT_REVIEW_PANEL.md is where an operator learns to run the
+    panel, and the script's own header sends its reader there. Each test reads
+    a fact off the workflow or the script and asks the document for it.
+
+    What an operator does with a wrong sentence there: requires a status check
+    that nothing publishes (the document said `cross-vendor`; the job is
+    `panel` and the status `independent-verify`), reads a dormant panel as a
+    pass (it said "deterministic CI only"; the workflow publishes failure and
+    nothing merges), or sets a repo variable the workflow never passes (it
+    offered `VERIFIER_MODEL`)."""
+
+    ROOT = Path(__file__).resolve().parents[1]
+    DOC = ROOT / "docs" / "INDEPENDENT_REVIEW_PANEL.md"
+    WORKFLOW = ROOT / ".github" / "workflows" / "independent-verify.yml"
+
+    @classmethod
+    def _workflow(cls) -> dict:
+        return yaml.safe_load(cls.WORKFLOW.read_text(encoding="utf-8"))
+
+    @classmethod
+    def _steps(cls) -> list[dict]:
+        return [step for job in cls._workflow()["jobs"].values() for step in job["steps"]]
+
+    @classmethod
+    def _status(cls) -> tuple[str, str]:
+        """(context, shell script) of the one step that posts the commit status."""
+        (run,) = [step["run"] for step in cls._steps() if "/statuses/" in step.get("run", "")]
+        (context,) = set(re.findall(r'-f context="([^"]+)"', run))
+        return context, run
+
+    @classmethod
+    def _folded(cls, text: str) -> str:
+        """On one line: the document wraps at 80 columns, so a quoted status or
+        a list of names spans lines."""
+        return " ".join(text.split())
+
+    @classmethod
+    def _items(cls, heading: str) -> list[str]:
+        """The numbered items under one `## ` heading, each folded."""
+        doc = cls.DOC.read_text(encoding="utf-8")
+        section = doc.split(f"\n## {heading}", 1)[1].split("\n## ", 1)[0]
+        return [cls._folded(item) for item in re.split(r"(?m)^(?=\d+\. )", section)[1:]]
+
+    def test_the_document_names_the_trigger_the_job_and_the_status_context(self):
+        workflow = self._workflow()
+        triggers = set(workflow[True])      # YAML 1.1 reads the key `on` as true
+        jobs = set(workflow["jobs"])
+        context, _ = self._status()
+        doc = self._folded(self.DOC.read_text(encoding="utf-8"))
+        assert triggers and jobs
+        for trigger in sorted(triggers):
+            assert f"`{trigger}`" in doc, (
+                f"the workflow runs on {trigger}; the document does not name it")
+        named = set(re.findall(r"job `([^`]+)`", doc))
+        assert named == jobs, (
+            f"the document names the job(s) {sorted(named)}; the workflow has {sorted(jobs)}")
+        assert f"status `{context}`" in doc, (
+            f"the verdict is the commit status {context!r}; the document does not name it")
+
+    def test_the_document_quotes_the_dormant_status(self):
+        _, run = self._status()
+        state, description = re.search(
+            r'state=(\w+)\s+desc="(panel dormant[^"]*)"', run).groups()
+        quoting = [item for item in self._items("Mechanism") if description in item]
+        assert quoting, f"the document does not quote the dormant status {description!r}"
+        assert all(f"**{state}**" in item for item in quoting), (
+            f"a dormant panel publishes {state}; the document quotes the status without saying so")
+
+    def test_every_repo_variable_the_document_offers_is_one_the_workflow_reads(self):
+        read = {name
+                for step in self._steps()
+                for value in step.get("env", {}).values()
+                for name in re.findall(r"\$\{\{\s*vars\.(VERIFIER_[A-Z_]+)\s*\}\}", str(value))}
+        (step,) = [item for item in self._items("Activation") if "repo **variables**" in item]
+        # The list is the sentence that opens the step; what follows it may name
+        # settings that are NOT repo variables, to say so.
+        offered = set(re.findall(
+            r"`(VERIFIER_[A-Z_]+)`", step.split("repo **variables**", 1)[1].split(".", 1)[0]))
+        assert read and offered
+        assert sorted(offered - read) == [], (
+            "offered as a repo variable, but the workflow passes no such variable")
+        named = set(re.findall(r"VERIFIER_[A-Z_]+", step))
+        assert sorted(read - named) == [], (
+            "a repo variable the workflow reads is not named where the document lists them")
+
+    def test_every_setting_the_script_reads_is_in_the_document(self):
+        script = (self.ROOT / "scripts" / "independent_verify.py").read_text(encoding="utf-8")
+        read = set(re.findall(r'os\.environ(?:\.get\(|\[)\s*"(VERIFIER_[A-Z_]+)"', script))
+        (panel,) = [step for step in self._steps() if step.get("id") == "panel"]
+        # What the workflow takes from the pull-request event itself (the review
+        # range) is no operator's setting.
+        from_the_event = {name for name, value in panel["env"].items()
+                          if str(value).startswith("${{ github.event.")}
+        assert read and from_the_event < read
+        doc = self.DOC.read_text(encoding="utf-8")
+        # \b: `VERIFIER_PANEL` is not named by a mention of `VERIFIER_PANEL_MODELS`.
+        missing = sorted(name for name in read - from_the_event
+                         if not re.search(rf"\b{name}\b", doc))
+        assert missing == [], "read by the script, absent from its document"
+
+    def test_every_enforcement_note_lists_the_panels_status_among_the_required_checks(self):
+        """The publishing step calls its context a REQUIRED check. Three notes
+        say which checks the ruleset on main requires: CODEOWNERS (enforcement
+        status), ci.yml (ENFORCEMENT) and the document (Activation, branch
+        protection). They name the same checks, the panel's among them."""
+        context, _ = self._status()
+        codeowners = (self.ROOT / ".github" / "CODEOWNERS").read_text(encoding="utf-8")
+        note = codeowners.split("Required status checks", 1)[1].split("Code Owner review", 1)[0]
+        required = set(re.findall(r'"([^"]+)"', note))
+        assert context in required, (
+            f"CODEOWNERS lists {sorted(required)} as required; the panel's status "
+            f"{context!r} is not among them")
+        ci = (self.ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        ci_note = self._folded(
+            ci.split("# ENFORCEMENT", 1)[1].split("\n\n", 1)[0].replace("\n#", " "))
+        (step,) = [item for item in self._items("Activation") if "Branch protection" in item]
+        for name in sorted(required):
+            assert f"`{name}`" in ci_note, f"ci.yml's enforcement note does not name {name!r}"
+            assert f"`{name}`" in step, f"the document's branch-protection step does not name {name!r}"

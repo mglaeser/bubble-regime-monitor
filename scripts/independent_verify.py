@@ -63,10 +63,10 @@ ENV (same contract as the reference):
   VERIFIER_REQUIRED_APPROVER      required-approver model prefix (default gpt-5.6-sol)
   VERIFIER_MIN_OTHER_APPROVERS    independent corroborations required (default 1)
   VERIFIER_REQUIRE_KEY            fail closed without a key when true (hosted default)
-  VERIFIER_REQUIRE_DEFECT_LIST    a GREEN vote MUST carry a "defects" ledger (default
-                                  off; turn on only once the run logs show every
-                                  configured voice emitting the field, then it is on
-                                  for good — see docs/INDEPENDENT_REVIEW_PANEL.md)
+  VERIFIER_REQUIRE_DEFECT_LIST    a GREEN vote MUST carry a "defects" ledger (off by
+                                  default in this script; the hosted workflow sets it
+                                  to true — docs/INDEPENDENT_REVIEW_PANEL.md,
+                                  Mechanism, item 4)
 
 Usage:
   python scripts/independent_verify.py             verify the PR diff (exit != 0 on block)
