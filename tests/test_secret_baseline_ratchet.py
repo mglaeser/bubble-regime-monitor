@@ -23,6 +23,15 @@ fixture: the entry mutations to the committed file, the configuration mutations
 to the baseline at the pinned commit. A hand-written one would drift from the
 shape the gate actually produces, and then these tests would be about a
 document nobody ships.
+
+## `.secrets.baseline` cannot carry 64-hex digests
+
+The baseline's accepted-entries check and the entropy detector are in tension:
+detect-secrets cannot distinguish a published sha256 digest from a leaked
+token, so any doc or fixture that gains a literal 64-hex string needs a
+`# pragma: allowlist secret` rather than a baseline entry. Discovered while
+adding gate evidence. Not a defect in either tool — a constraint worth writing
+down, because the obvious fix (grow the baseline) is the wrong one.
 """
 
 from __future__ import annotations

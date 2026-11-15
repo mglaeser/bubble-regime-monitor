@@ -655,6 +655,10 @@ takes over now"):
   `structure.s3_tier_150` are named IN the catalogue as known Tier-A coverage
   gaps — must-never-miss rules with no staged arc yet — so their absence
   reads as outstanding evidence work, not demotion.
+  The candidate selection that preceded the freeze (2026-08-24, eight rules
+  in two tiers) is in the history of `docs/MANDATORY_EVENTS_PROPOSAL.md`; the
+  file is deleted, because its banner still said that no event was approved
+  or frozen.
 * **`active_stage` committed to 3** in the same decision. Committing the stage
   is still not delivery: the deployment sends only after the operator promotes
   the exact artifact through the evidence-gated service and sets
