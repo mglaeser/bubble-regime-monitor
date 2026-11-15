@@ -26,7 +26,10 @@ def run_once(*, dry_run: bool = False) -> dict[str, Any]:
 
     with session_scope() as session:
         report = run_retention(session, settings=settings, dry_run=dry_run)
-    return {"status": "ok", **report.as_dict()}
+    # A run that refused to sweep (inverted horizons: `skipped` names why) did
+    # no work and is not ok. It said "ok" here and in the daily heartbeat while
+    # `alerts retention` exited 1 for the same state.
+    return {"status": "refused" if report.skipped else "ok", **report.as_dict()}
 
 
 def job() -> None:
@@ -35,7 +38,7 @@ def job() -> None:
         from app.jobs.alert_recovery import heartbeat
 
         result = run_once()
-        heartbeat(COMPONENT, "ok", result)
+        heartbeat(COMPONENT, "critical" if result["status"] == "refused" else "ok", result)
         log.info("alert_retention_job", **result)
     except Exception as exc:
         log.error("alert_retention_job_failed", error_class=type(exc).__name__,

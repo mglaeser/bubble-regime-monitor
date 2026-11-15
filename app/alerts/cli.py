@@ -178,7 +178,7 @@ def cmd_retention(args: argparse.Namespace) -> int:
 
     result = run_once(dry_run=bool(args.dry_run))
     _print(result)
-    return 1 if result.get("skipped") else 0
+    return 1 if result["status"] == "refused" else 0
 
 
 def cmd_ruleset(_args: argparse.Namespace) -> int:

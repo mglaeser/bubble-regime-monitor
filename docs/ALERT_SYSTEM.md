@@ -511,12 +511,13 @@ run must be `COMMITTED`, have atomically applied its plan, and have a sane
 completion timestamp no more than ten hours old. Disabled mode explicitly
 reports the evaluator as not required.
 
-The health projection also reports the latest and p95 evaluation duration, P1
-enqueue-to-provider-attempt p95, rolling LLM cap/call/fallback evidence,
-missing typed sidecars, overdue or malformed outbox holds, the UNKNOWN
-deliveries, SQLite WAL/foreign-key/busy-timeout/RETURNING
+The health projection also reports the latest and p95 evaluation duration, the
+P1 enqueue-to-provider-attempt p95 of the last 30 days (null when no P1 was
+attempted in them), missing typed sidecars, overdue or malformed outbox holds,
+the UNKNOWN deliveries, SQLite WAL/foreign-key/busy-timeout/RETURNING
 capabilities, the Alembic revision, required partial indexes and immutability
-triggers, and live artifact/promotion agreement. Missing scheduler components
+triggers, and live artifact/promotion agreement (the rules and the phrase set:
+the live gate requires both). Missing scheduler components
 or required schema objects are critical; sidecar gaps, overdue holds and P1
 latency above 60 seconds are degraded rather than silently green. An UNKNOWN
 delivery is counted and degrades nothing: it is terminal, and no operator step
@@ -566,7 +567,9 @@ could still reuse that exact render), and events belonging to an open episode
 needed) or to a delivery not yet terminal. `UNKNOWN` is terminal (owner
 decision D2f): nothing sends it again, so its body and its events expire on
 these horizons as any settled delivery's do. Inverted horizons — metadata
-shorter than messages — are refused outright rather than half-applied.
+shorter than messages — are refused outright rather than half-applied, and the
+run says so: its status is `refused`, the retention heartbeat is critical, and
+`alerts retention` exits 1.
 
 ---
 
