@@ -130,7 +130,7 @@ Base path `/api/v1`; every response is `{"data": ..., "meta": ...}` with the fiv
 | `POST /api/v1/admin/refresh` | Start a recompute in the background — returns 202 immediately; single-flight (X-API-Key) |
 | `GET /api/v1/admin/refresh/status` | Running state + last recompute outcome (X-API-Key) |
 | `POST /api/v1/admin/send-sms` | Send the daily digest now over the configured transport (iMessage or SMS) — test path (X-API-Key) |
-| `POST /api/v1/admin/falsification` | Record a falsification outcome — append-only (X-API-Key) |
+| `POST /api/v1/admin/falsification` | Record that a falsification criterion tripped: `{"criterion": 1, "detail": "..."}` — the criterion by its number under "Falsification criteria" below (1-3), `detail` optional, at most 2000 characters; anything else is refused. Append-only (X-API-Key) |
 
 ## Deployment & updates
 
