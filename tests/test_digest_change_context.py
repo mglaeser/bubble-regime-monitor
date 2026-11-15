@@ -289,7 +289,9 @@ class TestTheTrendIsTheRulesState:
 
         months = [(f"2025-{month:02d}-28", float(month)) for month in range(1, 13)]
         falling = [(day, 13.0 - close) for day, close in months]
-        produced = {legs.month_end_faber(series, as_of_month="2026-01", feed_current=True)[0]
+        # every month of these one-bar-a-month series is handed over as closed
+        produced = {legs.month_end_faber(series, as_of_month="2026-01",
+                                         closed_months=frozenset(day[:7] for day, _ in series))[0]
                     for series in (months, falling, months[:6])}
         assert produced == {"IN", "OUT", None}
         for name in ("spy_trend", "qqq_trend", "spy_trend_1d_ago", "qqq_trend_1d_ago"):
