@@ -144,6 +144,44 @@ class TestSourceChains:
         assert result.provenance.fallback_used is True
         assert fetched == ["multpl", "shillerdata"]
 
+    # The line of https://www.multpl.com/shiller-pe that states the value, as
+    # the page served it on 2026-11-14 (verbatim). It is the one place on that
+    # page where the words "Current Shiller PE Ratio" stand together.
+    MULTPL_LINE = ('<meta name="description" content="Shiller PE Ratio chart, historic, and current data. '
+                   'Current Shiller PE Ratio is 39.95, a change of -0.15 from previous market close." />')
+
+    def test_the_current_cape_is_the_number_in_multpls_sentence(self):
+        from app.sources.cape import _current_from_multpl
+
+        assert _current_from_multpl(self.MULTPL_LINE) == 39.95
+
+    @pytest.mark.parametrize("page", [
+        'content="Current Shiller PE Ratio (CAPE 10) is 39.70, a change of -0.12"',
+        'content="Current Shiller PE Ratio as of Nov 10, 2026: 39.70"',
+        '<b>Current Shiller PE Ratio</b> <span class="h6">39.70</span>',
+        "Current Shiller PE Ratio - Mean: 17.33",
+    ], ids=["a-number-in-parentheses", "a-date-before-the-value", "a-heading-and-a-class", "another-figure"])
+    def test_a_reworded_page_is_a_failure_not_another_number(self, page):
+        """Behind the words "Current Shiller PE Ratio" each of these pages has
+        a number between 5 and 100 that is not the current CAPE: 10, 10, 6 and
+        17.33. Taking the first digits behind the words returned exactly
+        those, each as a healthy multpl reading."""
+        from app.sources.cape import _current_from_multpl
+
+        with pytest.raises(SourceError, match="could not parse current CAPE"):
+            _current_from_multpl(page)
+
+    def test_a_reworded_multpl_page_hands_over_to_shillers_spreadsheet(self, monkeypatch):
+        import app.sources.cape as cape
+
+        page = _Response(text='content="Current Shiller PE Ratio (CAPE 10) is 39.70"', content=b"xls")
+        monkeypatch.setattr(cape, "fetch", lambda source, url, **kwargs: page)
+        monkeypatch.setattr(cape, "_history_from_shillerdata", lambda content: [38.0, 39.1])
+        result = cape.current_cape()
+        assert result.value == 39.1
+        assert result.provenance.source == "shillerdata_ie_data"
+        assert result.provenance.fallback_used is True
+
     def test_the_multpl_monthly_table_needs_no_beautifulsoup(self, monkeypatch):
         import sys
 
