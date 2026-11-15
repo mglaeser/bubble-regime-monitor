@@ -41,6 +41,7 @@ import httpx
 
 from app.config import get_settings
 from app.logging_conf import get_logger
+from app.notify import NEVER_SENT
 from app.redaction import sanitize
 
 log = get_logger(__name__)
@@ -109,6 +110,12 @@ class ImessageResult:
     status_code: int | None
     error: str | None = None
     operation_id: str | None = None
+    #: No answer was read and the request may have gone out, so the proxy may
+    #: have accepted the message: every failure of the send itself except
+    #: `NEVER_SENT`. False when the proxy answered, whatever it answered, and
+    #: when nothing left this host (a refusal above, or `NEVER_SENT`). Only
+    #: the failure alarm reads it (app/services/failure_alert.py).
+    unanswered: bool = False
 
 
 #: The ONLY name permitted for a plain-HTTP destination.
@@ -337,7 +344,8 @@ def send_imessage(message: str, *, recipient: str | None = None) -> ImessageResu
         # misconfigured base URL can carry credentials in its userinfo.
         detail = sanitize(str(exc), limit=200)
         log.warning("imessage_send_failed", error_class=type(exc).__name__, error=detail)
-        return ImessageResult(ok=False, status_code=None, error=detail)
+        return ImessageResult(ok=False, status_code=None, error=detail,
+                              unanswered=not isinstance(exc, NEVER_SENT))
 
     # 202 EXACTLY, not any 2xx. The contract documents one success status for
     # this route, so another 2xx means something other than the proxy answered

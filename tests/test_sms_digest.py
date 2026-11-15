@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import httpx
+import pytest
+
 from app.engine.sms_report import _asciify, _clip_to_sms, deterministic_report
 from app.models import Snapshot
 
@@ -141,6 +144,43 @@ class TestSipgateSender:
         monkeypatch.setattr(sg.httpx, "Client", _Client)
         result = sg.send_sms("hello")
         assert result.ok is False and result.status_code == 402
+        assert result.unanswered is False      # sipgate answered
+        get_settings.cache_clear()
+
+    @pytest.mark.parametrize("exc, unanswered", [(httpx.ReadTimeout("no reply"), True),
+                                                  (httpx.ConnectError("refused"), False)],
+                             ids=["ReadTimeout", "ConnectError"])
+    def test_a_lost_answer_is_unanswered_and_a_request_that_never_left_is_not(
+            self, isolated_db, monkeypatch, exc, unanswered):
+        """As `send_imessage` (tests/test_imessage_digest.py): an exception
+        carries no status, and `unanswered` says whether the request may have
+        reached sipgate (anything but `app.notify.NEVER_SENT`)."""
+        monkeypatch.setenv("SIPGATE_TOKEN_ID", "token-XYZ")
+        monkeypatch.setenv("SIPGATE_TOKEN", "secret")
+        monkeypatch.setenv("SIPGATE_RECIPIENT", "the-recipient")   # never written: the client raises
+        from app.config import get_settings
+
+        get_settings.cache_clear()
+
+        class _Client:
+            def __init__(self, *a, **k):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def post(self, *a, **k):
+                raise exc
+
+        import app.notify.sipgate as sg
+
+        monkeypatch.setattr(sg.httpx, "Client", _Client)
+        result = sg.send_sms("hello")
+        assert result.ok is False and result.status_code is None
+        assert result.unanswered is unanswered
         get_settings.cache_clear()
 
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import httpx
 import pytest
 
 from app.config import Settings, near_miss_env_keys
@@ -71,6 +72,25 @@ def _fake_client(captured, resp):
         def post(self, url, json, headers):
             captured.update(url=url, json=json, headers=headers)
             return resp
+
+    return _Client
+
+
+def _raising_client(exc):
+    """A client whose POST raises `exc`: nothing leaves the host."""
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def post(self, *a, **k):
+            raise exc
 
     return _Client
 
@@ -507,6 +527,48 @@ class TestSendImessage:
         result = im.send_imessage("hi")
         assert result.ok is False and result.status_code is None
         assert _KEY not in (result.error or "")
+
+    @pytest.mark.parametrize("exc, unanswered", [
+        (httpx.ReadTimeout("no reply"), True),
+        (httpx.ReadError("reset"), True),
+        (httpx.RemoteProtocolError("closed"), True),
+        (httpx.WriteTimeout("stalled mid-write"), True),
+        (httpx.WriteError("broken pipe"), True),
+        (RuntimeError("anything else"), True),
+        (httpx.ConnectError("refused"), False),
+        (httpx.ConnectTimeout("no route"), False),
+        (httpx.PoolTimeout("no free connection"), False),
+        (httpx.ProxyError("tunnel refused"), False),
+    ], ids=lambda value: type(value).__name__ if isinstance(value, Exception) else str(value))
+    def test_a_lost_answer_is_unanswered_and_a_request_that_never_left_is_not(
+            self, isolated_db, imessage_env, monkeypatch, exc, unanswered):
+        """Every exception is "not ok" with no status, so the status cannot
+        tell a refused connection from a lost answer; `unanswered` does. The
+        four classes of `app.notify.NEVER_SENT` wrote nothing. Any other
+        failure, a class this list does not name included, may have reached
+        the proxy: unknown is the answer that claims least."""
+        import app.notify.imessage as im
+
+        monkeypatch.setattr(im.httpx, "Client", _raising_client(exc))
+        result = im.send_imessage("hi")
+        assert result.ok is False and result.status_code is None
+        assert result.unanswered is unanswered
+
+    def test_an_answer_is_never_unanswered(self, isolated_db, imessage_env, monkeypatch):
+        """Whatever the proxy answered, it answered; and a send refused before
+        a socket opened sent nothing."""
+        import app.notify.imessage as im
+        from app.config import get_settings
+
+        for resp in (_Resp(), _Resp(status_code=503, text="not ready"), _Resp(payload={})):
+            monkeypatch.setattr(im.httpx, "Client", _fake_client({}, resp))
+            assert im.send_imessage("hi").unanswered is False, resp.status_code
+
+        monkeypatch.setenv("IMESSAGE_API_BASE_URL", "http://messages.example.com")
+        get_settings.cache_clear()
+        refused = im.send_imessage("hi")
+        assert refused.ok is False and "cleartext" in (refused.error or "")
+        assert refused.unanswered is False
 
     @pytest.mark.parametrize("status", [200, 201, 204])
     def test_non_202_success_status_is_not_treated_as_sent(

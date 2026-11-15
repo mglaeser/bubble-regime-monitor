@@ -27,8 +27,9 @@ atomically): the usual way an outage ends is a deployed fix, which is a
 restart, and the all-clear must not be lost with it. The record is marked
 announced BEFORE the alarm is handed to the transport, so a process that dies
 mid-send still owes the all-clear (an all-clear nobody needed is a smaller
-mistake than a FAILING nobody retracts); a transport that answers "not
-delivered" undoes the mark, since then nobody was told.
+mistake than a FAILING nobody retracts), and so does a send whose answer never
+came; a transport that answers "not delivered", or a request that never left
+this host, undoes the mark, since then nobody was told.
 
 THE FILE IS THIS RECORD'S OWN FORMAT, in both directions: no backward
 compatibility (owner ruling, 2026-09-20). An image from before D11 cannot read
@@ -230,20 +231,24 @@ def _transport() -> tuple[str, str | None]:
     return transport, None
 
 
-def _send(transport: str, text: str) -> tuple[bool, int | None, str | None]:
-    """Hand the text to the transport. Never raises."""
+def _send(transport: str, text: str) -> tuple[bool, int | None, str | None, bool]:
+    """Hand the text to the transport: (ok, status, error, unanswered). The
+    last is True when the request may have gone out and no answer was read,
+    so nobody knows whether the reader was told. Never raises."""
     try:
         if transport == "imessage":
             result = send_imessage(text)
-            return result.ok, result.status_code, result.error
+            return result.ok, result.status_code, result.error, result.unanswered
         if transport == "sipgate":
             sms = send_sms(text)
-            return sms.ok, sms.status_code, sms.error
-        return False, None, f"unknown transport {transport!r}"
+            return sms.ok, sms.status_code, sms.error, sms.unanswered
+        return False, None, f"unknown transport {transport!r}", False   # nothing was sent
     except Exception as exc:
+        # The transports promise never to raise. One that does raised somewhere
+        # mid-send: unknown, like the lost answer.
         detail = sanitize(exc, limit=200)
         log.error("failure_alert_send_raised", transport=transport, error=detail)
-        return False, None, detail
+        return False, None, detail, True
 
 
 def notify_recompute_outcome(error: str | None,
@@ -334,14 +339,31 @@ def notify_recompute_outcome(error: str | None,
             if kind == "failure":
                 outage.announced = True
             _persist_locked()
-            ok, status_code, send_error = _send(transport, text)
+            ok, status_code, send_error, unanswered = _send(transport, text)
             if kind == "recovery" and ok:
                 _current = None              # closes only once the all-clear is out
             elif kind == "failure":
+                # The repeat clock starts only on a delivered alarm. After an
+                # unanswered send it stays unset like after any failed one, so
+                # the next failed recompute sends the alarm again: a second
+                # alarm is a smaller mistake than FAILURE_ALERT_REPEAT_H
+                # without one.
                 outage.last_sent = now if ok else None
-                if not ok:
-                    # A transport that answered "not delivered" is the KNOWN
-                    # case, unlike a crash mid-send: nobody was told this time.
+                if not ok and not unanswered:
+                    # A transport that answered "not delivered" (any answer
+                    # but its success), or a request that never left this
+                    # host, is the KNOWN case: nobody was told this time. A
+                    # send whose answer never came (`unanswered`) is not
+                    # known - the alarm may be on the phone - and keeps the
+                    # mark, like the crash mid-send. Undoing the mark on every
+                    # failed send lost that all-clear: after a read timeout the
+                    # next success found no announced outage and removed the
+                    # record, so an alarm the proxy delivered late stayed
+                    # unretracted. Not seen in production (2026-10-05 to
+                    # 2026-11-10: none of 222 recomputes failed; the proxy
+                    # answered all 21 alert deliveries in 1.04 to 2.08 s, the
+                    # read cap being 30 s), but a degraded network causes both
+                    # halves at once: the failed recompute and the lost answer.
                     outage.announced = was_announced
             _persist_locked()
         log.info("failure_alert", kind=kind, transport=transport, sent=ok,
