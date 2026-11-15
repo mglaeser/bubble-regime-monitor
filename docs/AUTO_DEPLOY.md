@@ -54,7 +54,9 @@ systemctl --user start bubblegauge.service
 A previous image that does not come up has found a schema it does not know
 (the journal names the revision): the schema has moved, and the way is
 forward - restore `:latest` to main's image, start the service, fix the
-commit.
+commit. The way back past a migration is the previous image on a copy of the
+database from before it, and it loses what was written since ("The database's
+copies", below).
 A merge reaches production within one tick plus the release, about six
 minutes: merge outside the stretch from :50 before to :35 after the recompute
 slots (02/06/10/14/18/22 UTC).
@@ -136,3 +138,33 @@ The service reports a failed or stuck recompute itself (the failure alarm),
 and the host reports a failed release or watchdog run (the host notices,
 `deploy/notify-outage.sh`). A host that is down reports nothing: by the
 owner's decision (2026-10-04) there is no external monitor.
+
+
+## The database's copies
+
+Every day at 03:50 UTC the service copies its database with SQLite's online
+backup into `backups/` beside it (`data/backups/` in the checkout): one whole
+file per day, `<name>-<day>.db` for the database `<name>.db`, read back with
+`quick_check` before it gets that name, the newest seven kept
+(`app/jobs/db_backup.py`). A copy that fails removes no earlier one and is one
+line in the service's log, `db_backup_job_failed`; no notice is sent. To go
+back to a copy, in the checkout:
+
+```bash
+systemctl --user stop bubblegauge-release.timer       # no new release...
+systemctl --user stop bubblegauge-release.service     # ...none in flight...
+systemctl --user stop bubblegauge.service             # ...and nothing writes the database
+cp data/backups/<name>-<day>.db data/<name>.db        # the copy over the database
+rm -f data/<name>.db-wal data/<name>.db-shm           # the replaced database's log must not meet the copy
+systemctl --user start bubblegauge.service
+systemctl --user start bubblegauge-release.timer
+```
+
+The image migrates an older copy forward as it boots. To run a previous image
+on a copy from before a migration, tag that image before the start (the hand
+rollback above) and leave the timer stopped: the next release would put main's
+image back, and that image migrates. What was written after the copy is lost.
+The copies are on the database's disk: a lost disk loses both, and no copy
+leaves the host. `backups/` holds whole, closed files, safe to copy elsewhere
+at any moment, which the live file with its `-wal` is not; whether and where a
+second copy goes is the owner's decision.
