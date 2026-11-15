@@ -10,9 +10,11 @@ here rather than a matter of care:
   walking the import graph, so the guarantee cannot be quietly lost.
 
   **It cannot touch production state.** Everything is applied into an ISOLATED
-  database. The source database is opened read-only and only sidecars are read
-  out of it; no episode, evaluation, delivery or state row in production is
-  created, updated or deleted by a replay.
+  database the replay creates at a path that must not exist yet: it replaces
+  and deletes nothing. The source database is read through connections on
+  which SQLite refuses every statement that would change it, and only sidecars
+  are read out of it; no episode, evaluation, delivery or state row in
+  production is created, updated or deleted by a replay.
 
   **It is deterministic.** Given the same sidecars and the same artifacts, two
   replays produce byte-identical summaries. That requires care: `now` is
@@ -246,8 +248,14 @@ def _isolated_session_factory(state_db_path: Path):
     from app.models import Base
 
     state_db_path.parent.mkdir(parents=True, exist_ok=True)
-    if state_db_path.exists():
-        state_db_path.unlink()
+    # Created here, exclusively: a path that exists raises FileExistsError and
+    # is left as it is. This used to unlink whatever the path named, and the
+    # source defaults to the app's own database: `--state-db` given that file
+    # deleted it and recreated it as replay state (on a copy of production,
+    # 2026-11-12: 615 snapshots and 147,356 daily closes before, 0 after).
+    # Which paths are refused is the operating system's decision, not a
+    # comparison of paths and URLs made here.
+    state_db_path.touch(exist_ok=False)
     engine = create_engine(f"sqlite:///{state_db_path}", future=True,
                            connect_args={"check_same_thread": False})
 
@@ -278,16 +286,30 @@ def _isolated_session_factory(state_db_path: Path):
     return scope, engine
 
 
+def read_only_engine(db_url: str) -> Any:
+    """An engine on whose connections SQLite refuses every statement that
+    would change the database (`PRAGMA query_only`)."""
+    from sqlalchemy import event as sa_event
+
+    engine = create_engine(db_url, future=True,
+                           connect_args={"check_same_thread": False})
+
+    def _query_only(dbapi_connection: Any, _record: Any) -> None:
+        dbapi_connection.execute("PRAGMA query_only=ON")
+
+    sa_event.listen(engine, "connect", _query_only)
+    return engine
+
+
 def load_source_inputs(config: ReplayConfig) -> list[AlertInput]:
     """Read sidecars from the SOURCE database, oldest first. Read-only.
 
-    Opening a separate engine rather than reusing the app's keeps the replay
-    from ever holding a write handle on production.
+    Its own engine, whose connections refuse every statement that would
+    change the source (`read_only_engine`).
     """
     from app.alerts.models import AlertInputSnapshot
 
-    engine = create_engine(config.source_db_url, future=True,
-                           connect_args={"check_same_thread": False})
+    engine = read_only_engine(config.source_db_url)
     factory = sessionmaker(bind=engine, expire_on_commit=False)
     session: Session = factory()
     try:

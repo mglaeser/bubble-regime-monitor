@@ -447,7 +447,7 @@ GET  /api/v1/alerts/ruleset
 GET  /api/v1/alerts/health
 GET  /api/v1/alerts/silences
 POST   /api/v1/alerts/silences        Idempotency-Key honoured; 409 on reuse with a different body
-DELETE /api/v1/alerts/silences/{id}
+DELETE /api/v1/alerts/silences/{id}   ends it now; one that has not started is withdrawn
 POST /api/v1/admin/alerts/evaluate    one sidecar, shadow by default
 POST /api/v1/admin/alerts/promote
 POST /api/v1/admin/alerts/recover
@@ -714,7 +714,10 @@ The HTTP operator actions are admin-scoped and `no-store`:
   market condition), it is outside the non-P1 budgets, and its body is the
   reviewed `TEST_MESSAGE` fragment. It goes through the ordinary dispatcher —
   same claim, same admission, same classification — because a test that
-  bypassed the pipeline would prove the wrong thing.
+  bypassed the pipeline would prove the wrong thing. While alerting is
+  disabled it queues nothing and answers 409: no dispatcher pass runs then,
+  and no later mode reads a row queued in that one
+  (tests/test_alert_api.py::test_a_send_test_while_alerting_is_disabled_is_refused).
 
 No route sends an UNKNOWN delivery again (owner decision D2f, 2026-10-03).
 Until then `POST /api/v1/admin/alerts/deliveries/{id}/retry` was the only way
@@ -782,6 +785,18 @@ ends `RENDER_FAILED`, while the rest of the dispatch pass goes on
 (tests/test_alert_delivery.py::test_work_queued_under_the_stored_legacy_pair_fails_its_render_and_the_pass_goes_on).
 Production's registry holds one such set - v3.4, under the superseded rules
 v3.2.2 - with nothing queued under it (read-only, 2026-10-04).
+Registered ruleset bytes this build refuses - a service version outside the
+range the ruleset declares, for one - rebuild to nothing in the same way: live
+mode then finds no promoted ruleset and refuses; where the candidate on disk
+is refused as well, health reports the artifacts unavailable and the routes
+that need them answer 503; and an alert queued under those bytes ends
+`RENDER_FAILED` while the pass goes on
+(tests/test_alert_delivery.py::test_registered_ruleset_bytes_this_build_refuses_are_audit_data_not_rules,
+::test_work_queued_under_ruleset_bytes_this_build_refuses_fails_its_render_and_the_pass_goes_on,
+tests/test_alert_api.py::test_alert_routes_refuse_and_never_500_while_no_artifacts_load).
+An evaluation requested in live mode while nothing is promoted is refused the
+same way (503). Production's promoted rules, v3.2.3, declare 3.8.0..3.99.99
+and the service is 3.9.0 (read-only, 2026-11-11).
 
 ## 12. Replay (the Stage 1 gate)
 
@@ -789,9 +804,15 @@ Stage 1's gate is *deterministic replay; no PII; no scoring regression*.
 
 ```bash
 python -m scripts.alert_replay --state-db /tmp/replay.db          # committed stage
-python -m scripts.alert_replay --state-db /tmp/replay.db --stage 3 --out report.json
-python -m app.alerts.cli dryrun --state-db /tmp/replay.db --from 2026-01-01
+python -m scripts.alert_replay --state-db /tmp/replay-stage3.db --stage 3 --out report.json
+python -m app.alerts.cli dryrun --state-db /tmp/replay-2026.db --from 2026-01-01
 ```
+
+`--state-db` must name a path that does not exist: a replay creates its state
+database and deletes nothing, so a file that is there - the app's own database
+included - is refused (exit 1, `REPLAY_STATE_EXISTS`;
+tests/test_alert_replay.py::test_a_replay_refuses_a_state_path_that_exists_and_leaves_it,
+::test_the_cli_refuses_the_apps_own_database_as_state).
 
 Exit 0 means every check the run could make held; exit 1 means one failed, or
 the artifacts are invalid.
@@ -802,8 +823,9 @@ Three properties are structural rather than a matter of care:
   `alert_input_snapshot` rows and archived artifact bytes. `app/alerts/replay.py`
   imports no provider, no HTTP client and no sender, and a test walks the
   import graph so the guarantee cannot be quietly lost.
-- **It cannot touch production.** State goes into a throwaway database opened
-  through its own engine; the source database is only ever selected from. Mode
+- **It cannot touch production.** State goes into a database the replay
+  creates and never replaces; the source is read through connections that
+  refuse every statement that would change it. Mode
   is `dryrun`, which is its own state namespace — shadow and live never see a
   replay's episodes.
 - **It is deterministic.** `now` comes from each input's own `computed_at`,

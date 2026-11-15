@@ -147,14 +147,33 @@ def delete_silence(response: Response, silence_id: str,
                    _: None = Depends(require_alerts_write)) -> Any:
     _no_store(response)
     now = datetime.now(UTC)
+    withdrawn = False
     with session_scope() as session:
         row = session.get(AlertSilence, silence_id)
         if row is None:
             raise HTTPException(status_code=404, detail="no silence with that id",
                                 headers=ERROR_HEADERS)
-        # Expire rather than delete: the audit trail of what was silenced, by
-        # whom and when must survive.
-        row.ends_at = max(now, row.starts_at)
+        if now <= row.starts_at:
+            # It has not started: it silenced nothing, so there is no record
+            # of a silence to keep, and the table admits no empty window to
+            # expire it into (ck_alert_silence_window, ends_at > starts_at;
+            # hence `<=`). Writing ends_at = starts_at, as this route did,
+            # failed that check: the DELETE answered 500 and the silence
+            # stayed in force, for every priority, P1 included. Removed, it is
+            # listed nowhere and matches nothing; the log line below is the
+            # trace of the withdrawal. (A POST replayed under its
+            # Idempotency-Key still names it, as it names a silence that was
+            # ended.) Production holds no silence and no idempotency record
+            # (0 rows each, read-only, 2026-11-11).
+            session.delete(row)
+            withdrawn = True
+        elif now < row.ends_at:
+            # Expire rather than delete: the audit trail of what was silenced,
+            # by whom and when must survive.
+            row.ends_at = now
+        # One that has ended keeps the end it had: that end is the record.
+    if withdrawn:
+        log.info("alert_silence_withdrawn", silence_id=silence_id)
     return {"silence_id": silence_id, "ended": True}
 
 
@@ -186,9 +205,18 @@ def admin_evaluate(
                             detail="ALERTS_MODE=disabled; pass shadow=true or enable a mode",
                             headers=ERROR_HEADERS)
 
+    from app.alerts.errors import AlertingUnavailable
     from app.services.alert_integration import evaluate_input
 
-    outcome = evaluate_input(input_identity, mode=mode)
+    # No artifacts load in this mode - live with nothing promoted (the state
+    # after every release that changes the ruleset, until the operator
+    # promotes), or no valid ruleset at all: refused with 503, as send-test
+    # refuses the same state. Unhandled, it was a 500.
+    try:
+        outcome = evaluate_input(input_identity, mode=mode)
+    except AlertingUnavailable as exc:
+        raise HTTPException(status_code=503, detail=exc.redacted(),
+                            headers=ERROR_HEADERS) from exc
     if outcome is None:
         raise HTTPException(status_code=404, detail="no captured sidecar with that identity",
                             headers=ERROR_HEADERS)
@@ -345,6 +373,15 @@ def send_test(response: Response,
 
     _no_store(response)
     settings = get_settings()
+    if settings.alerts_mode == "disabled":
+        # No dispatcher pass runs while alerting is disabled
+        # (`app.jobs.alert_dispatch.run_once`), and no later mode reads a row
+        # queued in this one. The route used to queue it and answer that the
+        # dispatcher sends it on its next pass. Refused before anything is
+        # written, as an evaluation is in this mode.
+        raise HTTPException(status_code=409,
+                            detail="ALERTS_MODE=disabled; no dispatcher runs to send a test",
+                            headers=ERROR_HEADERS)
     now = datetime.now(UTC)
 
     from app.alerts.errors import AlertingUnavailable

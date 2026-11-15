@@ -161,18 +161,104 @@ def test_replay_writes_to_its_own_database_and_never_the_app_one(
             assert count == 0, f"replay wrote {model.__name__} rows into production"
 
 
-def test_replay_state_database_is_recreated_not_appended(tmp_path, artifacts):
-    """Re-running into the same path must not accumulate — that is what makes
-    a second run comparable to the first rather than a superset of it."""
-    state = tmp_path / "shared.db"
-    config = ReplayConfig(source_db_url="sqlite:///unused",
-                          state_db_path=state, evaluate_at_stage=3)
-    first = run_replay(config=config, ruleset=artifacts.ruleset,
-                       phrase_set=artifacts.phrase_set, inputs=_history())
-    second = run_replay(config=config, ruleset=artifacts.ruleset,
-                        phrase_set=artifacts.phrase_set, inputs=_history())
-    assert first.episodes_opened == second.episodes_opened
-    assert first.to_json() == second.to_json()
+def test_a_replay_refuses_a_state_path_that_exists_and_leaves_it(tmp_path, artifacts):
+    """"It cannot touch production state": a replay creates its state database
+    and deletes nothing. A path that exists - the app's own database, a
+    backup, an earlier replay - is refused and left byte for byte. The replay
+    used to unlink whatever the path named and recreate it as replay state.
+    What that protected, a second run that does not accumulate into the
+    first, holds because a second run into the same path is refused."""
+    def replay_into(path):
+        return run_replay(
+            config=ReplayConfig(source_db_url="sqlite:///unused", state_db_path=path,
+                                evaluate_at_stage=3),
+            ruleset=artifacts.ruleset, phrase_set=artifacts.phrase_set, inputs=_history())
+
+    existing = tmp_path / "bubble.db"
+    existing.write_bytes(b"not a replay's to replace")
+    with pytest.raises(FileExistsError):
+        replay_into(existing)
+    assert existing.read_bytes() == b"not a replay's to replace"
+
+    state = tmp_path / "replay.db"
+    assert replay_into(state).evaluations_committed > 0
+    first_run = state.read_bytes()
+    with pytest.raises(FileExistsError):
+        replay_into(state)
+    assert state.read_bytes() == first_run
+
+
+def test_the_cli_refuses_the_apps_own_database_as_state(isolated_db, capsys):
+    """The source defaults to the app's database, so `--state-db` given that
+    file named production itself: the command refuses it, says why without
+    echoing the path, and the database keeps its rows. On a copy of the
+    production database the replay it replaces left 0 of 615 snapshots and 0
+    of 147,356 daily closes (2026-11-12)."""
+    from app.alerts import cli
+    from app.alerts.models import AlertInputSnapshot
+    from app.db import session_scope
+
+    now = datetime(2026, 8, 15, 10, 0, tzinfo=UTC)
+    record = make_input(identity="s1", computed_at=now.isoformat())
+    with session_scope() as session:
+        session.add(AlertInputSnapshot(
+            input_identity=record.input_identity, snapshot_id=None, origin="RECOMPUTE",
+            built_at=now, computed_at=now,
+            alert_input_schema_version=record.schema_version,
+            methodology_version=None, methodology_sha256=None, reconstructed=False,
+            evaluation_eligibility="EVALUABLE", ineligibility_reasons=[],
+            payload=json.dumps(record.model_dump(mode="json")),
+            payload_sha256="the app's own row"))
+    capsys.readouterr()
+
+    code = cli.main(["dryrun", "--state-db", str(isolated_db)])
+
+    out = capsys.readouterr().out
+    assert '"error_code": "REPLAY_STATE_EXISTS"' in out, out
+    assert code == 1
+    assert str(isolated_db) not in out
+    with session_scope() as session:
+        # A replay seeds its state with the same sidecar, as its own row.
+        assert [(row.input_identity, row.payload_sha256)
+                for row in session.query(AlertInputSnapshot).all()] == [
+                    ("s1", "the app's own row")]
+
+
+def test_the_source_database_is_opened_read_only(tmp_path):
+    """"The source database is read through connections on which SQLite
+    refuses every statement that would change it": a CREATE TABLE tried on
+    the connection the replay reads its sidecars through is refused. The
+    engine used to be an ordinary read-write one, and the same statement
+    succeeded."""
+    import sqlite3
+
+    from sqlalchemy import create_engine, event
+    from sqlalchemy.engine import Engine
+
+    from app.models import Base
+
+    source = tmp_path / "source.db"
+    seed = create_engine(f"sqlite:///{source}")
+    Base.metadata.create_all(seed)
+    seed.dispose()
+    refused: list[bool] = []
+
+    def try_a_write(dbapi_connection, _record, _proxy):
+        try:
+            dbapi_connection.execute("CREATE TABLE written_by_a_replay (x)")
+        except sqlite3.OperationalError:
+            refused.append(True)
+        else:
+            refused.append(False)
+
+    event.listen(Engine, "checkout", try_a_write)
+    try:
+        assert load_source_inputs(ReplayConfig(
+            source_db_url=f"sqlite:///{source}", state_db_path=tmp_path / "state.db")) == []
+    finally:
+        event.remove(Engine, "checkout", try_a_write)
+
+    assert refused == [True]
 
 
 def test_replay_module_cannot_reach_a_provider_or_a_transport():

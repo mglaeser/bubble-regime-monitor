@@ -219,8 +219,9 @@ def load_by_hash(session: Session, rules_sha256: str, *,
 
     The promoted fallback is rebuilt this way, and queued work renders from
     the bytes it was planned with: those are in the database, so the file on
-    disk having moved on is irrelevant. None when the rows are gone or the
-    phrase bytes no longer validate (`registered_phrase_set`).
+    disk having moved on is irrelevant. None when the rows are gone or this
+    build's validator no longer admits the stored bytes - the phrase set's
+    (`registered_phrase_set`) or the ruleset's.
     """
     row = session.get(AlertRulesetRegistry, rules_sha256)
     if row is None:
@@ -231,15 +232,29 @@ def load_by_hash(session: Session, rules_sha256: str, *,
     phrase_set = registered_phrase_set(phrase_row)
     if phrase_set is None:
         return None
-    ruleset = validate_ruleset(
-        row.canonical_yaml,
-        phrase_set=phrase_set,
-        phrase_set_version=phrase_set.version,
-        phrase_set_sha256=phrase_set.sha256,
-        methodology_version=row.methodology_version,
-        methodology_manifest_sha256=row.methodology_manifest_sha256,
-        service_version=service_version or get_settings().service_version,
-    )
+    try:
+        ruleset = validate_ruleset(
+            row.canonical_yaml,
+            phrase_set=phrase_set,
+            phrase_set_version=phrase_set.version,
+            phrase_set_sha256=phrase_set.sha256,
+            methodology_version=row.methodology_version,
+            methodology_manifest_sha256=row.methodology_manifest_sha256,
+            service_version=service_version or get_settings().service_version,
+        )
+    except RulesetInvalid as exc:
+        # As for the phrase half (`registered_phrase_set`): stored bytes this
+        # build's validator refuses - a service version outside the range the
+        # ruleset declares, for one - are audit data, not rules to run. They
+        # rebuild to None, like a row that is gone. A loader that needed them
+        # then refuses with AlertingUnavailable, the error every caller
+        # handles: live mode stays refused, the routes answer 503, health
+        # reports the artifacts unavailable, and the dispatcher fails that one
+        # render. The raise passed all of them: the routes answered 500 and a
+        # dispatch pass ended at that delivery, leaving it leased.
+        log.error("alert_registered_ruleset_refused",
+                  rules_sha256=rules_sha256[:12], error=exc.redacted())
+        return None
     return LoadedArtifacts(ruleset=ruleset, phrase_set=phrase_set, source="registry")
 
 

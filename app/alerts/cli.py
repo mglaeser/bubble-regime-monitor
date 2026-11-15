@@ -296,6 +296,14 @@ def cmd_dryrun(args: argparse.Namespace) -> int:
         _print({"error_code": "MANDATORY_EVENT_CATALOGUE_INVALID",
                 "detail": str(exc)})
         return 1
+    except FileExistsError:
+        # The replay creates its state database exclusively and deletes
+        # nothing (`app.alerts.replay._isolated_session_factory`). The path is
+        # not echoed back.
+        _print({"error_code": "REPLAY_STATE_EXISTS",
+                "detail": "--state-db names a file that exists; a replay creates "
+                          "its state database and deletes nothing - pass a new path"})
+        return 1
     except OperationalError:
         # Overwhelmingly: the source database is not where the settings say, or
         # capture has never run so the file does not exist yet. The URL is not
@@ -428,7 +436,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     dryrun = sub.add_parser("dryrun", help="replay captured sidecars (isolated, no send)")
     dryrun.add_argument("--state-db", required=True,
-                        help="path for the ISOLATED replay database (recreated)")
+                        help="path for the ISOLATED replay database (a new path; "
+                             "a file that exists is refused)")
     dryrun.add_argument("--from", dest="from_moment", help="ISO-8601 window start")
     dryrun.add_argument("--to", dest="to_moment", help="ISO-8601 window end")
     dryrun.add_argument("--source-db", help="source DB URL (default: the app's)")
