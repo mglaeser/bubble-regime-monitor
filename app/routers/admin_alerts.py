@@ -29,8 +29,6 @@ from app.security import require_admin_key, require_alerts_write
 log = get_logger(__name__)
 router = APIRouter(prefix="/api/v1", tags=["alerts-admin"])
 
-IDEMPOTENCY_TTL_HOURS = 24
-
 
 class SilenceRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -67,6 +65,12 @@ def _check_idempotency(session: Any, key: str | None, route: str,
 
     Same key + different body is a 409, never a silent re-execution against
     different parameters.
+
+    A key is honoured for as long as its record exists. The record carried a
+    24-hour expiry that this module wrote and nothing read - a key was
+    replayed 899 days after it, and retention left the record - so it limited
+    nothing; the constant and the column went with migration 0028
+    (tests/test_alert_api.py::test_an_idempotency_key_is_honoured_without_a_time_limit).
     """
     if not key:
         return False, None
@@ -132,8 +136,7 @@ def create_silence(
             session.add(ApiIdempotencyRecord(
                 idempotency_key=idempotency_key, route=route,
                 request_sha256=sha256_of(payload), response_ref=silence_id,
-                status_code=201, created_at=now,
-                expires_at=now + timedelta(hours=IDEMPOTENCY_TTL_HOURS),
+                created_at=now,
             ))
     log.info("alert_silence_created", silence_id=silence_id,
              matcher_kind=body.matcher_kind)
