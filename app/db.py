@@ -56,9 +56,15 @@ def _set_sqlite_pragmas(dbapi_connection: object, _record: object) -> None:
     cursor.execute("PRAGMA synchronous=NORMAL")
     # The alert system adds a second and third writer (the dispatcher poll loop
     # and the post-recompute evaluation) to what used to be a single-writer
-    # service. Without busy_timeout, SQLite returns SQLITE_BUSY IMMEDIATELY on
-    # a contended write instead of waiting — a lost alert plan rather than a
-    # slightly slower one. WAL keeps readers unblocked either way.
+    # service. A writer that finds the lock held waits busy_timeout for it. The
+    # wait is set here and not left to the driver, whose own default is the
+    # same 5000 ms (Python's sqlite3 `timeout=5.0`; read back from a fresh
+    # connection, plain and through SQLAlchemy), so that it is this service's
+    # setting, ALERTS_BUSY_TIMEOUT_MS: at 0 SQLite returns SQLITE_BUSY at once,
+    # a lost alert plan rather than a slightly slower one. Past the wait the
+    # write fails with "database is locked" (once in the service log from
+    # 2026-10-05 to 2026-11-10, on the dispatcher's heartbeat). WAL keeps
+    # readers unblocked either way.
     cursor.execute(f"PRAGMA busy_timeout={int(get_settings().alerts_busy_timeout_ms)}")
     # With the default OFF, the implicit DELETE performed by INSERT OR
     # REPLACE conflict resolution does NOT fire DELETE triggers (panel

@@ -340,9 +340,11 @@ def configured_environment() -> dict[str, str]:
     return merged
 
 
-#: Settings that were removed. An old value in an environment changes nothing,
-#: and that is said loudly - at boot, in the alerts preflight, in health - so
-#: it is never dropped in silence the way `extra="ignore"` would drop it.
+#: Removed settings an old environment is likely to still hold. A value under
+#: one of these keys changes nothing, and that is said loudly - at boot, in the
+#: alerts preflight, in health. The list is not every removed setting: one that
+#: is not named here is dropped without a word, as `extra="ignore"` drops any
+#: unknown key.
 RETIRED_ENV_KEYS: dict[str, str] = {
     "DAILY_SMS_ENABLED": (
         "removed with the Stage-4 cutover (owner decision D2c, 2026-10-02): the daily "

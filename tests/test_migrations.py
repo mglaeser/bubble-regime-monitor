@@ -11,8 +11,12 @@ import pytest
 
 # The two bootstraps do NOT agree today, and the divergence is real rather than
 # cosmetic: every column below is NOT NULL under create_all and NULLABLE under
-# Alembic. Production boots from Alembic, so a production database permits nulls
-# the models declare impossible.
+# Alembic. A database built by the migration chain permits nulls the models
+# declare impossible. Production's is not such a database: it was born from
+# create_all and then stamped (app/db_migrate.py, case c), and on 2026-11-10
+# its read-only copy had NOT NULL on 39 of the 42 columns below; the three of
+# daily_close are nullable, as migration 0004 built them. A host rebuilt from
+# the chain would have NOT NULL on none of the 42.
 #
 # They are WAIVED, not fixed, and the difference matters. Migrations 0001-0004
 # are already applied to the live database; rewriting them would not change it,
@@ -335,6 +339,20 @@ def test_migrations_match_models(tmp_path):
                                           for k, (a, b) in differing.items()))
     assert m["triggers"] == c["triggers"], "triggers differ between the bootstraps"
     assert m["views"] == c["views"], "views differ between the bootstraps"
+
+
+def test_the_waiver_count_the_bootstrap_states_is_the_ledgers():
+    """app/db_migrate.py says how the migrated schema differs from the models'
+    and gives the number of waived columns. The number is this ledger's size,
+    so the sentence cannot outlive a change of the ledger."""
+    import re
+
+    from app import db_migrate
+
+    stated = re.search(r"(\d+) pre-alert columns", " ".join((db_migrate.__doc__ or "").split()))
+    assert stated, "app/db_migrate.py does not state how many columns the chain leaves nullable"
+    assert int(stated.group(1)) == sum(len(cols) for cols in KNOWN_NOTNULL_DIVERGENCES.values())
+    assert "column-for-column" not in db_migrate.__doc__
 
 
 def test_legacy_create_all_db_is_self_healed(tmp_path):
