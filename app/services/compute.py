@@ -454,7 +454,7 @@ def _track(raw: RawInputs, source: str, fn: Any) -> Any:
 
 
 def gather_inputs() -> RawInputs:
-    """Fetch all upstream sources with per-source circuit breakers.
+    """Fetch all upstream sources, one after the other.
 
     A source failure never raises out of here — the indicator is later
     dropped (or falls back) with a provenance note.

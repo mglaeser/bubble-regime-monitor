@@ -86,8 +86,8 @@ class TestTheGatherChokepointRedacts:
     ):
         """The D1 reproduction, as a regression test.
 
-        Drives the real _track circuit-breaker with a real FRED call against a
-        400, and asserts the note it would persist carries no key."""
+        Drives the real _track with a real FRED call against a 400, and
+        asserts the note it would persist carries no key."""
         import app.http_client as hc
         from app.config import get_settings
         from app.services import compute
@@ -190,7 +190,7 @@ def _answering(status: int) -> httpx.Client:
 
 @pytest.fixture
 def keyed(isolated_db, monkeypatch):
-    """Every provider has a fake key, a retry does not wait, no breaker is open."""
+    """Every provider has a fake key, and a retry does not wait."""
     import tenacity
 
     import app.http_client as hc
@@ -201,9 +201,7 @@ def keyed(isolated_db, monkeypatch):
         monkeypatch.setenv(name, key)
     get_settings.cache_clear()
     monkeypatch.setattr(hc._get_with_retry.retry, "wait", tenacity.wait_none())
-    hc._breakers.clear()
     yield hc
-    hc._breakers.clear()
     get_settings.cache_clear()
 
 
