@@ -213,10 +213,15 @@ period, the condition re-fires and the cooldown is the only thing standing
 between that and a second message.
 
 When a condition can fire again is decided by the rule's `resolution.policy`.
-Under `auto_on_inverse` and `single_shot` the episode of a transition or a crossing
-lasts while the state it reported lasts (the flag stays off, the leg stays in,
-the run-up stays at or above its tier) and ends with it, and the rule fires
-again at the next occurrence. A P2 held for quiet hours is therefore sent in
+Under `auto_on_inverse` and `single_shot` the episode of a transition lasts
+while the state it reported lasts (the flag stays off, the leg stays in) and
+ends with it, and the rule fires again at the next occurrence. The episode of
+a crossing lasts while the value stays beyond its level under every policy
+(the run-up stays at or above its tier): `tripwire.margin_rollover`, which
+resolves `auto_on_condition_false`, stays open while the multiplier reads 1.0,
+so the P2 of a release ingested at the 22:00 UTC slot is sent at 07:00 Berlin
+(tests/test_alert_evaluation.py::test_a_margin_rollover_reaches_the_owner_whatever_slot_ingests_it).
+A P2 held for quiet hours is therefore sent in
 the morning while it is still true and dropped as `RESOLVED_BEFORE_SEND` when
 it is not (section 11e), and the 48 h reminder of `structure.s3_tier_150` goes
 out only while the run-up is still at or above 150 pp
@@ -237,6 +242,31 @@ since 09-22 at a run-up of 64.7
 that state need no migration: the next evaluation ends the episode whose state
 is over, without a message, and keeps the one whose state still holds
 (::test_the_rows_stuck_in_production_settle_at_the_next_evaluation).
+
+Until 2026-11 the episode of `tripwire.margin_rollover` ended at the
+evaluation after the crossing. From five of the six slots its message was out
+by then. The P2 of the 22:00 UTC slot, held until 07:00 Berlin, was withdrawn
+at 02:00 UTC as `RESOLVED_BEFORE_SEND` with the multiplier still at 1.0, on
+CET and on CEST. Production ingested the August FINRA release at that slot
+(2026-09-14 22:01 UTC, one of the two releases since the multiplier is
+published); the multiplier read 0.6 in all 471 inputs that carry it
+(read-only, 2026-11-10), so no rollover message was lost. The episode now
+stays open for as long as the multiplier reads 1.0, which can be months: the
+alert API lists it among the open episodes, it sends one message (the rule
+declares no reminder), and a publication gap neither ends nor reopens it. A
+held message is still withdrawn when the multiplier is back at 0.6 before the
+morning
+(::test_a_rollover_that_turned_back_before_the_morning_is_withdrawn,
+::test_the_rollover_episode_lasts_while_the_multiplier_stays_turned). The
+ruleset's bytes do not change, and no stored row needs settling: production
+holds no episode of this rule. Of the two disabled crossing rules that resolve
+`auto_on_condition_false`, `credit.ebp_sign_flip` gets the same lifetime if it
+is enabled; `regime.iqr_edge_cross` asks for two confirming observations, and
+only a firing episode is held, so its candidate still reverts at the
+evaluation after the crossing. A transition under `auto_on_condition_false` is
+not held: every band is a target of `regime.base_band_moved_while_suppressed`,
+so a hold would last the whole suppression window and a second move of the
+base band inside it would open no episode.
 
 The loader emits a warning naming each such rule and the cooldown carrying the
 weight, because the failure mode this documents is a reader trusting an
