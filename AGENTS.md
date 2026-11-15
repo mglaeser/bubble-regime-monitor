@@ -33,6 +33,10 @@ Every change must pass `.github/workflows/ci.yml`, which is **blocking**:
 - `pip-audit` (dependency CVEs, over both locks)
 - `detect-secrets` (no new secrets)
 - `pytest` (must be green; the suite is hermetic — LPPLS/R paths self-skip when the engine is absent)
+- the alert artifacts: `python -m app.alerts.cli validate` on the shipped ruleset and phrase set; `python -m scripts.export_alert_openapi --check` (after a change to an alert route, write `docs/openapi-alerts.json` anew with the same command without `--check`); `python -m scripts.export_alert_stage1_gate --check` (the same for `docs/alert-stage1-gate.json` after a change to a rule, a phrase or the evaluator)
+- the regime checks: `python -m scripts.regime.separation_check` (every policy surface has an owner in `.github/CODEOWNERS`) and `python -m scripts.regime.authz_coverage` (every route carries an authorisation dependency or stands in the public allowlist)
+- the `image` job (the Containerfile builds, R and exuber included)
+- on a pull request, a second workflow must approve as well: the cross-vendor review panel (`.github/workflows/independent-verify.yml`, `docs/INDEPENDENT_REVIEW_PANEL.md`). It is given the diff and nothing else - no pull-request text, no commit message - so what a reviewer must know stands in the diff
 
 Type-checking (`mypy app`) is **blocking**, as a ratchet: CI fails if the error count rises above `MYPY_CEILING` in `.github/workflows/ci.yml` (**116** today, audit A-13). Lower the ceiling in the same commit that lowers the count; never raise it. The step also refuses if mypy exits >= 2 or checks fewer than `MYPY_MIN_FILES` source files, because a count of error lines is not a measure of work done. Driving the count to zero is a tracked task. A change is not done until CI is green.
 
@@ -51,4 +55,4 @@ One concern per change. Write the test from the **spec/README invariants above**
 
 ## Where things live
 
-`app/indicators/` (s1–s5, d1–d4, v) · `app/engine/` (aggregate, montecarlo, judgment, sms, legs) · `app/sources/` (external data adapters, each a fixed host) · `app/services/compute.py` (the pipeline) · `app/message_engine/` (the message engine: `composer.py` builds the prompt, `checks.py` the basic checks) · `app/routers/` (API) · `app/references.py` (the methodology registry + science audit — the de-facto spec) · `migrations/` (Alembic, authoritative) · `r/gsadf.R` + `app/indicators/d4_lppls.py` (subprocess-isolated heavy engines).
+`app/indicators/` (s1–s5, d1–d4, v) · `app/engine/` (aggregate, montecarlo, judgment, sms_report, legs) · `app/sources/` (external data adapters, each a fixed host) · `app/services/compute.py` (the pipeline) · `app/message_engine/` (the message engine: `composer.py` builds the prompt, `checks.py` the basic checks) · `app/routers/` (API) · `app/references.py` (the methodology registry + science audit — the de-facto spec) · `migrations/` (Alembic, authoritative) · `r/gsadf.R` + `app/indicators/d4_lppls.py` (subprocess-isolated heavy engines).
