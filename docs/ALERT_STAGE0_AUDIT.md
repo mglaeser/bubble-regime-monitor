@@ -135,6 +135,11 @@ failure the mandate's `UNKNOWN`-is-not-normal invariant guards against:
 | `state` | `ACTIVE` / `INACTIVE` / `UNKNOWN` / `BLOCKED` | `UNKNOWN` = required input unavailable; `BLOCKED` = governance forbids firing (contested GSADF) |
 | `data_state` | `FRESH` / `STALE` / `UNKNOWN_AGE` / `MISSING` | `UNKNOWN_AGE` keeps "old" distinct from "undated" (the v3.7.3/A-01 convention) |
 
+`data_state` is the freshness of the reading the flag is dated by
+(`period_end`): S4's for rf1, S3's for rf2, D1's for rf4, and for rf3 the HY
+OAS reading's own, 3 NYSE sessions (`compute.py:HY_OAS_SLA_DAYS`), whichever
+tier S5 is scored on.
+
 `published_at` is **always null**: no upstream vendor publication timestamp is
 available to this service, and inventing one would poison confirmation
 semantics later.
