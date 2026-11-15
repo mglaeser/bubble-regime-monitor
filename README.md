@@ -294,7 +294,7 @@ Everything bubblegauge sends to a person, by itself or on request. Times are UTC
 2. Score > 60 sustained through 24 months of > 10% annualized gains without a > 15% drawdown → **falsified**.
 3. Override fires and no > 20% drawdown within 12 months → **override falsified**.
 
-Outcomes are stored in the DB and exposed via `/api/v1/meta/methodology`.
+The service evaluates none of these. The operator judges them and records an outcome by hand (`POST /api/v1/admin/falsification`, append-only); recorded outcomes are exposed via `/api/v1/meta/methodology`, together with the tracking start date from `frozen_methodology.json` (`_meta.falsification_tracking_since`). That date is not set yet and only the operator sets it, so the empty list of outcomes is not a track record.
 
 ## Changelog
 
