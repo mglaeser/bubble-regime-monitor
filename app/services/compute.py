@@ -1515,7 +1515,6 @@ def persist_snapshot(data: SnapshotData, raw: RawInputs) -> int:
         # The near-ATH leg is only OBSERVED when the SPY series arrived; the
         # field itself defaults to False and cannot tell the two apart.
         near_ath_available=bool(raw.spy_daily_closes),
-        near_ath_state=(raw.index_within_2pct_of_ath if raw.spy_daily_closes else None),
     )
     band_state = data.band_state
 

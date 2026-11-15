@@ -31,8 +31,3 @@ def compute(pct_above_200dma: float, lo: float = BASELINE_LO, hi: float = BASELI
     breadth => higher score. hi=90 reflects that bull-market breadth routinely
     reaches the high 80s-90s (hi=75 clipped normal readings to 0)."""
     return max(SOFT_FLOOR, min(1.0, (hi - pct_above_200dma) / (hi - lo)))
-
-
-def red_flag_breadth(pct_above_200dma: float, index_within_2pct_of_ath: bool) -> bool:
-    """Red-flag #4: breadth < 50% WHILE the index is within 2% of its ATH."""
-    return pct_above_200dma < 50.0 and index_within_2pct_of_ath

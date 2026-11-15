@@ -52,13 +52,10 @@ def test_golden_fixture_byte_identical(golden_subscores, golden_mc_inputs):
     assert mc.iqr[1] == pytest.approx(54.9951, abs=1e-3)
 
 
-def test_frozen_methodology_hash_unchanged():
-    from app import methodology as _M
-
-    # The artifact is the scoring authority; Stage 0 must not touch it.
-    assert _M.frozen_sha256() == _M.frozen_sha256()
-    assert _M.get_path("_meta", "golden_headline") == 52.43
-    assert _M.get_path("override", "min_flags") == 3
+# The artifact's bytes, and with them golden_headline 52.43 and
+# override.min_flags 3, are pinned by
+# tests/test_frozen_methodology.py::test_sha256_byte_guard; the test here
+# compared the hash with itself.
 
 
 def test_typed_snapshot_fields_do_not_enter_scoring():
@@ -159,7 +156,7 @@ def _meta(**overrides):
         # rf4 has TWO legs and both must have been observed for it to be
         # fireable (B-11). The default here is the seeing case; the tests that
         # care about a blind near-ATH leg say so explicitly.
-        near_ath_available=True, near_ath_state=False,
+        near_ath_available=True,
     )
     base.update(overrides)
     return build_red_flag_meta(**base)
@@ -198,11 +195,28 @@ def test_a_blind_near_ath_leg_makes_rf4_unknown_not_inactive():
     missing the conjunction reads false and rf4 would report a confident
     "not firing" built on no evidence. Both legs, or the flag is unknown.
     """
-    meta = _meta(gsadf_contested=False, near_ath_available=False, near_ath_state=None)
+    meta = _meta(gsadf_contested=False, near_ath_available=False)
     rf4 = meta["flags"]["rf4"]
     assert rf4["fireable"] is False
     assert rf4["state"] == "UNKNOWN"
     assert meta["override_fireable_universe_count"] == 3
+
+
+def test_the_rf4_record_takes_the_legs_availability_and_no_state():
+    """The record never re-decides a flag (build_red_flag_meta: "the booleans
+    come from the already-evaluated `red_flags`").
+
+    rf4's `active` is the evaluated flag and its `fireable` is whether both
+    legs were observed. A near-ATH state handed in beside them was read by no
+    line of the function and stored in no field of the record, so a caller
+    that passes one is told so instead of being ignored.
+    """
+    rf4 = _meta(breadth_pct=44.0, near_ath_available=True)["flags"]["rf4"]
+    assert rf4["fireable"] is True
+    assert rf4["active"] is False          # RedFlags(): the evaluated flag, nothing else
+    assert rf4["state"] == "INACTIVE"
+    with pytest.raises(TypeError):
+        _meta(breadth_pct=44.0, near_ath_available=True, near_ath_state=True)
 
 
 def test_missing_input_is_unknown_and_shrinks_the_fireable_universe():

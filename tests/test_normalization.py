@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from app.engine.aggregate import evaluate_red_flags
 from app.indicators import (
     d1_breadth,
     d2_margin,
@@ -16,6 +17,20 @@ from app.indicators import (
     s5_credit,
     v_vix,
 )
+
+
+def _red_flags(**inputs):
+    """The four red flags on quiet inputs, with the named inputs set.
+
+    Each flag has one rule, aggregate.evaluate_red_flags, with the artifact's
+    thresholds (red_flags.hy_oas_widen_gt_bps, red_flags.breadth_lt_pct). The
+    indicator modules hold no second copy of a rule with a literal of its own,
+    so the flag tests below run the rule that scores.
+    """
+    quiet = dict(gsadf_explosive_p05=False, gsadf_contested=True, semi_runup_pp=0.0,
+                 hy_oas_bps=None, hy_oas_3yr_tight_bps=None,
+                 breadth_pct=None, index_within_2pct_of_ath=False)
+    return evaluate_red_flags(**{**quiet, **inputs})
 
 
 class TestS1:
@@ -85,8 +100,9 @@ class TestS5:
         assert s5_credit.sub_score(267.0, history) == pytest.approx(0.75)
 
     def test_tights_red_flag(self):
-        assert s5_credit.widened_gt_100bps_above_3yr_tights(380.0, [250.0, 260.0])
-        assert not s5_credit.widened_gt_100bps_above_3yr_tights(267.0, [250.0, 260.0])
+        # 250 is the trailing 3-yr tight: 130 bps above it fires, 17 bps does not.
+        assert _red_flags(hy_oas_bps=380.0, hy_oas_3yr_tight_bps=250.0).hy_oas_widen_gt_100bps
+        assert not _red_flags(hy_oas_bps=267.0, hy_oas_3yr_tight_bps=250.0).hy_oas_widen_gt_100bps
 
 
 class TestD1:
@@ -101,9 +117,13 @@ class TestD1:
         assert d1_breadth.compute(10.0) == 1.0
 
     def test_red_flag(self):
-        assert d1_breadth.red_flag_breadth(49.0, True)
-        assert not d1_breadth.red_flag_breadth(49.0, False)
-        assert not d1_breadth.red_flag_breadth(56.0, True)
+        def fired(pct: float, near_ath: bool) -> bool:
+            return _red_flags(breadth_pct=pct,
+                              index_within_2pct_of_ath=near_ath).breadth_lt_50_near_ath
+
+        assert fired(49.0, True)
+        assert not fired(49.0, False)
+        assert not fired(56.0, True)
 
 
 class TestD2:
