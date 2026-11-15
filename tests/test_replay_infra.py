@@ -231,6 +231,21 @@ class TestApiSurfaces:
             ev2 = client.get("/api/v1/replay/evidence")
             assert ev2.json()["data"]["falsification_outcomes"] == 1
 
+    def test_the_milestone_record_says_the_sufficiency_route_went(self):
+        # docs/REPLAY_MILESTONE.md records what v3.8.0 shipped, route by route.
+        # The one route of it that answers 404 today (the test above) is marked
+        # as removed right where the record names it, so that the record is
+        # not read as the API.
+        import re
+        from pathlib import Path
+
+        record = (Path(__file__).resolve().parents[1] / "docs"
+                  / "REPLAY_MILESTONE.md").read_text(encoding="utf-8")
+        assert "`GET /api/v1/replay/sufficiency`" in record
+        assert re.search(r"`GET /api/v1/replay/sufficiency`\s+\(removed\b", record), (
+            "docs/REPLAY_MILESTONE.md names GET /api/v1/replay/sufficiency "
+            "without saying that the route was removed")
+
 
 class TestCliAndHarness:
     def test_cli_studies_run(self, isolated_db, capsys, monkeypatch):
