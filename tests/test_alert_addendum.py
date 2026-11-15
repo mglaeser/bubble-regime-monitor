@@ -918,12 +918,9 @@ def test_retention_refuses_inverted_horizons(isolated_db):
     assert report.message_bodies_redacted == 0
 
 
-def test_retention_preserves_events_of_open_episodes(isolated_db):
-    """The trail explaining a still-firing mechanism is never swept."""
-    from app.alerts.retention import METADATA_PRESERVED
-
-    assert "episode transitions" in METADATA_PRESERVED
-    assert "rule and ruleset provenance" in METADATA_PRESERVED
+# That an event of an open episode is kept at any age is pinned by behaviour in
+# tests/test_alert_retention.py. The test that stood here under that name read
+# two strings out of a tuple no code used, and passed with the guard deleted.
 
 
 def test_retention_preserves_old_events_for_an_unresolved_delivery(isolated_db):
