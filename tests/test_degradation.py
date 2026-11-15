@@ -38,6 +38,28 @@ def test_single_source_down_drops_and_renormalizes(isolated_db, kill, indicator,
     assert 0.0 <= data.median <= 100.0  # scoring still completes
 
 
+def test_a_dropped_d1_names_the_provider_that_exists(isolated_db):
+    """Breadth has one source, the S&P 500 constituents priced by Polygon
+    (SOURCE_REGISTRY "breadth"; app/sources/breadth.py stamps
+    "constituents+polygon" on every reading).
+
+    A run without a breadth reading publishes d1's data_source from the
+    field's default, so the default is that source's name. It was
+    "constituents+twelvedata": breadth is Polygon-only, and in production no
+    d1 reading has named Twelve Data since 2026-07-14 (all 604 readings from
+    that day on say "constituents+polygon"; the last dropped d1 was on
+    2026-07-12).
+    """
+    from app.references import SOURCE_REGISTRY
+
+    raw = make_golden_raw_inputs()
+    raw.breadth_pct = None
+    d1 = _compute(raw).indicators["d1"]
+    assert d1.dropped is True
+    assert d1.data_source == "constituents+polygon"
+    assert "Polygon" in next(spec.name for spec in SOURCE_REGISTRY if spec.key == "breadth")
+
+
 def test_gsadf_unavailable_floors_at_contested_level(isolated_db):
     raw = make_golden_raw_inputs()
     raw.gsadf_stat = raw.gsadf_cv90 = raw.gsadf_cv95 = None

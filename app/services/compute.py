@@ -223,7 +223,6 @@ class RawInputs:
     cape_history: list[float] | None = None
 
     real10y_decimal: float | None = None
-    real10y_as_of: str | None = None
 
     top10_pct: float | None = None
     top10_source: str = "ssga_spy_xlsx"
@@ -271,13 +270,13 @@ class RawInputs:
     breadth_pct: float | None = None
     breadth_n: int | None = None   # constituents resolved on the common date
     breadth_universe: int | None = None  # current-universe denominator (v3.7.8/B-06)
-    breadth_source: str = "constituents+twelvedata"
+    # the one breadth source (app/sources/breadth.py); a run without a reading names it too
+    breadth_source: str = "constituents+polygon"
     breadth_note: str | None = None
     breadth_as_of: str | None = None
 
     margin_balances: list[float] | None = None
     margin_months: list[str] | None = None   # parallel YYYY-MM for calendar YoY (C-07)
-    margin_note: str | None = None
     margin_as_of: str | None = None
 
     hyperscalers: list[d3_hyperscaler_fcf.HyperscalerReading] | None = None
@@ -286,12 +285,10 @@ class RawInputs:
 
     lppls_confidence: float | None = None
     lppls_result: dict | None = None   # tri-state {state, value, n_windows_*, n_closes}
-    lppls_note: str | None = None
     lppls_as_of: str | None = None
 
     vix_ratio: float | None = None
     vix_ratio_source: str = "cboe_delayed"
-    vix_ratio_fallback: bool = False
     vix_as_of: str | None = None
     vix_level: float | None = None
     skew: float | None = None
@@ -477,7 +474,6 @@ def gather_inputs() -> RawInputs:
     r = _track(raw, "fred_DFII10", lambda: fred_src.latest("DFII10"))
     if r:
         raw.real10y_decimal = r.value / 100.0
-        raw.real10y_as_of = r.provenance.as_of
 
     r = _track(raw, "ssga_spy_xlsx", ssga_src.top10_concentration)
     if r:
@@ -709,15 +705,13 @@ def gather_inputs() -> RawInputs:
     if r is not None:
         raw.lppls_confidence = r["value"]
         raw.lppls_as_of = ndx.provenance.as_of if ndx else today
-    else:
-        cause = raw.gather_errors.get("lppls", "unknown cause")
-        raw.lppls_note = f"LPPLS floored ({cause}); excluded from Block D, which renormalizes"
+    # A failed fit needs no note of its own here: the dropped d4 row words one
+    # from lppls_result's reason or gather_errors["lppls"] (compute_snapshot, D4).
 
     r = _track(raw, "vix_term_structure", vix_src.term_structure_ratio)
     if r:
         raw.vix_ratio = r.value
         raw.vix_ratio_source = r.provenance.source
-        raw.vix_ratio_fallback = r.provenance.fallback_used
         # v3.7.8/§9: never fabricate `today` — an unknown source date stays None
         # (unverified), consistent with the breadth/EBP provenance policy. V is a
         # multiplier, not a coverage-gated block indicator, so this is display-only.
@@ -923,15 +917,10 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         # tells the coverage gate — and the reader — that NOTHING was measured
         # this run. A floored s4 must not report itself as a full-quality reading.
         s4_state, s4_quality = "FLOOR", 0.0
-        # FLOOR must actually floor the SCORE, not just the label. s4_sub was
-        # computed and published above; before v4.1 `not _s4_ok` was
-        # character-equivalent to sub_score's own data-missing guard, so FLOOR
-        # implied 0.25 by construction and nothing had to re-assert it. Adding
-        # `s4_asym is not None` broke that equivalence: an unrecognised rule
-        # reaches here with a finite, ordered, fully scorable triple, and the
-        # branch was publishing whatever sub_score returned for it -- measured,
-        # 1.0 on a non-contested rejection, headline bit-identical to the run
-        # under a recognised rule. That is failing OPEN while reporting FLOOR.
+        # FLOOR must actually floor the SCORE, not just the label. `not _s4_ok`
+        # is the same test as sub_score's own data-missing guard, so s4_sub is
+        # 0.25 here already; the three lines below state it where the state is
+        # set.
         s4_sub = s4_gsadf.SUB_CONTESTED_OR_STALE
         sub_s["s4"] = s4_sub
         mc_in.s4_sub = s4_sub
@@ -939,12 +928,10 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         # "GSADF not computable" was true by construction; since v4.0 _s4_ok gates
         # the ENDPOINT triple, so this branch is reachable with a perfectly good
         # sup sitting in the same payload under extra.s4_statistic.gsadf_sup.
-        _which_stat = s4_gsadf.SCORED_STATISTIC
-        # None means the artifact could not identify the rule at all; say that
-        # rather than printing "None" at the reader.
-        _floor_lab = ({"bsadf_endpoint": "BSADF@endpoint",
-                       "gsadf_sup": "GSADF sup"}.get(_which_stat, _which_stat)
-                      if _which_stat is not None else "unidentified — artifact unreadable")
+        # SCORED_STATISTIC is one of these two keys in every running process:
+        # s4_gsadf refuses to import on an absent or unrecognised value.
+        _floor_lab = {"bsadf_endpoint": "BSADF@endpoint",
+                      "gsadf_sup": "GSADF sup"}[s4_gsadf.SCORED_STATISTIC]
         s4_note = (f"s4 scored statistic ({_floor_lab}) not computable this run; "
                    "contested/stale floor applied")
         if raw.gsadf_note:
@@ -975,11 +962,12 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
             "bsadf_endpoint": ("BSADF@endpoint", raw.bsadf_stat, raw.bsadf_cv90),
             "gsadf_sup": ("GSADF sup", raw.gsadf_stat, raw.gsadf_cv90),
         }
-        # Non-raising read: unreachable with an absent key today (the selector
-        # floors first), but the guardrail is that a config fault never 500s.
-        _stat_key = s4_gsadf.SCORED_STATISTIC
-        _scored_family = _families.pop(_stat_key, None) if _stat_key is not None else None
-        if _scored_family is not None and None not in _scored_family[1:]:
+        # SCORED_STATISTIC is one of the two keys or the process did not start
+        # (s4_gsadf._frozen_enum refuses to import on anything else; pinned by
+        # tests/test_s4_endpoint_statistic.py::TestABadArtifactRefusesToIMPORT).
+        # A config fault therefore aborts the boot; it cannot reach a request.
+        _scored_family = _families.pop(s4_gsadf.SCORED_STATISTIC)
+        if None not in _scored_family[1:]:
             _lab, _st, _cv = _scored_family
             s4_note += f"; scored {_lab} {_st:.4f} (cv90 {_cv:.4f})"
         for _lab, _st, _cv in _families.values():
@@ -1151,8 +1139,6 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         note = ("rollover confirmed" if rolled_state is True else
                 "rollover unknown (calendar gap); mult=0.6" if rolled_state is None else
                 "no rollover; mult=0.6")
-        if raw.margin_note:
-            note = f"{raw.margin_note}; {note}"
         indicators["d2"] = IndicatorOutput(
             "d2", yoy, sub, False, "finra_xlsx", False,
             note=note, as_of=raw.margin_as_of,
@@ -1515,7 +1501,6 @@ def persist_snapshot(data: SnapshotData, raw: RawInputs) -> int:
         # The near-ATH leg is only OBSERVED when the SPY series arrived; the
         # field itself defaults to False and cannot tell the two apart.
         near_ath_available=bool(raw.spy_daily_closes),
-        near_ath_state=(raw.index_within_2pct_of_ath if raw.spy_daily_closes else None),
     )
     band_state = data.band_state
 

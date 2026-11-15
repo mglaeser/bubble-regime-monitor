@@ -454,7 +454,7 @@ def _rf4_meta(*, breadth, near_ath_available, near_ath_state):
         semi_runup_pp=None, semis_as_of=None, semis_stale=None,
         hy_oas_bps=None, hy_oas_tight_bps=None, hy_oas_as_of=None, hy_oas_stale=None,
         breadth_pct=breadth, breadth_as_of="2026-08-20", breadth_stale=False,
-        near_ath_available=near_ath_available, near_ath_state=near_ath_state,
+        near_ath_available=near_ath_available,
     )["flags"]["rf4"]
 
 
@@ -503,7 +503,6 @@ def test_an_unobservable_rf4_does_not_inflate_the_fireable_universe():
             hy_oas_bps=None, hy_oas_tight_bps=None, hy_oas_as_of=None, hy_oas_stale=None,
             breadth_pct=44.0, breadth_as_of="2026-08-20", breadth_stale=False,
             near_ath_available=available,
-            near_ath_state=False if available else None,
         )["override_fireable_universe_count"]
 
     assert universe(False) < universe(True), (

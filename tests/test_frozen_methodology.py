@@ -196,8 +196,6 @@ def test_freshness_and_coverage_are_the_artifact():
 #   montecarlo.py   70.0 x1  override.target_score (np.maximum(scores, 70.0))
 #   aggregate.py    0.5 x2   aggregation.alpha_baseline (combine/deterministic_score defaults)
 #   d4_lppls.py     0.5 x1   quality.d4_partial (_quality shortened-scan tier)
-#   d1_breadth.py   50.0 x1  red_flags.breadth_lt_pct — in red_flag_breadth(), which is
-#                            TEST-ONLY (production uses aggregate's wired constant)
 #
 # COINCIDENTAL COLLISIONS (same value, unrelated semantics — not defects):
 #   compute.py 4.0/5.0: round(x, 4) precisions, YYYY-MM slice indices, smooth=5
@@ -217,7 +215,6 @@ KNOWN_COLLISIONS: dict[tuple[str, float], int] = {
     ("app/engine/montecarlo.py", 70.0): 1,
     ("app/engine/montecarlo.py", 75.0): 1,
     ("app/engine/montecarlo.py", 95.0): 1,
-    ("app/indicators/d1_breadth.py", 50.0): 1,
     ("app/indicators/d2_margin.py", 3.0): 5,
     ("app/indicators/d2_margin.py", 4.0): 2,
     ("app/indicators/d2_margin.py", 5.0): 2,
