@@ -88,9 +88,9 @@ class RenderContext:
         return self.members[self.headline_member_index]
 
     def context_hash(self) -> str:
-        # The primary-member index and priority both affect the model prompt
-        # and rendered body.  Omitting them made materially different contexts
-        # share one audit fingerprint.
+        # The primary-member index and priority both affect the rendered body.
+        # Omitting them made materially different contexts share one audit
+        # fingerprint.
         return sha256_of({
             "headline_member_index": self.headline_member_index,
             "members": [

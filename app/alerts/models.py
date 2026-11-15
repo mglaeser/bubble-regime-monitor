@@ -459,7 +459,9 @@ class AlertEvent(Base):
 
 
 # ===========================================================================
-# A.12-A.15  deliveries, members, renders, LLM attempts
+# A.12-A.15  deliveries, members, renders
+# (the LLM-attempt table went with the selector: migration 0020, owner
+# decision D2b)
 # ===========================================================================
 
 
@@ -607,7 +609,8 @@ class AlertRender(Base):
 
 
 # ===========================================================================
-# A.16-A.19  silences, idempotency, reviews, heartbeats
+# A.16-A.19  silences, idempotency, heartbeats
+# (the actionability-review table went with migration 0020 as well)
 # ===========================================================================
 
 

@@ -403,7 +403,7 @@ class TestTimeoutIsNeverFatal:
         (10**400, 600.0),   # OverflowError on float() — the reported crash
         (0, 1.0),           # a zero would fail every send instantly
         (-5, 1.0),
-        (10**9, 600.0),     # must not outlive the dispatch lease
+        (10**9, 600.0),     # the ceiling: ten minutes, above the 120 s dispatch lease
         (30, 30.0),         # the documented default passes through untouched
     ])
     def test_timeout_is_clamped_not_trusted(self, configured, expected):

@@ -157,8 +157,9 @@ silently-dropped rule is a mechanism that looks configured and never fires):
 
 A threshold with `value: null` and `attribution: PIN` is unresolved. The rule
 stays disabled and the API reports `value: null` plus `unresolved_reason` —
-**never** the literal string `"<PIN>"` in a numeric field. Sixteen rules are
-currently blocked this way; five more on inputs this service does not have.
+**never** the literal string `"<PIN>"` in a numeric field. 16 rules are
+currently blocked this way; 30 are disabled on inputs this service does not
+have (`runtime_readiness: MISSING_INPUT`), 4 of them among the 16.
 
 ---
 
@@ -203,8 +204,9 @@ readings of one period are counted once, so the rule confirms only on a
 genuinely new period.
 
 **At `count: 1` there is no candidate.** The rule fires on the transition
-itself and the basis is never consulted. Twenty-one of the shipped rules are
-written this way, including every Faber leg and both s3 tiers.
+itself and the basis is never consulted. 27 of the 90 shipped rules are
+written this way (9 of the 29 enabled ones), including every Faber leg and
+both s3 tiers.
 
 So for those rules the declaration describes intent, not enforcement, and what
 actually limits a repeat notification is `cooldown_seconds` — 2 days on the
@@ -234,10 +236,16 @@ currently ask for, and should not be added without deciding that it should.
 | P4 | API / log only | n/a | none | n/a |
 
 Quiet hours use IANA rules, so the release time moves with DST; exactly 22:00
-is held. The non-P1 budget is 2 per rolling 168h in quiet regimes, hard-capped
-at 5/24h and 8/168h (`app/alerts/budgets.py` `LIMITS`). **P1 is never held by
-either** — enforced by the ruleset loader *and* by a CHECK constraint on
-`alert_delivery`, so a future planner bug cannot even persist the mistake.
+is held. The non-P1 budget is two caps, 5 per rolling 24h and 8 per rolling
+168h (`app/alerts/budgets.py` `LIMITS`). The 2 per 168h beside them is the
+quiet-regime target and holds no send: `check_budget` reads the caps only, and
+production sent 4 non-P1 alerts inside 168 h on 2026-10-16 to 10-21, each
+admitted. A replay that spans 168 h reports a mean above the target and does
+not fail on it
+(`tests/test_alert_replay.py::test_a_breached_non_p1_cap_fails_the_gate`).
+**P1 is never held by either** — enforced by the ruleset loader *and* by a
+CHECK constraint on `alert_delivery`, so a future planner bug cannot even
+persist the mistake.
 
 ---
 
@@ -271,7 +279,7 @@ alert plan rather than a slower one.
 
 ## 8. Configuration
 
-Two **independent** switches:
+Two switches:
 
 ```bash
 ALERT_INPUT_CAPTURE=true    # persist the point-in-time sidecar  (Stage 1: ON)
@@ -284,6 +292,13 @@ stage inert: no sidecars means nothing to replay, while still claiming the
 stage had been reached. Capture writes one immutable evidence row per recompute
 in its own transaction; it calls no provider, alters no score and cannot roll
 back a snapshot.
+
+They are not symmetric. Capture runs without alerting, but an evaluation reads
+the captured input: with `ALERT_INPUT_CAPTURE=false`, `ALERTS_MODE=shadow` or
+`live` evaluates no recompute and logs `alert_evaluation_skipped` at each one
+(`tests/test_alert_foundations.py::test_alerting_without_capture_evaluates_no_recompute_and_says_so`).
+The recompute-outage alert does not depend on capture: the watchdog writes its
+own input.
 
 `MESSAGE_LANGUAGE` (`en` | `de`; unset, each artifact speaks its own language)
 selects the language of every operator message. A phrase set may carry more than one language —
@@ -343,8 +358,12 @@ names it. Turning the alert system on never changes the digest's transport,
 and a digest without one is named by the alert health projection ("the daily
 digest has no transport").
 
-Volume, lease, retention and LLM settings live in `app/config.py`; each has a
-safe default. Alert phrasing has no model path: configuring the runtime
+Lease, retention and LLM settings live in `app/config.py`; each has a
+safe default. The volume caps are not settings: they are the constant
+`app/alerts/budgets.py` `LIMITS` (owner decision D2d), and an old
+`ALERTS_NON_P1_*` key is reported as retired
+(`tests/test_alert_promotion.py::test_the_alert_budget_is_code_the_replay_gate_checks_not_a_host_setting`).
+Alert phrasing has no model path: configuring the runtime
 gateway activates only the judgment/digest paths. Configuration alone never
 grants delivery permission: live mode runs only the promoted artifact, and
 promoting it is an operator action.
@@ -646,7 +665,8 @@ mandatory-event catalogue. Both were held open as operator decisions rather
 than absorbed, and on 2026-08-27 the operator made them ("I want that it
 takes over now"):
 
-* **Caps raised 3→5 / 6→8**, recorded in `app/config.py` beside the values.
+* **Caps raised 3→5 / 6→8**, recorded beside the values
+  (`app/alerts/budgets.py` `LIMITS`, a constant since owner decision D2d).
   The quiet-regime target stays 2. The evidence artifact records the limits
   each verdict used, and admission refuses caps the evidence never saw — so
   the raise is bound into the gate, not slipped past it.
@@ -883,9 +903,12 @@ summaries still omit bare digests, and the *Alert artifacts* CI step
 independently validates the files.
 
 The history establishes regression coverage, **not** recall. Recall is a Stage
-2 question and needs `config/alert_mandatory_events.v3.2.json`, which ships
-empty on purpose: inventing historical windows would manufacture a recall
-number nothing measured, the same failure mode as inventing a `[PIN]`.
+2 question and needs `config/alert_mandatory_events.v3.2.json`. It shipped
+empty until 2026-08-27 — inventing historical windows would manufacture a
+recall number nothing measured, the same failure mode as inventing a `[PIN]` —
+and has been frozen since with the entries the coverage history stages
+(section 11b): pipeline recall, 5 of 5 in the committed gate, not a
+market-history figure.
 
 Supplying a catalogue is an evidence-bearing action, so replay fails closed on
 a missing file, invalid JSON, malformed envelope, duplicate or unsafe event
@@ -895,7 +918,7 @@ limit, missing field, or extra event field. A non-empty catalogue must declare
 expected priority, inside that event's own UTC window, and no later than its
 declared recompute-slot allowance. `NOT_EVALUABLE` is decided per event window,
 not copied from a run-wide missing-input count. If every event window is blind,
-or the deliberately empty shipped catalogue is used, recall remains explicitly
+or a catalogue is empty, recall remains explicitly
 UNMEASURED. Stage 1 reports that honestly and remains eligible; a Stage 2+
 replay fails unless the shipped catalogue is non-empty, frozen and detected at
 100% across its evaluable events, and the artifact binds the catalogue's bytes,
@@ -914,8 +937,9 @@ buy/sell instructions or guaranteed outcomes — phrase validation applies the
 honesty lint to every fragment in every language, and the final renderer
 applies the same lint to the body before anything can reach a wire. Denying
 the noun ("keine Wahrscheinlichkeit", "not a probability") is the one honest
-use of it and passes; the same stem anywhere else does not. A model may only
-select reviewed codes.
+use of it and passes; the same stem anywhere else does not. No model takes
+part: the alert system has no model path (owner decision D2b,
+`tests/test_alert_delivery.py::test_the_alert_system_has_no_model_path`).
 
 Exactly-once SMS delivery is not promised. Ambiguous delivery outcomes are made
 visible and handled conservatively rather than retried into duplicates.

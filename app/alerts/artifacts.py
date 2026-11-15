@@ -7,9 +7,15 @@ nothing else. It marks the exact bytes live mode runs and reads no evidence
 promotes.
 
 Fallback never escalates. If the candidate ruleset on disk is invalid, the
-service keeps evaluating the ruleset that was already promoted and reports
-`ops.rules_invalid`. If nothing valid is available at all it reports
-`ops.alerting_unavailable` and evaluates nothing — it does not "do its best".
+service keeps evaluating the ruleset that was already promoted, logs
+`alert_rules_invalid` and carries the reason into alert health
+(`fallback_reason`;
+tests/test_alert_recovery.py::test_the_fallback_to_the_promoted_ruleset_never_escalates_the_mode).
+If nothing valid is available at all it raises `AlertingUnavailable` and
+evaluates nothing — it does not "do its best". `ops.rules_invalid` and
+`ops.alerting_unavailable` are inventory rules, disabled: no code raises them.
+(Their `disabled_reason` in the ruleset says the loader does; those are
+promoted bytes and change with the next ruleset version.)
 
 Queued work resolves rules and phrases from the REGISTRY, not from the files:
 a delivery planned before a deploy must render with the bytes it was planned
