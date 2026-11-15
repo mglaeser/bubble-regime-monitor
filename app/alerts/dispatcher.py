@@ -422,6 +422,27 @@ def _frozen_render_membership_changed(
     return len(represented) != len(raw) or represented != expected
 
 
+def _all_members_gone_reason(session: Session, delivery: AlertDelivery) -> str:
+    """Why a delivery has no member left to send.
+
+    `revalidate_members` drops a member whose condition resolved and a member
+    a silence covers. A silence that withdrew a member is the reason, the one
+    `outbox.apply_silences_to_unsent` gives for the same situation: that
+    member's condition did not resolve, and a record saying it did answers
+    "why did this alert not arrive" wrongly. Each member row keeps its own
+    drop reason. No stored row carries the old label for a silence:
+    production holds no silence and no cancelled delivery (read-only,
+    2026-11-11).
+    """
+    members = session.execute(
+        select(AlertDeliveryMember).where(
+            AlertDeliveryMember.delivery_id == delivery.delivery_id,
+        )
+    ).scalars().all()
+    silenced = any(member.drop_reason == "SILENCED_BEFORE_SEND" for member in members)
+    return "ALL_MEMBERS_SILENCED" if silenced else "ALL_MEMBERS_RESOLVED"
+
+
 def _utc_clock_value(clock: Callable[[], datetime]) -> datetime:
     moment = clock()
     if moment.tzinfo is None:
@@ -506,7 +527,8 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
         # queued before the database trigger was corrected); no legacy provider
         # intent bypasses the runtime guard.
         if not rendered_member_ids and delivery.delivery_kind != DeliveryKind.TEST:
-            cancel(session, delivery, now=now, reason="ALL_MEMBERS_RESOLVED")
+            cancel(session, delivery, now=now,
+                   reason=_all_members_gone_reason(session, delivery))
             report.cancelled += 1
             return
 
