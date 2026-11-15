@@ -95,6 +95,105 @@ class TestStaleness:
         assert payload["stale"] is False and payload["age_days"] == 0
 
 
+def _xlsx(rows: list[list]) -> bytes:
+    """An .xlsx file with the given rows on its first sheet."""
+    import io
+
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    for row in rows:
+        ws.append(row)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _finra_xlsx(month_cells: list) -> bytes:
+    """Shaped like FINRA's margin statistics: the header row, then one row per
+    month cell. The debit balance of row i is 900,000 + i."""
+    header = ["Year-Month", "Debit Balances in Customers' Securities Margin Accounts",
+              "Free Credit Balances in Customers' Cash Accounts",
+              "Free Credit Balances in Customers' Securities Margin Accounts"]
+    return _xlsx([header] + [[cell, 900_000.0 + i, 150_000.0 + i, 180_000.0 + i]
+                             for i, cell in enumerate(month_cells)])
+
+
+_MONTH_ABBR = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split()
+
+
+class TestFinraMonths:
+    """app/sources/finra.py: "Rows are parsed as (date, debit) PAIRS and sorted
+    by date ascending", and a date column is mandatory. The file's month cells
+    are ISO 8601 text ("2026-09"); a column in another spelling is not a date
+    column, and the pull fails instead of returning other months."""
+
+    def test_months_are_read_as_iso_year_month_without_a_guess(self):
+        """A guard, not a red-to-green pin: a format guess takes the day the
+        cell lacks from the system clock, which a test cannot set, and it
+        warns only when that day does not exist in the newest month (for this
+        file, September: on the 31st of a month). Read as ISO 8601 there is no
+        guess, on any day."""
+        import warnings
+
+        from app.sources.finra import parse_debit_balances
+
+        months = [(y, m) for y in (2024, 2025, 2026) for m in range(1, 13)][:33]      # 2024-01 .. 2026-09
+        cells = [f"{y}-{m:02d}" for y, m in reversed(months)]                        # newest first, as served
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            values, labels, as_of = parse_debit_balances(_finra_xlsx(cells))
+        assert labels == [f"{y}-{m:02d}" for y, m in months]
+        assert as_of == "2026-09-30"
+        assert len(values) == 33 and values[-1] == 900_000.0                         # the first row is the newest
+
+    @pytest.mark.parametrize("spell", [
+        lambda y, m: f"{_MONTH_ABBR[m - 1]}-{y % 100:02d}",      # Sep-26, the spelling of FINRA's web table
+        lambda y, m: f"{m:02d}-{y % 100:02d}",                   # 09-26
+        lambda y, m: f"{y}{m:02d}",                              # 202609 as text
+        lambda y, m: y * 100 + m,                                # 202609 as a number
+        lambda y, m: f"1/{m}/{y}",                               # 1/9/2026, day first
+    ], ids=["Mon-YY", "MM-YY", "YYYYMM-text", "YYYYMM-number", "D/M/YYYY"])
+    def test_months_in_another_spelling_are_a_failure_not_a_guess(self, spell):
+        """Thirty years of months, 1997-01 .. 2026-12, newest first. Guessed,
+        these files came back as a healthy pull of other months: "Sep-26" and
+        "09-26" as 36 months ending 1999-12, "202609" as 144 months (132 of
+        them in the wrong month) ending 2012-12, the number 202609 as the one
+        month 1970-01, "1/9/2026" as 30 Januaries."""
+        from app.sources.finra import parse_debit_balances
+
+        months = [(y, m) for y in range(1997, 2027) for m in range(1, 13)]
+        with pytest.raises(SourceError, match="no parseable date column"):
+            parse_debit_balances(_finra_xlsx([spell(y, m) for y, m in reversed(months)]))
+
+    @pytest.mark.parametrize("spell", [
+        lambda y, m: f"{_MONTH_ABBR[m - 1]} {y}",                # Sep 2026
+        lambda y, m: f"{m}/{y}",                                 # 9/2026
+    ], ids=["Mon YYYY", "M/YYYY"])
+    def test_a_spelling_the_guess_happened_to_read_right_is_not_a_date_either(self, spell):
+        """The narrowing of the contract, pinned: the guess read these two
+        into the right months, with its warning on every parse. They are not
+        ISO 8601 and not what FINRA sends, and what counts as a date is what
+        pandas reads as ISO 8601, so the pull fails on them as well."""
+        from app.sources.finra import parse_debit_balances
+
+        months = [(y, m) for y in range(1997, 2027) for m in range(1, 13)]
+        with pytest.raises(SourceError, match="no parseable date column"):
+            parse_debit_balances(_finra_xlsx([spell(y, m) for y, m in reversed(months)]))
+
+    def test_a_file_without_a_date_column_is_a_failure_not_january_1970(self):
+        """The debit column and one more column of numbers. Guessed, the
+        numbers were dates (nanoseconds after 1970-01-01) and the pull came
+        back healthy with the one month "1970-01"."""
+        from app.sources.finra import parse_debit_balances
+
+        header = ["Debit Balances in Customers' Securities Margin Accounts",
+                  "Free Credit Balances in Customers' Cash Accounts"]
+        with pytest.raises(SourceError, match="no parseable date column"):
+            parse_debit_balances(_xlsx([header] + [[900_000.0 + i, 150_000.0 + i] for i in range(30)]))
+
+
 class _Response:
     def __init__(self, text: str = "", content: bytes = b"", payload: dict | None = None):
         self.text, self.content, self._payload = text, content, payload
@@ -144,6 +243,44 @@ class TestSourceChains:
         assert result.provenance.fallback_used is True
         assert fetched == ["multpl", "shillerdata"]
 
+    # The line of https://www.multpl.com/shiller-pe that states the value, as
+    # the page served it on 2026-11-14 (verbatim). It is the one place on that
+    # page where the words "Current Shiller PE Ratio" stand together.
+    MULTPL_LINE = ('<meta name="description" content="Shiller PE Ratio chart, historic, and current data. '
+                   'Current Shiller PE Ratio is 39.95, a change of -0.15 from previous market close." />')
+
+    def test_the_current_cape_is_the_number_in_multpls_sentence(self):
+        from app.sources.cape import _current_from_multpl
+
+        assert _current_from_multpl(self.MULTPL_LINE) == 39.95
+
+    @pytest.mark.parametrize("page", [
+        'content="Current Shiller PE Ratio (CAPE 10) is 39.70, a change of -0.12"',
+        'content="Current Shiller PE Ratio as of Nov 10, 2026: 39.70"',
+        '<b>Current Shiller PE Ratio</b> <span class="h6">39.70</span>',
+        "Current Shiller PE Ratio - Mean: 17.33",
+    ], ids=["a-number-in-parentheses", "a-date-before-the-value", "a-heading-and-a-class", "another-figure"])
+    def test_a_reworded_page_is_a_failure_not_another_number(self, page):
+        """Behind the words "Current Shiller PE Ratio" each of these pages has
+        a number between 5 and 100 that is not the current CAPE: 10, 10, 6 and
+        17.33. Taking the first digits behind the words returned exactly
+        those, each as a healthy multpl reading."""
+        from app.sources.cape import _current_from_multpl
+
+        with pytest.raises(SourceError, match="could not parse current CAPE"):
+            _current_from_multpl(page)
+
+    def test_a_reworded_multpl_page_hands_over_to_shillers_spreadsheet(self, monkeypatch):
+        import app.sources.cape as cape
+
+        page = _Response(text='content="Current Shiller PE Ratio (CAPE 10) is 39.70"', content=b"xls")
+        monkeypatch.setattr(cape, "fetch", lambda source, url, **kwargs: page)
+        monkeypatch.setattr(cape, "_history_from_shillerdata", lambda content: [38.0, 39.1])
+        result = cape.current_cape()
+        assert result.value == 39.1
+        assert result.provenance.source == "shillerdata_ie_data"
+        assert result.provenance.fallback_used is True
+
     def test_the_multpl_monthly_table_needs_no_beautifulsoup(self, monkeypatch):
         import sys
 
@@ -165,6 +302,41 @@ class TestSourceChains:
         assert len(result.value) == 300
         assert result.value[0] == pytest.approx(10.01)              # oldest first
         assert result.value[-1] == pytest.approx(13.00)
+
+
+def _slickcharts_table(weights: list[float], last_row: str = "") -> str:
+    rows = "".join(f"<tr><td>{i}</td><td>Co{i}</td><td>SY{i}</td><td>{w:.2f}%</td></tr>"
+                   for i, w in enumerate(weights, 1))
+    return f"<table><tr><th>#</th><th>Company</th><th>Symbol</th><th>Weight</th></tr>{rows}{last_row}</table>"
+
+
+class TestSlickchartsFallback:
+    """README "Data sources" and app/sources/ssga.py: the S2 input is the sum
+    of the top-10 INDIVIDUAL HOLDING weights, from SSGA's holdings file or,
+    when that fails, from Slickcharts' holdings table."""
+
+    # 71 holdings; the ten largest add up to 44.2.
+    WEIGHTS = [10.4, 7.9, 6.5, 4.2, 3.9, 3.0, 2.5, 2.2, 1.9, 1.7] + [1.5] + [0.1] * 60
+
+    def test_a_holding_above_ten_percent_is_counted(self):
+        """With single weights cut at 10 % the fallback read 35.3 here: the
+        10.4 left out and the eleventh name (1.5) counted in its place. SSGA's
+        file with the same weights reads 44.2."""
+        from app.sources.ssga import _top10_from_slickcharts, _top10_from_xlsx
+
+        assert _top10_from_slickcharts(_slickcharts_table(self.WEIGHTS)) == pytest.approx(44.2, abs=0.01)
+        ssga = _xlsx([["Name", "Ticker", "Weight"]] + [[f"Co{i}", f"SY{i}", w] for i, w in enumerate(self.WEIGHTS, 1)])
+        assert _top10_from_xlsx(ssga) == pytest.approx(44.2, abs=0.01)
+
+    def test_a_total_row_fails_the_check_of_the_sum(self):
+        """The cut also kept out a row that is no holding. The check of the
+        sum (5 < sum < 80) answers that row: with a 100 % total the ten largest
+        rows add up to 142.5, and the read fails instead of scoring."""
+        from app.sources.ssga import _top10_from_slickcharts
+
+        total = "<tr><td></td><td>Total</td><td></td><td>100.00%</td></tr>"
+        with pytest.raises(SourceError, match="implausible top-10 sum 142.5"):
+            _top10_from_slickcharts(_slickcharts_table(self.WEIGHTS, last_row=total))
 
 
 class TestBreadthIsPolygonOnly:
