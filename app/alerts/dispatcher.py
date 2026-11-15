@@ -1,8 +1,9 @@
 """The delivery worker: claim, revalidate, render, send, classify.
 
-Two passes can overlap: the scheduler's and `bubblegauge alerts dispatch
---once`. The claim is a conditional UPDATE, so a row is claimed once, and the
-budget recheck counts every other claimed or sending row, so the caps hold
+Passes can overlap: the scheduler's, `bubblegauge alerts dispatch --once`, and
+the host watchdog's run when it evaluated something (`watchdog.announce`). The
+claim is a conditional UPDATE, so a row is claimed once, and the budget recheck
+counts every other claimed or sending row, so the caps hold
 (`outbox.dispatch_budget_usage`).
 
 Order matters, and every step can still stop the send:

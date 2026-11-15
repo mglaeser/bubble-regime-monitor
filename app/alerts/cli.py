@@ -14,7 +14,7 @@ read-only unless its name says otherwise.
     python -m app.alerts.cli explain --evaluation-id ID
     python -m app.alerts.cli recover-evaluations --once
     python -m app.alerts.cli reconcile-sidecars
-    python -m app.alerts.cli watchdog --once     # exit 2 = outage detected
+    python -m app.alerts.cli watchdog --once     # exit 2 = outage detected and handed on; 1 = detected, not announced
     python -m app.alerts.cli dispatch --once     # one outbox pass
     python -m app.alerts.cli retention [--dry-run]
 """
@@ -156,12 +156,12 @@ def cmd_preflight(_args: argparse.Namespace) -> int:
 
 
 def cmd_watchdog(_args: argparse.Namespace) -> int:
-    """Exit 2 on a detected outage — a timer can act on that directly."""
-    from app.alerts.watchdog import run_once
+    """The host entry (`app.alerts.watchdog.main`): exit 2 = outage found and
+    handed on, 1 = found and not announced. One function decides the exit code;
+    the copy this command had knew 0 and 2 only."""
+    from app.alerts.watchdog import main as host_run
 
-    result = run_once()
-    _print(result)
-    return 2 if result["firing"] else 0
+    return host_run([])
 
 
 def cmd_dispatch(_args: argparse.Namespace) -> int:

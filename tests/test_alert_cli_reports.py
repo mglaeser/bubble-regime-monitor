@@ -49,6 +49,16 @@ def test_the_weekly_digest_command_is_gone():
         build_alert_parser().parse_args(["digest", "--window", "2026-W33", "--dry-run"])
 
 
+def test_the_cli_watchdog_is_the_host_entry(isolated_db, monkeypatch):
+    """`bubblegauge alerts watchdog --once` and the host timer's `python -m
+    app.alerts.watchdog --once` are one check with one set of exit codes. The
+    command had a copy of the exit logic, which knew 0 and 2 only."""
+    from app.alerts import cli, watchdog
+
+    monkeypatch.setattr(watchdog, "main", lambda argv: 1)
+    assert cli.main(["watchdog", "--once"]) == 1
+
+
 def _persist_inputs(inputs) -> None:
     from app.db import session_scope
 

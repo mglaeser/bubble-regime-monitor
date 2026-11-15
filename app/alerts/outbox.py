@@ -709,8 +709,8 @@ def dispatch_budget_usage(
     never the current one. That alone keeps the caps: a row spends budget
     only after its claim, and from its claim to its outcome it is in flight,
     so of the rows that are sent, the one checked last counted all the
-    others. Two overlapping dispatchers (the scheduler's and `bubblegauge
-    alerts dispatch --once`) cannot both spend the last slot.
+    others. Overlapping dispatchers (the scheduler's, `bubblegauge alerts
+    dispatch --once`, the host watchdog's run) cannot spend the last slot twice.
 
     Queued READY rows reserve nothing (re-evaluation A8). The reservation for
     READY rows ranked before this one in the claim order went. The one

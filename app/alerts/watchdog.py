@@ -3,7 +3,9 @@
 A monitoring system that only runs as a callback after a successful recompute
 cannot notice that recomputes have stopped. So this is a standalone entry point
 (`python -m app.alerts.watchdog --once`) meant to run from a HOST timer, outside
-the container — see `deploy/systemd/`.
+the container — see `deploy/systemd/`. That run also passes the outbox once for
+what it planned (`announce`): the scheduled dispatcher is a job of the scheduler
+that may be what stopped.
 
 It is still not a complete answer: a total host or network failure silences the
 watchdog too. That requires external monitoring, and this file says so rather
@@ -26,7 +28,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 
 from app.alerts.dto import ALERT_INPUT_SCHEMA_VERSION, watchdog_input_identity
-from app.alerts.enums import Evaluability, InputOrigin
+from app.alerts.enums import Evaluability, EvaluationRunStatus, InputOrigin
 from app.alerts.input_builder import build_watchdog_input, serialize
 from app.alerts.models import AlertEpisode, AlertInputSnapshot
 from app.config import get_settings
@@ -214,7 +216,51 @@ def run_once(*, now: datetime | None = None) -> dict[str, object]:
     return result
 
 
+def announce(result: dict[str, object]) -> bool:
+    """Pass the outbox for what `run_once` planned. False when the alert path
+    did not take what the pass captured.
+
+    The host timer runs this module in a process of its own, and the outbox is
+    drained by a job of the application's scheduler alone. When that scheduler
+    is what stopped - the reason no recompute ran - the alert the host run
+    planned stayed queued. Executed on this entry point alone, live mode, a run
+    every 30 minutes for 17.5 hours: 36 runs, 18 of them firing, one alert
+    READY and PENDING after eight hours, nothing sent, and every firing run
+    exited 2, which the unit counts as success. One outbox pass then sent it.
+    Production has not met the case: the rule has opened no episode there.
+
+    So a pass that evaluated something runs one outbox pass itself.
+    `alerts dispatch --once` does the same beside the scheduled pass: no row is
+    claimed twice and the budget caps hold (`app/jobs/alert_dispatch.py`). A
+    pass that captured nothing, the 48 runs of a normal day, runs none.
+
+    The answer is what the alert path took, not what reached the phone: the
+    evaluation committed and the outbox pass ran. What the pass does with a
+    row is the dispatcher's, as in the scheduled pass - a P2 inside quiet hours
+    is held, a send that failed transiently is due again within five minutes,
+    and the next firing run passes the outbox again.
+    """
+    status = result["evaluation_status"]
+    if status is None:
+        # Nothing was evaluated: the pass captured nothing, or ALERTS_MODE is
+        # disabled. Nothing was planned, so there is nothing to send.
+        return True
+    if status != EvaluationRunStatus.COMMITTED:
+        return False
+    from app.jobs.alert_dispatch import run_once as outbox_pass
+
+    try:
+        report = outbox_pass()
+    except Exception as exc:      # noqa: BLE001 - the exit code reports it
+        log.error("alert_watchdog_dispatch_failed", error=sanitize(exc))
+        return False
+    log.info("alert_watchdog_dispatch", **report)
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
+    """The host entry. Exit 0 = no outage; 2 = an outage, handed to the alert
+    path; 1 = an outage the alert path did not take."""
     import argparse
     import json
 
@@ -223,7 +269,13 @@ def main(argv: list[str] | None = None) -> int:
                         help="run a single check and exit (the only mode)")
     parser.parse_args(argv)
     result = run_once()
+    announced = announce(result)
     print(json.dumps(result, indent=2, sort_keys=True, default=str))
+    if result["firing"] and not announced:
+        # Not 0 and not 2, the unit's `SuccessExitStatus`: the unit fails and
+        # its `OnFailure=` sends the host notice, the one path that shares
+        # nothing with the application. Before, this run exited 2 as well.
+        return 1
     return 2 if result["firing"] else 0
 
 

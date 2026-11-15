@@ -2,8 +2,9 @@
 
 The scheduler runs ONE pass at a time (`max_instances=1`), and a pass takes
 the queue in claim order, P1 first, then oldest. `bubblegauge alerts dispatch
---once` can run a pass beside it: no row is claimed twice and the budget caps
-hold (`app/alerts/dispatcher.py`).
+--once` can run a pass beside it, and the host watchdog's run does when it
+evaluated something (`app/alerts/watchdog.py`): no row is claimed twice and
+the budget caps hold (`app/alerts/dispatcher.py`).
 
 The job refuses to run unless ALERTS_MODE is `live` or `shadow`. In shadow it
 uses the NullSender, so a shadow deployment exercises the whole path —
