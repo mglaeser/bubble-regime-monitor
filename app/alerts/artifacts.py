@@ -79,7 +79,6 @@ def validate_from_disk(
     rules_path: Path | None = None,
     phrase_path: Path | None = None,
     service_version: str | None = None,
-    available_calibrations: frozenset[str] = frozenset(),
 ) -> LoadedArtifacts:
     """Validate the candidate artifacts. Raises on an invalid pair."""
     settings = get_settings()
@@ -103,7 +102,6 @@ def validate_from_disk(
         methodology_version=_M.get_path("_meta", "methodology_version"),
         methodology_manifest_sha256=_M.frozen_sha256(),
         service_version=service_version or settings.service_version,
-        available_calibrations=available_calibrations,
     )
     return LoadedArtifacts(ruleset=ruleset, phrase_set=phrase_set, source="candidate")
 

@@ -393,7 +393,6 @@ def validate_ruleset(
     methodology_version: str,
     methodology_manifest_sha256: str,
     service_version: str,
-    available_calibrations: frozenset[str] = frozenset(),
 ) -> ValidatedRuleset:
     """Parse, validate and hash a candidate ruleset. Raises `RulesetInvalid`.
 
@@ -430,7 +429,15 @@ def validate_ruleset(
         _check_sources(rule, problems)
         _check_condition_shapes(rule, problems)
         _check_confirmation_semantics(rule, problems)
-        if rule.calibration_id and rule.enabled and rule.calibration_id not in available_calibrations:
+        if rule.calibration_id and rule.enabled:
+            # No calibration registry exists: the statistical monitors of
+            # stage 6 are not built. This function took a set of available
+            # artifacts that no caller ever passed, so the set was empty on
+            # every call, and the table meant to back it held no row; both
+            # went with migration 0028. An enabled rule that names an
+            # artifact is refused, as it always was
+            # (tests/test_alert_foundations.py::
+            # test_an_enabled_rule_that_names_a_calibration_is_refused).
             problems.append(
                 f"{rule.rule_id}: enabled but calibration artifact "
                 f"{rule.calibration_id!r} is not available"
