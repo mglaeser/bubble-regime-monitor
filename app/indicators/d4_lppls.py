@@ -62,10 +62,10 @@ FILTER_CONDITIONS: dict[str, float] = _M.as_dict("indicators", "d4", "filter_con
 # times shrink the window from LPPLS_WINDOW_MAX down to LPPLS_SMALLEST_WINDOW
 # in LPPLS_INNER_INCREMENT-day steps -> ~144 start-time windows at ONE endpoint
 # (the library grid yields dt in {34, 39, ..., 749} for a 750-close window).
-# Atom N2800 budget: ~144 fits x max_searches=15 projects ~650-850 s (measured
-# against the v3.2 calibration of 675k point-searches ~ 64 s on a dev core,
-# Atom ~8x slower) — inside the 1500 s subprocess timeout with margin. Raise
-# max_searches only after a timed host run.
+# Budget: the ~144 fits x max_searches=15 take 16 to 37 s on the deploy host
+# (222 fits in the service log, 2026-10-05 to 2026-11-10; median 19 s), far
+# inside LPPLS_TIMEOUT_S (default 1500 s). Raise max_searches only after a
+# timed host run.
 LPPLS_WORKERS = _M.get_path("indicators", "d4", "workers")
 LPPLS_WINDOW_MAX = _M.get_path("indicators", "d4", "window_max")          # 750 trading days
 LPPLS_SMALLEST_WINDOW = _M.get_path("indicators", "d4", "smallest_window")      # 30

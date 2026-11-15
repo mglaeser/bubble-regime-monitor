@@ -16,8 +16,9 @@ score-effective tree). It is permitted ONLY inside the `_meta` block, which hold
 governance bookkeeping (methodology_frozen_at / falsification_tracking_since) that
 was never recorded in the codebase and only the operator can supply.
 
-The artifact is byte-faithful to the v3.7.8 runtime literals; the seeded-MC golden
-headline is 52.43 and is unchanged by wiring the engine to load from it.
+The artifact is byte-faithful to the v3.7.8 runtime literals; the golden fixture's
+deterministic point score is 52.43 (its seeded Monte Carlo median, the headline,
+52.56), and neither moved when the engine was wired to load from it.
 """
 
 from __future__ import annotations

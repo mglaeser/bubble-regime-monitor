@@ -225,8 +225,10 @@ class Settings(BaseSettings):
     message_engine_breaker_strikes: int = 5      # failed calls in a row -> cooldown
     message_engine_breaker_cooldown_s: int = 86400   # no call for this long after them
 
-    # Volume cap (ruling Q40). At the cap the evergreen fallback is used and
-    # the exhaustion is reported in the next digest — never a dropped message.
+    # Volume cap (ruling Q40). At the cap no call is made and the template goes
+    # out (README, the daily digest's row) — never a dropped message. No message
+    # announces the cap: the attempt table keeps "daily budget spent" on a
+    # not_asked row (governor.refusal, record_fallback), and that is all.
     message_engine_daily_budget: int = 100
 
     # Channel length (rulings Q27/Q29/Q30). SMS_MAX_LEN already defaults to

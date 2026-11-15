@@ -452,9 +452,11 @@ class TestTheFloorNoteNamesTheScoredStatistic:
 class TestTheCvRouteIsReported:
     def test_the_route_rides_on_the_report(self):
         raw = _raw_diverging()
-        raw.bsadf_cv_route = "augment_join"
+        # The one route r/gsadf.R reports besides "unavailable"; the fixture's
+        # own value is None, so this is still the value riding through.
+        raw.bsadf_cv_route = "bsadf_cv"
         extra = compute_snapshot(raw).indicators["s4"].extra["s4_statistic"]
-        assert extra["cv_route"] == "augment_join"
+        assert extra["cv_route"] == "bsadf_cv"
 
     def test_an_unavailable_route_is_visible_not_silent(self):
         # A CV-extraction failure and a degenerate series both floor s4, but they
