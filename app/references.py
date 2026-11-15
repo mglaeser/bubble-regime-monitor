@@ -405,8 +405,8 @@ REGISTRY: dict[str, Methodology] = {
         ),
         how=(
             "Parse the FINRA margin-statistics XLSX debit-balance column; yoy = 12-month % change "
-            "of debit balances. base = clip((yoy - 25)/35, 0, 1). mult = 1.0 if there have been two "
-            "consecutive monthly declines from a trailing-12-month high, else 0.6. "
+            "of debit balances. base = clip((yoy - 25)/35, 0, 1). mult = 1.0 if debit balances fell "
+            "in each of the last two months (three consecutive published months), else 0.6. "
             "sub_score = base * mult."
         ),
         why=(
