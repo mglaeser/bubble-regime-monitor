@@ -1200,8 +1200,10 @@ def test_a_healthy_watchdog_pass_resolves_the_open_outage(
         ).scalars().one()
         outage_id = outage.episode_id
 
-    # A late but healthy 14:00 recompute appears. The watchdog now sees no
-    # missed slot, and must still emit/evaluate a FALSE recovery observation.
+    # A late but healthy 14:00 recompute appears, and its input is not
+    # evaluated (capture off, or an evaluation that did not commit). The
+    # watchdog now sees no missed slot, and must still emit/evaluate a FALSE
+    # recovery observation.
     with session_scope() as session:
         _snapshot(
             session, computed_at=day + timedelta(hours=14, minutes=5),
@@ -1215,6 +1217,162 @@ def test_a_healthy_watchdog_pass_resolves_the_open_outage(
     assert outage.is_open is False
     assert outage.episode_status == "RESOLVED"
     get_settings.cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# the outage rule is decided on every input: a recompute reads no missed slot
+# ---------------------------------------------------------------------------
+
+OUTAGE_RULE = "ops.recompute_outage"
+#: A Monday, 07:00 in Berlin. Every outage alert below fires between 07:00 and
+#: 22:00 Berlin, so the P2 quiet hours hold none of them.
+FIRST_SLOT = datetime(2026, 11, 2, 6, 0, tzinfo=UTC)
+
+
+class _Slots:
+    """The scheduled jobs by hand, one four-hour slot after the other.
+
+    A slot that runs writes a snapshot, and its input is captured and
+    evaluated. For a slot that does not run, the watchdog passes 100 minutes
+    later, past its 90-minute grace. The dispatcher passes after each.
+    """
+
+    def __init__(self) -> None:
+        from app.alerts.sender import NullSender
+
+        self.prev_id: int | None = None
+        self.sender = NullSender()
+
+    def recompute(self, i: int) -> None:
+        from app.services.alert_integration import capture_alert_input, evaluate_input
+        from tests.test_alert_end_to_end import _snapshot
+
+        slot = FIRST_SLOT + timedelta(hours=4 * i)
+        with session_scope() as session:
+            self.prev_id = _snapshot(session, computed_at=slot + timedelta(seconds=40),
+                                     effective="trim", prev_id=self.prev_id).id
+        identity = capture_alert_input(self.prev_id, now=slot + timedelta(seconds=50))
+        outcome = evaluate_input(identity, now=slot + timedelta(minutes=2))
+        assert outcome.status == EvaluationRunStatus.COMMITTED
+        self._dispatch(slot + timedelta(minutes=3))
+
+    def missed(self, i: int) -> None:
+        from app.alerts.watchdog import run_once
+
+        slot = FIRST_SLOT + timedelta(hours=4 * i)
+        run_once(now=slot + timedelta(minutes=100))
+        self._dispatch(slot + timedelta(minutes=101))
+
+    def _dispatch(self, now: datetime) -> None:
+        from tests.test_alert_end_to_end import _dispatch
+
+        _dispatch(self.sender, now)
+
+    def run(self, slots: int, *, down: set[int]) -> None:
+        for i in range(slots):
+            (self.missed if i in down else self.recompute)(i)
+
+    @property
+    def messages(self) -> list[str]:
+        return [message for _recipient, message in self.sender.sent]
+
+
+def _outage_episodes() -> list[tuple[str, list[str]]]:
+    """(status, suppression reasons) of every outage episode, oldest first."""
+    from app.alerts.models import AlertEpisode
+
+    with session_scope() as session:
+        return [(str(episode.episode_status), list(episode.suppression_reasons or []))
+                for episode in session.execute(
+                    select(AlertEpisode).where(AlertEpisode.rule_id == OUTAGE_RULE)
+                    .order_by(AlertEpisode.opened_at)).scalars()]
+
+
+def _outage_state() -> tuple[str, str]:
+    from app.alerts.models import AlertRuleState
+
+    with session_scope() as session:
+        row = session.execute(select(AlertRuleState).where(
+            AlertRuleState.rule_id == OUTAGE_RULE)).scalars().one()
+        return str(row.evaluation_status), str(row.condition_state)
+
+
+def test_a_recompute_reads_no_missed_slot_and_the_watchdog_its_count():
+    """A snapshot exists because its slot ran: at that instant the watchdog's
+    own count is zero, and that is what the recompute's input reads."""
+    from app.alerts.input_builder import build_watchdog_input
+    from app.alerts.sources import read_source
+    from app.alerts.watchdog import evaluate_outage
+
+    recompute = make_input(identity="recompute", computed_at="2026-11-02T06:00:40+00:00")
+    healthy = read_source("missed_recompute_slots", recompute)
+    assert (healthy.available, healthy.value) == (True, 0)
+    written = datetime.fromisoformat(recompute.computed_at)
+    assert evaluate_outage(last_snapshot_at=written, now=written).missed_slots == 0
+
+    outage = read_source("missed_recompute_slots", build_watchdog_input(
+        expected_slot_key="2026-11-03T10:00:00+00:00", missed_slots=3,
+        built_at=FIRST_SLOT, service_version="test", last_snapshot=None))
+    assert (outage.available, outage.value) == (True, 3)
+
+
+def test_every_separate_recompute_outage_is_announced(isolated_db, tmp_path, monkeypatch):
+    """Three outages of three missed slots, 36 hours of recomputes between
+    them. Each is an outage of its own and each is announced: a mechanism that
+    fires three times in five days is not chattering."""
+    from tests.test_alert_end_to_end import _stage3_shadow
+
+    _stage3_shadow(tmp_path, monkeypatch, "three-outages")
+    service = _Slots()
+    service.run(36, down={6, 7, 8, 18, 19, 20, 30, 31, 32})
+
+    assert len(service.messages) == 3
+    assert all(message.startswith("Kein Rechenlauf seit ") for message in service.messages)
+    assert _outage_episodes() == [("RESOLVED", []), ("RESOLVED", []), ("RESOLVED", [])]
+
+
+def test_the_first_recompute_after_an_outage_closes_it(isolated_db, tmp_path, monkeypatch):
+    """README, "Recompute-outage alert": "once a recompute lands, its
+    evaluation closes it without a message". The recompute is the observation
+    that no slot is missing; no watchdog pass has to follow it."""
+    from app.alerts.models import AlertEvent
+    from tests.test_alert_end_to_end import _stage3_shadow
+
+    _stage3_shadow(tmp_path, monkeypatch, "outage-closed")
+    service = _Slots()
+    service.run(2, down=set())
+    assert _outage_state() == ("OK", "NORMAL")
+    with session_scope() as session:
+        assert session.execute(select(AlertEvent).where(
+            AlertEvent.rule_id == OUTAGE_RULE,
+            AlertEvent.action == "condition_unknown")).scalars().all() == []
+
+    service.missed(2)
+    service.missed(3)
+    assert _outage_episodes() == [("FIRING", [])]
+    assert len(service.messages) == 1
+
+    service.recompute(4)
+    assert _outage_episodes() == [("RESOLVED", [])]
+    assert _outage_state() == ("OK", "NORMAL")
+    assert len(service.messages) == 1
+
+
+def test_an_outage_that_keeps_coming_back_is_still_held_as_flapping(
+        isolated_db, tmp_path, monkeypatch):
+    """The flapping control keeps its meaning: three outages with a single
+    recompute between them are four flips inside the window of six states,
+    and the third is not announced."""
+    from tests.test_alert_end_to_end import _stage3_shadow
+
+    _stage3_shadow(tmp_path, monkeypatch, "outage-flapping")
+    service = _Slots()
+    service.run(11, down={2, 3, 5, 6, 8, 9})
+
+    episodes = _outage_episodes()
+    assert len(episodes) == 3
+    assert "FLAPPING" in episodes[2][1]
+    assert len(service.messages) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -1255,7 +1413,8 @@ def test_a_watchdog_input_carries_the_missed_slots_and_nothing_else(slot_key, mi
 OUTAGE_DAY = datetime(2026, 8, 20, tzinfo=UTC)
 
 
-def _outage_arc(tmp_path, monkeypatch, *, before: str, after: str | None = None) -> None:
+def _outage_arc(tmp_path, monkeypatch, *, before: str, after: str | None = None,
+                evaluated: bool = True) -> None:
     """An outage in production's shape, through the real capture and watchdog.
 
     Snapshots carry lineage (`prev_snapshot_id`), every sidecar is captured
@@ -1265,8 +1424,12 @@ def _outage_arc(tmp_path, monkeypatch, *, before: str, after: str | None = None)
       02:00  a quiet trim snapshot
       06:00  the snapshot `before` names: "quiet", "override" or "suppressed"
       10:00, 14:00  no recompute; at 15:31 the watchdog fires
-      18:00  with `after`: the recompute is back in that state, and at 18:10
-             the watchdog writes its recovery observation
+      18:00  with `after`: the recompute is back in that state. Its own
+             evaluation ends the outage, and the watchdog at 18:10 has nothing
+             left to observe. With `evaluated=False` the snapshot is written
+             and its input is not evaluated (capture off, an evaluation that
+             did not commit): then the watchdog at 18:10 writes its recovery
+             observation, and that ends the outage.
     """
     import pathlib
 
@@ -1289,7 +1452,8 @@ def _outage_arc(tmp_path, monkeypatch, *, before: str, after: str | None = None)
     monkeypatch.setenv("ALERT_INPUT_CAPTURE", "true")
     get_settings.cache_clear()
 
-    def recompute(hour: int, state: str, prev_id: int | None) -> int:
+    def recompute(hour: int, state: str, prev_id: int | None, *,
+                  evaluated: bool = True) -> int:
         at = OUTAGE_DAY + timedelta(hours=hour)
         with session_scope() as session:
             snap = _snapshot(
@@ -1304,6 +1468,8 @@ def _outage_arc(tmp_path, monkeypatch, *, before: str, after: str | None = None)
                 snap.band_suppressed_by_coverage = True
                 snap.data_degraded = True
             snapshot_id = snap.id
+        if not evaluated:
+            return snapshot_id
         outcome = evaluate_input(
             capture_alert_input(snapshot_id, now=at + timedelta(minutes=1)),
             now=at + timedelta(minutes=2))
@@ -1318,10 +1484,15 @@ def _outage_arc(tmp_path, monkeypatch, *, before: str, after: str | None = None)
     assert fired["evaluation_status"] == EvaluationRunStatus.COMMITTED
     if after is None:
         return
-    recompute(18, after, last_id)
+    recompute(18, after, last_id, evaluated=evaluated)
+    # An evaluated recompute has closed the outage itself: its input reads no
+    # missed slot (`sources._missed_recompute_slots`). So the watchdog's next
+    # pass finds nothing to observe, and writes its recovery observation only
+    # when that evaluation did not run.
     recovered = run_once(now=OUTAGE_DAY + timedelta(hours=18, minutes=10))
-    assert recovered["recovery_observation"] is True
-    assert recovered["evaluation_status"] == EvaluationRunStatus.COMMITTED
+    assert (recovered["firing"], recovered["recovery_observation"]) == (False, not evaluated)
+    assert recovered["evaluation_status"] == (
+        None if evaluated else EvaluationRunStatus.COMMITTED)
 
 
 def _episodes(rule_id: str) -> list[bool]:
@@ -1357,10 +1528,15 @@ def test_an_outage_neither_resolves_nor_announces_a_standing_decision(
     assert "override.resolves" not in _planned_rules()
 
 
-def test_the_recovery_observation_leaves_an_active_override_alone(
-        isolated_db, tmp_path, monkeypatch):
-    """Override active before, during and after the outage: nothing to say."""
-    _outage_arc(tmp_path, monkeypatch, before="override", after="override")
+@pytest.mark.parametrize("evaluated", [True, False],
+                         ids=["the-recompute-ends-it", "the-recovery-observation-ends-it"])
+def test_the_end_of_an_outage_leaves_an_active_override_alone(
+        isolated_db, tmp_path, monkeypatch, evaluated):
+    """Override active before, during and after the outage: nothing to say,
+    whether the recompute's own evaluation ends the outage or, when that did
+    not run, the watchdog's recovery observation, which carries no snapshot."""
+    _outage_arc(tmp_path, monkeypatch, before="override", after="override",
+                evaluated=evaluated)
 
     assert _episodes("ops.recompute_outage") == [False]    # the outage is over
     assert _episodes("override.fires") == [True]           # the override is not
@@ -1371,8 +1547,8 @@ def test_the_recovery_observation_leaves_an_active_override_alone(
 def test_an_override_that_fired_during_an_outage_is_announced_by_the_next_recompute(
         isolated_db, tmp_path, monkeypatch):
     """The first recompute after the outage is judged against the snapshot
-    before it (lineage), and the recovery observation minutes later must not
-    close the P1 episode it opened: its 48 h reminder hangs on that episode."""
+    before it (lineage), and the P1 episode it opens stays open when the same
+    evaluation ends the outage: its 48 h reminder hangs on that episode."""
     _outage_arc(tmp_path, monkeypatch, before="quiet", after="override")
 
     assert _episodes("ops.recompute_outage") == [False]
