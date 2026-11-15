@@ -1,5 +1,5 @@
 """Dashboard feed (v3.4.0): read-only current-values feed for the companion
-"Crisis Winners" dashboard (crash.klee.me). See DASHBOARD_FEED_SPEC.md.
+"Crisis Winners" dashboard (ai-bubble.fyi). See DASHBOARD_FEED_SPEC.md.
 
 DESIGN CONTRACT (dashboard-side sign-off, 2026-07-15; decisions 1A/2A/3A/4B/5A;
 v3.7.0 additive delta: +fear_greed series & metric — see spec section 7):

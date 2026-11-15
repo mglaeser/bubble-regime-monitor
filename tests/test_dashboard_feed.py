@@ -306,6 +306,36 @@ class TestFeedEndpoint:
     def test_503_before_first_payload(self, client):
         assert client.get("/api/v1/dashboard/feed").status_code == 503
 
+    def test_the_route_text_restates_no_inventory_count(self, client):
+        """The inventory is counted where it is pinned: SERIES_KEYS and
+        METRIC_KEYS (test_frozen_key_inventory) and spec section 2. The route's
+        summary said "12 monthly series ... + 34 scalar metrics", the capture
+        of 2026-07-15, while the feed served 13 and 33: a count restated in
+        the served text goes stale with the next key."""
+        import re
+
+        op = client.get("/openapi.json").json()["paths"]["/api/v1/dashboard/feed"]["get"]
+        count = re.compile(r"\d+\s+(monthly\s+)?series|\d+\s+(scalar\s+)?metrics")
+        for text in (op["summary"], op["description"]):
+            assert not count.search(text), text
+
+    def test_the_committed_capture_is_a_record_of_its_day(self):
+        """docs/dashboard-feed-capture2.json is the payload served on
+        2026-07-15, and the spec now calls it that (capture status, section 5)
+        where it said "the complete byte contract" to integrate against. It is
+        not the inventory: it holds keys that left the contract since, has no
+        `fear_greed`, and carries the `meta.disclaimer` v3.6.0 removed."""
+        from pathlib import Path
+
+        capture = json.loads((Path(__file__).resolve().parents[1] / "docs"
+                              / "dashboard-feed-capture2.json").read_text(encoding="utf-8"))
+        series, metrics = capture["data"]["series"], capture["data"]["metrics"]
+        assert (len(series), len(metrics)) == (12, 34)
+        assert capture["meta"]["computed_at"].startswith("2026-07-15")
+        assert {"cofer_gold_share_pct", "cofer_ust_share_pct"} <= set(metrics) - set(df.METRIC_KEYS)
+        assert "fear_greed" not in series and "fear_greed" not in metrics
+        assert "disclaimer" in capture["meta"]
+
     def test_serves_latest_payload_with_cache_header(self, client):
         self._persist_payload()
         r = client.get("/api/v1/dashboard/feed")

@@ -1,10 +1,10 @@
 # DASHBOARD_FEED_SPEC — bubblegauge → Crisis-Winners dashboard
 
-**Version: 1.0 (implemented) · service_version 3.4.0 · branch `claude/dashboard-feed`**
+**Version: 1.2 (v1.0 of 2026-07-15, service 3.4.0, with the deltas of sections 7 and 8 and the key removals noted in section 2)**
 **Sign-off basis: dashboard-side approval of proposal v0 with decisions 1A · 2A · 3A · 4B · 5A and three key-naming requests — all honored below.**
 
 > **CAPTURE STATUS — COMPLETE. Capture #2 (production host, `computed_at 2026-07-15T23:29:51+00:00`, commit a897198) confirms the full contract:**
-> all 12 series populated (61/61 points each), all 34 metrics present, per-item degradation and every labeled fallback behaving as specified. §5 below carries the real capture-#2 `metrics` block and a real full series verbatim; **the canonical full artifact is committed at [`docs/dashboard-feed-capture2.json`](docs/dashboard-feed-capture2.json) — the dashboard should integrate against that file plus the live endpoint** (`GET https://bubblegauge.klee.me/api/v1/dashboard/feed`).
+> all 12 series populated (61/61 points each), all 34 metrics present, per-item degradation and every labeled fallback behaving as specified. §5 below carries the real capture-#2 `metrics` block and a real full series verbatim; **[`docs/dashboard-feed-capture2.json`](docs/dashboard-feed-capture2.json) is that capture in full, a record of 2026-07-15: 12 series and 34 metrics as served that day, with keys that have left the contract since (section 2), without `fear_greed` (section 7) and with a `meta.disclaimer` the service no longer sends. The contract is sections 2 to 4 and the live endpoint** (`GET https://bubblegauge.klee.me/api/v1/dashboard/feed`).
 >
 > Capture #1 (same day, one recompute earlier) exposed two issues, both resolved and regression-tested:
 > 1. All six Tiingo series failed (`only 61 rows`) — a ≥100-row guard meant for GSADF's long-history calibration; the feed now passes `min_rows=24`. Capture #2 shows all six populated.
@@ -71,7 +71,7 @@ GET /api/v1/dashboard/feed?sections=metrics
 GET /api/v1/dashboard/feed?sections=series&symbols=qqq,gold,btc
 ```
 
-- Public read, `{data, meta}` envelope, 60/min/IP rate limit, CORS allows `https://ai-bubble.fyi` and `https://crash.klee.me` (GET-only, no credentials).
+- Public read, `{data, meta}` envelope, 60/min/IP rate limit, CORS allows `https://ai-bubble.fyi` (GET-only, no credentials; `app/main.py`, pinned by `tests/test_cors.py`).
 - `?symbols=` filters **both** `series` and `metrics` by key; `?sections=` selects the top-level maps. Unknown values ignored.
 - `Cache-Control: public, max-age=900` (`private` when reads are keyed, `READ_ENDPOINTS_PUBLIC=false`).
 - **503** only before the first payload exists. Per-item failures ship `available:false` inside a **200**. Never a 500 on upstream failure.
@@ -87,7 +87,7 @@ GET /api/v1/dashboard/feed?sections=series&symbols=qqq,gold,btc
 
 ## 4 · Refresh, freshness, failure
 
-- Built **inside the twice-daily recompute (06:00/18:00 UTC), strictly after the score persists** — a feed failure never touches scoring; the endpoint then serves the previous payload. Manual `POST /api/v1/admin/refresh` also rebuilds it. **No on-request upstream pulls, ever** (cached read of a persisted row; migration 0005, table `dashboard_feed`).
+- Built **inside every scheduled recompute (`app/engine/recompute_slots.py`; the schedule is served as `service.recompute_schedule` by `/api/v1/status`), strictly after the score persists** — a feed failure never touches scoring; the endpoint then serves the previous payload. Manual `POST /api/v1/admin/refresh` also rebuilds it. **No on-request upstream pulls, ever** (cached read of a persisted row; migration 0005, table `dashboard_feed`).
 - Stale SLAs: daily market data 7 d · FRED H.10 FX 10 d · CAPE 45 d · FINRA 75 d · quarterly MMF 290 d (the newest quarter is about 163 to 255 days old by FRED's date). `stale` is null when `as_of` is unknown.
 - Quota cost per recompute: ~6 Tiingo requests, ~6 Twelve Data credits (through the existing per-minute throttle and credit governor), ~6 FRED series. Negligible against all limits.
 - Tests: golden-fixture build (frozen inventories, 61-point pad, honest kinds), one-source-down degradation (200 + `available:false`), spot→ETF fallback labeling, endpoint 503/filters/lenient-params. 206 tests green.
@@ -167,7 +167,7 @@ A real full series (capture #2, `usd_broad_index`, first/last points shown — a
 
 Envelope (real): `"meta": {"computed_at": "2026-07-15T23:29:51.060987+00:00", "service_version": "3.4.0", "disclaimer": "Research, not advice."}` — with `data.anchor_month: "2026-07"`, `data.anchor_partial: true`.
 
-**Full-payload artifact:** [`docs/dashboard-feed-capture2.json`](docs/dashboard-feed-capture2.json) (committed; captured from the live endpoint at the timestamp above, validated 12 series x 61 points + 34 metrics) is the complete byte contract. Integrate against it plus the live endpoint.
+**Full-payload artifact:** [`docs/dashboard-feed-capture2.json`](docs/dashboard-feed-capture2.json) (committed; captured from the live endpoint at the timestamp above, validated 12 series x 61 points + 34 metrics) is the full payload of that capture: a record of 2026-07-15, not the current inventory.
 
 Provider date conventions visible in the real bytes (both intentional): Tiingo monthly bars are dated at month **end** — the in-progress month carries the forward end-of-month date (`2026-07-31`) — while Twelve Data 1-month bars are dated at month **start** (`2026-07-01`); `anchor_partial` marks the open month. While a month runs the six Tiingo series and `gold_ttm_pct` carry that forward date as `as_of`, so their `stale` can turn true from the eighth day after the month ends and not before; the `btc` series has the same monthly resolution through its 35-day SLA.
 
@@ -272,7 +272,7 @@ And a REAL degradation row (capture #1, before the min_rows fix) — this is pre
 3. BTC ATH basis = max(provider monthly closes, current spot), coverage start in `detail` — not a curated record. Drawdown is computed against that basis and is ≤ 0 by construction.
 4. `vix_term_state` is categorical: `value` is null (the contract requires numeric values) and the reading lives in `detail.state`; the numeric companion is `vix_term_ratio`.
 5. ~~COFER reserve shares ship `available:false` (new IMF provider = out of scope).~~ **Resolved in v3.7.5:** both are connected via `app/sources/imf_reserves.py`. `cofer_ust_share_pct` IS COFER (USD share of allocated FX reserves); `cofer_gold_share_pct` is IMF **IFS** (gold ÷ total reserves), NOT COFER — COFER is FX-only, so the key name stays a labeled historical misnomer. Quarterly (~1-quarter lag), non-scoring, per-item graceful degradation. Requires a deploy-host network policy that allows `imf.org`. **Not connected again since 2026-09-27:** the IMF retired that service, both keys ship `available:false`. **Dropped 2026-10-03 (owner decision D13):** both keys left the contract.
-6. §5 now carries real capture-#2 bytes (metrics block verbatim + envelope); the complete per-point byte contract is committed at `docs/dashboard-feed-capture2.json`. The pre-capture sketch is retained under "5-legacy" for history only.
+6. §5 now carries real capture-#2 bytes (metrics block verbatim + envelope); the capture's full payload is committed at `docs/dashboard-feed-capture2.json`. The pre-capture sketch is retained under "5-legacy" for history only.
 7. **`silver_spot` is permanently the labeled SLV-close fallback on the free Twelve Data tier** (XAG/USD needs the Grow plan; XAU/USD works free — confirmed by capture #1). The dashboard's "render prose spot only when source is true spot" rule handles this by design; `gold_silver_ratio` states its `mixed` basis. If a paid TD plan is ever added, true silver spot activates automatically with no code change.
 8. Twelve Data 1-month bars are dated at the month **start** (the current partial bar reads `YYYY-MM-01`), so the `btc` series uses a 35-day stale SLA; `btc_spot` (daily) carries the fresh date.
 
@@ -390,7 +390,7 @@ detail keys are new; none are removed:
   sup rejects at 5% on a window ending 2000-02 while the endpoint is calm — an
   illustration, not a live capture.
 
-The metric **key is unchanged** (`gsadf`) and `METRIC_KEYS` is still 35, so the
+The metric **key is unchanged** (`gsadf`), so the
 frozen key inventory in §2 and the endpoint contract in §3 are unaffected.
 
 **The §5 / §5b captures predate this change** and show the pre-v4.0 sup under

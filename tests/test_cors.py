@@ -1,5 +1,8 @@
 """Browser-origin allowlist contract."""
 
+import re
+from pathlib import Path
+
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.testclient import TestClient
 
@@ -49,3 +52,26 @@ def test_the_retired_klee_me_origins_are_absent(isolated_db):
     origins = cors.kwargs["allow_origins"]
     assert not any("klee.me" in origin.casefold() for origin in origins), origins
     assert "https://ai-bubble.fyi" in origins, "the live dashboard must stay"
+
+
+def test_the_feed_documents_name_the_allowed_origins_and_no_other(isolated_db):
+    """The dashboard feed is what a browser on another origin reads, and its
+    contract (DASHBOARD_FEED_SPEC.md section 3) says which origins may. The
+    spec named `https://crash.klee.me` beside the live origin, and the two feed
+    modules named it as the dashboard's host, after it had left the allowlist
+    (the test above). A contract that still lists a retired origin reads as a
+    reason to put it back."""
+    import app.routers.dashboard as route
+    import app.services.dashboard_feed as feed
+
+    cors = next(
+        middleware
+        for middleware in create_app().user_middleware
+        if middleware.cls is CORSMiddleware
+    )
+    spec = (Path(__file__).resolve().parents[1] / "DASHBOARD_FEED_SPEC.md").read_text(
+        encoding="utf-8")
+    line = next(ln for ln in spec.splitlines() if "CORS allows" in ln)
+    assert set(re.findall(r"https://[a-z0-9.-]+", line)) == set(cors.kwargs["allow_origins"])
+    for module in (route, feed):
+        assert "crash.klee.me" not in module.__doc__, module.__name__
