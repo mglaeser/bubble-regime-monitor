@@ -911,3 +911,104 @@ def test_newer_incompatible_sidecar_does_not_masquerade_as_old_current_context(
         session.add_all([row(trigger), row(incompatible)])
     with session_scope() as session:
         assert load_latest_compatible_input(session, like=trigger) is None
+
+
+# --- an alert that ended without a send is visible ------------------------------
+
+
+def _health() -> dict:
+    """What `GET /api/v1/alerts/health` projects for this database."""
+    from app.alerts.artifacts import load_active
+    from app.alerts.health import health_projection
+    from app.config import get_settings
+
+    with session_scope() as session:
+        artifacts = load_active(session)
+        return health_projection(
+            session, settings=get_settings(), ruleset=artifacts.ruleset,
+            artifact_source=artifacts.source, fallback_reason=artifacts.fallback_reason)
+
+
+def _outbox_log(monkeypatch):
+    """Every line `app.alerts.outbox` logs, recorded by structlog's own
+    `CapturingLogger`. The module's logger is replaced, not the configuration:
+    a logger an earlier app start cached keeps that start's processors, which
+    `structlog.testing.capture_logs` does not reach."""
+    from structlog.testing import CapturingLogger
+
+    from app.alerts import outbox
+
+    recorder = CapturingLogger()
+    monkeypatch.setattr(outbox, "log", recorder)
+    return recorder
+
+
+def _warnings(recorder) -> list[tuple]:
+    return [(call.args[0], call.kwargs.get("state"), call.kwargs.get("error_code"),
+             call.kwargs.get("http_status"))
+            for call in recorder.calls if call.method_name == "warning"]
+
+
+def test_health_counts_an_alert_the_proxy_refused_for_good(tmp_path, monkeypatch):
+    """docs/ALERT_SYSTEM.md, health: a delivery the transport refused for good
+    is counted (`outbox.dead_permanent`), degrades nothing, is logged at
+    warning level and is not sent again. A 401 is what the proxy answers once
+    its key has expired (README, iMessage): the P1 ends DEAD_PERMANENT."""
+    import httpx
+
+    from app.alerts.sender import ImessageSender, NullSender
+    from app.config import get_settings
+    from tests.test_alert_imessage_sender import _client, _configured
+
+    _stage3_shadow(tmp_path, monkeypatch, "refused-for-good")
+    _configured(monkeypatch)
+    base = datetime(2026, 8, 20, 6, 0, tzinfo=UTC)
+    _evaluate("de-risk", base + timedelta(hours=4), _evaluate("trim", base, None))
+    proxy = ImessageSender(_client(lambda request: httpx.Response(401, text="key expired")))
+    recorder = _outbox_log(monkeypatch)
+
+    refused = _dispatch(proxy, base + timedelta(hours=4, minutes=1))
+    later = _dispatch(NullSender(), base + timedelta(hours=8))
+
+    with session_scope() as session:
+        row = session.query(AlertDelivery).one()
+        assert (int(row.priority), row.transport_status) == (1, TransportStatus.DEAD_PERMANENT)
+    health = _health()
+    assert health["outbox"]["dead_permanent"] == 1
+    assert health["outbox"]["render_failed"] == 0
+    assert [c for c in health["conditions"] if "DEAD_PERMANENT" in c.upper()] == []
+    assert _warnings(recorder) == [
+        ("alert_delivery_not_sent", "DEAD_PERMANENT", "HTTP_401", 401)]
+    assert (refused.failed, later.claimed, later.sent) == (1, 0, 0)
+    get_settings.cache_clear()
+
+
+def test_health_counts_an_alert_whose_text_failed_its_checks(tmp_path, monkeypatch):
+    """The same for a text that cannot be sent (`outbox.render_failed`): here
+    the phrase set the alert was planned under is not the registered one, so
+    the reviewed text cannot be reproduced. Nothing reaches the transport."""
+    from app.alerts.sender import NullSender
+    from app.config import get_settings
+
+    _stage3_shadow(tmp_path, monkeypatch, "text-failed")
+    base = datetime(2026, 8, 20, 6, 0, tzinfo=UTC)
+    _evaluate("de-risk", base + timedelta(hours=4), _evaluate("trim", base, None))
+    with session_scope() as session:
+        session.query(AlertDeliveryMember).one().origin_phrase_set_sha256 = "0" * 64
+    sender = NullSender()
+    recorder = _outbox_log(monkeypatch)
+
+    failed = _dispatch(sender, base + timedelta(hours=4, minutes=1))
+    later = _dispatch(sender, base + timedelta(hours=8))
+
+    with session_scope() as session:
+        assert session.query(AlertDelivery).one().transport_status == \
+            TransportStatus.RENDER_FAILED
+    health = _health()
+    assert health["outbox"]["render_failed"] == 1
+    assert health["outbox"]["dead_permanent"] == 0
+    assert [c for c in health["conditions"] if "RENDER_FAILED" in c.upper()] == []
+    assert _warnings(recorder) == [
+        ("alert_delivery_not_sent", "RENDER_FAILED", "RENDER_REJECTED", None)]
+    assert (failed.render_failed, later.claimed, sender.sent) == (1, 0, [])
+    get_settings.cache_clear()

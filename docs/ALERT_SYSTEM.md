@@ -514,14 +514,23 @@ reports the evaluator as not required.
 The health projection also reports the latest and p95 evaluation duration, P1
 enqueue-to-provider-attempt p95, rolling LLM cap/call/fallback evidence,
 missing typed sidecars, overdue or malformed outbox holds, the UNKNOWN
-deliveries, SQLite WAL/foreign-key/busy-timeout/RETURNING
+deliveries, the deliveries that ended without a send, SQLite
+WAL/foreign-key/busy-timeout/RETURNING
 capabilities, the Alembic revision, required partial indexes and immutability
 triggers, and live artifact/promotion agreement. Missing scheduler components
 or required schema objects are critical; sidecar gaps, overdue holds and P1
 latency above 60 seconds are degraded rather than silently green. An UNKNOWN
 delivery is counted and degrades nothing: it is terminal, and no operator step
 awaits it (owner decision D2f, section 11d); a dispatch pass whose send ends
-UNKNOWN reports its heartbeat critical.
+UNKNOWN reports its heartbeat critical. A delivery the transport refused for
+good (`DEAD_PERMANENT`: a listed 4xx such as the 401 of an expired proxy key,
+a 2xx that is not a send operation, or no transport) or whose text failed its
+checks (`RENDER_FAILED`) is counted the same way (`outbox.dead_permanent`,
+`outbox.render_failed`), degrades nothing, and is logged at warning level
+(`alert_delivery_not_sent`). Neither is sent again
+(tests/test_alert_end_to_end.py::test_health_counts_an_alert_the_proxy_refused_for_good,
+`::test_health_counts_an_alert_whose_text_failed_its_checks`). Production held
+neither: 21 deliveries, all `SENT` (read-only, 2026-11-11).
 
 None of that bypasses rollout. In live mode the evaluation, the dispatch job
 and the message engine load through `load_active_for_mode`, which refuses a
