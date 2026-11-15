@@ -14,6 +14,8 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from app.alerts import observation as obs
 from app.alerts.enums import DataState
 from app.alerts.input_builder import build_alert_input
@@ -609,38 +611,68 @@ def test_a_snapshot_without_the_typed_leg_fields_is_missing_not_a_state(isolated
     assert faber.freshness_reason_code == "typed_month_end_absent"
 
 
-def test_each_asset_is_classified_against_its_own_calendar(isolated_db):
+def _session_bars(first: date, last: date) -> list[tuple[str, float]]:
+    """One bar for every NYSE session from `first` to `last`, rising."""
+    from app.alerts.calendars import is_trading_day
+
+    bars: list[tuple[str, float]] = []
+    day = first
+    while day <= last:
+        if is_trading_day(day):
+            bars.append((day.isoformat(), 100.0 + len(bars) * 0.1))
+        day += timedelta(days=1)
+    return bars
+
+
+def test_each_asset_is_classified_against_its_own_calendar():
     """QQQ must not be classified by SPY's clock.
 
     The feeds are independent and can be asynchronous. Borrowing one asset's
     latest bar to decide whether the OTHER's month is complete declares a
     still-running month finished for whichever asset lags — reintroducing the
     intramonth defect for that asset only, which is the hardest shape to spot.
+
+    Through the pipeline, the path production runs: SPY has every session up to
+    2026-08-07, QQQ's feed stopped on 2026-07-15. Evaluated on 2026-08-10, SPY's
+    last completed month is July; QQQ's July did not run to its last trading
+    day, so its last completed month stays June.
+    """
+    from app.services import compute
+    from tests.conftest import make_golden_raw_inputs
+
+    raw = make_golden_raw_inputs()
+    spy = _session_bars(date(2025, 6, 2), date(2026, 8, 7))
+    qqq = [bar for bar in spy if bar[0] <= "2026-07-15"]
+    raw.spy_daily, raw.spy_daily_closes = spy, [close for _, close in spy]
+    raw.qqq_daily, raw.qqq_daily_closes = qqq, [close for _, close in qqq]
+
+    trend = compute.compute_snapshot(
+        raw, mc_samples=1_000, mc_seed=20260711, as_of_date="2026-08-10").trend_states
+    assert trend["SPY"]["faber_month_end_period"] == "2026-07"
+    assert trend["QQQ"]["faber_month_end_period"] == "2026-06"
+
+
+def test_the_month_end_state_has_one_rule_and_it_needs_the_calendar():
+    """The month-end state is decided by the calendar's answer and by nothing
+    else: "Months whose LAST BAR is that month's last trading day"
+    (compute._closed_months, which calls adjacency, a bar in the following
+    month, "weaker": it "lets a month holding a single early bar through").
+
+    So a caller cannot ask for the state without saying which months ran to
+    their end, and cannot vouch for the newest month with a word of its own
+    (`feed_current`): there is no second rule to fall back to.
     """
     from app.engine.legs import month_end_faber
+    from app.services.compute import _closed_months
 
-    # a contiguous monthly series, then a partial month for the lagging asset
-    completed = [(f"2025-{m:02d}-28", 100.0 + m) for m in range(1, 13)]
-    completed += [(f"2026-{m:02d}-28", 112.0 + m) for m in range(1, 8)]
-    lagging = completed + [("2026-08-03", 50.0)]    # August only just started
+    bars = _session_bars(date(2025, 8, 1), date(2026, 7, 31))
+    closed = _closed_months(bars)
+    assert month_end_faber(bars, as_of_month="2026-09", closed_months=closed) == ("IN", "2026-07")
 
-    # its own clock: August is in progress and is dropped, July is closed
-    # because an August bar exists immediately after it
-    _, period = month_end_faber(lagging, as_of_month="2026-08", feed_current=True)
-    assert period == "2026-07", "the in-progress month must be dropped"
-
-    # a LATER clock cannot promote August: no September bar proves it closed,
-    # which is what stops a lagging feed being closed out by another asset's
-    # dates
-    # freshness is DERIVED, not asserted: on 2026-09-02 a feed whose newest bar
-    # is 2026-08-03 is a month behind, so it cannot close August either
-    from app.services.compute import _feed_is_current
-
-    assert _feed_is_current(lagging, "2026-09-02") is False
-    _, borrowed = month_end_faber(
-        lagging, as_of_month="2026-09",
-        feed_current=_feed_is_current(lagging, "2026-09-02"))
-    assert borrowed == "2026-07", "another asset's calendar must not close this feed"
+    with pytest.raises(TypeError):
+        month_end_faber(bars, as_of_month="2026-09")
+    with pytest.raises(TypeError):
+        month_end_faber(bars, as_of_month="2026-09", feed_current=True, closed_months=closed)
 
 
 def test_an_undated_leg_state_is_unknown_age_not_withheld(isolated_db):
@@ -658,100 +690,21 @@ def test_an_undated_leg_state_is_unknown_age_not_withheld(isolated_db):
     assert sma.period_end is None, "but it must not claim a date it does not have"
 
 
-def test_month_completion_needs_the_calendar_AND_a_publishing_feed():
-    """Two failures that trade off against each other, both avoided.
-
-    Waiting for a later bar means a month that ended on Friday is not
-    authoritative until Monday — a late P1. Trusting the calendar alone means a
-    feed that stopped mid-July gets July promoted once September arrives, with
-    a MID-JULY close standing in for July's month-end close — a wrong P1.
-
-    Freshness is decided against the MARKET CALENDAR, never the series' own gap
-    history: every statistic over those gaps is contaminated by the outages it
-    exists to detect, which is how a 40-day hole last month can make a feed
-    that stopped 30 days ago look healthy.
-    """
-    from datetime import date, timedelta
-
-    from app.engine.legs import month_end_faber
-    from app.services.compute import _feed_is_current
-
-    day, end_day, bars, px = date(2025, 8, 1), date(2026, 7, 31), [], 100.0
-    while day <= end_day:
-        if day.weekday() < 5:
-            px += 0.1
-            bars.append((day.isoformat(), px))
-        day += timedelta(days=1)
-
-    # 2026-07-31 is a Friday; on the following Monday the feed is current
-    assert _feed_is_current(bars, "2026-08-03") is True
-    # five weeks later it plainly is not, however long its past gaps were
-    assert _feed_is_current(bars, "2026-09-02") is False
-
-    _, prompt = month_end_faber(bars, as_of_month="2026-08",
-                                feed_current=_feed_is_current(bars, "2026-08-03"))
-    assert prompt == "2026-07", "a completed month must not wait for another bar"
-
-    _, stale = month_end_faber(bars, as_of_month="2026-09",
-                               feed_current=_feed_is_current(bars, "2026-09-02"))
-    assert stale == "2026-06", "a stale feed's partial month is not a month-end"
-
-    _, running = month_end_faber(bars[:-8], as_of_month="2026-07", feed_current=True)
-    assert running == "2026-06", "the in-progress month is never promoted"
-
-
-def test_a_prior_outage_cannot_make_a_stopped_feed_look_current():
-    """The defect in deriving freshness from the series' own cadence.
-
-    A long hole earlier in the window raises any gap statistic enough that a
-    feed which has since stopped passes as healthy — the outage hides the
-    outage. The market calendar has no such feedback loop.
-    """
-    from datetime import date, timedelta
-
-    from app.services.compute import _feed_is_current
-
-    day, end_day, bars, px = date(2025, 8, 1), date(2026, 5, 1), [], 100.0
-    while day <= end_day:
-        if day.weekday() < 5:
-            px += 0.1
-            bars.append((day.isoformat(), px))
-        day += timedelta(days=1)
-    # a 40-day outage inside the history, then it resumes, then it stops again
-    bars = [b for b in bars if not ("2026-02-01" <= b[0] <= "2026-03-12")]
-
-    assert _feed_is_current(bars, "2026-06-15") is False, (
-        "a stopped feed must not be excused by an earlier outage")
-
-
-
-
-def test_a_gap_month_does_not_prove_the_month_before_it_closed():
-    """"Some later bar exists" is not proof; the NEXT month's bar is.
-
-    A feed that stops mid-July and resumes in September leaves July as the
-    second-to-last month with a September bar behind it. Treating that as
-    closure promotes a MID-JULY close as July's month-end — the same partial
-    substitution this function exists to refuse, arriving through the gap
-    instead of through the clock.
-    """
-    from app.engine.legs import month_end_faber
-
-    base = [(f"2025-{m:02d}-28", 100.0 + m) for m in range(1, 13)]
-
-    outage = base + [("2026-07-15", 50.0), ("2026-09-02", 51.0)]
-    _, period = month_end_faber(outage, as_of_month="2026-09", feed_current=True)
-    assert period == "2025-11", (
-        "neither July nor December is proven closed by a bar two months later; "
-        "the months that remain are consecutive, so the window is still valid")
-
-    # contiguous through July, so the ten-month window is a real one and this
-    # asserts the CLOSURE rule rather than tripping the window rule
-    contiguous = [(f"2025-{m:02d}-28", 100.0 + m) for m in range(8, 13)]
-    contiguous += [(f"2026-{m:02d}-28", 105.0 + m) for m in range(1, 7)]
-    clean = contiguous + [("2026-07-31", 50.0), ("2026-08-03", 51.0)]
-    _, rolled = month_end_faber(clean, as_of_month="2026-08", feed_current=True)
-    assert rolled == "2026-07", "an adjacent bar does prove closure"
+# Three tests stood here for a second closure rule, the one a caller without
+# the calendar got: a bar in the following month closed a month, and the newest
+# month closed on the caller's word that the feed was publishing
+# (test_month_completion_needs_the_calendar_AND_a_publishing_feed,
+# test_a_prior_outage_cannot_make_a_stopped_feed_look_current,
+# test_a_gap_month_does_not_prove_the_month_before_it_closed). Production never
+# ran that rule (the numbers are at legs.month_end_faber), and the first of the
+# three asserted its answer where the calendar's differs: a feed complete
+# through 31 July and read in September kept June there; the rule that runs
+# says July (asserted above, and by
+# test_a_stale_feed_that_finished_its_month_still_closes_it). What the three
+# guarded is pinned on the rule that runs by the four tests below: a month with
+# one early bar is not closed, a stopped feed closes exactly the months it
+# finished, the month being lived in is never promoted, and a gapped window is
+# refused.
 
 
 def test_a_month_with_one_early_bar_is_not_closed():
