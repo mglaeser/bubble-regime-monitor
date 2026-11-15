@@ -446,10 +446,10 @@ REGISTRY: dict[str, Methodology] = {
             "PaymentsToAcquirePropertyPlantAndEquipment (capex) from EDGAR companyfacts (handle "
             "filer tag variants), compute TTM capex/OCF per firm, and take the aggregate mean ratio "
             "r. base = clip((r - 0.5)/(1.0 - 0.5), 0, 1). GATE: multiply base by 1.0 only if any "
-            "hyperscaler's cloud-segment revenue YoY < 15% while its TTM FCF < 0; otherwise cap "
-            "sub_score <= 0.30. Cloud-segment revenue comes from XBRL segment tags / quarterly "
-            "press figures (best-effort); if unavailable, use total revenue growth as a "
-            "conservative proxy with a provenance note."
+            "hyperscaler's total revenue grew less than 15% between its last two fiscal years "
+            "while its TTM FCF < 0; otherwise cap sub_score <= 0.30. The growth is the group's "
+            "total revenue: EDGAR companyfacts carries no segment figures, so cloud-segment "
+            "growth is not read."
         ),
         why=(
             "History shows that productive infrastructure buildouts (railroads in the 1870s, fiber "
@@ -465,9 +465,16 @@ REGISTRY: dict[str, Methodology] = {
             "General buildout-analogy literature (railroad/telecom capital-cycle studies)",
         ],
         caveats=[
-            "Cloud-segment revenue is best-effort from XBRL segment data; when it is unavailable "
-            "the total-revenue proxy is deliberately conservative (harder to trip the gate), which "
-            "biases the indicator toward under-alarming — documented as such."
+            # What the gate's growth leg reads (app/sources/edgar.py), and which
+            # way that leans: with capex above OCF the gate is off at 22 % growth
+            # and fires at 11 %, so the slower-growing group is the easier bar
+            # (tests/test_d3_gate_words.py). The daily digest's model reads this
+            # caveat whole (app/message_engine/context.py).
+            "The gate reads the group's total revenue growth between its last two fiscal years, "
+            "not the growth of its cloud segment, which EDGAR companyfacts does not carry. A group "
+            "usually grows more slowly than its cloud segment, so this gate trips more easily than "
+            "one on segment growth would: once an issuer's capex exceeds its operating cash flow, "
+            "the indicator leans toward over-alarming."
         ],
     ),
     "d4": Methodology(
@@ -1138,8 +1145,8 @@ SOURCE_REGISTRY: list[SourceSpec] = [
                "(cache & tolerate staleness).", ("finra_xlsx",)),
     SourceSpec("edgar", "SEC EDGAR companyfacts", "D3 hyperscaler FCF",
                "SEC XBRL company facts (official regulatory filings).", 100,
-               "https://data.sec.gov", "Cloud-segment revenue is best-effort; total-revenue "
-               "proxy is conservative when segments are unavailable.", ("sec_edgar",)),
+               "https://data.sec.gov", "Total revenue only: companyfacts carries no segment "
+               "figures, so the D3 gate reads group growth, not cloud growth.", ("sec_edgar",)),
     SourceSpec("lppls", "LPPLS fit (lppls==0.6.24 on QQQ proxy)", "D4 LPPLS",
                "Johansen-Ledoit-Sornette log-periodic power-law singularity confidence.", 3, "",
                "Package maintenance-inactive; ~29% precision (fires in ordinary bull markets); "

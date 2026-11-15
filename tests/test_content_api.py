@@ -949,9 +949,12 @@ class TestBlockArtifact:
         import app.content_registry as reg
 
         reg._clear_artifact_cache()
-        assert reg.content_version() == 2
+        # The version rises with a change of served text, so a client sees
+        # that the content changed (1 -> 2 was #136). 3: gauge.reg.d3 names
+        # total revenue as what fires the gate (tests/test_d3_gate_words.py).
+        assert reg.content_version() == 3
         payload = reg.dashboard_payload()
-        assert payload["content_version"] == 2
+        assert payload["content_version"] == 3
         assert len(payload["blocks"]) >= 211
         reg._clear_artifact_cache()
 
