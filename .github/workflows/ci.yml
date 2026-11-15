@@ -231,3 +231,10 @@ jobs:
       # so docker build is the documented substitute (spec section 12).
       - name: Build image (validates the Containerfile incl. R/exuber)
         run: docker build -t bubblegauge -f Containerfile .
+      - name: The documented operator command runs in the image
+        # The README ("the CLI in the container") and docs/ALERT_SYSTEM.md
+        # ("Operating it") name `bubblegauge ...` as the operator's command.
+        # No environment, no network, no database: the command imports the app
+        # and prints its help. Without PYTHONPATH in the Containerfile it ends
+        # in "ModuleNotFoundError: No module named 'app'".
+        run: docker run --rm --network none bubblegauge bubblegauge alerts --help
