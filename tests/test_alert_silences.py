@@ -207,6 +207,15 @@ def test_silence_created_after_planning_drops_member_before_send(matcher_kind):
         assert episode is not None and episode.is_open
         assert episode.episode_status == EpisodeStatus.FIRING
         assert state.condition_state == ConditionState.FIRING
+        # The record of why the alert did not arrive says what happened: a
+        # silence withdrew it. The condition is still firing, so the reason
+        # is not that it resolved - the label the silence sweep already gives
+        # (`test_active_silence_eagerly_cancels_a_parked_delivery`). The
+        # reason is the detail `GET /api/v1/alerts/events` serves.
+        cancelled = session.execute(select(AlertEvent.detail_redacted).where(
+            AlertEvent.action == "delivery_cancelled")).scalars().all()
+        assert delivery.cancel_reason == "ALL_MEMBERS_SILENCED"
+        assert cancelled == ["ALL_MEMBERS_SILENCED"]
 
 
 def test_silence_starting_during_render_refuses_the_wire_call():

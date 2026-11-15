@@ -958,6 +958,7 @@ def mark_permanent(session: Session, delivery: AlertDelivery, *, now: datetime,
     delivery.updated_at = now
     _event(session, now, action="delivery_dead", delivery_id=delivery.delivery_id,
            detail=error_code or "permanent rejection")
+    _log_not_sent(delivery, TransportStatus.DEAD_PERMANENT, http_status=http_status)
 
 
 def mark_unknown(session: Session, delivery: AlertDelivery, *, now: datetime,
@@ -992,6 +993,23 @@ def mark_render_failed(session: Session, delivery: AlertDelivery, *, now: dateti
     delivery.updated_at = now
     _event(session, now, action="delivery_render_failed",
            delivery_id=delivery.delivery_id, detail=reason)
+    _log_not_sent(delivery, TransportStatus.RENDER_FAILED)
+
+
+def _log_not_sent(delivery: AlertDelivery, state: TransportStatus, *,
+                  http_status: int | None = None) -> None:
+    """The warning for an alert that ended without a send and is never sent
+    again. Health counts these (`outbox.dead_permanent`,
+    `outbox.render_failed`) and is read only when asked; without this line a
+    refused P1 - a 401 once the proxy key has expired - left INFO lines and
+    nothing else, where the digest's transport logs the same status at
+    warning level. Logged where the state is written, so every caller emits
+    it. The error message stays on the row and in the event, redacted there;
+    only its code is logged.
+    """
+    log.warning("alert_delivery_not_sent", delivery_id=delivery.delivery_id,
+                priority=int(delivery.priority), state=state.value,
+                error_code=delivery.last_error_code, http_status=http_status)
 
 
 def cancel(session: Session, delivery: AlertDelivery, *, now: datetime,

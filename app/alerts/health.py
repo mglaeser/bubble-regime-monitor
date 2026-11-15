@@ -1067,6 +1067,19 @@ def health_projection(
             "unknown": _count(AlertDelivery,
                               *delivery_scope,
                               AlertDelivery.transport_status == TransportStatus.UNKNOWN),
+            # Final without a send, and never sent again. Counted like UNKNOWN
+            # and degrading nothing: delivery rows are never pruned, so one old
+            # row would degrade health for good. DEAD_PERMANENT is the
+            # transport's refusal (a listed 4xx such as the 401 of an expired
+            # proxy key, a 2xx that is no send operation, no transport),
+            # RENDER_FAILED a text that failed its own checks. Each is logged
+            # at warning level where it is written (`outbox._log_not_sent`).
+            "dead_permanent": _count(
+                AlertDelivery, *delivery_scope,
+                AlertDelivery.transport_status == TransportStatus.DEAD_PERMANENT),
+            "render_failed": _count(
+                AlertDelivery, *delivery_scope,
+                AlertDelivery.transport_status == TransportStatus.RENDER_FAILED),
             "p1_enqueue_to_attempt_p95_ms": p1_latency_p95,
         },
         "inputs": {
