@@ -180,6 +180,54 @@ class TestBuildFeedGolden:
         assert (sup["stat"], sup["cv90"], sup["cv95"]) == (SUP_1986, SUP_CV90, SUP_CV95)
 
 
+class TestStaleSlas:
+    """Spec section 4: `stale` says an item is older than its SLA, counted
+    from the date its source gives it."""
+
+    @pytest.mark.parametrize(("age_days", "stale"), [
+        (163, False),   # the day a quarter appears: its 91 days and about 72 to the release
+        (195, False),   # the capture of 2026-07-15: as_of 2026-01-01
+        (223, False),   # production, 2026-11-10: as_of 2026-04-01
+        (255, False),   # the day the next release replaces it
+        (347, True),    # one release later still: a release was missed
+    ])
+    def test_the_quarterly_item_is_stale_only_when_a_release_was_missed(
+            self, snapshot, patched_sources, monkeypatch, age_days, stale):
+        """Decision 5A's item is quarterly with about a quarter of publication
+        lag, and FRED dates a quarter at its first day, so its newest
+        observation is never young. An SLA below the age it has on the day it
+        is published (120 days until 2026-11) is true on every payload and
+        says nothing."""
+        from datetime import timedelta
+
+        raw, data = snapshot
+        label = (datetime.now(UTC).date() - timedelta(days=age_days)).isoformat()
+
+        def fred(series_id):
+            if series_id == "MMMFFAQ027S":
+                return [(label, 8_441_374.0)]
+            return fake_fred(series_id)
+
+        monkeypatch.setattr(df, "_fred_series", fred)
+        mmf = df.build_feed(raw, data)["metrics"]["mmf_total_assets_usd"]
+        assert mmf["available"] is True and mmf["as_of"] == label
+        assert mmf["stale"] is stale
+
+    def test_a_month_end_label_turns_stale_on_the_eighth_day_after_the_month(self):
+        """Spec section 5: Tiingo dates the running month's bar at the month's
+        last day (as_of 2026-11-30 on the six Tiingo series and on
+        gold_ttm_pct in 14 of 14 production payloads built 2026-11-08 to
+        11-10). A date still ahead has age 0, so the 7-day SLA starts to count
+        when the month ends: these items show a source that stopped at monthly
+        resolution, not within the month."""
+        from datetime import date
+
+        label = "2026-11-30"
+        assert df._stale(label, df.SLA_DAILY, date(2026, 11, 10)) is False
+        assert df._stale(label, df.SLA_DAILY, date(2026, 12, 7)) is False
+        assert df._stale(label, df.SLA_DAILY, date(2026, 12, 8)) is True
+
+
 class TestDegradation:
     def test_one_source_down_degrades_only_that_item(self, snapshot, patched_sources,
                                                      monkeypatch):
@@ -257,6 +305,36 @@ class TestFeedEndpoint:
 
     def test_503_before_first_payload(self, client):
         assert client.get("/api/v1/dashboard/feed").status_code == 503
+
+    def test_the_route_text_restates_no_inventory_count(self, client):
+        """The inventory is counted where it is pinned: SERIES_KEYS and
+        METRIC_KEYS (test_frozen_key_inventory) and spec section 2. The route's
+        summary said "12 monthly series ... + 34 scalar metrics", the capture
+        of 2026-07-15, while the feed served 13 and 33: a count restated in
+        the served text goes stale with the next key."""
+        import re
+
+        op = client.get("/openapi.json").json()["paths"]["/api/v1/dashboard/feed"]["get"]
+        count = re.compile(r"\d+\s+(monthly\s+)?series|\d+\s+(scalar\s+)?metrics")
+        for text in (op["summary"], op["description"]):
+            assert not count.search(text), text
+
+    def test_the_committed_capture_is_a_record_of_its_day(self):
+        """docs/dashboard-feed-capture2.json is the payload served on
+        2026-07-15, and the spec now calls it that (capture status, section 5)
+        where it said "the complete byte contract" to integrate against. It is
+        not the inventory: it holds keys that left the contract since, has no
+        `fear_greed`, and carries the `meta.disclaimer` v3.6.0 removed."""
+        from pathlib import Path
+
+        capture = json.loads((Path(__file__).resolve().parents[1] / "docs"
+                              / "dashboard-feed-capture2.json").read_text(encoding="utf-8"))
+        series, metrics = capture["data"]["series"], capture["data"]["metrics"]
+        assert (len(series), len(metrics)) == (12, 34)
+        assert capture["meta"]["computed_at"].startswith("2026-07-15")
+        assert {"cofer_gold_share_pct", "cofer_ust_share_pct"} <= set(metrics) - set(df.METRIC_KEYS)
+        assert "fear_greed" not in series and "fear_greed" not in metrics
+        assert "disclaimer" in capture["meta"]
 
     def test_serves_latest_payload_with_cache_header(self, client):
         self._persist_payload()

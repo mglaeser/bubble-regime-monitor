@@ -340,3 +340,112 @@ class TestSnapshotAge:
         from app.engine.recompute_slots import schedule_display
 
         assert schedule_display() in self._flags(client)["no-snapshot"]["detail"]
+
+
+class TestFeedBehind:
+    """DASHBOARD_FEED_SPEC.md section 4: the feed is built inside every
+    recompute, strictly after the score persists, and when its build fails
+    "the endpoint then serves the previous payload". The failed build is one
+    log line (dashboard_feed_failed, app/services/compute.py) and the run
+    counts as a success, so the status document showed an old "Feed built"
+    time beside a fresh snapshot and listed no flag for it.
+
+    Not seen in production: the 222 recomputes from 2026-10-05 to 11-10 logged
+    222 dashboard_feed_persisted and 0 dashboard_feed_failed."""
+
+    @staticmethod
+    def _snapshot() -> None:
+        from app.services.compute import compute_snapshot, persist_snapshot
+        from tests.conftest import make_golden_raw_inputs
+
+        raw = make_golden_raw_inputs()
+        persist_snapshot(compute_snapshot(raw, mc_samples=2_000, mc_seed=1), raw)
+
+    @staticmethod
+    def _feed(at: datetime) -> None:
+        import json
+
+        from app.db import session_scope
+        from app.models import DashboardFeed
+
+        with session_scope() as session:
+            session.add(DashboardFeed(computed_at=at,
+                                      payload=json.dumps({"series": {}, "metrics": {}})))
+
+    @staticmethod
+    def _flags(client) -> dict[str, dict]:
+        return {f["id"]: f for f in client.get("/api/v1/status").json()["science_audit"]["flags"]}
+
+    def test_a_feed_older_than_the_snapshot_is_flagged(self, client):
+        from datetime import timedelta
+
+        self._feed(datetime.now(UTC) - timedelta(days=3))   # the last build that worked
+        self._snapshot()                                    # recomputes have run since
+        body = client.get("/api/v1/status").json()
+        flag = {f["id"]: f for f in body["science_audit"]["flags"]}["feed-behind"]
+        assert flag["severity"] == "warn" and flag["category"] == "service-state"
+        # it names both times: the payload being served and the snapshot it missed
+        assert body["feed_sources"]["computed_at"] in flag["detail"]
+        assert body["snapshot"]["computed_at"] in flag["detail"]
+
+    def test_a_snapshot_with_no_feed_at_all_is_flagged(self, client):
+        self._snapshot()
+        assert client.get("/api/v1/dashboard/feed").status_code == 503
+        assert "never been built" in self._flags(client)["feed-behind"]["detail"]
+
+    def test_a_feed_built_after_its_snapshot_raises_nothing(self, client):
+        self._snapshot()
+        self._feed(datetime.now(UTC))
+        assert "feed-behind" not in self._flags(client)
+
+    def test_a_run_in_flight_raises_nothing(self, client):
+        """Between the snapshot's commit and the feed's the newest feed is the
+        older of the two in every run, six times a day (the 14 payloads
+        retained on 2026-11-10 are each 87 to 236 seconds younger than their
+        snapshot: the snapshots of 14:00:50, 18:00:46 and 22:00:49 have feeds
+        of 14:04:46, 18:02:23 and 22:02:32). The recompute lock covers the
+        whole run, so the flag waits for its release."""
+        from datetime import timedelta
+
+        from app.routers.admin import recompute_lock
+
+        self._feed(datetime.now(UTC) - timedelta(hours=4))
+        self._snapshot()
+        assert recompute_lock.acquire(blocking=False)
+        try:
+            assert "feed-behind" not in self._flags(client)
+        finally:
+            recompute_lock.release()
+        assert "feed-behind" in self._flags(client)
+
+    def test_a_run_that_ends_while_the_document_is_read_raises_nothing(self, client, monkeypatch):
+        """The document reads the snapshot, then the lock, then the feed. A
+        run that commits its feed and releases the lock in the instant before
+        the lock is asked is seen whole, because the feed is read after the
+        lock's state: read before it, the old feed would stand beside a
+        released lock and the flag would show for one request."""
+        from datetime import timedelta
+
+        from app.routers import admin
+
+        self._feed(datetime.now(UTC) - timedelta(hours=4))
+        self._snapshot()                        # the run in flight has committed its snapshot
+        write_feed = self._feed
+
+        class TheRunEndsNow:
+            @staticmethod
+            def locked() -> bool:
+                write_feed(datetime.now(UTC))   # its feed is committed
+                return False                    # and its lock released
+
+        monkeypatch.setattr(admin, "recompute_lock", TheRunEndsNow())
+        body = client.get("/api/v1/status").json()
+        assert body["recompute"]["running"] is False
+        assert "feed-behind" not in {f["id"] for f in body["science_audit"]["flags"]}
+
+    def test_no_snapshot_no_flag(self, client):
+        from datetime import timedelta
+
+        assert "feed-behind" not in self._flags(client)
+        self._feed(datetime.now(UTC) - timedelta(days=3))
+        assert "feed-behind" not in self._flags(client)

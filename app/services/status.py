@@ -168,7 +168,8 @@ def _indicators_block(live: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
 
 def _science_audit(snap: Snapshot | None, sources: list[dict[str, Any]],
                    providers: list[dict[str, Any]], live: dict[str, dict[str, Any]],
-                   last_run: dict[str, Any] | None, now: datetime) -> dict[str, Any]:
+                   last_run: dict[str, Any] | None, now: datetime,
+                   feed: dict[str, Any] | None, running: bool) -> dict[str, Any]:
     """Severity-ranked flags: static known issues + live degradations."""
     flags: list[dict[str, Any]] = [dict(k) for k in KNOWN_ISSUES]
 
@@ -229,6 +230,24 @@ def _science_audit(snap: Snapshot | None, sources: list[dict[str, Any]],
                           "detail": f"Computed {_iso(snap.computed_at)}; {outage.missed_slots} scheduled "
                                     f"recomputes ({schedule_display()}) have passed without a new one. "
                                     "Every number here is that old.", "ref": "scheduler"})
+        # The feed is built in the run that wrote the snapshot, after it
+        # (compute.run_recompute), and that run holds the recompute lock until
+        # both are written (routers/admin.run_recompute_guarded). So the newest
+        # feed is the older of the two only while a run is in flight, or when
+        # the last run wrote no feed: a failed build is one log line
+        # (dashboard_feed_failed), the run still counts as a success, and the
+        # endpoint goes on serving the last payload. A process stopped between
+        # the two writes leaves the same state, and the lock dies with it. Not
+        # seen in production (2026-10-05 to 11-10: 222 snapshots, 222 feeds,
+        # 0 dashboard_feed_failed).
+        if not running and (feed is None or
+                            datetime.fromisoformat(feed["computed_at"]) < snap.computed_at):
+            built = f"was built {feed['computed_at']}" if feed else "has never been built"
+            flags.append({"id": "feed-behind", "severity": "warn", "category": "service-state",
+                          "title": "The dashboard feed is older than the snapshot",
+                          "detail": f"The feed at /api/v1/dashboard/feed {built}; the snapshot is "
+                                    f"of {_iso(snap.computed_at)}. The last recompute wrote the "
+                                    "snapshot and no feed.", "ref": "dashboard feed"})
         coverage = (snap.data_freshness or {}).get("_coverage", {})
         for block_id in ("S", "D"):
             if isinstance(coverage.get(block_id), dict) and coverage[block_id].get("degraded"):
@@ -322,7 +341,10 @@ def build_status() -> dict[str, Any]:
         running, last_run = False, None
 
     now = datetime.now(UTC)
-    audit = _science_audit(snap, sources, providers, live, last_run, now)
+    # Read after the lock's state: a run that has committed the snapshot read
+    # above and released the lock has committed its feed too.
+    feed = _feed_sources_block()
+    audit = _science_audit(snap, sources, providers, live, last_run, now, feed, running)
 
     return {
         "service": {
@@ -335,7 +357,7 @@ def build_status() -> dict[str, Any]:
         "snapshot": snap_summary,
         "recompute": {"running": running, "last": last_run},
         "sources": sources,
-        "feed_sources": _feed_sources_block(),
+        "feed_sources": feed,
         "providers": providers,
         "indicators": _indicators_block(live),
         "legs_science": LEGS_SCIENCE,
