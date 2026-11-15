@@ -93,3 +93,42 @@ def test_a_time_as_upper_bound_is_that_instant(history, bound, last):
     `from`). The whole-day extension answered ?to=...T06:00 with the
     snapshots of the following 24 hours."""
     assert _points(history(3), f"to={bound}")[-1] == last
+
+
+def test_a_history_row_names_the_versions_that_computed_it(isolated_db):
+    """README, API: each history row carries the service and methodology
+    version that computed it. The three snapshots are production's. On
+    2026-07-14 the median went from 32.83 (hold) to 45.46 (trim) within nine
+    hours: 3.2.0 computed the first and 3.3.0, which changed the aggregation,
+    the second. The methodology stamp exists since v3.8.0 (2026-07-29) and is
+    null on the rows before. A daily or monthly point is one kept snapshot and
+    carries that snapshot's versions, never the answering service's
+    (`meta.service_version`)."""
+    from app.db import session_scope
+    from app.main import create_app
+    from app.models import Snapshot
+
+    with session_scope() as session:
+        session.add_all(
+            Snapshot(computed_at=computed_at, service_version=service, methodology_version=methodology,
+                     median=median, iqr_lo=median - 2, iqr_hi=median + 2, band5=median - 5,
+                     band95=median + 5, point_score=median, action_band=band)
+            for computed_at, service, methodology, median, band in (
+                (datetime(2026, 7, 14, 6, 10, tzinfo=UTC), "3.2.0", None, 32.83, "hold"),
+                (datetime(2026, 7, 14, 15, 12, tzinfo=UTC), "3.3.0", None, 45.46, "trim"),
+                (datetime(2026, 7, 29, 14, 3, tzinfo=UTC), "3.8.0", "v3-final", 51.41, "trim")))
+    client = TestClient(create_app())
+
+    def versions(granularity: str) -> list[tuple]:
+        response = client.get(f"/api/v1/score/history?granularity={granularity}")
+        assert response.status_code == 200, response.text
+        return [(row["computed_at"][:16], row["median"],
+                 row.get("service_version", "absent"), row.get("methodology_version", "absent"))
+                for row in response.json()["data"]]
+
+    before, after, stamped = (("2026-07-14T06:10", 32.83, "3.2.0", None),
+                              ("2026-07-14T15:12", 45.46, "3.3.0", None),
+                              ("2026-07-29T14:03", 51.41, "3.8.0", "v3-final"))
+    assert versions("raw") == [before, after, stamped]
+    assert versions("daily") == [after, stamped]
+    assert versions("monthly") == [stamped]
