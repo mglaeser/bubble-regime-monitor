@@ -238,12 +238,26 @@ class TestAFredAnswerThatIsNotJson:
         hc._breakers.clear()
 
         def answer(status: int, **body) -> None:
+            # body is httpx.Response's own keywords: html= (it sends the text
+            # as text/html; charset=utf-8), json=, content= and headers=.
             monkeypatch.setattr(hc, "_client", httpx.Client(
                 transport=httpx.MockTransport(lambda _request: httpx.Response(status, **body)),
                 timeout=5))
 
         yield answer
         hc._breakers.clear()
+
+    def test_the_stub_sends_an_html_page_for_the_html_keyword(self, fred_answers):
+        import app.http_client as hc
+        from app.sources import fred
+
+        fred_answers(200, html=MAINTENANCE_PAGE)
+        page = hc.get_client().get(fred.BASE)
+
+        assert page.status_code == 200
+        assert page.headers["content-type"] == "text/html; charset=utf-8"
+        assert page.content == b"<html>maintenance</html>"
+        assert len(page.content) == 24
 
     @pytest.mark.parametrize(("status", "body", "text"), [
         pytest.param(200, {"html": MAINTENANCE_PAGE},
