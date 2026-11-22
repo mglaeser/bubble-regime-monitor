@@ -51,15 +51,20 @@ def _as_of_from_xlsx(content: bytes) -> str | None:
 
     Row 3 of the file reads `Holdings: | As of 12-Nov-2026` (taken 2026-11-14,
     a Saturday: the file published on a session states the session before it).
-    Only a cell in exactly that layout is the date. The footer's "as of the
-    date indicated" is not one, and a cell in another layout is not guessed
-    at."""
+    The date is the cell to the right of the one that reads `Holdings:`, and
+    only that cell: another cell in the same form is not the holdings date and
+    would count an old weight as fresh. When that cell is missing or in
+    another form the weight is undated; the footer's "as of the date
+    indicated" is not a date."""
     head = pd.read_excel(io.BytesIO(content), header=None, nrows=20)
-    for cell in head.to_numpy().ravel():
-        try:
-            return datetime.strptime(str(cell).strip(), "As of %d-%b-%Y").date().isoformat()
-        except ValueError:
-            continue
+    for row in head.to_numpy().tolist():
+        cells = [str(c).strip() for c in row]
+        if "Holdings:" in cells[:-1]:
+            try:
+                return datetime.strptime(cells[cells.index("Holdings:") + 1],
+                                         "As of %d-%b-%Y").date().isoformat()
+            except ValueError:
+                return None
     return None
 
 

@@ -151,6 +151,29 @@ def test_a_workbook_that_states_no_date_is_undated(monkeypatch, holdings_cell):
     assert result.value == pytest.approx(TOP10_OF_THE_INVENTED_ROWS)
 
 
+# A cell in the form of the holdings date that is not the holdings date. The
+# workbook taken on 2026-11-14 has none; the row is invented.
+ANOTHER_DATE = ["Net Asset Value:", "As of 20-Nov-2026"]
+
+
+@pytest.mark.parametrize(("head", "as_of"), [
+    ([ANOTHER_DATE, *SSGA_HEAD], "2026-11-12"),                 # above the holdings row, newer
+    ([ANOTHER_DATE, ["Holdings:", "As of the close"]], None),   # the holdings cell names no day
+    ([ANOTHER_DATE, *SSGA_HEAD[:2]], None),                     # no holdings row
+    ([["Holdings:", "Daily", "As of 20-Nov-2026"]], None),      # not the cell beside the label
+])
+def test_only_the_cell_beside_the_holdings_label_dates_the_weight(monkeypatch, head, as_of):
+    """The date is the cell to the right of the one that reads `Holdings:`.
+    Another cell in the same form does not stand in for it, above the holdings
+    row or without one: taken for it, a newer date would count an old weight as
+    fresh in the coverage gate."""
+    monkeypatch.setattr(ssga, "fetch", lambda *_a, **_k: _Response(content=_workbook(head)))
+    result = ssga.top10_concentration()
+    assert (result.provenance.source, result.provenance.fallback_used) == ("ssga_spy_xlsx", False)
+    assert result.provenance.as_of == as_of
+    assert result.value == pytest.approx(TOP10_OF_THE_INVENTED_ROWS)
+
+
 # ---- S1: the multpl page ----
 
 @pytest.mark.parametrize("read_on", [
