@@ -20,28 +20,37 @@ WORKFLOWS = ROOT / ".github" / "workflows"
 CI = yaml.safe_load((WORKFLOWS / "ci.yml").read_text(encoding="utf-8"))
 #: "How to make a change (the gate)", up to the table of change classes.
 GATE = AGENTS[AGENTS.index("## How to make a change"):AGENTS.index("### Verification tier")]
-#: What CI's blocking steps run that is not `python -m <module>`.
-TOOLS = ("ruff", "pip-audit", "detect-secrets", "pytest")
+#: The tools CI's blocking steps run. The other blocking steps run modules.
+TOOLS = ("ruff", "mypy", "pip-audit", "detect-secrets", "pytest")
+#: The word in a step's name that says its failure fails the build: BLOCKING,
+#: and RATCHET on the type check, which AGENTS.md calls blocking as well.
+BLOCKS = ("BLOCKING", "RATCHET")
+
+
+def _blocking_steps() -> list[dict]:
+    """The steps of ci.yml whose name carries one of `BLOCKS`."""
+    return [step for job in CI["jobs"].values() for step in job.get("steps", [])
+            if any(word in step.get("name", "") for word in BLOCKS)]
 
 
 def _named_as(run: str) -> set[str]:
-    """What the gate list calls a step: each module the step runs with
-    `python -m`, or else the tool."""
-    modules = set(re.findall(r"python -m ([\w.]+)", run))
-    return modules or {tool for tool in TOOLS if tool in run}
+    """What the gate list calls a step: the tool the step runs, or else each
+    module it runs with `python -m`."""
+    tools = {tool for tool in TOOLS if tool in run}
+    return tools or set(re.findall(r"python -m ([\w.]+)", run))
 
 
 def test_agents_md_names_every_blocking_step_of_the_gate():
-    """"Every change must pass ci.yml, which is blocking": the list under that
-    sentence names each step ci.yml calls BLOCKING by what it runs, the `image`
-    job, and every workflow file. A step the list leaves out is one an agent
-    learns of from a red build - `scripts.export_alert_openapi`, after it
-    changed an alert route. A workflow it leaves out is the review panel,
-    which is given the diff and nothing else: an agent that does not know
-    that writes its reasons where no reviewer reads them."""
-    blocking = [step for job in CI["jobs"].values() for step in job.get("steps", [])
-                if "BLOCKING" in step.get("name", "")]
-    assert blocking, "ci.yml calls no step BLOCKING any more: this test reads that word"
+    """"Every change must pass ci.yml, which is blocking": the section under
+    that sentence names each blocking step of ci.yml by what it runs, the type
+    check (`mypy`) among them, the `image` job, and every workflow file.
+    A step it leaves out is one an agent learns of from a red build -
+    `scripts.export_alert_openapi`, after it changed an alert route. A
+    workflow it leaves out is the review panel, which is given the diff and
+    nothing else: an agent that does not know that writes its reasons where
+    no reviewer reads them."""
+    blocking = _blocking_steps()
+    assert blocking, f"no step name of ci.yml carries one of {BLOCKS} any more: this test reads them"
     missing = []
     for step in blocking:
         names = _named_as(step["run"])
@@ -55,6 +64,20 @@ def test_agents_md_names_every_blocking_step_of_the_gate():
         if workflow.relative_to(ROOT).as_posix() not in GATE:
             missing.append(("workflow", workflow.name))
     assert not missing, f"the gate list of AGENTS.md does not name: {missing}"
+
+
+def test_the_type_check_is_one_of_the_blocking_steps_and_is_named_mypy():
+    """AGENTS.md calls the type check blocking, "as a ratchet", so the gate
+    test above reads that step like the rest and asks the gate section for
+    `mypy`. It can because RATCHET, the word ci.yml puts in this one step's
+    name in place of BLOCKING, is one of `BLOCKS`, and because `mypy`, which
+    the step runs as a command and not with `python -m`, is one of `TOOLS`."""
+    type_check = [step for step in _blocking_steps() if "MYPY_CEILING" in step.get("env", {})]
+    assert len(type_check) == 1, (
+        f"not exactly one step of ci.yml that holds MYPY_CEILING carries one of {BLOCKS} "
+        f"in its name: {[step['name'] for step in type_check]}")
+    named = _named_as(type_check[0]["run"])
+    assert named == {"mypy"}, f"the gate test asks AGENTS.md for {sorted(named)}, not for `mypy`"
 
 
 def _cited() -> list[tuple[str, list[str]]]:
