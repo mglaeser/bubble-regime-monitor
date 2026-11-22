@@ -350,6 +350,25 @@ class TestFailClosed:
         raw.bsadf_cv90, raw.bsadf_cv95 = END_CV95, END_CV90     # inverted
         assert compute_snapshot(raw, gsadf_contested=False).indicators["s4"].state == "FLOOR"
 
+    @pytest.mark.parametrize("missing", [
+        {"stat"}, {"cv90"}, {"cv95"}, {"stat", "cv90"}, {"stat", "cv95"},
+        {"cv90", "cv95"}, {"stat", "cv90", "cv95"}], ids=lambda m: "+".join(sorted(m)))
+    def test_a_missing_statistic_or_critical_value_floors_and_raises_nothing(self, missing):
+        """sub_score answers None with its three `is None` clauses before
+        math.isfinite is evaluated (`or` stops at the first true clause). A
+        statistic or a critical value that R could not supply floors at 0.25
+        and raises nothing, in the mapping and through compute_snapshot."""
+        stat, cv90, cv95 = (None if name in missing else value for name, value in
+                            (("stat", END_1986), ("cv90", END_CV90), ("cv95", END_CV95)))
+        for contested in (True, False):
+            for asymmetric in (True, False):
+                assert s4_gsadf_module().sub_score(
+                    stat, cv90, cv95, contested, asymmetric=asymmetric) == 0.25
+        raw = _raw_diverging()
+        raw.bsadf_stat, raw.bsadf_cv90, raw.bsadf_cv95 = stat, cv90, cv95
+        s4 = compute_snapshot(raw, mc_samples=2_000).indicators["s4"]
+        assert (s4.state, s4.quality, s4.sub_score) == ("FLOOR", 0.0, 0.25)
+
 
 class TestPartialMetadataNeverCrashes:
     """Both cases below were raised by the cross-vendor review panel on PR #77

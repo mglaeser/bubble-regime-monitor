@@ -142,6 +142,8 @@ def sub_score(stat: float | None, cv90: float | None, cv95: float | None,
     # contested 0.25, never fall through to a comparison (v3.7.4/G-04).
     import math
 
+    # None is answered by the three `is None` clauses: `or` stops at the first
+    # true one, so math.isfinite and the comparison only ever see three floats.
     if (stat is None or cv95 is None or cv90 is None
             or not (math.isfinite(stat) and math.isfinite(cv90) and math.isfinite(cv95))
             or cv90 >= cv95):
