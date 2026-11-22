@@ -125,8 +125,10 @@ class TestBaselineShape:
     def test_the_baseline_holds_exactly_the_accepted_entries(self):
         # An unbounded baseline is a slow-motion wildcard exclusion.
         #
-        # The accepted entries are a literal in `tests/secretbaselineref.py`
-        # and the comparison is equality. This replaces "not grown against
+        # The accepted entries are a literal in `tests/secretbaselineref.py`,
+        # each named by file, detector type and hash, and the comparison is
+        # equality: an entry added, removed or exchanged for another fails
+        # here until the literal moves. This replaces "not grown against
         # the pinned commit" (`assert_has_not_grown`): that commit holds 19
         # entries and the baseline 4, so the old comparison accepted the
         # baseline plus 15 new entries and refused the 16th (executed on

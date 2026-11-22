@@ -76,7 +76,8 @@ def _some_entry(document: dict):
 
 
 class TestTheAcceptedEntriesRedden:
-    """The committed baseline holds exactly `ref.ACCEPTED_ENTRIES`, per file.
+    """The committed baseline holds exactly `ref.ACCEPTED_ENTRIES`: under each
+    file the same entries, each named by detector type and hash.
 
     This class replaces TestTheGrowthRatchetReddens and
     TestRemovalIsNotSilentlyEquivalent. Those fed mutated copies of the baseline
@@ -91,9 +92,9 @@ class TestTheAcceptedEntriesRedden:
         the identity check on the committed baseline                     fails: "entries 19 -> 4"; no test
                                                                          had applied it since 2026-08-17
 
-    Equality with a literal leaves no such room: one entry more or one fewer is
-    refused. And every mutation below is applied to the committed file through
-    the function the real-file test calls
+    Equality with a literal leaves no such room: one entry more, one fewer or
+    one exchanged for another is refused. And every mutation below is applied
+    to the committed file through the function the real-file test calls
     (tests/test_secret_gate_policy.py::TestBaselineShape::
     test_the_baseline_holds_exactly_the_accepted_entries), so this class cannot
     go on proving a check that nothing applies to that file."""
@@ -123,9 +124,10 @@ class TestTheAcceptedEntriesRedden:
             ref.assert_accepted_entries(grown)
 
     def test_a_removed_entry_reddens_too(self, committed):
-        """A shrink has to lower the literal in the same change. The growth
-        check let it pass in silence, which is how the room for 15 additions
-        opened (19 entries -> 5 -> 4 while the reference stayed at 19)."""
+        """A removed entry has to leave the literal in the same change. The
+        growth check let a shrink pass in silence, which is how the room for 15
+        additions opened (19 entries -> 5 -> 4 while the reference stayed at
+        19)."""
         shrunk = copy.deepcopy(committed)
         path, _ = _some_entry(shrunk)
         shrunk["results"][path] = shrunk["results"][path][1:]
@@ -140,26 +142,56 @@ class TestTheAcceptedEntriesRedden:
         moved["results"][path] = moved["results"][path][1:]
         moved["results"]["app/newly_added.py"] = [dict(
             entry, hashed_secret="2" * 40)]  # pragma: allowlist secret
-        assert sum(ref.entries_by_file(moved).values()) \
-            == sum(ref.ACCEPTED_ENTRIES.values())
+        assert sum(map(len, ref.entries_by_file(moved).values())) \
+            == sum(map(len, ref.ACCEPTED_ENTRIES.values()))
         with pytest.raises(AssertionError, match="app/newly_added.py"):
             ref.assert_accepted_entries(moved)
 
-    def test_an_entry_exchanged_inside_one_file_is_not_seen(self, committed):
-        """The stated limit, pinned so that it reads as a decision.
+    def test_an_entry_exchanged_inside_one_file_reddens(self, committed):
+        """A fixture leaves a file, another secret enters the same file, and
+        its record is regenerated. The file holds as many entries as before and
+        the scan passes, because the baseline now holds the new secret's hash.
+        A count per file cannot tell the two baselines apart. The literal names
+        each entry by its hash, so the exchange is refused. Every entry of the
+        committed baseline is exchanged in turn."""
+        for path, entries in committed["results"].items():
+            for position in range(len(entries)):
+                exchanged = copy.deepcopy(committed)
+                exchanged["results"][path][position] = dict(
+                    entries[position], hashed_secret="3" * 40)  # pragma: allowlist secret
+                assert [len(found) for found in exchanged["results"].values()] \
+                    == [len(found) for found in committed["results"].values()]
+                with pytest.raises(AssertionError, match="are not the accepted"):
+                    ref.assert_accepted_entries(exchanged)
 
-        The literal counts the entries per file and does not name them: a
-        hash is credential-shaped, so naming the four would put four allowlist
-        pragmas into the reference. One entry exchanged for another in the
-        same file therefore passes. The growth check did not see that either,
-        and the secret scan still refuses every secret whose hash the baseline
-        does not hold."""
-        exchanged = copy.deepcopy(committed)
-        path, entry = _some_entry(exchanged)
-        exchanged["results"][path] = [dict(
-            entry, hashed_secret="3" * 40)  # pragma: allowlist secret
-        ] + list(exchanged["results"][path][1:])
-        ref.assert_accepted_entries(exchanged)
+    def test_an_entry_recorded_under_another_detector_reddens(self, committed):
+        """The scan matches a secret to an entry by file, detector type and
+        hash, so the type is part of the entry the literal names."""
+        retyped = copy.deepcopy(committed)
+        _, entry = _some_entry(retyped)
+        entry["type"] = "Hex High Entropy String"
+        assert entry["type"] != _some_entry(committed)[1]["type"]
+        with pytest.raises(AssertionError, match="are not the accepted"):
+            ref.assert_accepted_entries(retyped)
+
+    def test_a_record_written_twice_reddens(self, committed):
+        """The records are compared as a list, not as a set: a second copy of
+        an accepted record is one entry more."""
+        doubled = copy.deepcopy(committed)
+        path, entry = _some_entry(doubled)
+        doubled["results"][path].append(dict(entry))
+        with pytest.raises(AssertionError, match="are not the accepted"):
+            ref.assert_accepted_entries(doubled)
+
+    def test_a_moved_line_is_no_change_of_the_entries(self, committed):
+        """Line numbers are not part of the literal: the scan does not compare
+        them (file, type and hash decide), and the hook rewrites them itself
+        when an edit moves a fixture."""
+        shifted = copy.deepcopy(committed)
+        for entries in shifted["results"].values():
+            for entry in entries:
+                entry["line_number"] = int(entry["line_number"]) + 7
+        ref.assert_accepted_entries(shifted)
 
 
 # -------------------------------------------------- filters and exclusions ----
@@ -217,10 +249,11 @@ class TestConfigurationChangesRedden:
     # change reddened it too, and a baseline whose `generated_at` alone had
     # moved was named as REGENERATED. The function is deleted (see
     # TestTheAcceptedEntriesRedden): no test applied it to the committed file,
-    # where it fails. A rescan that adds or removes an entry is refused by the
-    # accepted entries, and one that changes a filter, a plugin or the version
-    # by the checks of this class. A rescan that moves the timestamp and
-    # nothing else changes nothing the gate decides.
+    # where it fails. A rescan that adds, removes or exchanges an entry is
+    # refused by the accepted entries, and one that changes a filter, a plugin
+    # or the version by the checks of this class. A rescan that moves the
+    # timestamp or a line number and nothing else changes nothing the gate
+    # decides.
 
 
 # ------------------------------------------------- the reference cannot move --
