@@ -111,6 +111,10 @@ def _unknown_flags_served_and_in_the_contract(client, **raw_over) -> tuple[list[
         compute_snapshot(raw, mc_samples=2_000, mc_seed=20260711, gsadf_contested=True), raw)
     with session_scope() as session:
         flags = session.get(Snapshot, snapshot_id).red_flag_meta["flags"]
+        # Every snapshot the pipeline stores carries the contract's four flags,
+        # so from the first recompute on the snapshot served is never one
+        # stored before the contract.
+        assert set(flags) == {"rf1", "rf2", "rf3", "rf4"}
         in_contract = [flag["source_key"] for flag in flags.values() if flag["state"] == "UNKNOWN"]
     return client.get("/api/v1/score").json()["data"]["unknown_red_flags"], in_contract
 
@@ -146,15 +150,27 @@ def test_the_api_lists_as_unknown_exactly_the_flags_the_contract_calls_unknown(c
     assert sorted(served) == sorted(in_contract)
 
 
-def test_a_snapshot_stored_before_the_contract_serves_no_unknown_flags(client):
-    """The 125 oldest production snapshots (up to 2026-08-06) carry no typed
-    contract: red_flag_meta is {}, the column's default. They read an empty
-    list, as they did before (82 never had a list, 43 had an empty one)."""
+@pytest.mark.parametrize("data_freshness", [
+    pytest.param({}, id="no_key"),                              # 82 production snapshots
+    pytest.param({"_unknown_red_flags": []}, id="empty_list"),  # 43 production snapshots
+    # On no production snapshot: a list with a flag in it. The key is not read.
+    pytest.param({"_unknown_red_flags": ["gsadf_explosive_noncontested"]}, id="a_flag_listed"),
+])
+def test_a_snapshot_stored_before_the_contract_serves_no_unknown_flags(client, data_freshness):
+    """A snapshot without the typed contract (red_flag_meta {}, the column's
+    default, which migration 0007 leaves on historical rows) serves an empty
+    list. The contract is the field's one source: `_unknown_red_flags`, the
+    key under which older versions stored the second list in data_freshness,
+    is not read, and no reader is kept for a retired key (AGENTS.md: no
+    backward compatibility). The first two cases are the 125 production
+    snapshots without the contract (82 and 43 of them, up to 2026-08-06),
+    which read [] as before. The third is on no production snapshot and pins
+    that the key is not read."""
     with session_scope() as session:
         session.add(Snapshot(
             computed_at=datetime(2026, 8, 6, 10, 1, tzinfo=UTC), service_version="3.8.0",
             median=52.0, iqr_lo=50.0, iqr_hi=54.0, band5=47.0, band95=57.0, point_score=52.0,
-            action_band="trim", data_freshness={"_unknown_red_flags": []}))
+            action_band="trim", data_freshness=data_freshness))
     response = client.get("/api/v1/score")
     assert response.status_code == 200
     assert response.json()["data"]["unknown_red_flags"] == []

@@ -76,10 +76,17 @@ def _unknown_flags(snap: Snapshot) -> list[str]:
     flag 4's input was known while the contract of the same snapshot said
     UNKNOWN and counted 2 fireable flags of the 3 the override requires.
 
-    Stored snapshots (production, 2026-11-10): the 490 that carry the
-    contract hold four flags each, every one with `source_key` and `state`
-    (build_red_flag_meta is the only writer), and both lists were empty on
-    all of them; the 125 older ones hold {} and read [] as before."""
+    A snapshot stored before the contract (red_flag_meta {}: migration 0007
+    leaves historical rows empty) serves []. The key `_unknown_red_flags`,
+    under which older versions stored that second list in data_freshness, is
+    not read: no reader is kept for a retired key (AGENTS.md: no backward
+    compatibility). No stored observation is lost. Production, 2026-11-10:
+    of the 125 snapshots without the contract (up to 2026-08-06) 82 hold no
+    such key and 43 an empty list; the 490 since hold an empty list and four
+    flags each, none UNKNOWN, every one with `source_key` and `state`
+    (build_red_flag_meta is the only writer). All 615 read [] before and
+    after, and the route serves only the latest snapshot, which every
+    recompute stores with the contract."""
     flags = (snap.red_flag_meta or {}).get("flags") or {}
     return [flag["source_key"] for flag in flags.values() if flag["state"] == FLAG_UNKNOWN]
 
