@@ -328,13 +328,52 @@ class TestSlickchartsFallback:
         ssga = _xlsx([["Name", "Ticker", "Weight"]] + [[f"Co{i}", f"SY{i}", w] for i, w in enumerate(self.WEIGHTS, 1)])
         assert _top10_from_xlsx(ssga) == pytest.approx(44.2, abs=0.01)
 
-    def test_a_total_row_fails_the_check_of_the_sum(self):
-        """The cut also kept out a row that is no holding. The check of the
-        sum (5 < sum < 80) answers that row: with a 100 % total the ten largest
-        rows add up to 142.5, and the read fails instead of scoring."""
+    @pytest.mark.parametrize("label, weight", [("Subtotal", "20.00%"), ("Top 10", "44.20%"), ("Total", "100.00%")])
+    def test_a_row_without_a_symbol_is_not_a_holding(self, label, weight):
+        """The cut at 10 % also kept out rows that are no holdings. A holding
+        is a row with a symbol: a total or a subtotal row that leaves the
+        Symbol cell empty is left out, whatever its number, and the reading
+        stays the holdings' 44.2. Counted as a row like any other, the 20 %
+        subtotal reads 62.5 (20.0 in, the tenth name's 1.7 out), inside the
+        check of the sum (5 < sum < 80) and so a healthy reading; the other
+        two fail that check (86.7 and 142.5) and give no reading."""
         from app.sources.ssga import _top10_from_slickcharts
 
-        total = "<tr><td></td><td>Total</td><td></td><td>100.00%</td></tr>"
+        row = f"<tr><td></td><td>{label}</td><td></td><td>{weight}</td></tr>"
+        html = _slickcharts_table(self.WEIGHTS, last_row=row)
+        assert _top10_from_slickcharts(html) == pytest.approx(44.2, abs=0.01)
+
+    def test_a_symbol_that_reads_like_a_missing_value_is_a_symbol(self):
+        """pandas reads a cell "NA" as a missing value unless it is told not
+        to. A holding with that symbol is a holding: left out, the largest
+        name would be missing from the sum without a word (35.3 for 44.2)."""
+        from app.sources.ssga import _top10_from_slickcharts
+
+        html = _slickcharts_table(self.WEIGHTS).replace("<td>SY1</td>", "<td>NA</td>")
+        assert "<td>NA</td><td>10.40%</td>" in html
+        assert _top10_from_slickcharts(html) == pytest.approx(44.2, abs=0.01)
+
+    def test_a_table_without_a_symbol_column_gives_no_reading(self):
+        """The scope, pinned: which row is a holding is read from the Symbol
+        column, so a table with a weight column and no Symbol column is no
+        holdings table, and the fallback gives no reading from it."""
+        from app.sources.ssga import _top10_from_slickcharts
+
+        rows = "".join(f"<tr><td>Co{i}</td><td>{w:.2f}%</td></tr>" for i, w in enumerate(self.WEIGHTS, 1))
+        html = f"<table><tr><th>Company</th><th>Weight</th></tr>{rows}</table>"
+        with pytest.raises(SourceError, match="no holdings table"):
+            _top10_from_slickcharts(html)
+
+    def test_a_row_with_anything_in_its_symbol_cell_is_taken_as_a_holding(self):
+        """The scope, pinned: the Symbol cell is all that tells a holding from
+        another row, so a row with anything in it is counted. pandas repeats a
+        label that spans columns into each of them: a total row written that
+        way carries a symbol. What is left for such a row is the check of the
+        sum (5 < sum < 80), which a smaller one would pass: with a 100 % total
+        the ten largest add up to 142.5 and there is no reading."""
+        from app.sources.ssga import _top10_from_slickcharts
+
+        total = '<tr><td colspan="3">Total</td><td>100.00%</td></tr>'
         with pytest.raises(SourceError, match="implausible top-10 sum 142.5"):
             _top10_from_slickcharts(_slickcharts_table(self.WEIGHTS, last_row=total))
 

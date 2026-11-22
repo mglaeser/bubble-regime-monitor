@@ -98,7 +98,10 @@ def _top10_from_slickcharts(html: str) -> float:
     try:
         # flavor="lxml": use the installed parser only (never fall back to an
         # optional html5lib), and raise ValueError (not ImportError) on no table.
-        tables = pd.read_html(io.StringIO(html), flavor="lxml")
+        # keep_default_na=False: a cell is read as it stands. pandas otherwise
+        # takes a symbol "NA" for a missing value, and the symbol decides below
+        # which row is a holding.
+        tables = pd.read_html(io.StringIO(html), flavor="lxml", keep_default_na=False)
     except (ValueError, ImportError) as exc:
         raise SourceError(f"Slickcharts: no HTML table found ({exc})") from exc
     # Pick the table with the MOST single-name weight rows (v3.7.7/§4.2): the real
@@ -110,28 +113,34 @@ def _top10_from_slickcharts(html: str) -> float:
         wcol = next((c for c in df.columns
                      if "weight" in str(c).strip().lower()
                      or "portfolio" in str(c).strip().lower()), None)
-        if wcol is None:
+        scol = next((c for c in df.columns if "symbol" in str(c).strip().lower()), None)
+        if wcol is None or scol is None:
             continue
-        cleaned = df[wcol].astype(str).str.replace("%", "", regex=False).str.strip()
+        # A holding is a row with a symbol, and the ten largest holdings are
+        # the answer, whatever they weigh. A cut at 10 % stood here ("no S&P
+        # 500 name exceeds ~8%") and did two things. It left a name above 10 %
+        # out of the sum without a word: 10.4 and nine others, 44.2 in all,
+        # came back as 35.3 (S2 sub-score 0.75 for 1.00), while the SSGA path,
+        # which never had the cut, reads 44.2 from the same weights. And it
+        # kept out a row that is no holding, if that row stood above 10 %. The
+        # Symbol cell does that now, at any size: a total or a subtotal row
+        # that leaves it empty is left out. Without either, a 20 % subtotal
+        # row would read as the largest holding, 62.5 for 44.2, inside the
+        # check of the sum below. The contract: a row with anything in its
+        # Symbol cell is taken as a holding, and a table without a Symbol
+        # column is no holdings table. The largest weight in SSGA's file of
+        # 2026-11-12 is 7.90 %. The fallback has not run in production (SSGA
+        # served 615 of 615 snapshots), so no published score moves. The cut
+        # went with the audit of 2026-11-11, whose findings the owner asked to
+        # have implemented (tests/test_sources.py::TestSlickchartsFallback).
+        held = df[df[scol].astype(str).str.strip() != ""]
+        cleaned = held[wcol].astype(str).str.replace("%", "", regex=False).str.strip()
         weights = pd.to_numeric(cleaned, errors="coerce").dropna()
-        # No ceiling on a single weight: the ten largest rows of the holdings
-        # table are the answer, whatever they are. A cut at 10 % stood here
-        # ("no S&P 500 name exceeds ~8%") and left a larger name out of the sum
-        # without a word: 10.4 and nine others, 44.2 in all, came back as 35.3
-        # (S2 sub-score 0.75 for 1.00), while the SSGA path, which never had
-        # the cut, reads 44.2 from the same weights. The largest weight in
-        # SSGA's file of 2026-11-12 is 7.90 %. The fallback has not run in
-        # production (SSGA served 615 of 615 snapshots), so no published score
-        # moves. What the cut also kept out, a row that is no holding (a 100 %
-        # total), now fails the check of the sum below: the fallback gives no
-        # reading where it used to leave that row out. The cut went with the
-        # audit of 2026-11-11, whose findings the owner asked to have
-        # implemented (tests/test_sources.py::TestSlickchartsFallback).
         weights = weights[weights > 0.0]
         if len(weights) >= 10 and (best is None or len(weights) > len(best)):
             best = weights
     if best is None:
-        raise SourceError("Slickcharts: no holdings weight column in any table")
+        raise SourceError("Slickcharts: no holdings table (a Symbol and a Weight column, ten holdings or more)")
     top10 = float(best.nlargest(10).sum())
     if not 5.0 < top10 < 80.0:
         raise SourceError(f"Slickcharts: implausible top-10 sum {top10}")
