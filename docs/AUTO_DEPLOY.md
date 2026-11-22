@@ -40,10 +40,16 @@ migration rolled back. After the switch the service is
 systemd's: `Restart=always` every ten seconds without limit, and the health
 check kills a container that stops answering. The app has five seconds to
 answer (curl's `--max-time`); podman's own clock around the probe is thirty,
-and five checks in a row must fail, so a wedged app is killed within five
-minutes and a slow host is not taken for one: at five seconds and three
+and five checks in a row must fail: at five seconds and three
 retries a stalled host got the working service killed six times in the night
-of 2026-10-31. Nothing rolls back: a release
+of 2026-10-31 (the numbers stand at the unit's `HealthTimeout` line). A
+wedged app is killed after five failed checks in a row. That is a count and
+not a deadline: about 145 s on a host that is not stalled (each check ends
+at curl's five seconds, the next starts thirty after it ended), longer on a
+stalled one, because podman's clock ends no check; and no failure counts in
+the five minutes after a start (`HealthStartPeriod`), so an app that never
+answers after a start is killed after those five minutes and five more
+failed checks. Nothing rolls back: a release
 that answers nothing after the switch is what main says to run, and the next
 commit fixes it. The hand rollback, valid while the schema has not moved (the
 five newest commit tags are kept):

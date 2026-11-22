@@ -67,9 +67,17 @@ HealthInterval=30s
 # as silent whenever one of its ticks in the 25 s after a probe's start was
 # more than 5 s late, the longest failing run at 30s is two, which leaves
 # three retries a margin of one probe and five a margin of three. A stall
-# passes and a wedge lasts: a wedged app is still killed, 145 s after its
-# first failing probe starts when each ends at curl's 5 s (75 s at three
-# retries), 270 s when each takes podman's 30.
+# passes and a wedge lasts: a wedged app is still killed, after five failed
+# checks in a row. That is a count and not a deadline: about 145 s on a host
+# that is not stalled, from the start of the first failing probe (each ends
+# at curl's 5 s and the next starts 30 s after it ended; 75 s at three
+# retries), and no number bounds it, at these settings or the ones before.
+# HealthTimeout ends no probe, so a stalled host stretches it: that night's
+# six kills came 94 to 143 s after their first failing probe started, not
+# 75. And podman counts no failure in the HealthStartPeriod below (the ten
+# probes that failed right after that night's seven starts left the
+# container `starting`), so an app that never answers after a start is
+# killed after those 300 s and five more failed checks.
 HealthTimeout=30s
 HealthRetries=5
 HealthStartPeriod=300s
