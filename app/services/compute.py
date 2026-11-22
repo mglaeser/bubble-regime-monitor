@@ -814,8 +814,9 @@ def _feed_is_current(daily: list[tuple[str, float]], as_of_date: str | None) -> 
     return last_bar >= previous
 
 
-#: The Monte Carlo's sample count and seed: the frozen artifact's, and nothing
-#: else's (app/config.py says why they are no settings).
+#: The Monte Carlo's sample count and seed: the frozen artifact's, read through
+#: app.methodology (this module's _M) like the frozen constants above, and
+#: nothing else's (app/config.py says why they are no settings).
 MC_SAMPLES: int = _M.get_path("monte_carlo", "samples")
 MC_SEED: int = _M.get_path("monte_carlo", "seed")
 

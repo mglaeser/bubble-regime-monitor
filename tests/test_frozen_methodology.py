@@ -350,6 +350,7 @@ def test_the_pipeline_runs_the_artifacts_seed_and_sample_count(monkeypatch):
     from app.services import compute
     from tests.conftest import make_golden_raw_inputs
 
+    # M is app.methodology, imported at the top of this module.
     assert (compute.MC_SAMPLES, compute.MC_SEED) == (
         M.get_path("monte_carlo", "samples"), M.get_path("monte_carlo", "seed")) == (100_000, 20260711)
 
