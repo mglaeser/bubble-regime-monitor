@@ -359,8 +359,8 @@ def build_member_context(
     Uses current values only when they are compatible with the trigger;
     otherwise it falls back to trigger values and adds `CONTEXT_STALE` to the
     required caveats. Silently mixing the two would produce a message whose
-    numbers came from two different methodologies. A fact the current input
-    lacks is the trigger's, with the same caveat.
+    numbers came from two different methodologies. A fact a compatible current
+    input lacks is the trigger's, with the same caveat.
     """
     notes: list[str] = []
     caveats = list(required_caveat_codes)
@@ -381,18 +381,21 @@ def build_member_context(
             trigger=trigger, source=current, previous=previous, labels=labels,
             authorized_fact_ids=authorized_fact_ids, notes=notes,
         )
+        # Only a compatible current input gives facts: for another methodology
+        # or schema version this is empty, and the merge below is the
+        # trigger's facts alone (tests/test_alert_fact_fallback.py).
         if current is not None and use_current else {}
     )
     deltas = material_fact_deltas(
         trigger=trigger, current=current, previous=previous, labels=labels,
         authorized_fact_ids=authorized_fact_ids,
     )
-    # Per fact, not all or nothing: a reading the current sidecar lacks (a
-    # dropped indicator, AGENTS.md invariant 4) is the trigger's, and the
-    # message says so. Taking the trigger's facts only when the current view
-    # was EMPTY left the headline slot unfillable whenever one fact was missing
-    # beside another (F_NEXT_CHECK is always there), and the delivery ended
-    # RENDER_FAILED for good: no alert at all.
+    # Per fact, not all or nothing: a reading a compatible current sidecar
+    # lacks (a dropped indicator, AGENTS.md invariant 4) is the trigger's, and
+    # the message says so. Taking the trigger's facts only when the current
+    # view was EMPTY left the headline slot unfillable whenever one fact was
+    # missing beside another (F_NEXT_CHECK is always there), and the delivery
+    # ended RENDER_FAILED for good: no alert at all.
     facts = {**trigger_facts, **current_facts}
     lacks_a_fact = use_current and bool(trigger_facts.keys() - current_facts.keys())
     if lacks_a_fact:
