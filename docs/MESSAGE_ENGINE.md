@@ -209,23 +209,31 @@ compute that column at all.
 Relaxing the constraint would weaken a live SMS invariant to make room for a
 different channel. Instead the engine persists its own rows: code-point count,
 channel, source (`generated` | `fallback`; a `deterministic` text asks no
-model and writes no row, decision 8), every attempt including timeouts and
-rejections (Q46: full rows). The alert schema is untouched.
+model and writes no row, decision 8),
+every attempt including timeouts and rejections (Q46: full rows, 90-day
+retention). The alert schema is untouched.
 
-Q46 also set a retention of 90 days for these rows. It is not built: no code
-deletes an attempt, and the rows are kept. They are the governor's state
-(decision 3), read at any age: four failed calls of 100 to 103 days ago and
-one of ten minutes ago, with no success since, are the five strikes that open
-the breaker, and without the four the model is asked
-(`tests/test_message_governor.py::test_a_run_of_failures_older_than_90_days_still_opens_the_breaker`).
-So a sweep by age alone changes a decision; one that spares the breaker's run
-is a rule of its own, for a table that held 58 rows in 0.04 MB after 52 days
-in production (2026-11-11), about 0.3 MB a year. The first row turns 90 days
-old on 2026-12-18. Whether Q46's 90 days are built or struck is the owner's
-ruling to make. Two columns of the table carry nothing: `emoji_count` was
-never written and is NULL, and `iteration` is 1, on all 58 rows - the emoji
-cap the first was made for went with the validator (decision 24), and a
-compose asks the model once (decision 27).
+Q46's 90 days are the ruling in force, and the sweep that performs them is not
+built yet: no code deletes an attempt row. The ruling stands here as a test,
+`tests/test_message_governor.py::test_an_attempt_that_ended_more_than_90_days_ago_is_deleted`,
+an expected failure and a strict one: the day the retention job or the
+governor deletes such a row it passes, the suite turns red, and its marker
+goes together with this sentence. No row is overdue before 2026-12-18: the
+oldest of the 58 rows production held on 2026-11-11 is of 2026-09-19. From
+that day a row outlives the ruling unless the sweep is built or the owner has
+amended Q46. Nothing here amends it: that is the owner's to do (decision 3).
+
+What the sweep has to spare: the rows are also the governor's state (decision
+3), read at any age. Four failed calls of 100 to 103 days ago and one of ten
+minutes ago, with no success since, are the five strikes that open the
+breaker, and without the four the model is asked
+(`tests/test_message_governor.py::test_a_run_of_failures_older_than_90_days_still_opens_the_breaker`),
+so a sweep by age alone changes a decision.
+
+Two columns of the table carry nothing: `emoji_count` was never written and is
+NULL, and `iteration` is 1, on all 58 rows of 2026-11-11 - the emoji cap the
+first was made for went with the validator (decision 24), and a compose asks
+the model once (decision 27).
 
 ## Decision 5 — admission is a GATE, not a re-modelled delivery
 
