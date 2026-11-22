@@ -334,12 +334,16 @@ def _admitted() -> Any:
 
 
 def claimable(session: Session, *, mode: str, live_profile: str, now: datetime,
-              limit: int = 10) -> list[AlertDelivery]:
+              limit: int = 10, rule_id: str | None = None) -> list[AlertDelivery]:
     """READY rows whose `not_before` has passed. P1 first, then oldest.
 
     In live mode, only admitted work (`_admitted`). The claim's own
     conditional UPDATE carries the same condition, so a ruleset revoked after
     this listing is not claimed (#153 round 5).
+
+    With `rule_id`, only the rows that carry a live member of that rule. The
+    host watchdog asks this after its pass: a pass takes `limit` rows, so a
+    row can be due and still not be taken (`watchdog.announce`).
     """
     query = select(AlertDelivery).where(
         AlertDelivery.mode == mode,
@@ -350,6 +354,11 @@ def claimable(session: Session, *, mode: str, live_profile: str, now: datetime,
         (AlertDelivery.not_before.is_(None)) | (AlertDelivery.not_before <= now),
         _admitted(),
     )
+    if rule_id is not None:
+        query = query.where(AlertDelivery.delivery_id.in_(
+            select(AlertDeliveryMember.delivery_id).where(
+                AlertDeliveryMember.rule_id == rule_id,
+                AlertDeliveryMember.dropped_at.is_(None))))
     return list(session.execute(
         query
         .order_by(

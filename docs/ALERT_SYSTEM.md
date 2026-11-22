@@ -533,7 +533,7 @@ against the five frozen catalogue entries (section 11b).
 
 Operational mechanisms use the strongest producer that actually exists. The
 recompute watchdog captures and evaluates its own typed input, and its host run
-sends what that planned; recovery and the
+passes the outbox once for what that planned; recovery and the
 dispatcher persist their real outcomes. Inventory-only mechanisms whose typed
 producer or calibration is unavailable remain disabled with an explicit
 reason instead of pretending to evaluate.

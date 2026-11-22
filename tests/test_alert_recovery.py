@@ -1385,10 +1385,14 @@ _HOST_RUN_DAY = datetime(2026, 11, 9, tzinfo=UTC)       # a Monday
 _HOST_RUN_AT = _HOST_RUN_DAY + timedelta(hours=11, minutes=32)
 
 
-def _host_run(monkeypatch, *, mode: str = "live", promoted: bool = True) -> int:
-    """`main([])` at 11:32 UTC with the last recompute at 02:00."""
+def _host_run(monkeypatch, *, mode: str = "live", promoted: bool = True,
+              queued: tuple[int, ...] = ()) -> int:
+    """`main([])` at 11:32 UTC with the last recompute at 02:00. `queued` names
+    the priorities of rows that are in the queue already, each three failed
+    sends old and due again."""
     from app.alerts import watchdog
     from app.alerts.artifacts import validate_from_disk
+    from app.alerts.models import AlertDelivery
     from app.config import get_settings
     from tests.test_alert_end_to_end import _snapshot
 
@@ -1396,8 +1400,19 @@ def _host_run(monkeypatch, *, mode: str = "live", promoted: bool = True) -> int:
     get_settings.cache_clear()
     with session_scope() as session:
         if promoted:
-            register_promoted(session, validate_from_disk(),
-                              now=_HOST_RUN_DAY - timedelta(days=30))
+            rules_sha = register_promoted(session, validate_from_disk(),
+                                          now=_HOST_RUN_DAY - timedelta(days=30))
+            # The pass ranks by priority and age, never by kind: a TEST row, the
+            # one kind that needs no episode, stands in for an alert.
+            queued_at = _HOST_RUN_AT - timedelta(hours=3)
+            for n, priority in enumerate(queued):
+                session.add(AlertDelivery(
+                    delivery_id=f"Q-{n}", dedupe_key=f"q-{n}", mode=mode,
+                    live_profile="default", planning_rules_sha256=rules_sha,
+                    delivery_kind="TEST", priority=priority,
+                    transport_status="RETRY_DUE", planning_state="READY",
+                    attempts=3, not_before=queued_at, created_at=queued_at,
+                    updated_at=queued_at, recipient_ref="default"))
         _snapshot(session, computed_at=_HOST_RUN_DAY + timedelta(hours=2, seconds=40),
                   effective="trim", prev_id=None)
     check = watchdog.run_once
@@ -1405,14 +1420,32 @@ def _host_run(monkeypatch, *, mode: str = "live", promoted: bool = True) -> int:
     return watchdog.main([])
 
 
-def _recording_sender(monkeypatch):
+class _Refusing:
+    """A transport that answers every send with 429: not accepted, and by the
+    README's P1 row "retried after 30 s per attempt (at most 5 minutes),
+    without limit"."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def send(self, message: str, *, recipient_ref: str,
+             idempotency_key: str | None = None):
+        from app.alerts.enums import SenderOutcome
+        from app.alerts.sender import SendResult
+
+        self.calls += 1
+        return SendResult(outcome=SenderOutcome.DEFINITE_TRANSIENT_NOT_ACCEPTED,
+                          http_status=429, error_code="HTTP_429")
+
+
+def _recording_sender(monkeypatch, sender=None):
     """The dispatcher re-reads the wall clock for quiet hours and builds the
     live sender, so the pass gets a fixed instant and a sender that records.
     Nothing else of the path is replaced."""
     import app.alerts.dispatcher as dispatcher
     from app.alerts.sender import NullSender
 
-    sender = NullSender()
+    sender = sender or NullSender()
     real = dispatcher.dispatch_once
     monkeypatch.setattr(dispatcher, "dispatch_once", lambda scope, **kw: real(
         scope, **{**kw, "sender": sender, "now": _HOST_RUN_AT + timedelta(minutes=1)}))
@@ -1469,6 +1502,35 @@ def test_the_host_run_fails_when_its_outbox_pass_raises(isolated_db, monkeypatch
 
     assert _host_run(monkeypatch) == 1
     assert _delivery_states() == ["PENDING"]
+
+
+def test_the_host_run_fails_when_its_pass_does_not_reach_the_outage_alert(
+        isolated_db, monkeypatch):
+    """A pass "sends up to 5 queued alerts" (README), P1 first, then oldest.
+    Five P1 alerts whose sends keep being refused are due again long before the
+    next 30-minute run, so with no scheduler every run's pass is spent on them.
+
+    Executed before the run looked at the queue after its pass (four runs,
+    11:32 to 13:02 UTC): each exited 2 with five sends, all for the P1 rows,
+    and the outage alert stayed PENDING without an attempt. With four such
+    rows the first run sent it."""
+    sender = _recording_sender(monkeypatch, _Refusing())
+
+    assert _host_run(monkeypatch, queued=(1, 1, 1, 1, 1)) == 1
+    assert sender.calls == 5
+    assert sorted(_delivery_states()) == ["PENDING"] + ["RETRY_DUE"] * 5
+
+
+def test_the_host_run_answers_for_the_outage_alert_not_for_the_queue(
+        isolated_db, monkeypatch):
+    """Four P1 rows ahead and a P4 row behind: the pass's fifth row is the
+    outage alert, it is sent, and the run exits 2. The row the pass did not
+    get to is no outage alert, so it does not fail the run."""
+    sender = _recording_sender(monkeypatch)
+
+    assert _host_run(monkeypatch, queued=(1, 1, 1, 1, 4)) == 2
+    assert sorted(_delivery_states()) == ["RETRY_DUE"] + ["SENT"] * 5
+    assert len(sender.sent) == 5
 
 
 def test_with_alerting_disabled_the_host_run_reports_the_outage_as_before(

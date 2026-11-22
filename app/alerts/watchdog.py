@@ -235,10 +235,19 @@ def announce(result: dict[str, object]) -> bool:
     pass that captured nothing, the 48 runs of a normal day, runs none.
 
     The answer is what the alert path took, not what reached the phone: the
-    evaluation committed and the outbox pass ran. What the pass does with a
-    row is the dispatcher's, as in the scheduled pass - a P2 inside quiet hours
-    is held, a send that failed transiently is due again within five minutes,
-    and the next firing run passes the outbox again.
+    evaluation committed, the outbox pass ran, and the pass left no outage
+    alert due in the queue. The last is checked, not assumed, because a pass
+    takes five rows, P1 first, then oldest: when an outage alert is still
+    claimable after the pass, the answer is False. Executed with no scheduler
+    and five P1 rows whose sends were refused (a 429 is retried without limit
+    and is due again within five minutes): four runs in 90 minutes each spent
+    their pass on those five, and the outage alert stayed PENDING without an
+    attempt.
+
+    What the pass does with a row it reached is the dispatcher's, as in the
+    scheduled pass - a P2 inside quiet hours is held, a send that failed
+    transiently is due again within five minutes, and the next firing run
+    passes the outbox again.
     """
     status = result["evaluation_status"]
     if status is None:
@@ -247,14 +256,24 @@ def announce(result: dict[str, object]) -> bool:
         return True
     if status != EvaluationRunStatus.COMMITTED:
         return False
+    from app.alerts.outbox import claimable
     from app.jobs.alert_dispatch import run_once as outbox_pass
 
+    settings = get_settings()
     try:
         report = outbox_pass()
+        with session_scope() as session:
+            still_due = [row.delivery_id for row in claimable(
+                session, mode=settings.alerts_mode,
+                live_profile=settings.alerts_live_profile,
+                now=datetime.now(UTC), limit=1, rule_id="ops.recompute_outage")]
     except Exception as exc:      # noqa: BLE001 - the exit code reports it
         log.error("alert_watchdog_dispatch_failed", error=sanitize(exc))
         return False
     log.info("alert_watchdog_dispatch", **report)
+    if still_due:
+        log.error("alert_watchdog_outage_alert_still_due", delivery_id=still_due[0])
+        return False
     return True
 
 

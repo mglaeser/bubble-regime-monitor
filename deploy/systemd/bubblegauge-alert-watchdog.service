@@ -14,9 +14,9 @@
 #   systemctl --user enable --now bubblegauge-alert-watchdog.timer
 #
 # Exit codes (app/alerts/watchdog.py decides them): 0 = healthy, 2 = outage
-# detected and handed to the alert path (the run passes the outbox itself and
-# sends what is due), 1 = outage detected and the alert path did not take it:
-# the unit fails and OnFailure= reports it.
+# detected and handed to the alert path (the run passes the outbox once itself
+# and leaves no outage alert due behind that pass), 1 = outage detected and the
+# alert path did not take it: the unit fails and OnFailure= reports it.
 
 [Unit]
 Description=bubblegauge alert watchdog (missed recompute slots)
