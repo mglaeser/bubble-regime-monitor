@@ -1279,11 +1279,34 @@ def test_the_instance_reminder_count_drop_round_trips_from_the_deliveries(tmp_pa
 #: A fake FRED key in the shape of the real one: 32 hexadecimal characters.
 _FAKE_FRED_KEY = "9f8e7d6c5b4a39281706f5e4d3c2b1a0"  # pragma: allowlist secret
 
+#: The note of production's source_health row 223 (fred_baa_dgs10, 2026-07-15
+#: 18:11:59), the text of a FRED 504 with the API key in its URL, here with
+#: the fake key ...
+_LEAKED_NOTE = (
+    "Server error '504 Gateway Time-out' for url 'https://api.stlouisfed.org/fred/series/"
+    f"observations?series_id=BAA&api_key={_FAKE_FRED_KEY}&file_type=json&sort_order=asc'\n"
+    "For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/504")
+#: ... and as the gather stores such a note today (app/services/compute.py _track).
+_LEAKED_NOTE_AS_THE_GATHER_STORES_IT = (
+    "Server error '504 Gateway Time-out' for url 'https://api.stlouisfed.org/fred/series/"
+    "observations?series_id=BAA&api_key=[redacted]&file_type=json&sort_order=asc' "
+    "For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/504")
 
-def _database_file_bytes(db: str) -> bytes:
-    """The database file and what SQLite keeps beside it (-wal, -shm), as stored."""
+_INSERT_SOURCE_HEALTH = (
+    "insert into source_health (source, ok, latency_ms, http_status, checked_at, note) "
+    "values (?, ?, 1.0, NULL, ?, ?)")
+
+
+def _copies_of_the_fake_key_in_the_file(db: str) -> int:
+    """How often the fake key occurs in the bytes of the database file and of
+    what SQLite keeps beside it (-wal, -shm), with the WAL checkpointed first:
+    until then the old version of a rewritten page is still in the main file."""
+    connection = sqlite3.connect(db)
+    connection.execute("pragma wal_checkpoint(TRUNCATE)")
+    connection.close()
     path = Path(db)
-    return b"".join(file.read_bytes() for file in sorted(path.parent.glob(path.name + "*")))
+    return sum(file.read_bytes().count(_FAKE_FRED_KEY.encode())
+               for file in path.parent.glob(path.name + "*"))
 
 
 def test_0027_redacts_a_stored_note_that_carries_a_provider_key(tmp_path):
@@ -1296,33 +1319,24 @@ def test_0027_redacts_a_stored_note_that_carries_a_provider_key(tmp_path):
     18:11:59 - is the text of a FRED 504 with the API key in its URL. The
     first row below is that note with a fake key.
 
-    0027 leaves it as the gather stores such a note today, and the key's
-    bytes are no longer in the database file. A note the gather already
-    redacted (production's id 3426), a note without a credential and a row
-    without a note are not touched.
+    0027 leaves it as the gather stores such a note today. A note the gather
+    already redacted (production's id 3426), a note without a credential and
+    a row without a note are not touched.
 
-    Four rows and no filler, on purpose: with hundreds of rows after it, the
-    split of the table's first page leaves a second, dead copy of the fake
-    key in the unused space of a page (measured with 509 rows: 2 copies
-    before, 1 after), and the byte count would then pin SQLite's page layout
-    and not the migration. Production's file holds the value once."""
+    The file holds the key once here, in the cell of that row, as
+    production's file does (measured: one copy, in a leaf page of the table),
+    and the rewrite of the cell takes that copy out. That is all 0027 does to
+    the bytes of the file; the next test is the layout where a second, dead
+    copy exists."""
     from app.redaction import sanitize
 
     db = str(tmp_path / "stored-notes.db")
-    leaked = (
-        "Server error '504 Gateway Time-out' for url 'https://api.stlouisfed.org/fred/series/"
-        f"observations?series_id=BAA&api_key={_FAKE_FRED_KEY}&file_type=json&sort_order=asc'\n"
-        "For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/504")
-    as_the_gather_stores_it = (
-        "Server error '504 Gateway Time-out' for url 'https://api.stlouisfed.org/fred/series/"
-        "observations?series_id=BAA&api_key=[redacted]&file_type=json&sort_order=asc' "
-        "For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/504")
     already_redacted = (
         "Server error '500 Internal Server Error' for url 'https://api.stlouisfed.org/fred/series/"
         "observations?series_id=BAA&api_key=[redacted]&file_type=json&sort_order=asc' "
         "For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500")
     stored = [  # source, ok, checked_at, note
-        ("fred_baa_dgs10", 0, "2026-07-15 18:11:59.086967", leaked),
+        ("fred_baa_dgs10", 0, "2026-07-15 18:11:59.086967", _LEAKED_NOTE),
         ("fred_baa_dgs10", 0, "2026-09-01 06:01:02.000000", already_redacted),
         ("fred_DFII10", 0, "2026-10-21 18:00:01.000000", "Expecting value: line 1 column 1 (char 0)"),
         ("price_QQQ", 1, "2026-10-21 18:00:02.000000", None),
@@ -1331,8 +1345,6 @@ def test_0027_redacts_a_stored_note_that_carries_a_provider_key(tmp_path):
     def _rows() -> list[tuple]:
         connection = sqlite3.connect(db)
         try:
-            # The file is read below, so what the WAL holds goes into it first.
-            connection.execute("pragma wal_checkpoint(TRUNCATE)")
             return connection.execute(
                 "select id, source, ok, latency_ms, http_status, checked_at, note "
                 "from source_health order by id").fetchall()
@@ -1348,14 +1360,12 @@ def test_0027_redacts_a_stored_note_that_carries_a_provider_key(tmp_path):
         command.upgrade(cfg, "0026")
         connection = sqlite3.connect(db)
         connection.execute("pragma journal_mode=WAL")  # production's (app/db.py)
-        connection.executemany(
-            "insert into source_health (source, ok, latency_ms, http_status, checked_at, note) "
-            "values (?, ?, 1.0, NULL, ?, ?)", stored)
+        connection.executemany(_INSERT_SOURCE_HEALTH, stored)
         connection.commit()
         connection.close()
         before = _rows()
         assert [row[1:3] + row[5:] for row in before] == stored
-        assert _database_file_bytes(db).count(_FAKE_FRED_KEY.encode()) == 1
+        assert _copies_of_the_fake_key_in_the_file(db) == 1
 
         command.upgrade(cfg, "0027")
 
@@ -1364,16 +1374,68 @@ def test_0027_redacts_a_stored_note_that_carries_a_provider_key(tmp_path):
         changed = [(old, new) for old, new in zip(before, after, strict=True) if old != new]
         assert len(changed) == 1, "only the note that carried a key is rewritten"
         old, new = changed[0]
-        assert old[-1] == leaked and new[:-1] == old[:-1], "and nothing of its row but the note"
-        assert new[-1] == as_the_gather_stores_it == sanitize(leaked, limit=400)
+        assert old[-1] == _LEAKED_NOTE and new[:-1] == old[:-1], "and nothing of its row but the note"
+        assert new[-1] == _LEAKED_NOTE_AS_THE_GATHER_STORES_IT == sanitize(_LEAKED_NOTE, limit=400)
         assert _FAKE_FRED_KEY not in new[-1]
-        assert _database_file_bytes(db).count(_FAKE_FRED_KEY.encode()) == 0, (
-            "the key's bytes are still in the database file")
+        assert _copies_of_the_fake_key_in_the_file(db) == 0, (
+            "the rewritten cell's old bytes are still in the database file")
 
     _run_with_db(db, _cycle)
     connection = sqlite3.connect(db)
     assert connection.execute("select version_num from alembic_version").fetchall() == [("0027",)]
     connection.close()
+
+
+def test_0027_redacts_the_rows_and_does_not_purge_the_unused_space_of_a_page(tmp_path):
+    """0027's contract is the rows: after it no stored note holds a key. It is
+    not a purge of the bytes of the file, and this pins where the two differ.
+
+    The key's row is the table's first here and 509 rows follow it. When the
+    table outgrew its first page, SQLite copied that page's cells to a new
+    page and left the old bytes in the unused space of the first: the file
+    holds the key twice, one live copy and one dead. (secure_delete is set
+    OFF for the inserts so that every build lays the file out this way; a
+    SQLite built with it on, Ubuntu's for one, zero-fills the old bytes and
+    the file holds one copy.)
+
+    0027 rewrites the row, and the live copy goes with it. The dead copy is
+    in no row, so no query returns it and /readyz cannot serve it, and it
+    stays in the file until SQLite reuses the space: only a VACUUM removes
+    it, and a VACUUM cannot run inside the one transaction the upgrade is
+    (migrations/env.py). Production's file has no dead copy; it is the
+    previous test's layout, the value once and in the live cell. The remedy
+    for a copy of the key anywhere is the key's rotation (SECURITY.md)."""
+    db = str(tmp_path / "dead-copy.db")
+    when = "2026-07-15 18:11:59.086967"
+    stored = [("fred_baa_dgs10", 0, when, _LEAKED_NOTE)] + [("price_SPY", 1, when, None)] * 509
+
+    def _cycle():
+        from alembic import command
+
+        from app.db_migrate import _alembic_config
+
+        cfg = _alembic_config()
+        command.upgrade(cfg, "0026")
+        connection = sqlite3.connect(db)
+        connection.execute("pragma journal_mode=WAL")  # production's (app/db.py)
+        connection.execute("pragma secure_delete=OFF")
+        connection.executemany(_INSERT_SOURCE_HEALTH, stored)
+        connection.commit()
+        connection.close()
+        assert _copies_of_the_fake_key_in_the_file(db) == 2, "one live copy and one dead"
+
+        command.upgrade(cfg, "0027")
+
+        connection = sqlite3.connect(db)
+        notes = connection.execute("select note from source_health where note is not null").fetchall()
+        rows = connection.execute("select count(*) from source_health").fetchone()
+        connection.close()
+        assert rows == (510,)
+        assert notes == [(_LEAKED_NOTE_AS_THE_GATHER_STORES_IT,)], "no row holds the key"
+        assert _copies_of_the_fake_key_in_the_file(db) == 1, (
+            "the live copy goes with the row's rewrite; the dead one is not 0027's to purge")
+
+    _run_with_db(db, _cycle)
 
 
 def test_the_weekly_digest_storage_is_dropped_and_restored_exactly(tmp_path):

@@ -36,11 +36,29 @@ The import of app.redaction.sanitize is deliberate (0007 imports from app in
 the same way): a stored note then has exactly the form the gather writes
 today, from the one definition of what a credential looks like.
 
-No PRAGMA secure_delete and no VACUUM. Executed on copies of the production
-database (2026-11-12): the UPDATE alone takes the value out of the file, 1
-occurrence before and 0 once the WAL is checkpointed (until then the old page
-is still in the main file and the new one in the WAL), and with secure_delete
-on the result is the same.
+The contract is the rows: after this revision no stored note holds what the
+gather's redaction removes. It is not a purge of the bytes of the file. An
+UPDATE writes the row's cell anew and touches nothing else, so a dead copy of
+an old cell in the unused space of a page stays until SQLite reuses that
+space (SQLite leaves such a copy when a table outgrows its first page, unless
+secure_delete was on then). A dead copy is in no row: no query returns it and
+/readyz cannot serve it; only a reader of the file itself finds it. Short of
+that reuse only a VACUUM removes it, and a VACUUM cannot run inside a
+transaction, which the whole upgrade is (migrations/env.py: a failed upgrade
+leaves the database as it found it). So there is no VACUUM here, and no
+PRAGMA secure_delete, which zero-fills what is freed from then on and not
+what is already dead.
+
+Production's file has no dead copy. Executed with this revision on copies of
+it (2026-11-12 and 2026-11-22): the value occurs once in the bytes, in the
+live cell of row 223 on a leaf page of the table, and the count goes from 1
+to 0 once the WAL is checkpointed (until then the old page is still in the
+main file and the new one in the WAL). The unused space of the table's first
+page is zero-filled there (2,798 bytes). A purge for a layout the one
+deployment does not have is not built (AGENTS.md: no defence against what a
+single-tenant deployment cannot meet). tests/test_migrations.py pins both
+layouts: a single live copy goes with the rewrite of its row, and a dead copy
+stays.
 
 The downgrade changes nothing: a redaction cannot be undone, and nothing
 reads the value it removed.
