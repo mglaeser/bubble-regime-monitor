@@ -507,6 +507,8 @@ def _v_reading_to_keep(data: SnapshotData, raw: RawInputs) -> dict[str, Any]:
     if ratio is None:
         return {}
     try:
+        # v_vix is app.indicators.v_vix, imported at the top of this module:
+        # the same call compute_snapshot scores V with.
         v_vix.state(ratio)
     except ValueError:
         return {}

@@ -169,6 +169,29 @@ def test_a_snapshot_keeps_the_reading_it_was_scored_with(isolated_db, monkeypatc
     assert asked == []
 
 
+def test_a_run_with_a_usable_ratio_is_saved_with_its_reading(isolated_db):
+    """persist_snapshot asks `_v_reading_to_keep`, which asks `v_vix.state`.
+    `v_vix` there is the indicator module compute.py imports at its top, the
+    one compute_snapshot scores V with. Were the name unbound, this run would
+    raise NameError and no snapshot would be saved."""
+    from sqlalchemy import select
+
+    from app.db import session_scope
+    from app.indicators import v_vix
+    from app.models import Snapshot
+    from app.services import compute
+
+    assert compute.v_vix is v_vix
+    snapshot_id = _persist_run(0.94)
+    with session_scope() as session:
+        v_state, stored = session.execute(
+            select(Snapshot.v_state, Snapshot.data_freshness)
+            .where(Snapshot.id == snapshot_id)).one()
+    assert v_state == "contango"
+    assert stored["_v_reading"] == {
+        "ratio": 0.94, "as_of": "2026-11-09", "source": "cboe_delayed"}
+
+
 @pytest.mark.parametrize("ratio", [None, float("nan"), 0.0])
 def test_a_run_without_a_usable_ratio_keeps_no_reading(isolated_db, ratio):
     """Usable is what v_vix.state accepts. Nothing is carried across a failed
