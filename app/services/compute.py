@@ -146,6 +146,10 @@ def _age_days(as_of_iso: str | None) -> int | None:
         return None
 
 
+# `date` here and `datetime`/`UTC` in `IndicatorOutput.stale` are this module's
+# own imports (`from datetime import UTC, date, datetime, timedelta` at its top,
+# the names `_age_days` above uses); tests/test_freshness_sessions.py runs both
+# on the real clock.
 def _past_sla(indicator_id: str, as_of_iso: str | None, today: date) -> bool | None:
     """Is a reading dated `as_of_iso` past its indicator's freshness SLA on `today`?
 
