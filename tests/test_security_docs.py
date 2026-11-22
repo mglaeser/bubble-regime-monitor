@@ -44,16 +44,16 @@ def _rows() -> dict[str, list[str]]:
 def test_no_security_document_names_a_control_that_is_gone():
     # the release rolls nothing back, and deploy.sh, whose health-check
     # auto-rollback the register named as the compensating control of rows
-    # A-01/B-35 and B-03/B-28, went with the webhook chain on 2026-10-02
+    # A-01/B-35, A-24/B-19/B-31 and B-03/B-28, went with the webhook chain on
+    # 2026-10-02
     assert not (ROOT / "deploy.sh").exists() and not list((ROOT / "deploy").rglob("deploy.sh"))
     assert "Nothing rolls back" in _read("docs/AUTO_DEPLOY.md")
     gone = ("deploy.sh", "auto-rollback")
     policy = POLICY.read_text(encoding="utf-8")
     assert not [word for word in gone if word in policy]
+    # every row of the register is read, the three that named it among them
     rows = _rows()
-    # row A-24 is not read: it is about the database backup and is corrected
-    # with it
-    rows.pop("A-24 / B-19 / B-31", None)
+    assert {"A-01 / B-35", "A-24 / B-19 / B-31", "B-03 / B-28"} <= set(rows)
     named = {row: [word for word in gone if word in " ".join(cells)] for row, cells in rows.items()}
     assert not {row: words for row, words in named.items() if words}
 
