@@ -31,13 +31,27 @@ Design notes:
   so this has not happened. A defence the deployment's cadence cannot meet
   is removed, not completed (AGENTS.md, "Delete before you add"; found by
   the audit of 2026-11-11, whose findings the owner asked to have
-  implemented). What it costs: against an EDGAR that hangs, a run waits for
-  all five fetches, where it waited for three on the first dead run and for
-  one from the second on; a fetch that hangs takes about 93 s (three
-  attempts of 30 s, and 1 s and 2 s between them). Pinned in
-  tests/test_http_client.py. The price chain's provider cooldown
-  (app/sources/prices.py) and the model governor's breaker
-  (app/message_engine/governor.py) are other mechanisms and stay.
+  implemented).
+  What it costs is time, and only where a label is asked more than once in
+  a run and its upstream fails: every fetch of it is then made. The slowest
+  failure is a read that stalls, 93 s a fetch (three attempts of 30 s, and
+  1 s and 2 s between them), so the worst case is the label asked most
+  often: against an EDGAR that hangs, every such run makes all five
+  fetches, 15 attempts and 465 s. The breaker let through three fetches on
+  the first such run (9 attempts, 279 s) and one on each later run (3
+  attempts, 93 s). It saved those seconds and no data: with no issuer
+  answering, the pull fails and D3 is dropped either way.
+  Nothing waits for them. The gather runs in the background while the API
+  serves the stored snapshot; its step records the failed pull and the next
+  source is fetched; the next run is 14,400 s away; and the same gather
+  gives its LPPLS fit 1,500 s by default (LPPLS_TIMEOUT_S). Ten of the 615
+  production runs spent more than 465 s in the gather's tracked steps (534
+  to 895 s, all in July 2026, 507 to 881 s of it the LPPLS fit), and each
+  stored its snapshot. Both sides are pinned in tests/test_http_client.py:
+  the two issuers the breaker cost, and the 465 s its absence costs.
+  The price chain's provider cooldown (app/sources/prices.py) and the model
+  governor's breaker (app/message_engine/governor.py) are other mechanisms
+  and stay.
 """
 
 from __future__ import annotations
@@ -103,7 +117,15 @@ def _get_with_retry(url: str, headers: dict[str, str], params: dict[str, str] | 
 
 def fetch(source: str, url: str, *, headers: dict[str, str] | None = None,
           params: dict[str, str] | None = None) -> httpx.Response:
-    """GET with retry/backoff; a failure is logged under the source's label and raised."""
+    """GET with retry/backoff; a failure is logged under the source's label and raised.
+
+    Nothing stands before the GET, so an upstream that does not answer costs
+    every fetch of it its three attempts: 93 s when the reads stall. The
+    label asked most often in a run is EDGAR's, five fetches and 465 s where
+    the breaker let through 279 s and then 93 s. That is the price of asking
+    every issuer; tests/test_http_client.py pins it against the gather's own
+    limits, and the module docstring has the reasons.
+    """
     merged = {**DEFAULT_HEADERS, **(headers or {})}
     try:
         return _get_with_retry(url, merged, params)

@@ -25,14 +25,24 @@ from __future__ import annotations
 
 import httpx
 import pytest
-import tenacity
 
 from app import http_client
+from app.config import Settings
+from app.engine.recompute_slots import RECOMPUTE_SLOT_HOURS
+from app.services import compute
 from app.sources import edgar
 
 
 @pytest.fixture
-def upstream(monkeypatch):
+def waits(monkeypatch) -> list[float]:
+    """The seconds the retry waits between two attempts: recorded, not slept."""
+    slept: list[float] = []
+    monkeypatch.setattr(http_client._get_with_retry.retry, "sleep", slept.append)
+    return slept
+
+
+@pytest.fixture
+def upstream(monkeypatch, waits):
     """A fake upstream behind the shared client; a retry does not wait."""
 
     def install(handler) -> None:
@@ -40,7 +50,6 @@ def upstream(monkeypatch):
         monkeypatch.setattr(http_client, "_client",
                             httpx.Client(transport=httpx.MockTransport(handler), timeout=5))
 
-    monkeypatch.setattr(http_client._get_with_retry.retry, "wait", tenacity.wait_none())
     yield install
     http_client.close_client()
 
@@ -95,3 +104,41 @@ def test_three_unreachable_issuers_do_not_sink_the_other_two(upstream, monkeypat
     assert asked == ciks, "every issuer is asked, once (a 404 is not retried)"
     assert [reading.ticker for reading in result.value] == list(edgar.CIKS)[3:]
     assert all(reading.capex_ocf_ttm == pytest.approx(0.6) for reading in result.value)
+
+
+def test_an_edgar_that_does_not_answer_costs_465_s_and_only_its_own_pull(upstream, waits, monkeypatch):
+    """What having no breaker costs, at its worst: the label asked most often
+    in a run, and every read of it stalls. All five issuers are asked, three
+    attempts each: 15 attempts and 465 s, on every such run. (The breaker let
+    through 9 attempts, 279 s, on the first such run and 3 attempts, 93 s, on
+    each later one. It saved those seconds and no data: no issuer answers, so
+    the pull fails and D3 is dropped either way.) The seconds are bounded and
+    nothing waits for them: the gather's step records the failed pull and
+    returns, so the next source is fetched, and 465 s is under a third of
+    what the same gather gives its LPPLS fit, with 14,400 s to the next run."""
+    http_client.close_client()
+    assert http_client.get_client().timeout == httpx.Timeout(30.0, connect=10.0), "the real client's"
+    attempts: list[str] = []
+
+    def stall(request: httpx.Request) -> httpx.Response:
+        attempts.append(request.url.path)
+        raise httpx.ReadTimeout("no byte within the read timeout", request=request)
+
+    upstream(stall)
+    monkeypatch.setattr(edgar, "MIN_INTERVAL_S", 0.0)
+    raw = compute.RawInputs()
+
+    assert compute._track(raw, "sec_edgar", edgar.hyperscaler_readings) is None
+    assert [(row["source"], row["ok"], row["note"]) for row in raw.source_health] == [
+        ("sec_edgar", False, "EDGAR: no hyperscaler facts retrievable")]
+
+    issuers = [httpx.URL(edgar.BASE.format(cik=cik)).path for cik in edgar.CIKS.values()]
+    assert attempts == [path for path in issuers for _ in range(3)], "five issuers, three attempts each"
+    assert waits == [1, 2] * 5, "1 s and 2 s between the three attempts of a fetch"
+    seconds = len(attempts) * http_client.DEFAULT_TIMEOUT.read + sum(waits)
+    assert seconds == 465, "15 attempts of 30 s and 15 s of waiting: 93 s a fetch"
+
+    lppls_limit = Settings.model_fields["lppls_timeout_s"].default
+    between_runs = 3600 * (RECOMPUTE_SLOT_HOURS[1] - RECOMPUTE_SLOT_HOURS[0])
+    assert (lppls_limit, between_runs) == (1500, 14_400)
+    assert seconds < lppls_limit / 3
