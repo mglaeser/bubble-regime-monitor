@@ -256,6 +256,7 @@ def _eval_crossing(node: CrossingCondition, ctx: EvaluationContext,
     value = _as_number(now.value)
     if not now.available or value is None:
         return _unknown(f"{node.source}:unavailable", {node.source: now})
+    # The level's pinned value: the hold and the crossing below both compare against it.
     level = thresholds.get(node.level)
     if level is None:
         return ConditionOutcome(truth=None, status=EvaluationStatus.DISABLED,
