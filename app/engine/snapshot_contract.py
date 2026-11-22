@@ -17,9 +17,11 @@ ALREADY computed, by *calling* the authoritative band functions in
                           base_action_band does: the two are equal on every
                           snapshot the pipeline computes (all 606 production
                           snapshots that carry both, to 2026-11-10; the
-                          override had fired on none of the 615). What the
-                          composite alone said stays readable from the two
-                          block values (aggregate.combine).
+                          override had fired on none of the 615). The score
+                          before the override (Score_raw, the composite of
+                          the two blocks) stays readable from the two block
+                          values (aggregate.combine); no band of it is
+                          published.
     base_action_band      authoritative decision after the persisted override,
                           before coverage presentation suppression
                                                  -> aggregate.action_band_with_override
