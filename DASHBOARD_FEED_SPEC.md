@@ -61,7 +61,16 @@
 > ETFs) and `gold_ttm_pct` (GLD over GLD, one basis) stay. The companion
 > dashboard names none of the three keys and lists whatever metrics are present
 > (checked at its main of 2026-09-28), so it needs no change; no backward
-> compatibility is kept.
+> compatibility is kept. That holds for the stored payloads too: the endpoint
+> and the status page read the newest stored row through the contract
+> (`to_contract` in `app/services/dashboard_feed.py`), so a row written before
+> this change is served without the three keys, and a GLD close stored under
+> `gold_spot` is served as `available:false`, from the deploy on: before the
+> next build, and for as long as a build fails (a response cached before the
+> deploy lives out its 15 minutes). The rows are not migrated. Read that way,
+> the 14 rows production retained on 2026-11-10 (33 metric keys each) hold
+> exactly the 30 keys with every remaining item unchanged, `gold_spot` being
+> the spot quote in all 14.
 
 ### Series (12 + 1, see §7)
 
@@ -111,7 +120,7 @@ GET /api/v1/dashboard/feed?sections=series&symbols=qqq,gold,btc
 - Built **inside the twice-daily recompute (06:00/18:00 UTC), strictly after the score persists** — a feed failure never touches scoring; the endpoint then serves the previous payload. Manual `POST /api/v1/admin/refresh` also rebuilds it. **No on-request upstream pulls, ever** (cached read of a persisted row; migration 0005, table `dashboard_feed`).
 - Stale SLAs: daily market data 7 d · FRED H.10 FX 10 d · CAPE 45 d · FINRA 75 d · quarterly MMF 120 d. `stale` is null when `as_of` is unknown.
 - Quota cost per recompute: ~6 Tiingo requests, 5 Twelve Data credits (through the existing per-minute throttle and credit governor), ~6 FRED series. Negligible against all limits.
-- Tests: golden-fixture build (frozen inventories, 61-point pad, honest kinds), one-source-down degradation (200 + `available:false`), a failed spot quote ships `available:false`, endpoint 503/filters/lenient-params.
+- Tests: golden-fixture build (frozen inventories, 61-point pad, honest kinds), one-source-down degradation (200 + `available:false`), a failed spot quote ships `available:false`, a stored payload older than the contract is served through the contract, endpoint 503/filters/lenient-params.
 
 ## 5 · REAL captured payload — capture #2 (production, 2026-07-15T23:29:51+00:00)
 

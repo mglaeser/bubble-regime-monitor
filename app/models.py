@@ -252,8 +252,10 @@ END
 class DashboardFeed(Base):
     """Cached dashboard-feed payload (v3.4.0, DASHBOARD_FEED_SPEC.md): the full
     series+metrics JSON assembled once per recompute (AFTER the score persists)
-    and served verbatim by GET /api/v1/dashboard/feed — endpoints never pull
-    upstream on request. Only the newest ~14 rows are retained."""
+    and served by GET /api/v1/dashboard/feed through the contract of the day
+    (`app.services.dashboard_feed.to_contract`: a stored row can be older than
+    the contract) — endpoints never pull upstream on request. Only the newest
+    ~14 rows are retained."""
 
     __tablename__ = "dashboard_feed"
 

@@ -222,6 +222,29 @@ METRIC_KEYS = [
     "fear_greed",  # v3.7.0 additive
 ]
 
+GOLD_SPOT_SOURCE = "twelvedata:XAU/USD"
+
+
+def to_contract(payload: dict[str, Any]) -> dict[str, Any]:
+    """A stored payload as its readers get it: the metric keys of METRIC_KEYS
+    and no others, and `gold_spot` only from the spot source.
+
+    The table keeps the 14 newest payloads, and the feed endpoint and the
+    status page read the newest one until the next build succeeds: from a
+    deploy to the next recompute, and for as long as the build fails. A payload
+    written before 2026-11 holds `ndx_close`, `silver_spot` (the SLV close)
+    and `gold_silver_ratio` (a mixed basis), and its `gold_spot` came from the
+    GLD fallback if the quote had failed then. Read through this function none
+    of that is published from the deploy on. The stored rows are not migrated
+    or rewritten, and a payload of today's build passes unchanged."""
+    metrics = {k: v for k, v in (payload.get("metrics") or {}).items() if k in METRIC_KEYS}
+    gold = metrics.get("gold_spot")
+    if isinstance(gold, dict) and gold.get("source") != GOLD_SPOT_SOURCE:
+        metrics["gold_spot"] = _unavailable(
+            "USD", GOLD_SPOT_SOURCE,
+            "source failed: the stored item is the ETF fallback of before 2026-11, not the quote")
+    return {**payload, "metrics": metrics}
+
 
 def _fred_scalar_from(pairs: list[tuple[str, float]] | None, unit: str, series_id: str,
                       sla: int, note: str | None = None) -> dict[str, Any]:
@@ -419,7 +442,7 @@ def build_feed(raw: Any, data: Any) -> dict[str, Any]:
     # pairs keep their fallback: the Fed's H.10 rate is the same quantity as
     # the quote.
     m["gold_spot"] = _fresh_or("XAU/USD", "USD", lambda err: _unavailable(
-        "USD", "twelvedata:XAU/USD", f"source failed: {err}"))
+        "USD", GOLD_SPOT_SOURCE, f"source failed: {err}"))
     m["usdjpy"] = _fresh_or("USD/JPY", "JPY-per-USD", _fred_fx_fallback("DEXJPUS", "JPY-per-USD"))
     m["usdchf"] = _fresh_or("USD/CHF", "CHF-per-USD", _fred_fx_fallback("DEXSZUS", "CHF-per-USD"))
 

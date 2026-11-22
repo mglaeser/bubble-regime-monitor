@@ -344,28 +344,104 @@ class TestFeedEndpoint:
         assert r.status_code == 200                      # unknown section ignored
         assert "series" in r.json()["data"]
 
-    def test_a_payload_stored_before_three_keys_left_is_replaced_by_the_next_build(
-            self, client, snapshot, patched_sources):
-        """No migration for the stored payloads: the endpoint serves the newest
-        row only, and the first recompute after the deploy writes one without
-        `ndx_close`, `silver_spot` and `gold_silver_ratio`. The retained rows
-        of the old shape (14 are kept) rotate out and are not served again."""
+    # What a build before 2026-11 stored and the contract no longer holds, with
+    # the values, sources and notes of production's newest row of 2026-11-10.
+    _LEFT_THE_CONTRACT = {
+        "ndx_close": {"value": None, "unit": "index", "as_of": None, "source": "none",
+                      "available": False, "stale": None,
+                      "note": "no free raw NASDAQ-100 index source; use qqq_close (ETF proxy)"},
+        "silver_spot": {"value": 46.48, "unit": "USD", "as_of": "2026-11-10",
+                        "source": "tiingo:SLV", "available": True, "stale": False,
+                        "note": "SLV ETF close proxy - NOT spot (spot source failed)"},
+        "gold_silver_ratio": {"value": 86.77, "unit": "ratio", "as_of": "2026-11-10",
+                              "source": "twelvedata:XAU/USD/tiingo:SLV", "available": True,
+                              "stale": False,
+                              "note": "basis: mixed - one leg spot, one leg ETF close (see source)"},
+    }
+    # What the same build stored under `gold_spot` when the XAU/USD quote failed.
+    _GLD_CLOSE = {"value": 369.36, "unit": "USD", "as_of": "2026-11-10", "source": "tiingo:GLD",
+                  "available": True, "stale": False,
+                  "note": "GLD ETF close proxy - NOT spot (spot source failed)"}
+
+    def _store_a_payload_from_before(self, snapshot, hours_ago, gold_spot=None):
+        """Store what a build before 2026-11 wrote: today's payload plus the
+        three keys, and the GLD close under `gold_spot` when one is given."""
         from app.db import session_scope
         from app.models import DashboardFeed
 
-        old = {"anchor_month": "2026-11", "anchor_partial": True, "series": {},
-               "metrics": {"gold_silver_ratio": {"value": 86.77, "available": True},
-                           "silver_spot": {"value": 46.48, "available": True},
-                           "ndx_close": {"value": None, "available": False}}}
+        payload = df.build_feed(*snapshot)
+        payload["metrics"].update(self._LEFT_THE_CONTRACT)
+        if gold_spot is not None:
+            payload["metrics"]["gold_spot"] = gold_spot
         with session_scope() as s:
-            s.add(DashboardFeed(computed_at=datetime.now(UTC) - timedelta(hours=4),
-                                payload=json.dumps(old)))
-        before = client.get("/api/v1/dashboard/feed").json()["data"]["metrics"]
-        assert before["gold_silver_ratio"]["value"] == 86.77
+            s.add(DashboardFeed(computed_at=datetime.now(UTC) - timedelta(hours=hours_ago),
+                                payload=json.dumps(payload)))
 
-        raw, data = snapshot
-        df.build_and_persist_feed(raw, data)
-        served = client.get("/api/v1/dashboard/feed").json()["data"]["metrics"]
+    def _served_metrics(self, client, query=""):
+        return client.get("/api/v1/dashboard/feed" + query).json()["data"]["metrics"]
+
+    def test_a_stored_payload_is_served_without_the_keys_that_left(
+            self, client, snapshot, patched_sources):
+        """The endpoint serves the newest stored row, and no build has run
+        since the deploy: that row holds `ndx_close`, `silver_spot` (the SLV
+        close) and `gold_silver_ratio` (86.77 on a mixed basis). They are not
+        served, by default or by name. What the contract holds is served as it
+        was stored, the spot quote under `gold_spot` included (it was the
+        quote in 14 of 14 retained rows of production)."""
+        self._store_a_payload_from_before(snapshot, hours_ago=4)
+        served = self._served_metrics(client)
         assert sorted(served) == sorted(df.METRIC_KEYS)
-        for key in ("ndx_close", "silver_spot", "gold_silver_ratio"):
-            assert key not in served
+        assert served["gold_spot"]["value"] == 3350.0
+        assert served["gold_spot"]["source"] == "twelvedata:XAU/USD"
+        assert self._served_metrics(
+            client, "?symbols=ndx_close,silver_spot,gold_silver_ratio") == {}
+
+    def test_a_stored_etf_close_is_not_served_as_gold_spot(
+            self, client, snapshot, patched_sources, monkeypatch):
+        """A row written before 2026-11 while the XAU/USD quote was failing
+        holds the GLD close under `gold_spot`. It is served as a failed quote
+        is served today: unavailable, no value. That holds for as long as the
+        row is the newest, so also when the next build fails and stores
+        nothing; the next build that succeeds is served as built."""
+        self._store_a_payload_from_before(snapshot, hours_ago=4, gold_spot=self._GLD_CLOSE)
+        gold = self._served_metrics(client)["gold_spot"]
+        assert gold["available"] is False and gold["value"] is None
+        assert gold["source"] == "twelvedata:XAU/USD"
+        assert gold["note"].startswith("source failed")
+
+        def a_build_that_fails(raw, data):
+            raise RuntimeError("build failed")
+
+        with monkeypatch.context() as during_the_failure:
+            during_the_failure.setattr(df, "build_feed", a_build_that_fails)
+            with pytest.raises(RuntimeError):
+                df.build_and_persist_feed(*snapshot)
+        served = self._served_metrics(client)
+        assert sorted(served) == sorted(df.METRIC_KEYS)
+        assert served["gold_spot"]["value"] is None
+
+        df.build_and_persist_feed(*snapshot)
+        served = self._served_metrics(client)
+        assert sorted(served) == sorted(df.METRIC_KEYS)
+        assert served["gold_spot"]["value"] == 3350.0
+
+    def test_a_payload_of_the_contract_is_served_as_it_was_built(
+            self, client, snapshot, patched_sources, monkeypatch):
+        """The read changes nothing in what the build writes today, with the
+        quote or without it."""
+        feed = df.build_feed(*snapshot)
+        assert df.to_contract(feed) == feed
+        assert feed["metrics"]["gold_spot"]["source"] == df.GOLD_SPOT_SOURCE
+
+        def td_no_gold(symbol, interval, outputsize):
+            if symbol == "XAU/USD":
+                raise RuntimeError("quote failed")
+            return fake_td(symbol, interval, outputsize)
+
+        monkeypatch.setattr(df, "_td_series", td_no_gold)
+        feed = df.build_feed(*snapshot)
+        assert df.to_contract(feed) == feed
+        assert feed["metrics"]["gold_spot"]["note"] == "source failed: quote failed"
+
+        df.build_and_persist_feed(*snapshot)
+        assert self._served_metrics(client)["gold_spot"]["note"] == "source failed: quote failed"
