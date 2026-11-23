@@ -561,6 +561,10 @@ def _directives(unit: str) -> dict[str, list[str]]:
     return sections
 
 
+def _value(section: list[str], key: str) -> str:
+    return next(line.split("=", 1)[1] for line in section if line.startswith(key + "="))
+
+
 class TestTheUnits:
     def test_the_release_unit(self):
         unit = _directives((ROOT / "deploy/systemd/bubblegauge-release.service").read_text())
@@ -608,6 +612,52 @@ class TestTheUnits:
         assert 'HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-300}"' in (ROOT / "deploy/release.sh").read_text()
         assert "StartLimitIntervalSec=0" in unit["[Unit]"]
         assert not any(line.startswith("Exec") for line in service)     # no shell of our own in the unit
+
+    def test_podmans_clock_is_not_the_apps_bound_and_five_checks_must_fail(self):
+        """The health check is for an app that stops answering /healthz (the
+        unit's comment, docs/AUTO_DEPLOY.md), and the app's bound is curl's
+        --max-time. HealthTimeout is another clock: podman's, around its whole
+        exec - conmon, the runtime, curl - and read after the exec returns, so
+        on a slow host it fails the probe of an app that answers. At 5s and
+        three retries the host's stall in the night of 2026-10-31 had 141 of 795
+        probes fail on that clock and six kills of a working service; at 30s,
+        podman's default, 2 of the 795 fail, never two in a row (the numbers
+        are at the unit's HealthTimeout line)."""
+        container = _directives((ROOT / "deploy/quadlet/bubblegauge.container").read_text())["[Container]"]
+        app_bound = int(_value(container, "HealthCmd").split("--max-time ")[1].split()[0])
+        timeout = int(_value(container, "HealthTimeout").removesuffix("s"))
+        assert app_bound == 5           # the app answers within five seconds, or the probe fails
+        assert timeout > app_bound      # podman's clock is not the one that decides
+        assert timeout == 30            # podman's default, not a number of ours
+        assert _value(container, "HealthRetries") == "5"    # a stall passes, a wedge lasts: five failed checks in a row
+        assert "HealthOnFailure=kill" in container
+
+    def test_a_wedged_app_is_killed_by_a_count_of_checks_and_no_deadline_is_promised(self):
+        """A wedged app is killed after five failed checks in a row, and neither
+        the unit nor the docs put a deadline on that, because podman gives none.
+        HealthTimeout ends no probe: in the night of 2026-10-31 one ran 129 s,
+        and at 5s and three retries all six kills came 94 to 143 s after their
+        first failing probe started, where 3 x 5 s + 2 x 30 s is 75. And no
+        failure counts in the HealthStartPeriod, the 300 s after a start: the
+        ten probes that failed right after that night's seven starts left the
+        container `starting`. What both state is the time on a host that is not
+        stalled - each probe ends at curl's 5 s, the next starts 30 s after it
+        ended - and it is this arithmetic."""
+        text = (ROOT / "deploy/quadlet/bubblegauge.container").read_text()
+        container = _directives(text)["[Container]"]
+        app_bound = int(_value(container, "HealthCmd").split("--max-time ")[1].split()[0])
+        interval = int(_value(container, "HealthInterval").removesuffix("s"))
+        retries = int(_value(container, "HealthRetries"))
+        on_a_working_host = retries * app_bound + (retries - 1) * interval
+        assert on_a_working_host == 145
+        assert _value(container, "HealthStartPeriod") == "300s"
+        doc = (ROOT / "docs/AUTO_DEPLOY.md").read_text()
+        said = " ".join(doc[doc.index("After the switch the service is"):doc.index("Nothing rolls back")].split())
+        comment = " ".join(text[text.index("# The app's bound is curl's"):text.index("\nHealthTimeout=")].replace("#", " ").split())
+        for words in (comment, said):
+            assert "a count and not a deadline" in words
+            assert f"about {on_a_working_host} s on a host that is not stalled" in words
+            assert "HealthStartPeriod" in words         # where the time stands, the start period stands too
 
     def test_the_script_names_what_the_units_name(self):
         script = (ROOT / "deploy/release.sh").read_text()
