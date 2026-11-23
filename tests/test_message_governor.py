@@ -393,9 +393,9 @@ class TestRoundSevenOn140:
 def test_a_run_of_failures_older_than_90_days_still_opens_the_breaker():
     """The attempt rows are the governor's state at any age (app/models.py: "A
     dropped row would silently hand a failing model more attempts"). Ruling
-    Q46 gives them a retention of 90 days, in force and not built yet
-    (docs/MESSAGE_ENGINE.md, decision 4), and this is what its sweep has to
-    spare: four failed calls of 100 to 103 days ago and one of ten minutes
+    Q46 gives them a retention of 90 days that no code performs
+    (docs/MESSAGE_ENGINE.md, decision 4), and this is what a sweep performing
+    it has to spare: four failed calls of 100 to 103 days ago and one of ten minutes
     ago, with no success since, are the five strikes that open the breaker,
     and with the rows older than 90 days deleted the same call is admitted."""
     day = 24 * 60
@@ -414,31 +414,32 @@ def test_a_run_of_failures_older_than_90_days_still_opens_the_breaker():
     assert decision.may_ask and claim is not None
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="Q46's 90-day retention is in force and its sweep is not built yet "
-                          "(docs/MESSAGE_ENGINE.md, decision 4)")
-def test_an_attempt_that_ended_more_than_90_days_ago_is_deleted():
-    """Ruling Q46 as a test: an attempt row is kept for 90 days and no longer.
-    No code deletes one yet, so this is an expected failure: a digest that
+def test_no_code_deletes_an_attempt_row_of_more_than_90_days():
+    """What the code does, as docs/MESSAGE_ENGINE.md decision 4 states it, and
+    not what ruling Q46 asks: nothing deletes an attempt row. A digest that
     went out 91 days ago, with a success since (so it is no part of the
-    breaker's run, the test above), is still stored after the sweep the daily
-    retention job runs and after a call of the governor. And a strict one: the
-    day one of the two deletes that row the test passes, the suite turns red,
-    and this marker goes together with decision 4's "not built yet"."""
+    breaker's run, the test above), is still stored with its text after the
+    sweep the daily retention job runs and after a call of the governor.
+    Q46's 90 days stand as the owner's ruling; the sweep that performs them is
+    a change of its own, and that change replaces this test."""
     from app.alerts.retention import run_retention
     from app.config import get_settings
 
     day = 24 * 60
-    _row(gov.Outcome.OK, minutes_ago=91 * day, finished_minutes_ago=91 * day)
+    sent = (NOW - timedelta(days=91)).replace(tzinfo=None)
+    with session_scope() as s:
+        s.add(MessageEngineAttempt(trigger="daily_digest", channel="imessage", priority=2,
+                                   started_at=sent, finished_at=sent, outcome=gov.Outcome.OK.value,
+                                   iteration=1, message="bubblegauge 51/100", source="generated"))
     _row(gov.Outcome.OK, minutes_ago=day, finished_minutes_ago=day)
     with session_scope() as s:
         run_retention(s, settings=get_settings(), now=NOW)
     _reserve()
 
     with session_scope() as s:
-        overdue = s.query(MessageEngineAttempt).filter(
-            MessageEngineAttempt.finished_at < NOW - timedelta(days=90)).count()
-    assert overdue == 0
+        stored = [row.message for row in s.query(MessageEngineAttempt).filter(
+            MessageEngineAttempt.finished_at < NOW - timedelta(days=90))]
+    assert stored == ["bubblegauge 51/100"]
 
 
 @pytest.mark.parametrize("settings, priority, trigger", [
@@ -466,16 +467,17 @@ def test_a_deterministic_text_writes_no_row(monkeypatch, settings, priority, tri
 
 def test_the_document_keeps_q46s_90_days_and_says_they_are_not_built():
     """docs/MESSAGE_ENGINE.md decision 4 keeps ruling Q46 as it was written
-    (full rows, 90-day retention), says that the 90 days are in force and that
-    their sweep is not built yet, and cites the two tests above: the ruling as
-    an expected failure, and what the sweep has to spare. It does not turn the
-    ruling into "the rows are kept" or into an open question: only the owner
-    amends a ruling (decision 3)."""
+    (full rows, 90-day retention), says that the 90 days stand as the owner's
+    ruling and that no code performs them, names the day the first row is past
+    them, and cites the two tests above: what the code does, and what a sweep
+    has to spare. It does not turn the ruling into "the rows are kept" or into
+    an open question: only the owner amends a ruling (decision 3)."""
     document = (Path(__file__).resolve().parents[1] / "docs" / "MESSAGE_ENGINE.md").read_text(encoding="utf-8")
     decision = " ".join(document.split("\n## Decision 4 ")[1].split("\n## ")[0].split())
     assert "(Q46: full rows, 90-day retention)" in decision
-    assert "Q46's 90 days are the ruling in force, and the sweep that performs them is not built yet" in decision
+    assert "Q46's 90 days stand as the owner's ruling, and no code performs them" in decision
+    assert "No row is past 90 days before 2026-12-18" in decision
     assert "the rows are kept" not in decision and "built or struck" not in decision
-    for test in ("test_an_attempt_that_ended_more_than_90_days_ago_is_deleted",
+    for test in ("test_no_code_deletes_an_attempt_row_of_more_than_90_days",
                  "test_a_run_of_failures_older_than_90_days_still_opens_the_breaker"):
         assert f"tests/test_message_governor.py::{test}" in decision

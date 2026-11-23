@@ -213,15 +213,17 @@ model and writes no row, decision 8),
 every attempt including timeouts and rejections (Q46: full rows, 90-day
 retention). The alert schema is untouched.
 
-Q46's 90 days are the ruling in force, and the sweep that performs them is not
-built yet: no code deletes an attempt row. The ruling stands here as a test,
-`tests/test_message_governor.py::test_an_attempt_that_ended_more_than_90_days_ago_is_deleted`,
-an expected failure and a strict one: the day the retention job or the
-governor deletes such a row it passes, the suite turns red, and its marker
-goes together with this sentence. No row is overdue before 2026-12-18: the
-oldest of the 58 rows production held on 2026-11-11 is of 2026-09-19. From
-that day a row outlives the ruling unless the sweep is built or the owner has
-amended Q46. Nothing here amends it: that is the owner's to do (decision 3).
+Q46's 90 days stand as the owner's ruling, and no code performs them: nothing
+deletes an attempt row, so a row older than 90 days stays stored with its
+text, a daily digest's (decision 1). That is what the code does, not what the
+ruling asks, and
+`tests/test_message_governor.py::test_no_code_deletes_an_attempt_row_of_more_than_90_days`
+pins it. No row is past 90 days before 2026-12-18: the oldest of the 58 rows
+production held on 2026-11-11 is of 2026-09-19. From that day a row outlives
+the ruling until the sweep is built or the owner amends Q46 (decision 3);
+nothing here amends it. The sweep is a change of its own: it deletes
+production rows and has to spare the breaker's run (next paragraph), and the
+change that builds it replaces that test and this paragraph.
 
 What the sweep has to spare: the rows are also the governor's state (decision
 3), read at any age. Four failed calls of 100 to 103 days ago and one of ten
