@@ -1246,10 +1246,12 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         sub = d4_lppls.sub_score(raw.lppls_confidence)
         sub_d["d4"] = sub
         mc_in.d4_sub = sub
-        # value = LPPLS confidence at t2=today: the fraction of START-TIME
-        # windows (dt 30..750d) qualifying at the single scanned endpoint
-        # (Sornette et al. 2015 / Demirer et al. 2019). With one endpoint,
-        # value == n_qualifying / n_evaluated by construction.
+        # value = LPPLS confidence at t2 = the latest close: of the START-TIME
+        # windows whose fit is a positive bubble (b < 0), the fraction
+        # qualifying at the single scanned endpoint. value ==
+        # n_windows_qualifying / n_windows_positive (the library's pos_conf),
+        # not / n_windows_evaluated: see d4_lppls.compute_confidence (the
+        # window grid is in that module's header).
         bands = res.get("bands") or {}
         band_txt = ", ".join(
             f"{k}={v['conf']:.2f}(n={v['n']})" if v and v.get("conf") is not None
