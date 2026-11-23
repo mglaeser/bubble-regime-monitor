@@ -1134,8 +1134,8 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         # never reaches here; it takes the cached branch below, which reports
         # rollover as unknown.)
         # Rollover confirmation is CALENDAR-aware when dated months are available
-        # (v3.7.7/§3.1): on a publication gap the positional [-3:]/[-12:] windows
-        # straddle the hole and could flip the D2 multiplier (0.6<->1.0) from
+        # (v3.7.7/§3.1): on a publication gap the positional [-3:] window
+        # straddles the hole and could flip the D2 multiplier (0.6<->1.0) from
         # mis-spaced data. UNKNOWN (None) -> treat as NOT confirmed for the
         # multiplier, but say so honestly rather than asserting a rollover.
         if raw.margin_months and len(raw.margin_months) == len(raw.margin_balances):
