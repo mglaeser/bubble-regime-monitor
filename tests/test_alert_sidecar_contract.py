@@ -1155,7 +1155,7 @@ def test_a_run_without_a_ratio_leaves_an_open_backwardation_episode_open(isolate
 
     def decide(stored: str):
         ctx = EvaluationContext(current=_input_with_v_state(stored), previous=previous,
-                                history=(previous,), is_cold_start=False)
+                                history=(previous,))
         return evaluate_state(rule=rule, instance_fingerprint="fp", memory=firing,
                               outcome=evaluate_rule(rule, ctx, currently_firing=True),
                               ctx=ctx, now=BUILT_AT)
