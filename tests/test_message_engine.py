@@ -1030,6 +1030,8 @@ class TestTypedFacts:
         ("action_band", "de-risk (data degraded)", "de-risk (data degraded)"),
         ("override_suffix", " OVERRIDE", " OVERRIDE"), ("override_suffix", "", ""),
         ("F_NEXT_CHECK", "22:00", "22:00"), ("F_BAND_PREVIOUS", "suppressed", "suppressed"),
+        # a run without a usable VIX / VIX3M ratio: compute's word for it, as the trends carry theirs
+        ("vol_state", "unknown", "unknown"), ("vol_state", "backwardation", "backwardation"),
         ("median", float("nan"), None), ("median", float("inf"), None), ("median", "59", None),
         ("action_band", "IN", None), ("spy_trend", "trim", None), ("override_suffix", " override", None),
         ("F_NEXT_CHECK", "14:30", None), ("F_BAND_BASE", "suppressed", None), ("median", {"v": 59}, None),
