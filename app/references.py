@@ -496,8 +496,9 @@ REGISTRY: dict[str, Methodology] = {
         block="D",
         what=(
             "The Log-Periodic Power Law Singularity (LPPLS) confidence indicator on the Nasdaq-100 "
-            "(QQQ proxy): the fraction of start-time fitting windows, at the present endpoint, whose "
-            "calibrated parameters satisfy bubble-consistency filters."
+            "(QQQ proxy): of the start-time fitting windows that fit a positive-bubble shape at the "
+            "present endpoint, the fraction whose calibrated parameters also satisfy the "
+            "bubble-consistency filters. It is not a share of all fitted windows."
         ),
         how=(
             "Use lppls PyPI 0.6.24 (PINNED). v3.3.2 SINGLE-ENDPOINT DENSE SCAN: one fitting endpoint "
@@ -505,8 +506,17 @@ REGISTRY: dict[str, Methodology] = {
             "days in 5-day steps (~144 windows). Fit ln p(t) = A + B*(t_c - t)^m + C*(t_c - t)^m * "
             "cos(w*ln(t_c - t) - phi); filter conditions m in (0,1), w in [4,25] (flat "
             "filter_conditions_config dict; qualification via compute_indicators). confidence = "
-            "fraction of start-time windows passing the filters AT t2 (the library's per-endpoint "
-            "pos_conf; == n_qualifying/n_evaluated with a single endpoint); sub_score = confidence. "
+            # The denominator is the library's (lppls 0.6.24, compute_indicators:
+            # pos_conf = pos_qual_count / pos_count, pos_count the fits with b < 0),
+            # not every fitted window. Production, the 601 readings that carry the
+            # counts (2026-07-15 to 2026-11-10): value == qualifying / positive on
+            # 601, == qualifying / fitted on none; 83 to 130 of 144 windows were
+            # positive; mean value 0.299 against 0.208 over all fitted windows.
+            "the library's per-endpoint pos_conf AT t2: the positive-bubble windows (fit b < 0) "
+            "that pass the filters, divided by all positive-bubble windows, NOT by all fitted "
+            "windows, so it is never below the share of all fitted windows and usually above it "
+            "(in production 0.30 against 0.21 on average, July to November 2026); sub_score = "
+            "confidence. "
             "Three dt-band fractions (short 30-63d, medium 63-252d, long 252-750d) are partitioned "
             "from the SAME fits as multi-scale diagnostics (payload only, never headline inputs). "
             "States: VALID / VALID_ZERO (a computed zero ENTERS the aggregation) / "
@@ -690,8 +700,9 @@ CHANGELOG: list[dict[str, str]] = [
         "score": "D4 METHOD CHANGE — values not comparable across the v3.3.0->v3.3.2 boundary",
         "notes": "(1) D4 LPPLS redesigned to a SINGLE-ENDPOINT DENSE SCAN: one endpoint t2=today, "
         "start-time windows dt 30-750 trading days in 5-day steps (~144 windows); confidence = "
-        "fraction qualifying at t2 (Sornette 2015 / Demirer 2019 definition — with one endpoint "
-        "this equals n_qualifying/n_evaluated, dissolving the earlier reviewer dispute). Replaces "
+        "fraction qualifying at t2 (the library's pos_conf: qualifying windows over the "
+        "positive-bubble windows, b < 0; this entry said it equals n_qualifying/n_evaluated, "
+        "which it does not, corrected 2026-11). Replaces "
         "the ~40-endpoint x <=120-day grid with a recent-endpoint mean: cheaper (~144 fits vs "
         "~600) and examines 6x the scale range, so readings are NOT comparable to v3.3.0/1. "
         "Three dt-band diagnostics (short/medium/long) partitioned from the same fits at zero "
@@ -1075,9 +1086,17 @@ LEG_CAVEATS: dict[str, str] = {
         "timing rules is data-mining-fragile; the honest expectation is drawdown reduction, not "
         "return enhancement."
     ),
+    # 131 is the top 5% of the sample the cited analysis used, not of the index
+    # in 2026. This service's 615 stored readings (2026-07-11 to 2026-11-10):
+    # minimum 126.4, median 148.5, maximum 168.6; 609 are above 131. The text
+    # is served as `skew_caveat` beside the level (GET /api/v1/legs/fast-alarm)
+    # and on the status page, and it is a line of the framework block in the
+    # digest's prompt (app/message_engine/context.py, framework_for).
     "skew": (
-        "Bilello's analysis shows SKEW in its top 5% (>~131) has had ~zero forward predictive "
-        "value -> LABEL: COINCIDENT CONTEXT ONLY."
+        "Bilello's analysis shows that a SKEW reading in its top 5% (above ~131 in his sample) "
+        "has had ~zero forward predictive value. That level is no extreme in 2026: 609 of this "
+        "service's 615 stored readings (July to November 2026) are above 131, median 148.5 -> "
+        "LABEL: COINCIDENT CONTEXT ONLY."
     ),
     "derisking": (
         "Cederburg, O'Doherty, Wang & Yan (2020) — any de-risking rule may destroy value net of "
