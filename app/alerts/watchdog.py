@@ -6,8 +6,8 @@ cannot notice that recomputes have stopped. So this is a standalone entry point
 the container — see `deploy/systemd/`.
 
 It is still not a complete answer: a total host or network failure silences the
-watchdog too. That requires external monitoring, and this file says so rather
-than implying otherwise.
+watchdog too. Nothing watches from outside: by the owner's decision
+(2026-10-04) a host that is down reports nothing (docs/AUTO_DEPLOY.md).
 
 Condition (mandate 19.1):
 

@@ -283,6 +283,44 @@ def test_a_podman_that_ignores_sigterm_still_cannot_block_the_alert(tmp_path):
     assert elapsed < 15, f"took {elapsed:.1f}s; SIGTERM-ignoring probe was not killed"
 
 
+def test_no_file_still_asks_for_the_external_monitor():
+    """The owner, 2026-10-04, on the external ping: "ditch this, remove this
+    from any outstanding list, documentation or reference, this is not
+    needed!" Three comments went on arguing for it: the notifier script, the
+    watchdog's unit and the watchdog module each said that a dead host "needs"
+    or "requires" external or off-machine monitoring. They state the decision
+    now: nothing watches from outside, and a host that is down reports nothing
+    (docs/AUTO_DEPLOY.md, "Outages"). The decision's own sentence there, "there
+    is no external monitor", asks for nothing and does not match."""
+    root = SCRIPT.parents[1]
+    kinds = {".py", ".sh", ".md", ".service", ".timer", ".container"}
+    asks = [
+        f"{path.relative_to(root)}:{number}"
+        for top in ("app", "deploy", "docs")
+        for path in sorted((root / top).rglob("*"))
+        if path.is_file() and path.suffix in kinds
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        if re.search(r"(external|off-machine|off-host) monitoring", line)
+    ]
+    assert asks == []
+
+
+def test_a_timer_without_a_calendar_carries_no_persistent_line():
+    """systemd.timer(5) on Persistent=: "this setting only has an effect on
+    timers configured with OnCalendar=". The watchdog's timer is monotonic
+    (OnBootSec=, OnUnitActiveSec=) and carried `Persistent=true`: a line that
+    read as a catch-up after downtime and did nothing. What starts a monotonic
+    timer again after the host was down is its OnBootSec=."""
+    timers = sorted((SCRIPT.parent / "systemd").glob("*.timer"))
+    assert "bubblegauge-alert-watchdog.timer" in [timer.name for timer in timers]
+    for timer in timers:
+        lines = [line.strip() for line in timer.read_text(encoding="utf-8").splitlines()
+                 if not line.lstrip().startswith("#")]
+        if not any(line.startswith("OnCalendar=") for line in lines):
+            assert not any(line.startswith("Persistent=") for line in lines), timer.name
+            assert any(line.startswith("OnBootSec=") for line in lines), timer.name
+
+
 def test_a_down_host_reports_nothing_by_the_owners_decision():
     """The owner, 2026-10-04, on the Healthchecks dead-man ping: "ditch this,
     remove this from any outstanding list, documentation or reference, this is
