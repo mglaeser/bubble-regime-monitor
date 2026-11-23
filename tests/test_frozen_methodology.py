@@ -206,8 +206,11 @@ def test_freshness_and_coverage_are_the_artifact():
 #   compute.py 252.0: days-per-year display arithmetic
 #   montecarlo.py 5/25/75/95: percentile POINTS (reporting quantiles), not the
 #                        colliding d2/s3 anchors
-#   d2_margin.py 3.0 x5, 4.0/5.0 x2: rollover month-structure constants and
-#                        slice indices (rollover structure is an artifact GAP)
+#   d2_margin.py 3.0 x4, 4.0/5.0 x2: rollover month-structure constants and
+#                        slice indices (rollover structure is an artifact GAP).
+#                        3.0 is the two "fewer than three months" guards and
+#                        the two [-3:] slices; a third slice went with the
+#                        12-month-high test that decided nothing.
 #   d3_hyperscaler_fcf.py 0.5 x2: the (r-0.5)/0.5 ratio anchors (artifact GAP,
 #                        colliding with unrelated 0.5 leaves)
 KNOWN_COLLISIONS: dict[tuple[str, float], int] = {
@@ -218,7 +221,7 @@ KNOWN_COLLISIONS: dict[tuple[str, float], int] = {
     ("app/engine/montecarlo.py", 75.0): 1,
     ("app/engine/montecarlo.py", 95.0): 1,
     ("app/indicators/d1_breadth.py", 50.0): 1,
-    ("app/indicators/d2_margin.py", 3.0): 5,
+    ("app/indicators/d2_margin.py", 3.0): 4,
     ("app/indicators/d2_margin.py", 4.0): 2,
     ("app/indicators/d2_margin.py", 5.0): 2,
     ("app/indicators/d3_hyperscaler_fcf.py", 0.5): 2,
