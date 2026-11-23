@@ -26,7 +26,19 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # A NAMED RELEASE, in every job of this gate, never "ubuntu-latest". That label
+    # moves: between 2026-11-12 and 2026-11-21 it went from Ubuntu 24.04 to 26.04, and
+    # this gate turned red on an unchanged main. One test fails on the 26.04 image
+    # (20261116.88.1) and passes on the 24.04 image (20261101.360.1), same tree:
+    #   tests/test_host_outage_notifier.py::
+    #   test_a_podman_that_ignores_sigterm_still_cannot_block_the_alert
+    # (deploy/notify-outage.sh did not return within the test's thirty seconds).
+    # The suite executes the scripts under deploy/, which are written for this
+    # release's userland, so the release is part of what a green run proves. The gate
+    # changes when the repository does, not when a label does. Moving the pin is a
+    # change of its own: make that probe hold on the new release first.
+    # Pinned by tests/test_ci_runner.py.
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         python-version: ["3.12"]
@@ -210,7 +222,7 @@ jobs:
     # actually fails closed, rather than trusting that it would — the failure
     # mode being guarded against is an admission check that silently starts
     # returning 0 and is never noticed because nothing ever exercises it.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       # v4.4.0
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -227,7 +239,7 @@ jobs:
           echo "Admission correctly refused (fail-closed)."
 
   image:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       # v4.4.0
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -235,3 +247,10 @@ jobs:
       # so docker build is the documented substitute (spec section 12).
       - name: Build image (validates the Containerfile incl. R/exuber)
         run: docker build -t bubblegauge -f Containerfile .
+      - name: The documented operator command runs in the image
+        # The README ("the CLI in the container") and docs/ALERT_SYSTEM.md
+        # ("Operating it") name `bubblegauge ...` as the operator's command.
+        # No environment, no network, no database: the command imports the app
+        # and prints its help. Without PYTHONPATH in the Containerfile it ends
+        # in "ModuleNotFoundError: No module named 'app'".
+        run: docker run --rm --network none bubblegauge bubblegauge alerts --help

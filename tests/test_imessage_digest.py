@@ -793,6 +793,9 @@ class TestTransportSelection:
         values."""
         from app.config import configured_environment, near_miss_env_keys, retired_env_keys
 
+        # The deployment's setting: tests/conftest.py turns the dotenv file off
+        # for the suite, and this test is the one that reads one.
+        monkeypatch.setitem(Settings.model_config, "env_file", ".env")
         monkeypatch.chdir(tmp_path)
         monkeypatch.delenv("DAILY_SMS_ENABLED", raising=False)
         monkeypatch.delenv("IMESSAG_ENABLED", raising=False)

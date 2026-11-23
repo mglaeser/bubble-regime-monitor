@@ -1239,10 +1239,12 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         sub = d4_lppls.sub_score(raw.lppls_confidence)
         sub_d["d4"] = sub
         mc_in.d4_sub = sub
-        # value = LPPLS confidence at t2=today: the fraction of START-TIME
-        # windows (dt 30..750d) qualifying at the single scanned endpoint
-        # (Sornette et al. 2015 / Demirer et al. 2019). With one endpoint,
-        # value == n_qualifying / n_evaluated by construction.
+        # value = LPPLS confidence at t2 = the latest close: of the START-TIME
+        # windows whose fit is a positive bubble (b < 0), the fraction
+        # qualifying at the single scanned endpoint. value ==
+        # n_windows_qualifying / n_windows_positive (the library's pos_conf),
+        # not / n_windows_evaluated: see d4_lppls.compute_confidence (the
+        # window grid is in that module's header).
         bands = res.get("bands") or {}
         band_txt = ", ".join(
             f"{k}={v['conf']:.2f}(n={v['n']})" if v and v.get("conf") is not None
@@ -1271,10 +1273,20 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
             quality=0.0, state=state)
 
     # ---- V multiplier ----
-    # A non-finite/<=0 ratio now raises (v3.7.8/§9); an unknown OR invalid ratio
-    # degrades V to the frozen neutral multiplier 1.0 (unchanged rule), never a
-    # mislabelled "contango" from bad data.
-    v_state, v_mult = "contango", 1.0  # neutral default (unknown/invalid ratio)
+    # No usable ratio (none fetched, or one v_vix.state refuses, v3.7.8/§9): the
+    # frozen neutral multiplier 1.0 (unchanged rule: the run scores as a
+    # contango run does) and the state "unknown", the word
+    # fast_alarm.term_structure carries for the same run. Not "contango": that
+    # is a measured calm curve to /api/v1/score and to the digest, and to the
+    # alert rule vol.backwardation (resolution auto_on_inverse) it is the
+    # all-clear that closes an open episode as condition_false. "unknown" is
+    # no reading to an alert rule (app/alerts/sources.py, read_source), so an
+    # open episode is held until a ratio is measured again. Production has not
+    # met the case: source_health has the ratio on 615 of 615 recomputes
+    # (2026-07-11 to 2026-11-10), and the stored state equals
+    # fast_alarm.term_structure on all 615 snapshots, never "unknown". So no
+    # stored "contango" stands for a missing ratio, and no row is rewritten.
+    v_state, v_mult = "unknown", 1.0
     if raw.vix_ratio is not None:
         try:
             v_state = v_vix.state(raw.vix_ratio)
