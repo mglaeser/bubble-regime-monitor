@@ -1533,7 +1533,9 @@ def test_the_alert_system_has_no_model_path():
     which the dispatcher never called and whose tables never held a row - and
     its prompt test with it. What remains is pinned here: no module of the
     alert system imports the model gateway or a selector, so no alert text
-    reaches a model and no model writes an alert."""
+    reaches a model and no model writes an alert. A module that reaches the
+    gateway through another import is caught by the test below; an import of
+    `app.engine.judgment` passed this one (main 9f79c7a)."""
     import re
     from pathlib import Path
 
@@ -1542,3 +1544,48 @@ def test_the_alert_system_has_no_model_path():
     readers = sorted(p.name for p in alerts.rglob("*.py") if model_path.search(p.read_text(encoding="utf-8")))
     assert readers == []
 
+
+def test_importing_the_alert_system_loads_no_module_of_the_model_path(tmp_path):
+    """AGENTS.md rule 1 for the alert system, asked of the interpreter: a fresh
+    process imports every module of app.alerts and must then hold none of the
+    modules through which a prompt reaches a model, whether imported by an
+    alert module or by something an alert module imports. At main 9f79c7a the
+    37 alert modules load none of them. `from app.engine.judgment import
+    run_completion` in app/alerts/renderer.py passes the word search above and
+    fails here (loaded: app.engine.judgment); so does `import
+    app.services.digest` (loaded: that module, app.message_engine and
+    app.message_engine.gate). The word search stays: it also sees an import
+    written inside a function, which importing a module does not run."""
+    import importlib.util
+    import json
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    # Every module through which a prompt reaches a model (AGENTS.md rule 1
+    # names each): the gateway, the judgment, the message engine, the digest
+    # and the deploy note. A name that no longer names a module would be looked
+    # for in vain, so each must exist.
+    model_path = ("app.llm_gateway", "app.engine.judgment", "app.message_engine",
+                  "app.services.digest", "app.services.deploy_note")
+    assert all(importlib.util.find_spec(name) is not None for name in model_path)
+    probe = (
+        "import importlib, json, pkgutil, sys\n"
+        "import app.alerts\n"
+        "names = sorted(m.name for m in pkgutil.walk_packages(app.alerts.__path__, 'app.alerts.'))\n"
+        "for name in names:\n"
+        "    importlib.import_module(name)\n"
+        "print(json.dumps({'imported': len(names), 'loaded': sorted(sys.modules)}))\n"
+    )
+    # An interpreter of its own, because this process has imported the model
+    # path for other tests. Its working directory is empty and its database a
+    # throwaway, so the probe reads no dotenv file and touches no data.
+    out = subprocess.run(
+        [sys.executable, "-c", probe], cwd=tmp_path, capture_output=True, text=True, timeout=120,
+        env={"PYTHONPATH": str(root), "TESTING": "true", "PYTHONDONTWRITEBYTECODE": "1",
+             "DB_URL": f"sqlite:///{tmp_path}/probe.db"})
+    assert out.returncode == 0, out.stderr[-800:]
+    seen = json.loads(out.stdout.splitlines()[-1])
+    assert seen["imported"] >= 30                     # the probe did walk the package
+    assert [name for name in seen["loaded"] if name.startswith(model_path)] == []

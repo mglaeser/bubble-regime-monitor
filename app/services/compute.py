@@ -1271,10 +1271,20 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
             quality=0.0, state=state)
 
     # ---- V multiplier ----
-    # A non-finite/<=0 ratio now raises (v3.7.8/§9); an unknown OR invalid ratio
-    # degrades V to the frozen neutral multiplier 1.0 (unchanged rule), never a
-    # mislabelled "contango" from bad data.
-    v_state, v_mult = "contango", 1.0  # neutral default (unknown/invalid ratio)
+    # No usable ratio (none fetched, or one v_vix.state refuses, v3.7.8/§9): the
+    # frozen neutral multiplier 1.0 (unchanged rule: the run scores as a
+    # contango run does) and the state "unknown", the word
+    # fast_alarm.term_structure carries for the same run. Not "contango": that
+    # is a measured calm curve to /api/v1/score and to the digest, and to the
+    # alert rule vol.backwardation (resolution auto_on_inverse) it is the
+    # all-clear that closes an open episode as condition_false. "unknown" is
+    # no reading to an alert rule (app/alerts/sources.py, read_source), so an
+    # open episode is held until a ratio is measured again. Production has not
+    # met the case: source_health has the ratio on 615 of 615 recomputes
+    # (2026-07-11 to 2026-11-10), and the stored state equals
+    # fast_alarm.term_structure on all 615 snapshots, never "unknown". So no
+    # stored "contango" stands for a missing ratio, and no row is rewritten.
+    v_state, v_mult = "unknown", 1.0
     if raw.vix_ratio is not None:
         try:
             v_state = v_vix.state(raw.vix_ratio)
