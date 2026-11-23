@@ -667,6 +667,34 @@ class TestTheUnits:
         code = "\n".join(line for line in script.splitlines() if not line.lstrip().startswith("#"))
         assert ".deploy-state" not in code and "rollback" not in code.lower()
 
+    def test_only_the_release_builds_the_image_the_service_runs(self):
+        """The contract (docs/AUTO_DEPLOY.md): the service runs origin/main's
+        commit, and main reaches production only as images - built by the
+        release from an export of that commit and labelled with it.
+
+        The Makefile's `build` was `podman build -t bubblegauge -f Containerfile .`
+        on the working tree. podman-build(1) on -t: "If imageName does not
+        include a registry name, the registry name localhost is prepended to
+        the image name." So one `make build` in the checkout the service runs
+        from would write localhost/bubblegauge:latest, the tag the service unit
+        boots, with no revision label. The release compares the label of the
+        RUNNING container, so it would see nothing until a restart (a health
+        kill, a reboot) booted the working tree's image. `up` was
+        `podman-compose up -d`, which the README gives in full. No document,
+        script, workflow or test named either target, so both went and nothing
+        replaces them.
+
+        A local run builds through compose.yml (README, "Install"). It names no
+        image, and podman-compose then tags `<project>_<service>`: not the
+        service's tag."""
+        container = _directives((ROOT / "deploy/quadlet/bubblegauge.container").read_text())["[Container]"]
+        assert f"Image={IMAGE}:latest" in container
+        recipes = [line for line in (ROOT / "Makefile").read_text(encoding="utf-8").splitlines()
+                   if line.startswith("\t")]
+        assert [line for line in recipes if "podman" in line] == []
+        compose = (ROOT / "compose.yml").read_text(encoding="utf-8")
+        assert not any(line.strip().startswith("image:") for line in compose.splitlines())
+
     def test_the_release_script_is_installed_by_hand(self):
         doc = (ROOT / "docs/AUTO_DEPLOY.md").read_text()
         install = doc[doc.index("### Install (once"):doc.index("### Operate")]
