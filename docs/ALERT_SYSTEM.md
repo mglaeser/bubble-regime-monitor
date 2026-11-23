@@ -106,7 +106,7 @@ the decomposition it already knows:
 
 | column | meaning |
 |---|---|
-| `score_action_band` | band implied by the Monte Carlo **median** alone |
+| `score_action_band` | band of the published Monte Carlo **median**. A fired override already holds that median at 70 or above, so this then reads `de-risk` like the base band (the two were equal on all 606 production snapshots carrying both, 2026-11-10) |
 | `base_action_band` | after the override, before coverage suppression |
 | `effective_action_state` | `hold` / `trim` / `de-risk` / `suppressed` |
 | `band_suppressed_by_coverage` | coverage suppressed the base decision |
