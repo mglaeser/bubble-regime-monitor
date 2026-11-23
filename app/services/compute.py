@@ -397,7 +397,6 @@ class SnapshotData:
     fast_alarm: dict[str, Any]
     freshness: dict[str, str]
     coverage: dict[str, Any]
-    unknown_red_flags: list[str] = field(default_factory=list)  # v3.7.8/§24 (observability)
     ath_provenance: dict[str, Any] = field(default_factory=lambda: dict(ATH_PROVENANCE))  # PIN-F label
     # Typed alert contract (Stage 0) — derived from the values above, never a
     # second opinion on them. See app/engine/snapshot_contract.py.
@@ -1135,8 +1134,8 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         # never reaches here; it takes the cached branch below, which reports
         # rollover as unknown.)
         # Rollover confirmation is CALENDAR-aware when dated months are available
-        # (v3.7.7/§3.1): on a publication gap the positional [-3:]/[-12:] windows
-        # straddle the hole and could flip the D2 multiplier (0.6<->1.0) from
+        # (v3.7.7/§3.1): on a publication gap the positional [-3:] window
+        # straddles the hole and could flip the D2 multiplier (0.6<->1.0) from
         # mis-spaced data. UNKNOWN (None) -> treat as NOT confirmed for the
         # multiplier, but say so honestly rather than asserting a rollover.
         if raw.margin_months and len(raw.margin_months) == len(raw.margin_balances):
@@ -1239,10 +1238,12 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         sub = d4_lppls.sub_score(raw.lppls_confidence)
         sub_d["d4"] = sub
         mc_in.d4_sub = sub
-        # value = LPPLS confidence at t2=today: the fraction of START-TIME
-        # windows (dt 30..750d) qualifying at the single scanned endpoint
-        # (Sornette et al. 2015 / Demirer et al. 2019). With one endpoint,
-        # value == n_qualifying / n_evaluated by construction.
+        # value = LPPLS confidence at t2 = the latest close: of the START-TIME
+        # windows whose fit is a positive bubble (b < 0), the fraction
+        # qualifying at the single scanned endpoint. value ==
+        # n_windows_qualifying / n_windows_positive (the library's pos_conf),
+        # not / n_windows_evaluated: see d4_lppls.compute_confidence (the
+        # window grid is in that module's header).
         bands = res.get("bands") or {}
         band_txt = ", ".join(
             f"{k}={v['conf']:.2f}(n={v['n']})" if v and v.get("conf") is not None
@@ -1271,10 +1272,20 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
             quality=0.0, state=state)
 
     # ---- V multiplier ----
-    # A non-finite/<=0 ratio now raises (v3.7.8/§9); an unknown OR invalid ratio
-    # degrades V to the frozen neutral multiplier 1.0 (unchanged rule), never a
-    # mislabelled "contango" from bad data.
-    v_state, v_mult = "contango", 1.0  # neutral default (unknown/invalid ratio)
+    # No usable ratio (none fetched, or one v_vix.state refuses, v3.7.8/§9): the
+    # frozen neutral multiplier 1.0 (unchanged rule: the run scores as a
+    # contango run does) and the state "unknown", the word
+    # fast_alarm.term_structure carries for the same run. Not "contango": that
+    # is a measured calm curve to /api/v1/score and to the digest, and to the
+    # alert rule vol.backwardation (resolution auto_on_inverse) it is the
+    # all-clear that closes an open episode as condition_false. "unknown" is
+    # no reading to an alert rule (app/alerts/sources.py, read_source), so an
+    # open episode is held until a ratio is measured again. Production has not
+    # met the case: source_health has the ratio on 615 of 615 recomputes
+    # (2026-07-11 to 2026-11-10), and the stored state equals
+    # fast_alarm.term_structure on all 615 snapshots, never "unknown". So no
+    # stored "contango" stands for a missing ratio, and no row is rewritten.
+    v_state, v_mult = "unknown", 1.0
     if raw.vix_ratio is not None:
         try:
             v_state = v_vix.state(raw.vix_ratio)
@@ -1306,19 +1317,10 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         index_within_2pct_of_ath=raw.index_within_2pct_of_ath,
     )
     mc_in.red_flags = red_flags
-
-    # v3.7.8/§24: observability for red flags whose INPUT is unknown this run.
-    # The frozen numerical rule is unchanged (unknown -> not-fired, red_flag_count
-    # untouched); this list just makes the epistemic gap visible to the reader.
-    unknown_red_flags: list[str] = []
-    if runup is None:
-        unknown_red_flags.append("semi_runup_ge_150pp")
-    if raw.hy_oas_bps is None or not raw.hy_oas_history_bps:
-        unknown_red_flags.append("hy_oas_widen_gt_100bps")
-    if raw.breadth_pct is None:
-        unknown_red_flags.append("breadth_lt_50_near_ath")
-    if not _s4_ok:
-        unknown_red_flags.append("gsadf_explosive_noncontested")
+    # Which of these flags had an unknown input is said once, per flag, by the
+    # typed contract persist_snapshot stores (build_red_flag_meta: the state
+    # UNKNOWN). The score API's unknown_red_flags reads that; no list is built
+    # here.
 
     if not sub_s or not sub_d:
         raise RuntimeError("an entire block is empty — cannot score (all sources down)")
@@ -1427,7 +1429,6 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         fast_alarm=alarm.as_dict(),
         freshness=freshness,
         coverage=coverage,
-        unknown_red_flags=unknown_red_flags,
         # Typed alert contract (Stage 0): the band decomposition the display
         # string above collapses. Derived by calling the SAME authoritative
         # band functions, from the SAME median — never a second computation.
@@ -1551,7 +1552,6 @@ def persist_snapshot(data: SnapshotData, raw: RawInputs) -> int:
             judgment_stale=call.stale,
             judgment_error=call.error_class,
             data_freshness={**data.freshness, "_coverage": data.coverage,
-                            "_unknown_red_flags": data.unknown_red_flags,
                             "_ath_provenance": data.ath_provenance},
             # RM-1: stamp the methodology actually in force in THIS process —
             # read from the loader, never re-stated by hand.
