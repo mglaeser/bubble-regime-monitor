@@ -112,6 +112,29 @@ def test_a_series_a_provider_answered_stays_an_ok_pull(gather, monkeypatch, answ
         assert (pull["ok"], pull["http_status"], pull["note"]) == (True, 200, None), source
 
 
+def test_with_no_smh_series_the_soxx_a_provider_answered_feeds_s3_as_an_ok_pull(
+        gather, monkeypatch):
+    """SMH fails at every provider and has no cache; Tiingo answers SOXX. The
+    SOXX series is what S3 reads: its 2-yr return, source, flag and date. The
+    gather holds no semis series beyond these (SPY and QQQ keep theirs)."""
+    rows = [((LAST_BAR - timedelta(days=599 - i)).isoformat(), 100.0 + i) for i in range(600)]
+
+    def answer(name, canonical):
+        if canonical == "SMH":
+            raise prices.ProviderError(f"{name} SMH: down")
+        return rows
+
+    _providers(monkeypatch, answer)
+    raw, health = gather()
+    assert health["price_SMH"]["ok"] is False
+    assert "price chain exhausted" in health["price_SMH"]["note"]
+    soxx = health["price_SOXX"]
+    assert (soxx["ok"], soxx["http_status"], soxx["note"]) == (True, 200, None)
+    assert (raw.semis_symbol, raw.semis_fallback, raw.semis_source) == ("SOXX", True, "tiingo:SOXX")
+    assert raw.smh_2yr_return_pct == prices.total_return_pct(rows, 504, smooth=5)
+    assert raw.semis_as_of == rows[-1][0]
+
+
 def test_a_key_in_a_provider_error_does_not_reach_the_health_note(gather, monkeypatch):
     """The chain's note quotes its providers' errors. Alpha Vantage carries its
     key in the query string, httpx's `raise_for_status` puts the whole URL

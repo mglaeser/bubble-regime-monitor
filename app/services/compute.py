@@ -547,6 +547,8 @@ def gather_inputs() -> RawInputs:
         semis = _track_closes(raw, "price_SOXX", "SOXX")
         raw.semis_symbol = "SOXX"
         raw.semis_fallback = True
+    # Whichever answered, SMH or SOXX, feeds S3 through the fields below; the
+    # gather keeps no semis series of its own (RawInputs has no semis_daily).
     if semis:
         raw.semis_source = semis.provenance.source  # real provenance, e.g. "tiingo:SMH"
         try:
