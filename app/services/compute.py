@@ -1135,8 +1135,8 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         # never reaches here; it takes the cached branch below, which reports
         # rollover as unknown.)
         # Rollover confirmation is CALENDAR-aware when dated months are available
-        # (v3.7.7/§3.1): on a publication gap the positional [-3:]/[-12:] windows
-        # straddle the hole and could flip the D2 multiplier (0.6<->1.0) from
+        # (v3.7.7/§3.1): on a publication gap the positional [-3:] window
+        # straddles the hole and could flip the D2 multiplier (0.6<->1.0) from
         # mis-spaced data. UNKNOWN (None) -> treat as NOT confirmed for the
         # multiplier, but say so honestly rather than asserting a rollover.
         if raw.margin_months and len(raw.margin_months) == len(raw.margin_balances):
@@ -1239,10 +1239,12 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         sub = d4_lppls.sub_score(raw.lppls_confidence)
         sub_d["d4"] = sub
         mc_in.d4_sub = sub
-        # value = LPPLS confidence at t2=today: the fraction of START-TIME
-        # windows (dt 30..750d) qualifying at the single scanned endpoint
-        # (Sornette et al. 2015 / Demirer et al. 2019). With one endpoint,
-        # value == n_qualifying / n_evaluated by construction.
+        # value = LPPLS confidence at t2 = the latest close: of the START-TIME
+        # windows whose fit is a positive bubble (b < 0), the fraction
+        # qualifying at the single scanned endpoint. value ==
+        # n_windows_qualifying / n_windows_positive (the library's pos_conf),
+        # not / n_windows_evaluated: see d4_lppls.compute_confidence (the
+        # window grid is in that module's header).
         bands = res.get("bands") or {}
         band_txt = ", ".join(
             f"{k}={v['conf']:.2f}(n={v['n']})" if v and v.get("conf") is not None
