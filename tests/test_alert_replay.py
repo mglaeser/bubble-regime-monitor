@@ -721,6 +721,25 @@ def test_two_one_snapshot_derisk_entries_in_a_replayed_history_fail_the_gate(
                in failure for failure in summary.failures), summary.failures
 
 
+def test_a_derisk_excursion_of_two_or_more_snapshots_is_not_counted(
+        tmp_path, artifacts):
+    """Only a one-snapshot entry counts: a longer stay in de-risk is not one.
+
+    Two excursions of two and three de-risk snapshots and one entry of one
+    snapshot: six de-risk snapshots, one entry the condition counts, no breach.
+    """
+    slot = timedelta(hours=4)
+    states = ["trim", "de-risk", "de-risk", "trim",
+              "trim", "de-risk", "de-risk", "de-risk", "trim",
+              "trim", "de-risk", "trim"]
+    summary = _run(tmp_path, artifacts, name="long.db", inputs=_band_history(
+        [(slot * i, state) for i, state in enumerate(states)]))
+    assert summary.transient_one_snapshot_band_p1 == 1
+    assert summary.indeterminate_band_excursions == 0
+    assert not any("keep condition" in failure for failure in summary.failures), (
+        summary.failures)
+
+
 def test_the_keep_condition_counts_the_busiest_24_months_not_the_whole_history(
         tmp_path, artifacts):
     """The condition is stated per 24 months, so the busiest 24 months count.

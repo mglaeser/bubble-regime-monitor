@@ -730,7 +730,8 @@ def _collect_band_excursions(summary: ReplaySummary,
         before, after = states[i - 1], states[i + 1]
         if before == BAND_DERISK or after == BAND_DERISK:
             # Settled: a de-risk neighbour means this was not one snapshot
-            # long, whatever the other neighbour did or did not say.
+            # long, whatever the other neighbour did or did not say. So a stay
+            # of two or more de-risk snapshots adds nothing to the count below.
             continue
         if _band_unknown(before) or _band_unknown(after):
             indeterminate += 1
