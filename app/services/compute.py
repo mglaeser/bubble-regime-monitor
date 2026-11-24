@@ -397,7 +397,6 @@ class SnapshotData:
     fast_alarm: dict[str, Any]
     freshness: dict[str, str]
     coverage: dict[str, Any]
-    unknown_red_flags: list[str] = field(default_factory=list)  # v3.7.8/§24 (observability)
     ath_provenance: dict[str, Any] = field(default_factory=lambda: dict(ATH_PROVENANCE))  # PIN-F label
     # Typed alert contract (Stage 0) — derived from the values above, never a
     # second opinion on them. See app/engine/snapshot_contract.py.
@@ -447,6 +446,40 @@ def _track(raw: RawInputs, source: str, fn: Any) -> Any:
         return None
 
 
+def _track_closes(raw: RawInputs, source: str, canonical: str) -> Any:
+    """One daily price series through `_track`.
+
+    When every provider failed and the cache answered, the series is kept (it
+    is dated by its last bar, and that age is what the freshness SLA reads)
+    and the pull is recorded as the failure it was, with the chain's note.
+    The adapter's flag and note used to stop here: with Tiingo, Twelve Data
+    and Alpha Vantage all failing, GET /readyz and the status page listed the
+    price pulls as ok, HTTP 200, no note. The same case for HY OAS is
+    recorded this way already: FRED fails, the stored history is served, the
+    pull is not ok (below).
+
+    The note quotes the providers' errors. Provider error text can hold a
+    credential (Alpha Vantage's request URL carries its key) and GET /readyz
+    serves the note without authentication, so it passes `sanitize` like
+    every other gather failure.
+
+    Production shows no such outage: to 2026-11-10, 2452 price pulls, and the
+    provider health table holds one row, Tiingo with no failure. No stored
+    row and no score changes."""
+    from app.sources import prices as price_src
+
+    result = _track(raw, source, lambda: price_src.get_daily_closes(canonical))
+    # `fallback_used` on a price result means exactly this: no provider
+    # answered and the cache did (app/sources/prices.py). A provider further
+    # down the chain answering is a successful pull.
+    if result is not None and result.provenance.fallback_used:
+        raw.source_health[-1].update(   # the entry `_track` has just appended
+            ok=False, http_status=None, note=sanitize(result.provenance.note, limit=400))
+        log.warning("price_chain_served_stale_cache", source=source,
+                    as_of=result.provenance.as_of)
+    return result
+
+
 def gather_inputs() -> RawInputs:
     """Fetch all upstream sources with per-source circuit breakers.
 
@@ -489,11 +522,8 @@ def gather_inputs() -> RawInputs:
     # SPX->SPY); proxy substitutions are flagged in the note.
     from app.sources import prices as price_src
 
-    def _closes(canonical: str):
-        return price_src.get_daily_closes(canonical)
-
     # SPY (also the ATH gate) and QQQ.
-    spy = _track(raw, "price_SPY", lambda: _closes("SPY"))
+    spy = _track_closes(raw, "price_SPY", "SPY")
     if spy:
         raw.spy_daily = spy.value
         raw.spy_daily_closes = [c for _, c in spy.value]
@@ -505,17 +535,19 @@ def gather_inputs() -> RawInputs:
             pass
         closes = raw.spy_daily_closes
         raw.index_within_2pct_of_ath = closes[-1] >= _NEAR_ATH_FRAC * max(closes)
-    qqq = _track(raw, "price_QQQ", lambda: _closes("QQQ"))
+    qqq = _track_closes(raw, "price_QQQ", "QQQ")
     if qqq:
         raw.qqq_daily = qqq.value
         raw.qqq_daily_closes = [c for _, c in qqq.value]
 
     # SMH/SPY 2-yr run-up via the price chain (SOXX as SMH substitute).
-    semis = _track(raw, "price_SMH", lambda: _closes("SMH"))
+    semis = _track_closes(raw, "price_SMH", "SMH")
     if semis is None:
-        semis = _track(raw, "price_SOXX", lambda: _closes("SOXX"))
+        semis = _track_closes(raw, "price_SOXX", "SOXX")
         raw.semis_symbol = "SOXX"
         raw.semis_fallback = True
+    # Whichever answered, SMH or SOXX, feeds S3 through the fields below; the
+    # gather keeps no semis series of its own (RawInputs has no semis_daily).
     if semis:
         raw.semis_source = semis.provenance.source  # real provenance, e.g. "tiingo:SMH"
         try:
@@ -530,7 +562,7 @@ def gather_inputs() -> RawInputs:
     # proxy's 1999. Switching to it is a source substitution (PIN C, CONDITIONAL
     # HOLD), not made here.
     # R subprocess degrades to the contested/stale 0.25 floor.
-    ndx = _track(raw, "price_NDX", lambda: _closes("NDX"))
+    ndx = _track_closes(raw, "price_NDX", "NDX")
     if ndx:
         import math
 
@@ -814,6 +846,13 @@ def _feed_is_current(daily: list[tuple[str, float]], as_of_date: str | None) -> 
     return last_bar >= previous
 
 
+#: The Monte Carlo's sample count and seed: the frozen artifact's, read through
+#: app.methodology (this module's _M) like the frozen constants above, never
+#: the environment's (app/config.py says why they are no settings).
+MC_SAMPLES: int = _M.get_path("monte_carlo", "samples")
+MC_SEED: int = _M.get_path("monte_carlo", "seed")
+
+
 def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
                      mc_seed: int | None = None,
                      gsadf_contested: bool | None = None,
@@ -829,8 +868,12 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
     of the NEXT month arrives, which delays a month-end P1 by a day or more.
     """
     settings = get_settings()
-    n = mc_samples or settings.mc_samples
-    seed = mc_seed or settings.mc_seed
+    # mc_samples and mc_seed are for tests (fewer draws for speed). The
+    # recompute, the only path that stores a snapshot, passes neither, so a
+    # stored snapshot ran the artifact's seed and sample count (pinned:
+    # tests/test_frozen_methodology.py::test_the_recompute_passes_no_seed_and_no_sample_count).
+    n = mc_samples or MC_SAMPLES
+    seed = mc_seed or MC_SEED
     contested = settings.gsadf_contested if gsadf_contested is None else gsadf_contested
 
     indicators: dict[str, IndicatorOutput] = {}
@@ -1135,8 +1178,8 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         # never reaches here; it takes the cached branch below, which reports
         # rollover as unknown.)
         # Rollover confirmation is CALENDAR-aware when dated months are available
-        # (v3.7.7/§3.1): on a publication gap the positional [-3:]/[-12:] windows
-        # straddle the hole and could flip the D2 multiplier (0.6<->1.0) from
+        # (v3.7.7/§3.1): on a publication gap the positional [-3:] window
+        # straddles the hole and could flip the D2 multiplier (0.6<->1.0) from
         # mis-spaced data. UNKNOWN (None) -> treat as NOT confirmed for the
         # multiplier, but say so honestly rather than asserting a rollover.
         if raw.margin_months and len(raw.margin_months) == len(raw.margin_balances):
@@ -1318,19 +1361,10 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         index_within_2pct_of_ath=raw.index_within_2pct_of_ath,
     )
     mc_in.red_flags = red_flags
-
-    # v3.7.8/§24: observability for red flags whose INPUT is unknown this run.
-    # The frozen numerical rule is unchanged (unknown -> not-fired, red_flag_count
-    # untouched); this list just makes the epistemic gap visible to the reader.
-    unknown_red_flags: list[str] = []
-    if runup is None:
-        unknown_red_flags.append("semi_runup_ge_150pp")
-    if raw.hy_oas_bps is None or not raw.hy_oas_history_bps:
-        unknown_red_flags.append("hy_oas_widen_gt_100bps")
-    if raw.breadth_pct is None:
-        unknown_red_flags.append("breadth_lt_50_near_ath")
-    if not _s4_ok:
-        unknown_red_flags.append("gsadf_explosive_noncontested")
+    # Which of these flags had an unknown input is said once, per flag, by the
+    # typed contract persist_snapshot stores (build_red_flag_meta: the state
+    # UNKNOWN). The score API's unknown_red_flags reads that; no list is built
+    # here.
 
     if not sub_s or not sub_d:
         raise RuntimeError("an entire block is empty — cannot score (all sources down)")
@@ -1439,7 +1473,6 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         fast_alarm=alarm.as_dict(),
         freshness=freshness,
         coverage=coverage,
-        unknown_red_flags=unknown_red_flags,
         # Typed alert contract (Stage 0): the band decomposition the display
         # string above collapses. Derived by calling the SAME authoritative
         # band functions, from the SAME median — never a second computation.
@@ -1563,7 +1596,6 @@ def persist_snapshot(data: SnapshotData, raw: RawInputs) -> int:
             judgment_stale=call.stale,
             judgment_error=call.error_class,
             data_freshness={**data.freshness, "_coverage": data.coverage,
-                            "_unknown_red_flags": data.unknown_red_flags,
                             "_ath_provenance": data.ath_provenance},
             # RM-1: stamp the methodology actually in force in THIS process —
             # read from the loader, never re-stated by hand.
