@@ -86,6 +86,24 @@ def test_p2_is_held_at_night_and_released_at_seven_berlin():
     assert released.astimezone(ZoneInfo("Europe/Berlin")).hour == 7
 
 
+def test_quiet_hours_know_one_exemption_and_it_is_p1():
+    """The ruleset loader (rulespec.RuleSpec): "only P1 may be exempt from
+    quiet hours or budgets", and a P1 must be. So the priority is the whole
+    answer and the two functions take nothing else.
+
+    Both used to take `exempt=`, which no caller passed: the planner, the
+    outbox and the dispatcher call them with the priority and the moment. It
+    was a second way to release a P2 at night, on a caller's word, past the
+    loader's rule. (A TEST delivery skips the quiet hold by its kind, in the
+    dispatcher; that is not this parameter.)"""
+    assert release_time_for(1, NIGHT) == NIGHT and would_be_held(1, NIGHT) is False
+    assert would_be_held(2, NIGHT) is True
+    with pytest.raises(TypeError):
+        release_time_for(2, NIGHT, exempt=True)
+    with pytest.raises(TypeError):
+        would_be_held(2, NIGHT, exempt=True)
+
+
 # ---------------------------------------------------------------------------
 # dedupe
 # ---------------------------------------------------------------------------
@@ -1527,6 +1545,80 @@ def test_a_test_probe_is_not_parked_by_quiet_hours(isolated_db):
             == TransportStatus.SENT
 
 
+def test_the_alert_names_nothing_referenced_are_gone():
+    """AGENTS.md, "Delete before you add": dead code is removed, not
+    maintained.
+
+    Nothing in app, scripts, deploy, docs, config, migrations or the top-level
+    documents read one of the names below: each occurred where it was defined
+    and, for `is_cold_start` and `escalation_of`, where a value was handed in
+    that nothing read. The text beside a name says what does the work instead.
+    The scan is that statement, executable: an occurrence in any of those
+    trees fails it by file and name. (A test that still used one fails on its
+    own, with a TypeError or an ImportError.)
+
+    Not dead by this bar, and kept: what is stored. The enum members a CHECK
+    constraint names (`InputOrigin.MANUAL`, `Evaluability.NOT_EVALUABLE`), the
+    payload fields `known_issue_active` and `release_calendar` (in production
+    491 of 491 stored alert inputs carry both, none set; the models forbid an
+    unknown key, so without the fields those rows would not load) and the
+    columns."""
+    import re
+    from pathlib import Path
+
+    from app.alerts import gsm7
+    from app.alerts.planner import DeliveryIntent
+
+    gone = {
+        "PhraseSelection": "dto: the answer contract of the selector that owner decision D2b "
+                           "deleted; the alert system has no model path (the test below)",
+        "manual_input_identity": "dto: no code builds an input of origin MANUAL; the origins that "
+                                 "are built hash through recompute_ and watchdog_input_identity",
+        "to_evidence": "dto.EvidenceModel: nothing turns a stored model back into "
+                       "observation.Evidence; the rules read the model",
+        "NotEvaluable": "errors: never raised, never caught; an input that cannot be evaluated is "
+                        "the stored value Evaluability.NOT_EVALUABLE",
+        "PinMissing": "errors: never raised, never caught; the loader refuses an enabled rule "
+                      "with an unresolved pin and registry.unresolved_pins reports the others",
+        "rule_sources": "registry: a one-line wrapper of rulespec.referenced_sources, which the "
+                        "loader calls itself",
+        "VALIDATOR_VERSION": "registry: stamped nowhere; the version stored with a phrase set is "
+                             "phrase_registry.PHRASE_VALIDATOR_VERSION",
+        "reason_for": "dominance.DominanceOutcome: the planner reads `suppressed` and writes "
+                      "SuppressionReason.SUPERSEDED itself",
+        "is_cold_start": "primitives.EvaluationContext: the engine set it and nothing read it; a "
+                         "transition condition tests `ctx.previous is None`",
+        "is_unknown": "primitives.ConditionOutcome: its callers test `truth is None`",
+        "remaining_ms": "engine.Deadline: the evaluation calls `check` and nothing else",
+        "FACT_SOURCES": "render_context: seven fact ids, each one a key of MEMBER_FACT_BUILDERS, "
+                        "the table that builds the facts and that the loader validates against "
+                        "(a fact named F_SCORE is refused by the phrase-set loader, not by this)",
+        "escalation_of": "render_context.MemberContext and build_member_context: no caller "
+                         "passed it, nothing read it, context_hash never held it",
+    }
+    root = Path(__file__).resolve().parents[1]
+    files = [path
+             for tree in ("app", "scripts", "deploy", "docs", "config", "migrations")
+             for path in (root / tree).rglob("*")
+             if path.is_file() and "__pycache__" not in path.parts]
+    files += root.glob("*.md")
+    word = re.compile(r"\b(" + "|".join(gone) + r")\b")
+    assert sorted({f"{path.relative_to(root)}: {name}"
+                   for path in files
+                   for name in word.findall(path.read_text(encoding="utf-8", errors="ignore"))}) == []
+
+    # Two more are also words of the stored schema and of the loader's report,
+    # so a scan cannot tell them apart; here the attribute is the test.
+    # `DeliveryIntent.transport_status` returned PENDING on both of its
+    # branches and nothing read it: the outbox writes PENDING itself (the
+    # column alert_delivery.transport_status is another thing and stays).
+    assert not hasattr(DeliveryIntent, "transport_status")
+    # `gsm7.worst_case_septets` had no caller: the worst case is computed by
+    # phrase_registry._widest and registry._worst_fragment from the fact
+    # specs' own widths (the report key "worst_case_septets" stays).
+    assert not hasattr(gsm7, "worst_case_septets")
+
+
 def test_the_alert_system_has_no_model_path():
     """AGENTS.md rule 1 for the alert system. Owner decision D2b (2026-10-02)
     deleted the dormant LLM selector - the alert system's only model prompt,
@@ -1540,7 +1632,11 @@ def test_the_alert_system_has_no_model_path():
     from pathlib import Path
 
     alerts = Path(__file__).resolve().parents[1] / "app" / "alerts"
-    model_path = re.compile(r"\bllm_gateway\b|\bllm_selector\b|\bopenai\b|\banthropic\b")
+    # Nor does a module declare what a model may answer: `PhraseSelection`
+    # ("What the model is allowed to return: codes, and only codes") was the
+    # deleted selector's answer contract, and nothing built or validated one.
+    model_path = re.compile(r"\bllm_gateway\b|\bllm_selector\b|\bopenai\b|\banthropic\b"
+                            r"|\bPhraseSelection\b|LLM selection contract")
     readers = sorted(p.name for p in alerts.rglob("*.py") if model_path.search(p.read_text(encoding="utf-8")))
     assert readers == []
 
