@@ -85,7 +85,11 @@ jobs:
           # app/services/replay.py is gone (the holidays library replaced both).
           # 146 -> 145: the Twelve Data breadth sweep went (breadth is Polygon-only).
           # 145 -> 134: the unscored S4 and S5 shadows went (owner decision D4).
-          MYPY_CEILING: "116"
+          # 116 -> 115: the gather's untyped local `_closes` went
+          # (app/services/compute.py, `_track_closes` replaced it).
+          # 115 -> 114: the Monte Carlo settings went from app/config.py, and
+          # the no-any-return of the helper that read their defaults with them.
+          MYPY_CEILING: "114"
           # The floor constrains REACH, not DEPTH: it proves mypy READ the tree.
           # It does NOT make a low count mean "little is wrong" -- an earlier
           # version of this comment claimed that, and it is false. Measured:
@@ -250,3 +254,30 @@ jobs:
         # and prints its help. Without PYTHONPATH in the Containerfile it ends
         # in "ModuleNotFoundError: No module named 'app'".
         run: docker run --rm --network none bubblegauge bubblegauge alerts --help
+      - name: Run the tests of r/gsadf.R inside the image
+        # The only gate that executes r/gsadf.R, the script behind the scored
+        # S4 statistic. The test job has no R/exuber, so the eight tests of
+        # tests/test_s4_endpoint_statistic.py that call Rscript skip there:
+        # with a syntax error in the script that file is as green as without
+        # it (44 passed, 8 skipped). The image has R and exuber and, through
+        # `COPY . .`, the tests and the hash-checked dev lock. The dev tools
+        # go into a container that `--rm` discards; the image is unchanged.
+        # A skip cannot pass: loading exuber is the condition those tests skip
+        # on, it runs first and ends the script if it fails, and a summary
+        # that reports a skipped test fails the step. The refusal is an `if`:
+        # `set -e` never ends a script on a negated command, so `! grep` would
+        # hold only while it stayed the last line.
+        # `image` is a required check. A red R test here blocks every merge:
+        # the script, or the exuber the image was built with, no longer yields
+        # what the tests pin. That is repaired there, not by loosening this
+        # step.
+        run: |
+          docker run --rm bubblegauge bash -euo pipefail -c '
+            Rscript -e "library(exuber)"
+            pip install --quiet --no-cache-dir --require-hashes -r requirements-dev.lock
+            python -m pytest -p no:cacheprovider -q -rs tests/test_s4_endpoint_statistic.py | tee /tmp/r-tests.txt
+            if grep -q " skipped" /tmp/r-tests.txt; then
+              echo "::error::A test of r/gsadf.R was skipped inside the image."
+              exit 1
+            fi
+          '
