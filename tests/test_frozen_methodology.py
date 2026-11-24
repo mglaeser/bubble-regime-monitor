@@ -306,15 +306,15 @@ def test_no_unregistered_scored_literal_collisions():
     )
 
 
-# ---- The Monte Carlo's seed and sample count are the artifact's alone -------
+# ---- The Monte Carlo runs the artifact's seed and sample count ---------------
 
 def test_the_environment_cannot_move_the_monte_carlo(isolated_db, monkeypatch):
     """AGENTS.md ground rule 6: the seed is pinned, and a snapshot records the
-    artifact's hash and version and nothing else about the run, so what that
-    hash does not cover must not move the score. As settings both did, under
-    one hash (bfb3d9a5) and at the artifact's 100 000 draws: MC_SEED=1 gave
-    the golden inputs a median of 53.4515 for 53.4119, MC_SAMPLES=2000 gave
-    53.3795."""
+    artifact's hash and version and nothing else about the Monte Carlo's run,
+    so no setting may change its seed or sample count. When both were
+    settings, under one hash (bfb3d9a5) and at the artifact's 100 000 draws,
+    MC_SEED=1 gave the golden inputs a median of 53.4515 for 53.4119 and
+    MC_SAMPLES=2000 gave 53.3795."""
     from app.config import get_settings
     from app.services.compute import compute_snapshot
     from tests.conftest import make_golden_raw_inputs
@@ -347,9 +347,9 @@ def test_the_seed_and_the_sample_count_are_no_settings():
 
 
 def test_the_pipeline_runs_the_artifacts_seed_and_sample_count(monkeypatch):
-    """A recompute names neither (compute.run_recompute), so it runs the
-    artifact's monte_carlo.samples and monte_carlo.seed: 100 000 draws, seed
-    20260711."""
+    """A caller that names neither runs the artifact's monte_carlo.samples and
+    monte_carlo.seed: 100 000 draws, seed 20260711. The recompute is that
+    caller (the next test)."""
     from app.services import compute
     from tests.conftest import make_golden_raw_inputs
 
@@ -363,6 +363,33 @@ def test_the_pipeline_runs_the_artifacts_seed_and_sample_count(monkeypatch):
                         lambda inputs, **run: ran.update(run) or monte_carlo(inputs, **run))
     compute.compute_snapshot(make_golden_raw_inputs())
     assert ran == {"n": 100_000, "seed": 20260711}
+
+
+def test_the_recompute_passes_no_seed_and_no_sample_count(isolated_db, monkeypatch):
+    """compute_snapshot's mc_samples and mc_seed are for tests, and they do move
+    the median (mc_seed=1 gives the golden inputs 53.4515 for 53.4119). The
+    recompute (run_recompute: the scheduler's and the admin endpoint's path,
+    and the only one that stores a snapshot) passes neither, so a stored
+    snapshot ran the 100 000 draws and the seed 20260711 its methodology hash
+    covers. A recompute that passed either would fail here."""
+    from app.db import session_scope
+    from app.models import Snapshot
+    from app.services import compute
+    from tests.conftest import make_golden_raw_inputs
+
+    # The suite draws 20 000 (conftest); this test runs what production runs.
+    monkeypatch.setattr(compute, "MC_SAMPLES", M.get_path("monte_carlo", "samples"))
+    monkeypatch.setattr(compute, "gather_inputs", make_golden_raw_inputs)
+    ran: dict[str, int] = {}
+    monte_carlo = compute.monte_carlo
+    monkeypatch.setattr(compute, "monte_carlo",
+                        lambda inputs, **run: ran.update(run) or monte_carlo(inputs, **run))
+
+    snap_id = compute.run_recompute()
+
+    assert ran == {"n": 100_000, "seed": 20260711}
+    with session_scope() as session:
+        assert session.get(Snapshot, snap_id).methodology_sha256 == M.frozen_sha256()
 
 
 # ---- MUTATION: a changed artifact flows through to the engine ---------------
