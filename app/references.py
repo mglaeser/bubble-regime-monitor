@@ -1245,8 +1245,9 @@ KNOWN_ISSUES: list[dict[str, str]] = [
      "ref": "epistemic caveat 2"},
     {"id": "judgmental-anchors", "severity": "info", "category": "judgmental-parameter",
      "title": "Several anchors/weights are expert-judgmental, not estimated",
-     "detail": "S2 concentration lo/hi, D1 breadth lo/hi and weight, and the alpha split have no "
-     "labeled-crash-dataset calibration. No sensitivity report is kept: the script meant to "
+     "detail": "S2 concentration lo/hi, D1 breadth lo/hi and weight, the alpha split and the "
+     "action-band edges (45 and 60) have no labeled-crash-dataset calibration. No sensitivity "
+     "report is kept: the script meant to "
      "produce one failed at import from v3.3.0 on (2026-07-12, when EPSILON left "
      "app/engine/aggregate.py), so it produced no report or warning after that, and it was "
      "deleted by owner decision on 2026-09-28 rather than rebuilt. A weight change fails the "
