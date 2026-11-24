@@ -30,16 +30,14 @@ def configure_logging(level: str = "INFO") -> None:
     # slowapi writes one WARNING per refused request, with the client's
     # address in it (executed: 80 requests over the limit, 80 lines). The 429
     # is the answer; a line per request with the reader's address is written
-    # neither here nor by uvicorn (the image starts it with --no-access-log):
-    # that address is third-party personal data, which the service does not
-    # collect or store (SECURITY.md, "Personal data"). No record is lost:
-    # Alembic's setup at boot disabled both loggers, and the production journal
-    # of 2026-10-05 to 2026-11-10 holds neither line (executed with the real
-    # server before this change: 80 refusals, 0 lines).
-    # Its errors stay (a limit it could not load or apply). Not held: uvicorn
-    # refuses a WebSocket upgrade, which this API does not serve, with one INFO
-    # line that names the client, through the logger that also writes startup,
-    # shutdown and the tracebacks.
+    # neither here nor by uvicorn (the image starts it with --no-access-log
+    # and --ws none, Containerfile): that address is third-party personal
+    # data, which the service does not collect or store (SECURITY.md,
+    # "Personal data"). No record is lost: Alembic's setup at boot disabled
+    # both loggers, and the production journal of 2026-10-05 to 2026-11-10
+    # holds neither line (executed with the real server before this change:
+    # 80 refusals, 0 lines).
+    # Its errors stay (a limit it could not load or apply).
     logging.getLogger("slowapi").setLevel(logging.ERROR)
     structlog.configure(
         processors=[

@@ -82,4 +82,10 @@ EXPOSE 8000
 # collect or store (SECURITY.md). The production journal of 2026-10-05 to
 # 2026-11-10 holds no request line either: Alembic's setup at boot disabled
 # this logger.
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]
+# --ws none: the API serves no WebSocket. With uvicorn's WebSocket support on,
+# its error log refused an upgrade request with a 403 and an INFO line that
+# names the client (executed); off, the request is answered as the plain GET
+# it also is, and uvicorn writes two warnings that name no one ("Unsupported
+# upgrade request." and "No supported WebSocket library detected": none is
+# used). tests/test_boot_logging.py runs this command on the loopback.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log", "--ws", "none"]

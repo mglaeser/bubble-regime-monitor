@@ -22,9 +22,11 @@ from __future__ import annotations
 import json
 import logging
 import os
+import socket
 import sqlite3
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -120,19 +122,72 @@ def test_a_refused_request_is_answered_and_names_no_reader(isolated_db, caplog):
         limiter.reset()
 
 
-def test_the_image_serves_without_an_access_log():
-    """uvicorn's access log is a line per request with the client's address:
-    2,880 a day from the health check alone. The release's smoke boot starts
-    the server with a command of its own (deploy/release.sh), so nothing else
-    reads the image's CMD before production runs it: uvicorn's own command
-    line parses it here."""
-    from uvicorn.main import main as uvicorn_command_line
-
+def _image_command() -> list[str]:
     command = [line for line in (REPO / "Containerfile").read_text(encoding="utf-8").splitlines()
                if line.startswith("CMD ")]
     assert len(command) == 1
-    program, *arguments = json.loads(command[0].removeprefix("CMD "))
+    return json.loads(command[0].removeprefix("CMD "))
+
+
+def test_the_image_serves_without_an_access_log():
+    """uvicorn's access log is a line per request with the client's address:
+    2,880 a day from the health check alone. The release's smoke boot starts
+    the server with a command of its own (deploy/release.sh), so the release
+    never runs the image's CMD before production does: uvicorn's own command
+    line parses it here, and the next test runs it."""
+    from uvicorn.main import main as uvicorn_command_line
+
+    program, *arguments = _image_command()
     assert program == "uvicorn"
     options = uvicorn_command_line.make_context(program, arguments).params
     assert options["app"] == "app.main:app"
     assert options["access_log"] is False
+
+
+def _ask(port: int, headers: str) -> tuple[str, str]:
+    """GET /healthz on the loopback: the client's address and the status line."""
+    with socket.create_connection(("127.0.0.1", port), timeout=10) as connection:
+        connection.sendall(f"GET /healthz HTTP/1.1\r\nHost: test\r\n{headers}\r\n".encode())
+        answer = b""
+        while b"\r\n" not in answer and (chunk := connection.recv(4096)):
+            answer += chunk
+        host, client_port = connection.getsockname()
+        return f"{host}:{client_port}", answer.split(b"\r\n")[0].decode()
+
+
+def test_the_image_server_names_no_client(tmp_path):
+    """The real server with the image's CMD, on the loopback: a plain request
+    and a WebSocket upgrade request (this API serves no WebSocket) are both
+    answered, and no line the server writes names a client. With uvicorn's
+    WebSocket support on, the upgrade was refused with a 403 and the INFO line
+    `<client>:<port> - "WebSocket /healthz" 403` (executed)."""
+    program, *arguments = _image_command()
+    with socket.socket() as free:
+        free.bind(("127.0.0.1", 0))
+        port = free.getsockname()[1]
+    arguments[arguments.index("--host") + 1] = "127.0.0.1"   # the container's every interface; here the loopback
+    arguments[arguments.index("--port") + 1] = str(port)
+    env = {**os.environ, "DB_URL": f"sqlite:///{tmp_path / 'serve.db'}", "TESTING": "true", "PYTHONPATH": str(REPO)}
+    written = tmp_path / "server.log"
+    with written.open("w") as log:
+        server = subprocess.Popen([sys.executable, "-m", program, *arguments], cwd=tmp_path, env=env,
+                                  stdout=log, stderr=subprocess.STDOUT)
+        try:
+            deadline = time.monotonic() + 120
+            while True:      # uvicorn opens the socket after the lifespan: refused until the boot is done
+                assert server.poll() is None, written.read_text(encoding="utf-8")
+                try:
+                    plain = _ask(port, "Connection: close\r\n")
+                    break
+                except OSError:
+                    assert time.monotonic() < deadline
+                    time.sleep(0.2)
+            upgrade = _ask(port, "Connection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\n"
+                                 "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n")
+        finally:
+            server.terminate()
+            server.wait(timeout=60)
+    lines = written.read_text(encoding="utf-8").splitlines()
+    assert "INFO:     Application startup complete." in lines      # uvicorn's own log is on
+    assert [line for line in lines if plain[0] in line or upgrade[0] in line] == []
+    assert (plain[1], upgrade[1]) == ("HTTP/1.1 200 OK", "HTTP/1.1 200 OK")   # the upgrade, as a plain request
