@@ -78,4 +78,8 @@ EXPOSE 8000
 # --no-access-log: uvicorn's error log (startup, shutdown, the traceback of a
 # request or a boot that failed) is on; its access log would add a line per
 # request with the client's address - 2,880 a day from the health check alone.
+# A reader's address is third-party personal data, which the service does not
+# collect or store (SECURITY.md). The production journal of 2026-10-05 to
+# 2026-11-10 holds no request line either: Alembic's setup at boot disabled
+# this logger.
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]

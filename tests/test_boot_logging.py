@@ -96,6 +96,27 @@ def test_the_libraries_that_would_flood_the_journal_are_held():
         root.setLevel(level)
 
 
+def test_a_refused_request_is_answered_and_names_no_reader(isolated_db, caplog):
+    """The 429 is the answer, and no line records the reader's address: that is
+    third-party personal data, which the service does not collect or store
+    (SECURITY.md, "Personal data"). Nothing is lost by it: before this change
+    Alembic's setup at boot disabled slowapi's logger and uvicorn's access log
+    (executed with the real server: 80 refusals, 0 lines). uvicorn's access
+    log is off by the image's CMD, pinned below."""
+    from fastapi.testclient import TestClient
+
+    from app.main import create_app
+    from app.security import limiter
+
+    try:
+        with caplog.at_level(logging.INFO), TestClient(create_app()) as client:
+            codes = [client.get("/api/v1/meta/methodology").status_code for _ in range(61)]
+        assert (codes.count(200), codes[-1]) == (60, 429)
+        assert [r.getMessage() for r in caplog.records if "testclient" in r.getMessage()] == []
+    finally:
+        limiter.reset()
+
+
 def test_the_image_serves_without_an_access_log():
     """uvicorn's access log is a line per request with the client's address:
     2,880 a day from the health check alone. The release's smoke boot starts
