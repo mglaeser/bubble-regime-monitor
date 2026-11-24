@@ -707,13 +707,28 @@ def _band_unknown(state: str | None) -> bool:
     return state is None or state == STATE_SUPPRESSED
 
 
+def _stay_lasted_two_or_more_snapshots(before: str | None,
+                                       after: str | None) -> bool:
+    """A de-risk snapshot with a de-risk neighbour: the band stayed in de-risk.
+
+    The keep condition counts transient one-snapshot P1s, entries into de-risk
+    that the band left after one snapshot. A stay of two or more snapshots is
+    not one, so none of its snapshots is counted. The rule still sends its P1
+    for that entry. Replayed both ways, with two P1s each time, by
+    `test_the_keep_condition_fails_on_one_snapshot_p1s_and_holds_on_longer_stays`:
+    one-snapshot stays count 2 and fail the condition, two-snapshot stays count 0.
+    """
+    return BAND_DERISK in (before, after)
+
+
 def _collect_band_excursions(summary: ReplaySummary,
                              records: list[AlertInput]) -> None:
     """Transient one-snapshot entries into de-risk.
 
     The mandate keeps the immediate de-risk P1 only while replay shows at most
-    one transient one-snapshot excursion per 24 months. The harness measures
-    the busiest 24 months here and `_decide` judges it.
+    one transient one-snapshot excursion per 24 months. The harness counts the
+    one-snapshot entries of the busiest 24 months here (a longer stay is not
+    one, `_stay_lasted_two_or_more_snapshots`) and `_decide` judges the count.
 
     A neighbour that is UNKNOWN — degraded coverage, a suppressed band, a blind
     slot — is NOT evidence that the excursion ended. Counting it as one would
@@ -728,10 +743,9 @@ def _collect_band_excursions(summary: ReplaySummary,
         if states[i] != BAND_DERISK:
             continue
         before, after = states[i - 1], states[i + 1]
-        if before == BAND_DERISK or after == BAND_DERISK:
-            # Settled: a de-risk neighbour means this was not one snapshot
-            # long, whatever the other neighbour did or did not say. So a stay
-            # of two or more de-risk snapshots adds nothing to the count below.
+        if _stay_lasted_two_or_more_snapshots(before, after):
+            # Settled: not one snapshot long, whatever the other neighbour did
+            # or did not say. Not counted.
             continue
         if _band_unknown(before) or _band_unknown(after):
             indeterminate += 1

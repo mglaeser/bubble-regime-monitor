@@ -740,6 +740,40 @@ def test_a_derisk_excursion_of_two_or_more_snapshots_is_not_counted(
         summary.failures)
 
 
+def test_the_keep_condition_fails_on_one_snapshot_p1s_and_holds_on_longer_stays(
+        tmp_path, artifacts):
+    """The gate, executed both ways on the same two P1s.
+
+    regime.band_to_derisk sends a P1 for both entries into de-risk, three days
+    apart (outside its 48 h cooldown), whatever the stay's length. When each
+    stay ends after one snapshot, both P1s were transient and the keep
+    condition fails, 2 > 1. When each stay lasts two snapshots, the band stayed:
+    no P1 was transient and the condition holds.
+    """
+    slot, apart = timedelta(hours=4), timedelta(days=3)
+
+    def two_entries(stay: list[str]) -> list:
+        visit = ["trim", *stay, "trim"]
+        return _band_history([(start + slot * i, state)
+                              for start in (timedelta(0), apart)
+                              for i, state in enumerate(visit)])
+
+    one_snapshot = _run(tmp_path, artifacts, name="one.db",
+                        inputs=two_entries(["de-risk"]))
+    two_snapshots = _run(tmp_path, artifacts, name="two.db",
+                         inputs=two_entries(["de-risk", "de-risk"]))
+
+    for summary in (one_snapshot, two_snapshots):
+        assert summary.episodes_by_rule["regime.band_to_derisk"] == 2
+        assert summary.p1_total == 2
+    assert one_snapshot.transient_one_snapshot_band_p1 == 2
+    assert any("keep condition of regime.band_to_derisk: 2 > 1 per 24 months"
+               in failure for failure in one_snapshot.failures), one_snapshot.failures
+    assert two_snapshots.transient_one_snapshot_band_p1 == 0
+    assert not any("keep condition" in failure for failure in two_snapshots.failures), (
+        two_snapshots.failures)
+
+
 def test_the_keep_condition_counts_the_busiest_24_months_not_the_whole_history(
         tmp_path, artifacts):
     """The condition is stated per 24 months, so the busiest 24 months count.
