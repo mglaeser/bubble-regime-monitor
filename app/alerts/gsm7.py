@@ -65,17 +65,3 @@ def fits_single_sms(text: str) -> bool:
         return septets(text) <= SINGLE_SMS_SEPTETS
     except Gsm7Error:
         return False
-
-
-def worst_case_septets(template: str, slot_widths: dict[str, int]) -> int:
-    """Septet cost of a template with every `{slot}` at its widest value.
-
-    Phrase sets are reviewed against this, not against a sample rendering: a
-    template that fits with a two-digit number must still fit with a signed
-    three-digit one. `slot_widths` maps slot name -> maximum rendered width.
-    """
-    filled = template
-    for slot, width in slot_widths.items():
-        # 'W' is one septet wide and always GSM-7 — a safe widest-case filler.
-        filled = filled.replace("{" + slot + "}", "W" * width)
-    return septets(filled)
