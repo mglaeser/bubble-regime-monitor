@@ -181,10 +181,17 @@ def _coverage_gate(indicators: dict[str, Any]) -> dict[str, Any]:
     obtained, each live indicator scaled by its quality in [0,1].
 
     A dropped OR stale indicator counts as fully lost weight; a low-quality one
-    (e.g. d1 measured from a partial constituent universe, quality=n/503) counts
-    as w*quality. A proxy substitution does not reduce quality. If >1/3 of a
-    block's nominal weight is lost the block is degraded (band suppressed) — so a
-    breadth reading from only a handful of names now correctly degrades Block D."""
+    (e.g. d1 measured from a partial constituent universe, quality = resolved /
+    current universe) counts as w*quality. A proxy substitution does not reduce
+    quality. If >1/3 of a block's nominal weight is lost the block is degraded
+    (band suppressed).
+
+    The quality discount alone cannot degrade Block D: d1 weighs 0.35, so that
+    would take a quality below 4.8% (fewer than 24 of 504 names), and breadth is
+    published from 25 names up (25 of 504: coverage 0.6674, not degraded). A
+    thin universe lowers the coverage figure and degrades the block only
+    together with weight lost elsewhere in it (33 of 503 names with d4 dropped:
+    0.473). A dropped or stale d1 degrades the block by itself (0.65)."""
     blocks: dict[str, Any] = {}
     degraded_any = False
     for block_id, prefix in (("S", "s"), ("D", "d")):
@@ -846,6 +853,13 @@ def _feed_is_current(daily: list[tuple[str, float]], as_of_date: str | None) -> 
     return last_bar >= previous
 
 
+#: The Monte Carlo's sample count and seed: the frozen artifact's, read through
+#: app.methodology (this module's _M) like the frozen constants above, never
+#: the environment's (app/config.py says why they are no settings).
+MC_SAMPLES: int = _M.get_path("monte_carlo", "samples")
+MC_SEED: int = _M.get_path("monte_carlo", "seed")
+
+
 def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
                      mc_seed: int | None = None,
                      gsadf_contested: bool | None = None,
@@ -861,8 +875,12 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
     of the NEXT month arrives, which delays a month-end P1 by a day or more.
     """
     settings = get_settings()
-    n = mc_samples or settings.mc_samples
-    seed = mc_seed or settings.mc_seed
+    # mc_samples and mc_seed are for tests (fewer draws for speed). The
+    # recompute, the only path that stores a snapshot, passes neither, so a
+    # stored snapshot ran the artifact's seed and sample count (pinned:
+    # tests/test_frozen_methodology.py::test_the_recompute_passes_no_seed_and_no_sample_count).
+    n = mc_samples or MC_SAMPLES
+    seed = mc_seed or MC_SEED
     contested = settings.gsadf_contested if gsadf_contested is None else gsadf_contested
 
     indicators: dict[str, IndicatorOutput] = {}
