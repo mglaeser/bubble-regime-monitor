@@ -562,7 +562,8 @@ REGISTRY: dict[str, Methodology] = {
             "weighted sub-score. Label: LAGGING CONFIRMATION."
         ),
         how=(
-            "Compute ratio = VIX / VIX3M (CBOE delayed quotes, or FRED VIXCLS / VIX3M). "
+            "Compute ratio = VIX / VIX3M (CBOE delayed quotes, or FRED's daily closes "
+            "VIXCLS / VXVCLS, FRED's series id for VIX3M). "
             "State: ratio < 0.95 -> contango -> V = 1.00; 0.95 <= ratio <= 1.0 -> flat -> "
             "V = 1.05; ratio > 1.0 -> backwardation -> V = 1.15. Applied as "
             "D = min(D_raw * V, 1.0). Source order: CBOE delayed quotes (primary) -> FRED ratio "
@@ -1244,8 +1245,9 @@ KNOWN_ISSUES: list[dict[str, str]] = [
      "ref": "epistemic caveat 2"},
     {"id": "judgmental-anchors", "severity": "info", "category": "judgmental-parameter",
      "title": "Several anchors/weights are expert-judgmental, not estimated",
-     "detail": "S2 concentration lo/hi, D1 breadth lo/hi and weight, and the alpha split have no "
-     "labeled-crash-dataset calibration. No sensitivity report is kept: the script meant to "
+     "detail": "S2 concentration lo/hi, D1 breadth lo/hi and weight, the alpha split and the "
+     "action-band edges (45 and 60) have no labeled-crash-dataset calibration. No sensitivity "
+     "report is kept: the script meant to "
      "produce one failed at import from v3.3.0 on (2026-07-12, when EPSILON left "
      "app/engine/aggregate.py), so it produced no report or warning after that, and it was "
      "deleted by owner decision on 2026-09-28 rather than rebuilt. A weight change fails the "
