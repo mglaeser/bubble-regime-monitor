@@ -562,7 +562,8 @@ REGISTRY: dict[str, Methodology] = {
             "weighted sub-score. Label: LAGGING CONFIRMATION."
         ),
         how=(
-            "Compute ratio = VIX / VIX3M (CBOE delayed quotes, or FRED VIXCLS / VIX3M). "
+            "Compute ratio = VIX / VIX3M (CBOE delayed quotes, or FRED's daily closes "
+            "VIXCLS / VXVCLS, FRED's series id for VIX3M). "
             "State: ratio < 0.95 -> contango -> V = 1.00; 0.95 <= ratio <= 1.0 -> flat -> "
             "V = 1.05; ratio > 1.0 -> backwardation -> V = 1.15. Applied as "
             "D = min(D_raw * V, 1.0). Source order: CBOE delayed quotes (primary) -> FRED ratio "
