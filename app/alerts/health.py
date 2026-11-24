@@ -955,10 +955,12 @@ def health_projection(
     conditions.extend(f"retired setting {key} is set and changes nothing: {why}" for key, why in retired)
     # A key one character off a setting is read by nothing, like a retired one,
     # and is named the same way, whatever the transports do: the boot's "no
-    # transport" reason names it only for a digest without a transport. The
-    # key and the setting it looks like, never a value.
+    # transport" reason names it only for a digest without a transport. Each
+    # pair is the key and the setting it looks like, never a value
+    # (tests/test_alert_api.py::test_health_names_a_misspelt_setting_while_a_transport_works).
     misspelt = near_miss_env_keys(environ)
-    conditions.extend(f"setting {key} is read by nothing: it looks like {intended}" for key, intended in misspelt)
+    for key, intended in misspelt:
+        conditions.append(f"setting {key} is read by nothing: it looks like {intended}")
     critical = (
         ruleset is None
         or schema_fault
