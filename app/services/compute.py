@@ -181,10 +181,17 @@ def _coverage_gate(indicators: dict[str, Any]) -> dict[str, Any]:
     obtained, each live indicator scaled by its quality in [0,1].
 
     A dropped OR stale indicator counts as fully lost weight; a low-quality one
-    (e.g. d1 measured from a partial constituent universe, quality=n/503) counts
-    as w*quality. A proxy substitution does not reduce quality. If >1/3 of a
-    block's nominal weight is lost the block is degraded (band suppressed) — so a
-    breadth reading from only a handful of names now correctly degrades Block D."""
+    (e.g. d1 measured from a partial constituent universe, quality = resolved /
+    current universe) counts as w*quality. A proxy substitution does not reduce
+    quality. If >1/3 of a block's nominal weight is lost the block is degraded
+    (band suppressed).
+
+    The quality discount alone cannot degrade Block D: d1 weighs 0.35, so that
+    would take a quality below 4.8% (fewer than 24 of 504 names), and breadth is
+    published from 25 names up (25 of 504: coverage 0.6674, not degraded). A
+    thin universe lowers the coverage figure and degrades the block only
+    together with weight lost elsewhere in it (33 of 503 names with d4 dropped:
+    0.473). A dropped or stale d1 degrades the block by itself (0.65)."""
     blocks: dict[str, Any] = {}
     degraded_any = False
     for block_id, prefix in (("S", "s"), ("D", "d")):
