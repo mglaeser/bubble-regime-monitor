@@ -16,8 +16,9 @@
 # monitors.
 #
 # It is still not a complete answer, and pretending otherwise would be the same
-# mistake: a dead host or a dead network silences this too. That needs
-# off-machine monitoring, and no amount of local scheduling substitutes for it.
+# mistake: a dead host or a dead network silences this too. Nothing watches
+# from outside: by the owner's decision (2026-10-04) a host that is down
+# reports nothing (docs/AUTO_DEPLOY.md, "Outages").
 #
 # Usage:  notify-outage.sh "<short reason>"
 # Config: IMESSAGE_API_BASE_URL, IMESSAGE_API_KEY, IMESSAGE_RECIPIENT
