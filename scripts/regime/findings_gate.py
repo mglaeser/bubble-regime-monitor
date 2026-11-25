@@ -14,26 +14,10 @@ Two modes, deliberately separate:
 
 Both exit 1 on a ledger that cannot be read; any other argument exits 2.
 
-This file gates no deploy and has no admission mode. `--admission` ("the
-deploy gate": exit 1 while production_eligible is false) is removed, because
-nothing that deploys ran it. `grep -rnE "findings_gate|admission" deploy/
-Makefile` finds nothing, and deploy/release.sh released every merge to main
-from 2026-10-02 on (owner decision D6) while the mode answered "REFUSE deploy
-admission: production_eligible is false — 4 open STOP-SHIP, 11 open
-BLOCKER-1" on a ledger last edited on 2026-07-14. Its callers were the CI job
-deploy-admission-proof, green when the mode refused, and two tests that
-required the refusal. Executed on that code: with the 15 blocking records
-closed the mode exits 0, and the job and both tests are red. Among the 15 are
-records whose stated evidence is false today (A-08: no pip-audit and no
-detect-secrets in the repository; B-01: a `|| true` soft-fail in ci.yml;
-B-04: no lock file); a job and tests that need them open stood against
-correcting them.
-
-What a change passes before it is released: the checks `test (3.12)` and
-`image`, which a ruleset on main requires with no bypass actors
-(.github/workflows/ci.yml), and the review panel
-(.github/workflows/independent-verify.yml). `production_eligible` is a figure
-of the report; nothing that deploys reads it.
+`--admission` ("the deploy gate": exit 1 while production_eligible is false)
+is removed. deploy/release.sh, which releases every merge to main, does not
+call it; its callers were the CI job deploy-admission-proof, green when the
+mode refused, and tests that required the refusal.
 
 THE ONE RULE THE MANDATE STATES ABSOLUTELY: `production_eligible` may only ever
 be COMPUTED. It was previously a hard-coded literal in two files, both now
@@ -300,8 +284,7 @@ def main(argv: list[str]) -> int:
     try:
         # The path is read here, when the gate runs, not bound when the module
         # loads: a test that points FINDINGS_PATH at its own ledger is judged
-        # on that ledger. Bound as a default argument it was not, and the two
-        # unreadable-ledger tests passed on the committed ledger's refusal.
+        # on that ledger.
         records = load_findings(FINDINGS_PATH)
         t = tally(records)
         eligible, why = production_eligible(t)
