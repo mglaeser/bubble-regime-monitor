@@ -36,3 +36,45 @@ def test_rollover_calendar_none_when_months_absent():
 
     # length mismatch / no labels -> UNKNOWN, never a positional guess
     assert rollover_confirmed_calendar([], [1.0, 2.0, 3.0]) is None
+
+
+def test_the_registry_states_the_rule_the_code_applies():
+    """The registry is the de-facto spec (AGENTS.md) and the API serves it. It
+    said "two consecutive monthly declines from a trailing-12-month high"; the
+    code has never required a high: two monthly declines decide alone (the two
+    tests below)."""
+    from app.references import REGISTRY
+
+    how = REGISTRY["d2"].how
+    assert "fell in each of the last two months" in how
+    assert "12-month high" not in how
+
+
+def test_the_rule_is_two_consecutive_declines_and_nothing_else():
+    """REGISTRY d2 `how`: the multiplier is 1.0 if debit balances fell in each
+    of the last two months. Every series of four levels over three to seven
+    months, ties included (21,824 series): no other condition decides, in the
+    positional or in the calendar form. A second condition added later turns
+    this red."""
+    import itertools
+
+    from app.indicators.d2_margin import rollover_confirmed, rollover_confirmed_calendar
+
+    months = [f"2025-{m:02d}" for m in range(1, 8)]
+    for n in range(3, 8):
+        for levels in itertools.product((1.0, 2.0, 3.0, 4.0), repeat=n):
+            want = levels[-1] < levels[-2] < levels[-3]
+            assert rollover_confirmed(list(levels)) is want
+            assert rollover_confirmed_calendar(months[:n], list(levels)) is want
+
+
+def test_two_small_declines_far_below_an_old_high_confirm():
+    from app.indicators.d2_margin import multiplier, rollover_confirmed, rollover_confirmed_calendar
+
+    # The high (140) lies ten months back; the last two months fall by 0.1 %
+    # each, at 71 % of that high. The rule asks for the two declines only.
+    months = [f"2025-{m:02d}" for m in range(1, 13)]
+    values = [100, 140, 120, 110, 105, 104, 103, 102, 101, 100.0, 99.9, 99.8]
+    assert rollover_confirmed(values) is True
+    assert rollover_confirmed_calendar(months, values) is True
+    assert multiplier(True) == 1.0

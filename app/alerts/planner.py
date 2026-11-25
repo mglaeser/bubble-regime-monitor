@@ -37,7 +37,6 @@ from app.alerts.enums import (
     PlanningState,
     Priority,
     SuppressionReason,
-    TransportStatus,
 )
 from app.alerts.quiet_hours import release_time_for
 from app.alerts.rulespec import RuleSpec
@@ -81,11 +80,6 @@ class DeliveryIntent:
     not_before: datetime | None
     hold_reason_code: str | None = None
     budget: BudgetDecision | None = None
-
-    @property
-    def transport_status(self) -> str:
-        return (TransportStatus.PENDING if self.planning_state == PlanningState.READY
-                else TransportStatus.PENDING)
 
 
 @dataclass

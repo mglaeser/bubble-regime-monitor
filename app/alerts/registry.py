@@ -37,7 +37,6 @@ from app.alerts.rulespec import (
     RulesetDocument,
     RuleSpec,
     canonical_document,
-    referenced_sources,
     walk,
 )
 from app.alerts.sources import (
@@ -46,8 +45,6 @@ from app.alerts.sources import (
     KNOWN_SOURCES,
     SOURCE_REGISTRY,
 )
-
-VALIDATOR_VERSION = "1"
 
 
 @dataclass(frozen=True)
@@ -555,7 +552,3 @@ def unresolved_pins(validated: ValidatedRuleset) -> dict[str, list[str]]:
         if names:
             out[rule.rule_id] = names
     return out
-
-
-def rule_sources(rule: RuleSpec) -> set[str]:
-    return referenced_sources(rule.condition)
