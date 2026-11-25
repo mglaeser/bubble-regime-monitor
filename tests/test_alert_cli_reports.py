@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import tomllib
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 from sqlalchemy import func, select
@@ -17,6 +19,39 @@ from app.alerts.reports import (
 )
 from app.cli import build_parser as build_root_parser
 from tests.test_alert_evaluation import make_input
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def _containerfile_instructions(keyword: str) -> list[str]:
+    """The arguments of every Containerfile instruction of one kind, read as
+    the builder reads the file: comment lines dropped, continuation lines
+    joined."""
+    lines = [line for line in (ROOT / "Containerfile").read_text(encoding="utf-8").splitlines()
+             if not line.lstrip().startswith("#")]
+    instructions = [line.split(None, 1) for line in "\n".join(lines).replace("\\\n", " ").splitlines()]
+    return [parts[1].strip() for parts in instructions if len(parts) == 2 and parts[0] == keyword]
+
+
+def test_the_image_puts_the_source_where_the_command_looks():
+    """README ("the CLI in the container") and docs/ALERT_SYSTEM.md ("Operating
+    it") name `bubblegauge ...` as the operator's command in the image. pip
+    writes that command from `[project.scripts]` as a script that imports
+    `app.cli`. The image installs the project before it copies the source, so
+    site-packages holds no `app`, and a script's first import path is the
+    script's own directory, not the working directory: the source is found
+    only where `PYTHONPATH` points. Without it the command ended in
+    `ModuleNotFoundError: No module named 'app'`.
+
+    This pins the file. That the command runs in the built image is checked by
+    the step after the build in CI's `image` job."""
+    scripts = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["scripts"]
+    assert scripts == {"bubblegauge": "app.cli:main"}
+    (workdir,) = _containerfile_instructions("WORKDIR")
+    assert workdir == "/app"
+    assert ". ." in _containerfile_instructions("COPY"), "the source is copied into the working directory"
+    env = dict(pair.split("=", 1) for line in _containerfile_instructions("ENV") for pair in line.split())
+    assert env.get("PYTHONPATH") == workdir, env
 
 
 def test_exact_mandate_cli_surfaces_parse():

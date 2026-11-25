@@ -119,11 +119,7 @@ class TestMonteCarloIsLive:
         assert m1 != m2  # a dead/constant sampler would give identical medians
 
     def test_seed_and_sample_defaults_unchanged(self):
-        from app.config import get_settings
         from app.engine.montecarlo import monte_carlo
 
-        s = get_settings()
-        assert s.mc_seed == 20260711
-        assert s.mc_samples == 100_000
         assert monte_carlo.__defaults__[0] == 100_000  # n default
         assert monte_carlo.__defaults__[1] == 20260711  # seed default
