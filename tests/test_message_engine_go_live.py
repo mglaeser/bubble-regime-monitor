@@ -552,3 +552,40 @@ def test_the_document_states_the_channel_cap_the_settings_hold():
     since the owner's request of 2026-10-04, decision 28)."""
     cap = Settings.model_fields["message_engine_imessage_max_chars"].default
     assert f"up to {cap} code points (`MESSAGE_ENGINE_IMESSAGE_MAX_CHARS`)" in _decision(4)
+
+
+def test_an_imessage_at_the_cap_with_an_emoji_is_sent_and_is_no_alert_render(monkeypatch, engine_on):
+    """Decision 4: the engine's iMessage text, up to the cap and with emoji,
+    cannot compute `AlertRender.gsm7_septets` (NOT NULL, CHECK 0..160), and it
+    never has to: `deliver` sends it without the alert dispatcher and stores
+    it in the engine's own attempt row. The alert renderer, the one producer
+    of an `AlertRender` row's body, refuses a body over 160 septets or outside
+    GSM-7 before the row is written."""
+    from app.alerts.enums import RenderSource
+    from app.alerts.errors import RenderRejected
+    from app.alerts.gsm7 import Gsm7Error, septets
+    from app.alerts.models import AlertRender
+    from app.alerts.renderer import _validate
+
+    _admitted()
+    cap = get_settings().message_engine_imessage_max_chars
+    reading = "bubblegauge 51/100, band trim \U0001f539 valuations lead the reading, credit stays calm. "
+    reply = (reading * 10)[:cap - 1].rstrip()
+    reply += "." * (cap - len(reply))
+    sends: list[str] = []
+    TestEngineOn()._sent(monkeypatch, sends)
+    monkeypatch.setattr(composer, "complete", lambda **_kw: type("C", (), {"text": reply})())
+    out = service.deliver(trigger="daily_digest", facts=digest.digest_facts(_snapshot()), priority=3)
+
+    assert (out["status"], out["source"], sends) == ("sent", "generated", [reply])
+    assert len(reply) == cap == 350
+    with pytest.raises(Gsm7Error):
+        septets(reply)
+    with session_scope() as s:
+        assert s.query(AlertRender).count() == 0
+        [row] = s.query(MessageEngineAttempt).all()
+        assert (row.message, row.code_points) == (reply, cap)
+    for body in ("a" * 161, "bubblegauge \U0001f539"):
+        with pytest.raises(RenderRejected):
+            _validate(body, [], [], [], RenderSource.TEMPLATE_FULL, None,
+                      represented_member_ids=[], named_member_ids=[], overflow_count=0)

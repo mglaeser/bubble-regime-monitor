@@ -212,25 +212,10 @@ channel, source (`generated` | `fallback`; a `deterministic` text asks no
 model and writes no row, decision 8),
 every attempt including timeouts and rejections (Q46: full rows, 90-day
 retention). The alert schema is untouched.
-
-Q46's 90 days stand as the owner's ruling, and no code performs them: nothing
-deletes an attempt row, so a row older than 90 days stays stored with its
-text, a daily digest's (decision 1). That is what the code does, not what the
-ruling asks, and
-`tests/test_message_governor.py::test_no_code_deletes_an_attempt_row_of_more_than_90_days`
-pins it. No row is past 90 days before 2026-12-18: the oldest of the 58 rows
-production held on 2026-11-11 is of 2026-09-19. From that day a row outlives
-the ruling until the sweep is built or the owner amends Q46 (decision 3);
-nothing here amends it. The sweep is a change of its own: it deletes
-production rows and has to spare the breaker's run (next paragraph), and the
-change that builds it replaces that test and this paragraph.
-
-What the sweep has to spare: the rows are also the governor's state (decision
-3), read at any age. Four failed calls of 100 to 103 days ago and one of ten
-minutes ago, with no success since, are the five strikes that open the
-breaker, and without the four the model is asked
-(`tests/test_message_governor.py::test_a_run_of_failures_older_than_90_days_still_opens_the_breaker`),
-so a sweep by age alone changes a decision.
+The engine's text is never an `AlertRender` row: `engine_delivery.deliver`
+sends it without the alert dispatcher, and the alert renderer refuses a body
+over 160 septets or outside GSM-7 before a row is written
+(`tests/test_message_engine_go_live.py::test_an_imessage_at_the_cap_with_an_emoji_is_sent_and_is_no_alert_render`).
 
 Two columns of the table carry nothing: `emoji_count` was never written and is
 NULL, and `iteration` is 1, on all 58 rows of 2026-11-11 - the emoji cap the
