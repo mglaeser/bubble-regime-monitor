@@ -435,19 +435,15 @@ def _track(raw: RawInputs, source: str, fn: Any) -> Any:
         })
         return result
     except Exception as exc:
-        # SANITIZE, do not merely truncate. This note is persisted to
-        # SourceHealth.note and served verbatim by GET /readyz, which is
-        # UNAUTHENTICATED — so an upstream 4xx used to hand the FRED key to
-        # any anonymous caller: httpx wrote the request URL, query string and
-        # key included, into the error text. Reproduced before this line
-        # existed. An HTTP error text carries no query string any more
-        # (app.http_client.require_success). This sanitize stays for what
-        # else an error text can carry (an e-mail address, a credential a
-        # provider echoes in its answer), and the /readyz entry in
-        # scripts/regime/authz_coverage.py rests on it. It covers the gather
-        # only: the dashboard feed and the first-boot seed read the same
-        # error texts outside it (found 2026-11-11), so a key is kept out
-        # where the text is made, not here.
+        # SANITIZE, do not merely truncate. FRED, Alpha Vantage, Polygon and
+        # Twelve Data all carry their API key in the request QUERY STRING, and
+        # httpx puts the full URL into HTTPStatusError's message. This note is
+        # persisted to SourceHealth.note and served verbatim by GET /readyz,
+        # which is UNAUTHENTICATED — so an upstream 4xx used to hand the FRED
+        # key to any anonymous caller. Reproduced before this line existed.
+        # This covers the gather only. An HTTP error text is now made without
+        # its query string for every reader (app.http_client.require_success);
+        # the sanitize stays for what else a text can carry.
         note = sanitize(exc, limit=400)
         raw.source_health.append({
             "source": source, "ok": False,
