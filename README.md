@@ -64,7 +64,9 @@ Rootless Podman notes: the `:Z` suffix on the `./data:/data` bind mount applies 
 
 ## How to read the score
 
-The headline is the **median** of a seeded 100 000-draw Monte Carlo distribution over the framework's own structural uncertainty (weights, anchors, the S-vs-D split exponent). It is always served with the IQR (25th–75th) and the 5–95 band. **The bands communicate uncertainty in the *framework*, not a probability of a crash.** A median of 52 means "current conditions score 52/100 under this fixed, documented methodology," nothing more. The action bands (< 45 hold; 45–60 trim; ≥ 60 or override → de-risk) follow a balanced Alessi–Detken (2011) loss with θ = 0.5; de-risking is *executed* by the Leg 2 trend trigger, never by the score alone.
+The headline is the **median** of a seeded 100 000-draw Monte Carlo distribution over part of the framework's own structural uncertainty: the block weights, the valuation window of S1, the concentration anchors of S2, the breadth anchors of D1, the crash-frequency draw of S3 (from a run-up of 100 pp) and the S-vs-D split exponent. It is always served with the IQR (25th–75th) and the 5–95 band. **The bands show how far those sampled choices move the score, not a probability of a crash.** Their width is not a measure of data quality: on the golden fixture below the IQR is 5.0 points wide, 3.4 with D4 dropped and 5.5 with D3 dropped (in production it was 3.1 to 4.3 points wide on 605 of the 615 snapshots up to 2026-11-10, and narrowed from 3.8 to 3.2 while S1 was dropped on 2026-10-21). It also depends on a fixed constant, the concentration of the weight draws (50): at 25 the golden IQR would be 6.0 points wide. The bands say nothing about choices that are not sampled: with the rescale floor at 0.05 or 0.15 instead of 0.10 the golden median reads 47.6 or 56.5, either side of its IQR (50.0 to 55.0). When the override fires, every draw is held at 70 or above, so the median and both ranges can all read 70. A median of 52 means "current conditions score 52/100 under this fixed, documented methodology," nothing more. The action bands (< 45 hold; 45–60 trim; ≥ 60 or override → de-risk) are judgmental cut-offs: no loss function was fitted, and with about four comparable episodes none can be; Alessi & Detken (2011) is cited for the trade-off they express, missed peaks against false alarms; de-risking is *executed* by the Leg 2 trend trigger, never by the score alone.
+
+The override needs three of the four red flags. The first (S4's statistic above its 95% critical value) cannot fire while `GSADF_CONTESTED` is true, the standing default, so today the override needs the other three at once: the semiconductor run-up at 150 pp or more, HY OAS more than 100 bps above its three-year low, and breadth below 50% with the index within 2% of its all-time high. Since 2026-08-20 each snapshot stores both counts, the flags the override requires and the flags that can fire (`override_required_count`, `override_fireable_universe_count`): 3 and 3 on all 490 snapshots to 2026-11-10. In production to that date at most one flag was active at a time (breadth, on 176 of those 490), and the override fired on none of the 615 snapshots stored since 2026-07-11.
 
 ## Golden fixture (July 2026)
 
@@ -98,15 +100,18 @@ Red-flag count 0 → override not fired. **Deterministic point score 52.43; MC m
 |-----------|---------------|----------------|-----|
 | CAPE (S1) | multpl scrape | shillerdata `ie_data.xls` | 35d |
 | Real 10-yr (S1) | FRED `DFII10` | S1's last reading while it is at most 3 days old, flagged as a fallback; after that S1 is dropped and Block S renormalized | 3d |
-| Concentration (S2) | SSGA SPY holdings XLSX (top-10 **holdings** sum, not a sector weight) | Slickcharts → JPMAM cross-check | 3d |
+| Concentration (S2) | SSGA SPY holdings XLSX (top-10 **holdings** sum, not a sector weight) | Slickcharts (the JPMAM guide is a cross-check by hand, not a tier) | 3d |
 | Semis run-up (S3) | Tiingo `SMH`/`SPY` | Twelve Data -> Alpha Vantage -> cache; SOXX substitute for SMH | 3d |
-| GSADF (S4) | `Rscript r/gsadf.R` (exuber) | floor 0.05 + provenance note | 35d |
-| HY OAS (S5) | FRED `BAMLH0A0HYM2` (**truncated to rolling 3 yr since Apr 2026** — own `hy_oas_history` table, seeded on first boot, appended daily) | persisted history | 3d |
+| GSADF (S4) | `Rscript r/gsadf.R` (exuber) | no second source: without a statistic S4 keeps the declared 0.25 in Block S (state `FLOOR`, quality 0.0, so the coverage gate counts its 0.07 as lost) + provenance note; 0.05 is a completed test that does not reject | 35d |
+| Credit tightness (S5) | Fed Excess Bond Premium CSV (monthly, 1973+; the reading of 24 months back) | FRED `BAA` − `DGS10` (monthly, quality 0.5) → FRED `BAMLH0A0HYM2` (HY OAS, quality 0.3) → S5 is dropped and Block S renormalized | 45d |
+| HY OAS (red flag 3; S5's last tier) | FRED `BAMLH0A0HYM2` (**truncated to rolling 3 yr since Apr 2026** — own `hy_oas_history` table, seeded on first boot, appended daily) | persisted history | 3d |
 | Breadth (D1) | S&P 500 constituents (SSGA) + Polygon grouped-daily closes, 200-DMA on read | none: D1 is dropped and its block renormalized | 3d |
-| Margin (D2) | FINRA XLSX (3–4-week publication lag) | none — cache & tolerate staleness | 45d |
+| Margin (D2) | FINRA XLSX (3–4-week publication lag) | none — cache & tolerate staleness | 75d |
 | Hyperscaler FCF (D3) | SEC EDGAR companyfacts (mandatory UA, ≤8 req/s self-cap) | total-revenue gate proxy | 100d |
 | LPPLS (D4) | `lppls==0.6.24` (pinned; maintenance-inactive) | **drop + renormalize Block D** | 3d |
-| VIX curve (V) | CBOE delayed quotes | FRED `VIXCLS`/`VIX3M` | 2d |
+| VIX curve (V) | CBOE delayed quotes | FRED `VIXCLS`/`VXVCLS` (FRED's series id for VIX3M) | 2d |
+
+The 3d SLA of S2, S3, D1 and D4 counts NYSE sessions since the reading's date, so a weekend or an exchange holiday does not age a daily reading; every other SLA counts calendar days. `age_days` is always the calendar age. A daily feed that really stops is stale once more than three sessions have passed: two calendar days later than a calendar count reports it when a weekend lies in between, three when an exchange holiday does too, never earlier.
 
 ## API
 
@@ -124,7 +129,7 @@ Base path `/api/v1`; every response is `{"data": ..., "meta": ...}` with the fiv
 | `GET /api/v1/dashboard/feed` | Read-only feed for the companion dashboard (v3.4.0): 13 monthly series + 33 scalar metrics incl. CNN Fear & Greed (v3.7.0, non-scoring); per-item degradation; contract in `DASHBOARD_FEED_SPEC.md` |
 | `GET /api/v1/alerts/*` | Alert-system read surface: `overview`, `mechanisms[/{fingerprint}]`, `rules/{id}/instances`, `episodes[/{id}]`, `events`, `latest`, `deliveries[/{id}]`, `renders/{id}` (with the message text, `no-store`), `ruleset`, `silences`, `health`. Operator-only: every alert read takes `ADMIN_API_KEY` (X-API-Key) and nothing else, and fails closed (503) while that key is empty or the placeholder (owner decision D3a). The full pipeline (capture → evaluate → plan → render → dispatch) exists; the repo is **committed at Stage 3** (operator decision 2026-08-27) with passing replay evidence — the deployment sends only after the operator promotes the exact artifact AND sets `ALERTS_MODE=live` on the host; the CI replay gate is the evidence, and nothing at runtime re-reads it (owner decision D2d, `docs/ALERT_SYSTEM.md`) |
 | `POST`/`DELETE /api/v1/alerts/silences[/{id}]` | Silence a rule, instance or bucket (`ALERTS_WRITE_API_KEY`; `Idempotency-Key` honoured) |
-| `POST /api/v1/admin/alerts/evaluate` · `promote` · `recover` · `send-test` | Evaluate one captured sidecar (shadow by default); promote the validated artifacts on disk (reads no evidence: the CI replay gate is the evidence, owner decision D2d); sweep stale leases; queue an audited memberless TEST delivery through the real dispatcher. No route retries an UNKNOWN delivery: it is terminal (owner decision D2f) (X-API-Key) |
+| `POST /api/v1/admin/alerts/evaluate` · `promote` · `recover` · `send-test` · `render` | Evaluate one captured sidecar (shadow by default); promote the validated artifacts on disk (reads no evidence: the CI replay gate is the evidence, owner decision D2d); sweep stale leases; queue an audited memberless TEST delivery through the real dispatcher; preview the reviewed test message's text (stores and sends nothing). No route retries an UNKNOWN delivery: it is terminal (owner decision D2f) (X-API-Key) |
 | `GET /api/v1/status` | Live service + science-audit status (JSON twin of the `/` status page) |
 | `GET /healthz` · `GET /readyz` | Liveness; per-source health matrix |
 | `POST /api/v1/admin/refresh` | Start a recompute in the background — returns 202 immediately; single-flight (X-API-Key) |
@@ -186,7 +191,7 @@ SMS_DAILY_HOUR=8                                     # UTC hour (default 08:00)
 
 Three more things that bite in practice. The recipient must **also** be on the proxy's own allowlist, which is `admin`-scoped — a `messages:send` key can neither read that list nor add itself to it, so a destination missing from it fails `403` no matter what you set here. Proxy keys **expire** (90 days by default), and an expired key is a `401` indistinguishable from one that is simply wrong. And a `202` from the proxy means Messages.app accepted the command — it is explicitly *not* delivery confirmation, and it is the *only* status treated as sent: any other 2xx means something that is not the proxy's send route answered.
 
-Mind the spelling: settings load with `extra="ignore"`, so an unrecognised key is dropped **without any error**. `IMESSAG_ENABLED=true` reads as "iMessage off", and paired with `SMS_ENABLED=false` you get a service that sends nothing at all. The digest job now names a probable misspelling in its skip reason instead of going quiet.
+Mind the spelling: settings load with `extra="ignore"`, so an unrecognised key is dropped **without any error**. `IMESSAG_ENABLED=true` reads as "iMessage off", and paired with `SMS_ENABLED=false` you get a service that sends nothing at all. The digest job now names a probable misspelling in its skip reason instead of going quiet. A key one character off `MESSAGE_ENGINE_ENABLED`, an `IMESSAGE_*` setting, `SMS_ENABLED` or an `LLM_*` setting is also named at boot (`misspelt_setting_present`) and by the alert health projection, which is then `degraded` at best, whatever the transports do.
 
 ### Over SMS, via the [sipgate REST API v2](https://api.sipgate.com/v2/doc)
 
@@ -224,6 +229,8 @@ There is **one outage record** (since 2026-09-28): the first failure sends at on
 
 **Why it defaults on.** It can only reach a transport and recipient you already configured, so it adds no destination; with both transports off it does nothing but log. This exists because between 2026-08-06 and 2026-08-18 every scheduled recompute failed and nothing said so: `/healthz` returned `ok`, `/readyz` listed all eighteen sources green (source health is only persisted *by* a successful snapshot, so it was replaying the last good run), the science audit counted zero errors because it has no snapshot-age flag, and the daily digest kept sending the same twelve-day-old score. A monitor you have to remember to switch on is a monitor that is off.
 
+Either digest needs live admission, on top of its transport: the alert ruleset and phrase set the service loads must be the promoted ones (`POST /api/v1/admin/alerts/promote`, once per host and again after a release that ships new ones), whatever `ALERTS_MODE` says. On a host that promoted nothing, the scheduled digest is not sent and the test call below answers `"status": "refused"` with its blockers.
+
 Test either digest without waiting for the schedule: `curl -X POST -H "X-API-Key:<key>" localhost:8000/api/v1/admin/send-sms` — the path is unchanged so existing operator scripts keep working, and the response names the `transport` that actually carried it. Example body with the engine off: `bubblegauge 41/100 hold. range 34-47. SPY IN, QQQ IN. Flags 0/4.` (since v3.6.0 the digest carries no disclaimer tag; the research-only framing lives on the status/spec pages)
 
 ## Every message the service sends
@@ -260,7 +267,7 @@ Everything bubblegauge sends to a person, by itself or on request. Times are UTC
 | Request | What goes out |
 |---|---|
 | `POST /api/v1/admin/send-sms` | The daily digest now. With the engine off it goes out even when both transport switches are off, over whichever transport has credentials and a recipient (iMessage first); with the engine on it needs the chosen transport, like the scheduled run. Either way it needs live admission. |
-| `POST /api/v1/admin/refresh` | A recompute, and with it whatever a recompute sends: alerts, the failure alarm or the all-clear, the ping. |
+| `POST /api/v1/admin/refresh` | A recompute, and with it whatever a recompute sends: alerts, the failure alarm or the all-clear. |
 | `POST /api/v1/admin/alerts/send-test` | A P4 test alert, `bubblegauge Testnachricht.` / `bubblegauge test message.`, sent by the next dispatcher pass, exempt from quiet hours and the budget. It reaches a phone only in `live`. |
 | `POST /api/v1/admin/alerts/evaluate` with `shadow=false` | One evaluation in `ALERTS_MODE` (409 while disabled); in `live` its alerts are sent as above. |
 | `bubblegauge alerts dispatch --once` · `watchdog --once` (CLI) | One dispatcher pass; one outage check, which can raise the recompute-outage alert. `bubblegauge alerts evaluate` always runs in shadow and sends nothing. |
@@ -282,7 +289,7 @@ Everything bubblegauge sends to a person, by itself or on request. Times are UTC
 | | SMS (sipgate) | iMessage (imessage-proxy) |
 |---|---|---|
 | Chosen when | `SMS_ENABLED` with the token and recipient, and iMessage not chosen | `IMESSAGE_ENABLED` with URL, key and recipient; it wins when both are on |
-| Length | Digest: 150 characters with the engine off, 150 GSM-7 septets with it on (`^ { } \ [ ~ ] \| €` count two). Failure alarm: 150 characters. Alerts: 160 septets. | Digest: 150 characters with the engine off, 200 with it on. Failure alarm: 150 characters. Alerts: 160 GSM-7 septets, the same text as by SMS. |
+| Length | Digest: 150 characters with the engine off, 150 GSM-7 septets with it on (`^ { } \ [ ~ ] \| €` count two). Failure alarm: 150 characters. Alerts: 160 septets. | Digest: 150 characters with the engine off, 350 with it on (`MESSAGE_ENGINE_IMESSAGE_MAX_CHARS`). Failure alarm: 150 characters. Alerts: 160 GSM-7 septets, the same text as by SMS. |
 | Characters | Engine-on digest and alerts: GSM-7. Engine-off digest: ASCII. | Engine-on digest: printable ASCII and Latin-1, a few typographic marks, five allowed emoji. Alerts: GSM-7. Engine-off digest: ASCII. |
 | Sent only here | – | The deploy note, the host notices. |
 | Counts as sent | Alerts: 204 exactly; another 2xx is final, a 3xx or 5xx is `UNKNOWN`, a 429 or unlisted 4xx is retried. Digest and failure alarm: any 2xx. | 202 with an accepted send operation; for alerts the other statuses as by SMS. Host notices: any 2xx. |
@@ -335,7 +342,7 @@ hardening (pyarrow as an optional extra behind two SIGILL probes) is gone since 
 decision D8).
 
 - The LPPLS fit runs in an isolated subprocess (a native crash or hang in its scipy/scikit-learn/numba
-  stack degrades to drop-and-renormalize, bounded by `LPPLS_TIMEOUT_S`, default 1800 s).
+  stack degrades to drop-and-renormalize, bounded by `LPPLS_TIMEOUT_S`, default 1500 s).
 
 Expect long recomputes on weak hardware: the GSADF critical-value simulation (R, 2000 reps) and LPPLS fits dominate.
 
