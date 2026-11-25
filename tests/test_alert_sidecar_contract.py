@@ -921,8 +921,7 @@ def test_a_same_period_re_transition_is_not_suppressed(isolated_db):
     for gate, ident in ((True, "a"), (False, "b"), (True, "c")):
         current = one(gate, ident)
         ctx = EvaluationContext(current=current, previous=previous,
-                                history=(previous,) if previous else (),
-                                is_cold_start=previous is None)
+                                history=(previous,) if previous else ())
         decision = evaluate_state(rule=rule, instance_fingerprint="fp", memory=memory,
                                   outcome=evaluate_rule(rule, ctx), ctx=ctx, now=BUILT_AT)
         activations.append(decision.activate_episode)
@@ -1101,3 +1100,62 @@ def test_real_compute_output_survives_the_full_sidecar_source_boundary(isolated_
                    "rf4_active",
                    "falsification_outcome_count",
                })
+
+
+# ---------------------------------------------------------------------------
+# volatility: a run without a usable VIX / VIX3M ratio is no reading
+# ---------------------------------------------------------------------------
+
+
+def _input_with_v_state(stored: str):
+    snap = _snapshot_with_legs({})
+    snap.v_state = stored
+    return build_alert_input(snap, built_at=BUILT_AT, service_version="test")
+
+
+def test_a_run_without_a_ratio_leaves_an_open_backwardation_episode_open(isolated_db):
+    """`vol.backwardation` resolves by auto_on_inverse: while it fires, a
+    measured state outside its target closes the episode as condition_false.
+
+    A run without a usable VIX / VIX3M ratio stored "contango", so one failed
+    fetch read as that all-clear. It stores "unknown", which `read_source`
+    reads as no reading on every enum source (MISSING, not a value): the
+    episode is held and the next measured state decides. The rule is the
+    shipped one, and the stored word is the one compute_snapshot gives.
+    """
+    from app.alerts.artifacts import REPO_PHRASES, REPO_RULES, validate_from_disk
+    from app.alerts.enums import ConditionState
+    from app.alerts.primitives import EvaluationContext, evaluate_rule
+    from app.alerts.sources import read_source
+    from app.alerts.state_machine import InstanceMemory, evaluate_state
+    from app.services import compute
+    from tests.conftest import make_golden_raw_inputs
+
+    raw = make_golden_raw_inputs()
+    raw.vix_ratio = None
+    no_ratio = compute.compute_snapshot(raw, mc_samples=1_000, mc_seed=20260711).v_state
+
+    rule = validate_from_disk(
+        rules_path=REPO_RULES, phrase_path=REPO_PHRASES).ruleset.rule("vol.backwardation")
+    assert rule is not None and rule.resolution.policy == "auto_on_inverse"
+    firing = InstanceMemory(state_version=3, condition_state=ConditionState.FIRING,
+                            current_episode_id="EPISODE")
+    previous = _input_with_v_state("backwardation")
+
+    def decide(stored: str):
+        ctx = EvaluationContext(current=_input_with_v_state(stored), previous=previous,
+                                history=(previous,))
+        return evaluate_state(rule=rule, instance_fingerprint="fp", memory=firing,
+                              outcome=evaluate_rule(rule, ctx, currently_firing=True),
+                              ctx=ctx, now=BUILT_AT)
+
+    held = decide(no_ratio)
+    assert held.resolve_episode is False
+    assert held.condition_state == ConditionState.UNKNOWN
+    reading = read_source("v_state", _input_with_v_state(no_ratio))
+    assert (reading.available, reading.value, reading.data_state) == (False, None, DataState.MISSING)
+
+    # a measured state decides, as before
+    assert decide("backwardation").resolve_episode is False
+    assert decide("flat").resolve_episode is True
+    assert decide("contango").resolve_episode is True
