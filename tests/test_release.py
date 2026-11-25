@@ -562,6 +562,10 @@ def _directives(unit: str) -> dict[str, list[str]]:
     return sections
 
 
+def _value(section: list[str], key: str) -> str:
+    return next(line.split("=", 1)[1] for line in section if line.startswith(key + "="))
+
+
 def _install_section() -> str:
     doc = (ROOT / "docs/AUTO_DEPLOY.md").read_text(encoding="utf-8")
     return doc[doc.index("### Install (once"):doc.index("### Operate")]
@@ -625,6 +629,52 @@ class TestTheUnits:
         assert "StartLimitIntervalSec=0" in unit["[Unit]"]
         assert not any(line.startswith("Exec") for line in service)     # no shell of our own in the unit
 
+    def test_podmans_clock_is_not_the_apps_bound_and_five_checks_must_fail(self):
+        """The health check is for an app that stops answering /healthz (the
+        unit's comment, docs/AUTO_DEPLOY.md), and the app's bound is curl's
+        --max-time. HealthTimeout is another clock: podman's, around its whole
+        exec - conmon, the runtime, curl - and read after the exec returns, so
+        on a slow host it fails the probe of an app that answers. At 5s and
+        three retries the host's stall in the night of 2026-10-31 had 141 of 795
+        probes fail on that clock and six kills of a working service; at 30s,
+        podman's default, 2 of the 795 fail, never two in a row (the numbers
+        are at the unit's HealthTimeout line)."""
+        container = _directives((ROOT / "deploy/quadlet/bubblegauge.container").read_text())["[Container]"]
+        app_bound = int(_value(container, "HealthCmd").split("--max-time ")[1].split()[0])
+        timeout = int(_value(container, "HealthTimeout").removesuffix("s"))
+        assert app_bound == 5           # the app answers within five seconds, or the probe fails
+        assert timeout > app_bound      # podman's clock is not the one that decides
+        assert timeout == 30            # podman's default, not a number of ours
+        assert _value(container, "HealthRetries") == "5"    # a stall passes, a wedge lasts: five failed checks in a row
+        assert "HealthOnFailure=kill" in container
+
+    def test_a_wedged_app_is_killed_by_a_count_of_checks_and_no_deadline_is_promised(self):
+        """A wedged app is killed after five failed checks in a row, and neither
+        the unit nor the docs put a deadline on that, because podman gives none.
+        HealthTimeout ends no probe: in the night of 2026-10-31 one ran 129 s,
+        and at 5s and three retries all six kills came 94 to 143 s after their
+        first failing probe started, where 3 x 5 s + 2 x 30 s is 75. And no
+        failure counts in the HealthStartPeriod, the 300 s after a start: the
+        ten probes that failed right after that night's seven starts left the
+        container `starting`. What both state is the time on a host that is not
+        stalled - each probe ends at curl's 5 s, the next starts 30 s after it
+        ended - and it is this arithmetic."""
+        text = (ROOT / "deploy/quadlet/bubblegauge.container").read_text()
+        container = _directives(text)["[Container]"]
+        app_bound = int(_value(container, "HealthCmd").split("--max-time ")[1].split()[0])
+        interval = int(_value(container, "HealthInterval").removesuffix("s"))
+        retries = int(_value(container, "HealthRetries"))
+        on_a_working_host = retries * app_bound + (retries - 1) * interval
+        assert on_a_working_host == 145
+        assert _value(container, "HealthStartPeriod") == "300s"
+        doc = (ROOT / "docs/AUTO_DEPLOY.md").read_text()
+        said = " ".join(doc[doc.index("After the switch the service is"):doc.index("Nothing rolls back")].split())
+        comment = " ".join(text[text.index("# The app's bound is curl's"):text.index("\nHealthTimeout=")].replace("#", " ").split())
+        for words in (comment, said):
+            assert "a count and not a deadline" in words
+            assert f"about {on_a_working_host} s on a host that is not stalled" in words
+            assert "HealthStartPeriod" in words         # where the time stands, the start period stands too
+
     def test_the_script_names_what_the_units_name(self):
         script = (ROOT / "deploy/release.sh").read_text()
         assert "CONTAINER=bubblegauge\n" in script and "SERVICE=bubblegauge.service\n" in script
@@ -632,6 +682,34 @@ class TestTheUnits:
         # no memory and no rollback in the CODE (the comments may name what the docs do by hand)
         code = "\n".join(line for line in script.splitlines() if not line.lstrip().startswith("#"))
         assert ".deploy-state" not in code and "rollback" not in code.lower()
+
+    def test_only_the_release_builds_the_image_the_service_runs(self):
+        """The contract (docs/AUTO_DEPLOY.md): the service runs origin/main's
+        commit, and main reaches production only as images - built by the
+        release from an export of that commit and labelled with it.
+
+        The Makefile's `build` was `podman build -t bubblegauge -f Containerfile .`
+        on the working tree. podman-build(1) on -t: "If imageName does not
+        include a registry name, the registry name localhost is prepended to
+        the image name." So one `make build` in the checkout the service runs
+        from would write localhost/bubblegauge:latest, the tag the service unit
+        boots, with no revision label. The release compares the label of the
+        RUNNING container, so it would see nothing until a restart (a health
+        kill, a reboot) booted the working tree's image. `up` was
+        `podman-compose up -d`, which the README gives in full. No document,
+        script, workflow or test named either target, so both went and nothing
+        replaces them.
+
+        A local run builds through compose.yml (README, "Install"). It names no
+        image, and podman-compose then tags `<project>_<service>`: not the
+        service's tag."""
+        container = _directives((ROOT / "deploy/quadlet/bubblegauge.container").read_text())["[Container]"]
+        assert f"Image={IMAGE}:latest" in container
+        recipes = [line for line in (ROOT / "Makefile").read_text(encoding="utf-8").splitlines()
+                   if line.startswith("\t")]
+        assert [line for line in recipes if "podman" in line] == []
+        compose = (ROOT / "compose.yml").read_text(encoding="utf-8")
+        assert not any(line.strip().startswith("image:") for line in compose.splitlines())
 
     def test_the_release_script_is_installed_by_hand(self):
         doc = (ROOT / "docs/AUTO_DEPLOY.md").read_text()
