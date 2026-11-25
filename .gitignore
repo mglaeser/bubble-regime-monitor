@@ -4,7 +4,15 @@ __pycache__/
 # The SYMLINK form too: a trailing slash matches directories only, and a
 # `.venv -> ../other/.venv` link walked through it and was committed (PR #100).
 .venv
+# The credential file and every backup or variant of it, the family the image
+# ignore files exclude. The template is re-included last: the last match wins.
 .env
+.env.*
+*.env
+*.env.*
+.env~
+*.env~
+!.env.example
 data/*.db
 data/*.db-*
 data/snapshots/*
