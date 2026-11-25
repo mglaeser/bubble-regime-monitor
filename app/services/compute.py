@@ -306,7 +306,7 @@ class RawInputs:
 
     breadth_pct: float | None = None
     breadth_n: int | None = None   # constituents resolved on the common date
-    breadth_universe: int | None = None  # constituents stored for that date (v3.7.8/B-06)
+    breadth_universe: int | None = None  # current-universe denominator (v3.7.8/B-06)
     breadth_source: str = "constituents+twelvedata"
     breadth_note: str | None = None
     breadth_as_of: str | None = None
@@ -1176,9 +1176,8 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         mc_in.breadth_pct = raw.breadth_pct
         path_note = "path=B_constituent_compute"
         d1_note = f"{raw.breadth_note}; {path_note}" if raw.breadth_note else path_note
-        # d1 quality = resolved / universe, the constituents stored for the
-        # observation date (v3.7.8/B-06): a breadth reading from a partial
-        # universe discounts d1's live weight in the coverage gate.
+        # d1 quality = resolved / CURRENT-universe (v3.7.8/B-06): a breadth reading
+        # from a partial universe discounts d1's live weight in the coverage gate.
         d1_quality = min(1.0, raw.breadth_n / raw.breadth_universe)
         indicators["d1"] = IndicatorOutput("d1", raw.breadth_pct, sub, False,
                                            raw.breadth_source, False, note=d1_note,

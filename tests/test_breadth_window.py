@@ -48,37 +48,25 @@ def breadth_keyed(isolated_db, monkeypatch):
     class _Keyed:
         polygon_api_key = "x"
 
+    members = [f"S{n:02d}" for n in range(25)]
     monkeypatch.setattr(breadth, "get_settings", lambda: _Keyed())
-    for n in range(25):
-        _seed(f"S{n:02d}", DAYS, 100.0)
+    monkeypatch.setattr(breadth, "sp500_symbols", lambda: [*members, "BNY", "GAP"])
+    for symbol in members:
+        _seed(symbol, DAYS, 100.0)
     return breadth
 
 
-def _counts(breadth) -> tuple[int, int, int]:
+def _counts(breadth) -> tuple[int, int]:
     meta = breadth.pct_above_200dma().metadata
-    return meta["above"], meta["resolved"], meta["universe"]
+    return meta["above"], meta["resolved"]
 
 
 def test_a_reused_ticker_does_not_borrow_the_closes_of_the_security_before_it(breadth_keyed):
-    """Production, 2026-11-09: BNY had 223 stored closes. 104 belonged to a security
-    near 10 USD that last traded on 2026-02-06; the bank trades under the ticker
-    since 2026-05-21. 81 of the 200 closes behind its mean were the other
-    security's (mean 94.02 against a close of 151.23), so it was counted above
-    its mean whatever the truth."""
     _seed("BNY", DAYS[:104], 10.0)
     _seed("BNY", DAYS[-119:], 150.0)
 
-    # 139 of its closes are inside the 210 sessions: in the universe, and not
-    # counted until 200 of them are.
-    assert _counts(breadth_keyed) == (0, 25, 26)
-
-
-def test_two_missing_sessions_do_not_drop_a_member(breadth_keyed):
-    """Production, 2026-11-09: OKE had 292 of the 294 stored sessions and 208 of
-    the newest 210. The bound is 200 closes in 210 sessions, not every session."""
-    _seed("OKE", [d for i, d in enumerate(DAYS) if i not in (150, 220)], 100.0)
-
-    assert _counts(breadth_keyed) == (0, 26, 26)
+    # 139 of its closes are inside the 210 sessions: not counted until 200 of them are.
+    assert _counts(breadth_keyed) == (0, 25)
 
 
 @pytest.mark.parametrize(("missing", "resolved"), [(10, 26), (11, 25)])
@@ -87,4 +75,4 @@ def test_a_member_is_counted_with_200_closes_in_the_newest_210_sessions(
     gap = set(DAYS[-60:-60 + missing])
     _seed("GAP", [d for d in DAYS if d not in gap], 100.0)   # 294 - missing closes in all
 
-    assert _counts(breadth_keyed) == (0, resolved, 26)
+    assert _counts(breadth_keyed) == (0, resolved)

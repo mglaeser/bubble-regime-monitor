@@ -96,9 +96,9 @@ class TestPolygonBreadth:
             for i in range(50):
                 s.merge(DailyClose(symbol="CCC", date=base + timedelta(days=i),
                                    close=100.0, provider="polygon", fetched_at=now))
-        above, counted, universe, obs = _breadth_from_daily_close()
+        syms = [f"UP{n:02d}" for n in range(13)] + [f"DN{n:02d}" for n in range(12)] + ["CCC"]
+        above, counted, obs = _breadth_from_daily_close(syms)
         assert counted == 25         # CCC excluded (<200 closes); 25 usable counted
-        assert universe == 25        # CCC has no close on the observation date
         assert above == 13           # the 13 rising symbols are above their 200-DMA
         assert obs == base + timedelta(days=199)  # newest cached date (v3.7.3/B-02)
 

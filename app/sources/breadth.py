@@ -6,9 +6,7 @@ relied on unattended. Path B computes breadth directly = share of S&P 500
 constituents whose adjClose exceeds their own trailing 200-day SMA.
 
 The constituent list comes from the SSGA SPY holdings XLSX (the same file S2
-already fetches), NOT Wikipedia (its User-Agent policy returns 403). Only the
-sweep downloads it: it stores each day for that list alone, and the read takes
-its constituents from the stored day.
+already fetches), NOT Wikipedia (its User-Agent policy returns 403).
 
 Closes come from Polygon/Massive grouped-daily, the ONLY provider (owner
 decision D9, 2026-09-28): one call returns every US ticker's close for one
@@ -41,7 +39,7 @@ from app.sources.prices import (
 log = get_logger(__name__)
 
 MIN_RESOLVED = 25       # below this, the pct is too noisy to publish
-POLYGON_TARGET_DAYS = 210   # sessions the sweep keeps and the read uses: 200 for the mean, 10 of slack
+POLYGON_TARGET_DAYS = 210   # >= 200 needed for a 200-DMA (a little slack)
 POLYGON_PACE_SECONDS = 12.0  # Polygon free tier: 5 requests/minute
 POLYGON_MAX_CALENDAR_DAYS = 330  # ~210 trading days back, incl. weekends/holidays
 # (v3.7.8/B-05 removed the binomial-CI + finite-population-correction path: the
@@ -76,43 +74,10 @@ def sp500_symbols() -> list[str]:
 # Polygon/Massive grouped-daily PRIMARY path (v3.3.0)
 # ---------------------------------------------------------------------------
 
-def _breadth_from_daily_close() -> tuple[int, int, int, date | None]:
-    """(above, counted, universe, obs_date) — the %>200-DMA cross-section on ONE
-    common observation date (v3.7.6/B-07), read from the cache alone: from the
-    newest POLYGON_TARGET_DAYS stored sessions, in which a member needs 200 closes.
-
-    The constituents are the symbols stored for the observation date, and
-    `universe` is their number. The sweep stores a day for its SSGA list only, in
-    one transaction, so a day's rows are that list as the provider served it: 504
-    rows on 2026-11-09 for a list of 504 names, 498 to 505 rows on each of the
-    294 days stored in production. It follows that
-    - a symbol that left the list is counted until the first day stored without
-      it (the reading is of the observation date, and on that date it was a
-      member), and one that joined is in the universe from its first stored day
-      and counted once it has 200 closes;
-    - a listed name without a close stored for the observation date is not in
-      that date's universe;
-    - a day the provider answered for a part of the list would be read as that
-      part. No stored day is one: the symbols of two consecutive stored days
-      differ by 6 names at most (3 joined and 3 left on 2026-09-21).
-
-    The read does not download the SSGA list, because the recompute answers from
-    the cache alone. S2 has a fallback for that download and D1 has none: with
-    the list downloaded here, an unreachable SSGA dropped D1 although the cache
-    was complete, and D1 is 0.35 of block D, more than the third a block may lose
-    before its band is suppressed. That is executed on the production rows, not
-    observed: SSGA answered on all 615 recomputes.
-
-    The stored day gives the reading the downloaded list gave. Measured without
-    the window below: (306, 491, 504) on the production rows of 2026-11-09, the
-    published 62.32 % with bounds [60.71, 63.29]; and replayed over the 604
-    stored Polygon readings, each against the cache as it was at that moment,
-    598 values are equal. The other 6
-    (2026-09-21 14:01 to 09-22 10:01 UTC) read 243/496 = 48.99 % where
-    243/493 = 49.29 % is stored: BLDR, TAP and TTD left the list on 09-21 while
-    the newest stored day was 09-18, when all three were members. Red flag 4 is
-    true at both values. The universe is one lower on 17 readings (3 observation
-    dates), where the list held one name without a close stored for that date.
+def _breadth_from_daily_close(symbols: list[str]) -> tuple[int, int, date | None]:
+    """(above, counted, obs_date) — the %>200-DMA cross-section on ONE common
+    observation date (v3.7.6/B-07), read from the newest POLYGON_TARGET_DAYS
+    stored sessions, in which a member needs 200 closes.
 
     The prior version read each symbol's OWN last close and its own trailing 200
     and set obs_date = max over symbols, so constituents could be judged on
@@ -123,6 +88,7 @@ def _breadth_from_daily_close() -> tuple[int, int, int, date | None]:
     if it has a close on that date AND >= 200 closes through it (a symbol absent
     on the common date is excluded from BOTH numerator and denominator);
     obs_date is that common date, never a later per-symbol date."""
+    wanted = set(symbols)
     by_sym: dict[str, dict[date, float]] = {}
     with session_scope() as session:
         # Only the newest POLYGON_TARGET_DAYS stored sessions are read, the ones
@@ -133,26 +99,24 @@ def _breadth_from_daily_close() -> tuple[int, int, int, date | None]:
         # under the ticker since 2026-05-21. 81 of the 200 closes behind its mean
         # were the other security's (mean 94.02, close 151.23), so it was counted
         # above its mean whatever the truth. Inside the window it has 139 closes
-        # and is not counted until it has 200, on 2027-03-09, all its own by
-        # then. 2026-11-09 reads 305/490 = 62.24 % instead of 306/491 = 62.32 %,
-        # and each of the 201 stored readings since 2026-10-08 reads 0.07 to
-        # 0.11 pp lower, none across the 50 % of red flag 4. BNY is the only
-        # member this changes. The bound is 200 closes in 210 sessions, not
-        # every one of the last 200 sessions: OKE lacks 2 of the 210 and stays
-        # counted.
+        # and is not counted until it has 200. 2026-11-09 reads 305/490 = 62.24 %
+        # instead of 306/491 = 62.32 %; BNY is the only member this changes.
         window = session.execute(
             select(DailyClose.date).distinct().order_by(DailyClose.date.desc())
             .limit(POLYGON_TARGET_DAYS)
         ).scalars().all()
         if not window:
-            return 0, 0, 0, None
+            return 0, 0, None
         rows = session.execute(
             select(DailyClose.symbol, DailyClose.date, DailyClose.close)
             .where(DailyClose.date >= window[-1])
             .order_by(DailyClose.symbol, DailyClose.date)
         ).all()
     for sym, d, close in rows:
-        by_sym.setdefault(sym, {})[d] = close
+        if sym in wanted:
+            by_sym.setdefault(sym, {})[d] = close
+    if not by_sym:
+        return 0, 0, None
     # Eligibility is by USABLE symbols, not bare presence (v3.7.7/§2.2b): a symbol
     # is usable on date d only if it has >= 200 closes up to and including d. The
     # common cross-section date is the LATEST date backed by >= MIN_RESOLVED usable
@@ -168,19 +132,18 @@ def _breadth_from_daily_close() -> tuple[int, int, int, date | None]:
             usable_count[d] = usable_count.get(d, 0) + 1
     eligible = [d for d, c in usable_count.items() if c >= MIN_RESOLVED]
     if not eligible:
-        return 0, 0, 0, None   # no date has enough usable symbols -> breadth unavailable
+        return 0, 0, None   # no date has enough usable symbols -> breadth unavailable
     common_date = max(eligible)
-    above = counted = universe = 0
+    above = counted = 0
     for series in by_sym.values():
         if common_date not in series:          # absent on the common date -> excluded
             continue
-        universe += 1                          # stored for that date = a constituent on it
         closes = [series[d] for d in sorted(series) if d <= common_date]
         if len(closes) < 200:
             continue
         counted += 1
         above += closes[-1] > sum(closes[-200:]) / 200.0
-    return above, counted, universe, common_date
+    return above, counted, common_date
 
 
 def _cached_polygon_date_counts(symbols: set[str]) -> dict[date, int]:
@@ -294,7 +257,8 @@ def pct_above_200dma() -> SourceResult:
     with too little history, so D1 is dropped and its block renormalized."""
     if not get_settings().polygon_api_key:
         raise SourceError("breadth: POLYGON_API_KEY not configured (Polygon is the only provider)")
-    above, counted, universe, obs_date = _breadth_from_daily_close()
+    symbols = sp500_symbols()
+    above, counted, obs_date = _breadth_from_daily_close(symbols)
     if counted < MIN_RESOLVED:
         raise SourceError(f"breadth: {counted} constituents with 200 cached Polygon closes "
                           f"on a common date (< {MIN_RESOLVED})")
@@ -304,12 +268,12 @@ def pct_above_200dma() -> SourceResult:
     # it as unverified, not fresh.
     as_of = obs_date.isoformat() if obs_date else None
     lower, upper = _breadth_identification_bounds_pct(
-        above=above, counted=counted, universe=universe)
-    note = (f"breadth from {counted}/{universe} constituents "
+        above=above, counted=counted, universe=len(symbols))
+    note = (f"breadth from {counted}/{len(symbols)} constituents "
             f"(Polygon grouped-daily 200-DMA; obs {as_of}); full-universe "
             f"identification bounds [{lower:.2f}, {upper:.2f}]%")
     return SourceResult(
         pct, Provenance(source="constituents+polygon", note=note, as_of=as_of),
-        metadata={"resolved": counted, "universe": universe,
+        metadata={"resolved": counted, "universe": len(symbols),
                   "common_date": as_of, "above": above,
                   "identification_bounds_pct": [lower, upper]})

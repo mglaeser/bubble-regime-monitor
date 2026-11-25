@@ -149,10 +149,7 @@ class TestBreadthOnSSGA:
         class _Keyed:
             polygon_api_key = "x"
 
-        def _no_network(*_a, **_kw):
-            raise AssertionError("the recompute path asked for the constituent list")
-
         monkeypatch.setattr(breadth, "get_settings", lambda: _Keyed())
-        monkeypatch.setattr(breadth, "sp500_symbols", _no_network)
+        monkeypatch.setattr(breadth, "sp500_symbols", lambda: [f"S{i:03d}" for i in range(30)])
         with pytest.raises(SourceError, match="Polygon closes"):
             breadth.pct_above_200dma()

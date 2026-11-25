@@ -108,7 +108,7 @@ def test_b01_backfill_fetches_new_trading_days_when_cache_warm(isolated_db, monk
     assert newest == _recent_weekday(0)  # not the old frozen window
 
 
-def test_b02_breadth_as_of_is_observation_date_not_today(isolated_db):
+def test_b02_breadth_as_of_is_observation_date_not_today(isolated_db, monkeypatch):
     """pct_above_200dma stamps the newest cached trading day, not today()."""
     from app.db import session_scope
     from app.models import DailyClose
@@ -118,13 +118,14 @@ def test_b02_breadth_as_of_is_observation_date_not_today(isolated_db):
     # all ending on a KNOWN old date, so as_of is that real date, not today.
     obs = date(2026, 6, 15)
     syms = [f"S{n:02d}" for n in range(25)]
+    monkeypatch.setattr(breadth, "sp500_symbols", lambda: syms)
     with session_scope() as session:
         for sym in syms:
             for i in range(200):  # i=199 -> obs itself is the newest
                 session.merge(DailyClose(symbol=sym, date=obs - timedelta(days=199 - i),
                                          close=100.0 + i, provider="polygon",
                                          fetched_at=datetime.now(UTC)))
-    above, counted, universe, obs_date = breadth._breadth_from_daily_close()
+    above, counted, obs_date = breadth._breadth_from_daily_close(syms)
     assert counted == 25 and obs_date == obs
 
 
