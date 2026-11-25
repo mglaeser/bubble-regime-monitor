@@ -4,8 +4,9 @@
 
 Two things about `.secrets.baseline` do not change without a reviewer seeing it:
 
-  * the ENTRIES it holds: `ACCEPTED_ENTRIES`, the number of entries per file,
-    a literal in this module. `assert_accepted_entries` requires equality.
+  * the ENTRIES it holds: `ACCEPTED_ENTRIES`, every entry by file, detector
+    type and hash, a literal in this module. `assert_accepted_entries`
+    requires equality.
   * the SCAN CONFIGURATION (filters, plugins, detect-secrets version): the
     baseline's at `ACCEPTED_SECRET_BASELINE_COMMIT`, a pinned commit id.
     `assert_configuration_unchanged` requires equality.
@@ -55,7 +56,8 @@ growth check and nothing made the commit follow. Moving the commit would close
 the room once and leave its cause: merges are squashed, so a change cannot name
 its own merge commit, the reference can only follow one pull request late, and
 every shrink until then is room again. A literal moves in the same diff as the
-baseline, and equality refuses the first entry added and the first one removed.
+baseline, and equality refuses the first entry added, the first one removed and
+the first one exchanged for another.
 
 Both functions are deleted. The commit stays the reference for the scan
 configuration, which has not changed since it was pinned.
@@ -207,16 +209,38 @@ def _configuration(document: dict) -> dict:
     }
 
 
-#: What the committed baseline may hold: the number of entries per file. A
-#: literal, so that a change to it is in the diff a reviewer reads. The four
-#: are key fixtures of the admin-key tests in tests/test_audit_v331.py
-#: (TestAdminKeyFailClosed).
-ACCEPTED_ENTRIES: dict[str, int] = {"tests/test_audit_v331.py": 4}
+#: What the committed baseline may hold, entry by entry: under each file the
+#: detector type and the `hashed_secret` of every record. File, type and hash
+#: are what the scan matches a secret to an entry by (detect-secrets 1.5.0:
+#: `PotentialSecret` compares `filename`, `secret_hash` and `type`), so an
+#: entry exchanged for another in the same file is a different literal.
+#: `line_number` is not named: it decides nothing in the scan, and the hook
+#: rewrites it itself when a fixture moves.
+#:
+#: A literal, so that a change to it is in the diff a reviewer reads. The four
+#: are the SHA-1 digests of key fixtures of the admin-key and read-access tests
+#: in tests/test_audit_v331.py, as `.secrets.baseline` records them; a digest
+#: is credential-shaped to the scan, hence the pragmas.
+ACCEPTED_ENTRIES: dict[str, list[tuple[str, str]]] = {
+    "tests/test_audit_v331.py": [
+        # the shipped placeholder key, which must not authenticate
+        ("Secret Keyword", "2d1c3689e7808257bc4766b7a041f4ab23f18221"),  # pragma: allowlist secret
+        # the made-up key the tests configure as the real one
+        ("Secret Keyword", "ae8d7f6c6ba6a60c610084db45a951794b1c3805"),  # pragma: allowlist secret
+        # the wrong key, refused with 401
+        ("Secret Keyword", "a4b48a81cdab1e1a5dd37907d6c85ca1c61ddc7c"),  # pragma: allowlist secret
+        # the non-ASCII key, refused with 401
+        ("Secret Keyword", "7859fe48ea5b2d07394321d3d1b6c80e14a9abb8"),  # pragma: allowlist secret
+    ],
+}
 
 
-def entries_by_file(document: dict) -> dict[str, int]:
-    """The number of baseline entries under each file the baseline lists."""
-    return {path: len(found)
+def entries_by_file(document: dict) -> dict[str, list[tuple[str, str]]]:
+    """Each file's records as (type, hashed_secret), sorted.
+
+    A list and not a set, so that a record written twice counts twice."""
+    return {path: sorted((entry["type"], entry["hashed_secret"])
+                         for entry in found)
             for path, found in document.get("results", {}).items()}
 
 
@@ -234,28 +258,27 @@ def entries_by_file(document: dict) -> dict[str, int]:
 #                                                  ran on mutated copies of the
 #                                                  reference only
 #
-# Equality with the literal refuses the first entry added and the first one
-# removed, and there is no reference behind it that can go stale. What
-# byte-identity was introduced for, a filter entry that silently REPLACES
-# another, is a configuration change: `assert_configuration_unchanged` below
-# refuses it, and tests/test_secret_gate_policy.py applies it to the committed
-# file.
+# Equality with the literal refuses the first entry added, the first one
+# removed and the first one exchanged, and there is no reference behind it that
+# can go stale. What byte-identity was introduced for, a filter entry that
+# silently REPLACES another, is a configuration change:
+# `assert_configuration_unchanged` below refuses it, and
+# tests/test_secret_gate_policy.py applies it to the committed file.
 def assert_accepted_entries(current: dict) -> None:
-    """The baseline holds exactly `ACCEPTED_ENTRIES`: no entry more, none fewer.
+    """The baseline holds exactly `ACCEPTED_ENTRIES`: the same entries, no
+    entry more, none fewer.
 
-    An added entry needs a reviewer. A removed one lowers the literal in the
-    same change, so that no room for a later addition opens.
-
-    Limit: the count per file is compared, not the entries themselves, so one
-    entry exchanged for another in the same file passes (pinned in
-    tests/test_secret_baseline_ratchet.py). The secret scan still refuses every
-    secret whose hash the baseline does not hold."""
+    An added entry needs a reviewer, and so does one exchanged for another in
+    the same file: the scan accepts whatever secret the new hash belongs to. A
+    removed one leaves the literal in the same change, so that no room for a
+    later addition opens."""
     now = entries_by_file(current)
-    if now != ACCEPTED_ENTRIES:
+    accepted = {path: sorted(found) for path, found in ACCEPTED_ENTRIES.items()}
+    if now != accepted:
         raise AssertionError(
-            f"baseline entries {now} are not the accepted {ACCEPTED_ENTRIES}: "
-            "an added entry needs review; a removed one needs ACCEPTED_ENTRIES "
-            "in tests/secretbaselineref.py lowered in the same change")
+            f"baseline entries {now} are not the accepted {accepted}: an added "
+            "or exchanged entry needs review; a removed one has to leave "
+            "ACCEPTED_ENTRIES in tests/secretbaselineref.py in the same change")
 
 
 def assert_configuration_unchanged(current: dict, reference: dict) -> None:

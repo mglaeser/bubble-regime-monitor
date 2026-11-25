@@ -125,8 +125,10 @@ class TestBaselineShape:
     def test_the_baseline_holds_exactly_the_accepted_entries(self):
         # An unbounded baseline is a slow-motion wildcard exclusion.
         #
-        # The accepted entries are a literal in `tests/secretbaselineref.py`
-        # and the comparison is equality. This replaces "not grown against
+        # The accepted entries are a literal in `tests/secretbaselineref.py`,
+        # each named by file, detector type and hash, and the comparison is
+        # equality: an entry added, removed or exchanged for another fails
+        # here until the literal moves. This replaces "not grown against
         # the pinned commit" (`assert_has_not_grown`): that commit holds 19
         # entries and the baseline 4, so the old comparison accepted the
         # baseline plus 15 new entries and refused the 16th (executed on
@@ -164,14 +166,26 @@ class TestGateStillDetects:
                                                                    tmp_path):
         # The wildcard exclusion would have let this through.
         planted = ROOT / "artifacts" / "verifier" / "_planted_probe.json"
+        # The directories this test has to make, deepest first, so that it can
+        # remove them again: nothing under artifacts/ is tracked, and with only
+        # the planted file unlinked the two directories stayed in the checkout.
+        made = [d for d in (planted.parent, planted.parent.parent) if not d.exists()]
         planted.parent.mkdir(parents=True, exist_ok=True)
         planted.write_text(
             '{"k": "sk-proj-PLANTEDsecretVALUE1234567890abcd"}\n')  # pragma: allowlist secret
         try:
-            assert self._run(planted) == 1, (
+            # Relative to the repository, as CI names every file (git ls-files):
+            # the baseline's exclusions are unanchored, so the checkout's own
+            # absolute path can match one. In a checkout below a directory whose
+            # name ends in "audit" the absolute path matched `audit/` and the
+            # hook exited 0 for this planted secret; the relative path exits 1
+            # there too.
+            assert self._run(planted.relative_to(ROOT)) == 1, (
                 "a new secret under artifacts/verifier/ must still block")
         finally:
             planted.unlink()
+            for directory in made:
+                directory.rmdir()
 
     def test_the_exact_ci_command_exits_zero(self):
         if shutil.which("git") is None:
