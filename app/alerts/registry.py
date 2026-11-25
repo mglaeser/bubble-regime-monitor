@@ -14,8 +14,6 @@ the candidate is invalid the service keeps evaluating the promoted ruleset,
 logs `alert_rules_invalid` and carries the reason into alert health
 (`fallback_reason`); if there is no valid ruleset at all it raises
 `AlertingUnavailable` and evaluates nothing (`artifacts.load_active`).
-`ops.rules_invalid` and `ops.alerting_unavailable` are inventory rules,
-disabled: no code raises them.
 """
 
 from __future__ import annotations

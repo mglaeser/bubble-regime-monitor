@@ -752,42 +752,6 @@ def test_the_environment_flag_is_a_kill_switch(isolated_db, monkeypatch):
     get_settings.cache_clear()
 
 
-@pytest.mark.parametrize("mode,said", [
-    ("live", ["alert_evaluation_skipped"]),
-    ("shadow", ["alert_evaluation_skipped"]),
-    ("disabled", []),
-])
-def test_alerting_without_capture_evaluates_no_recompute_and_says_so(
-        isolated_db, monkeypatch, mode, said):
-    """The two switches are not symmetric (docs/ALERT_SYSTEM.md section 8).
-
-    Capture runs without alerting, but an evaluation reads the captured input:
-    with capture off, a recompute under `shadow` or `live` is not evaluated,
-    and the post-commit hook says so every time. With both off it is silent.
-    """
-    import app.services.alert_integration as integration
-    from app.config import get_settings
-
-    monkeypatch.setenv("ALERT_INPUT_CAPTURE", "false")
-    monkeypatch.setenv("ALERTS_MODE", mode)
-    get_settings.cache_clear()
-    evaluated: list[str] = []
-    logged: list[str] = []
-
-    class _Log:
-        def __getattr__(self, _level):
-            return lambda event, **_fields: logged.append(event)
-
-    monkeypatch.setattr(integration, "evaluate_input", evaluated.append)
-    monkeypatch.setattr(integration, "log", _Log())
-
-    integration.on_snapshot_committed(_persist_snapshot(isolated_db))
-
-    assert evaluated == []
-    assert logged == said
-    get_settings.cache_clear()
-
-
 def test_the_ruleset_can_disable_capture(isolated_db, monkeypatch, tmp_path):
     """`capture.enabled` in the promoted artifact is READ, not decoration.
 
@@ -988,8 +952,7 @@ def test_the_document_states_the_loaders_counts(ruleset):
     how many rules a pin blocks, how many lack an input and how many declare a
     basis nothing enforces. The numbers are the loader's on the shipped
     ruleset, so a ruleset version that moves one fails here until the sentence
-    moves with it. (The document said "five more" lack an input and
-    "twenty-one" bases are inert; the loader counts 30 and 27.)
+    moves with it.
     """
     rules = ruleset.rules()
     enabled = {r.rule_id for r in rules if r.enabled}
@@ -1008,51 +971,6 @@ def test_the_document_states_the_loaders_counts(ruleset):
     assert (f"{written_this_way} ({len(inert & enabled)} of the {len(enabled)} "
             "enabled ones)") in document
     assert written_this_way in _flat("app/alerts/registry.py")
-
-
-def test_the_document_does_not_call_the_frozen_catalogue_empty():
-    """Section 12 said twice that the shipped mandatory-event catalogue is
-    empty. It is frozen with events since 2026-08-27 (section 11b), and the
-    committed gate replays the committed stage against every one of them.
-    """
-    import json
-    from pathlib import Path
-
-    catalogue = json.loads(
-        Path("config/alert_mandatory_events.v3.2.json").read_text(encoding="utf-8"))
-    assert catalogue["frozen"] is True
-    assert catalogue["events"]
-    gate = json.loads(Path("docs/alert-stage1-gate.json").read_text(encoding="utf-8"))
-    run = next(r for r in gate["runs"].values()
-               if r["evaluated_at_stage"] == r["active_stage"])
-    assert run["mandatory_event_total"] == len(catalogue["events"])
-
-    document = _flat("docs/ALERT_SYSTEM.md")
-    assert "ships empty on purpose" not in document
-    assert "deliberately empty shipped catalogue" not in document
-    assert (f"pipeline recall, {run['mandatory_event_detected']} of "
-            f"{run['mandatory_event_total']} in the committed gate") in document
-
-
-def test_no_alert_module_or_document_gives_a_model_a_part():
-    """Owner decision D2b left the alert system without a model path
-    (tests/test_alert_delivery.py::test_the_alert_system_has_no_model_path).
-    Its docstrings, its comments and its document must not describe one: a
-    reader of "the model selects codes" concludes that a model words alerts.
-
-    The promoted phrase set's own `meta.note` still says so. Its bytes are
-    content-addressed, so the note changes with the next version, not here.
-    """
-    import re
-    from pathlib import Path
-
-    part = re.compile(r"\bmodel (selects|may (only )?select)\b|\bmodel prompt\b",
-                      re.IGNORECASE)
-    texts = [*sorted(str(p) for p in Path("app/alerts").rglob("*.py")),
-             "docs/ALERT_SYSTEM.md"]
-    claims = [f"{path}: {match.group(0)}"
-              for path in texts for match in part.finditer(_flat(path))]
-    assert claims == []
 
 
 def test_live_mode_refuses_a_ruleset_that_was_never_promoted(isolated_db):

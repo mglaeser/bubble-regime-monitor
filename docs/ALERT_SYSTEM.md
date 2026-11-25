@@ -238,11 +238,7 @@ currently ask for, and should not be added without deciding that it should.
 Quiet hours use IANA rules, so the release time moves with DST; exactly 22:00
 is held. The non-P1 budget is two caps, 5 per rolling 24h and 8 per rolling
 168h (`app/alerts/budgets.py` `LIMITS`). The 2 per 168h beside them is the
-quiet-regime target and holds no send: `check_budget` reads the caps only, and
-production sent 4 non-P1 alerts inside 168 h on 2026-10-16 to 10-21, each
-admitted. A replay that spans 168 h reports a mean above the target and does
-not fail on it
-(`tests/test_alert_replay.py::test_a_breached_non_p1_cap_fails_the_gate`).
+quiet-regime target and holds no send: `check_budget` reads the caps only.
 **P1 is never held by either** — enforced by the ruleset loader *and* by a
 CHECK constraint on `alert_delivery`, so a future planner bug cannot even
 persist the mistake.
@@ -295,10 +291,7 @@ back a snapshot.
 
 They are not symmetric. Capture runs without alerting, but an evaluation reads
 the captured input: with `ALERT_INPUT_CAPTURE=false`, `ALERTS_MODE=shadow` or
-`live` evaluates no recompute and logs `alert_evaluation_skipped` at each one
-(`tests/test_alert_foundations.py::test_alerting_without_capture_evaluates_no_recompute_and_says_so`).
-The recompute-outage alert does not depend on capture: the watchdog writes its
-own input.
+`live` evaluates no recompute and logs `alert_evaluation_skipped` at each one.
 
 `MESSAGE_LANGUAGE` (`en` | `de`; unset, each artifact speaks its own language)
 selects the language of every operator message. A phrase set may carry more than one language —
@@ -364,9 +357,7 @@ alert health projection ("the daily digest has no transport").
 
 Lease, retention and LLM settings live in `app/config.py`; each has a
 safe default. The volume caps are not settings: they are the constant
-`app/alerts/budgets.py` `LIMITS` (owner decision D2d), and an old
-`ALERTS_NON_P1_*` key is reported as retired
-(`tests/test_alert_promotion.py::test_the_alert_budget_is_code_the_replay_gate_checks_not_a_host_setting`).
+`app/alerts/budgets.py` `LIMITS` (owner decision D2d).
 Alert phrasing has no model path: configuring the runtime
 gateway activates only the judgment/digest paths. Configuration alone never
 grants delivery permission: live mode runs only the promoted artifact, and

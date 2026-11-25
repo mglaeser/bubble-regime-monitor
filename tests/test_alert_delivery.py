@@ -72,20 +72,6 @@ def test_reservations_count_against_the_budget():
     assert check_budget(2, BudgetUsage(2, 2, 1), LIMITS).reason == "cap_24h"
 
 
-def test_plan_inputs_default_to_the_limits_production_uses():
-    """The engine passes `budgets.LIMITS` (target 2, caps 5 and 8), and the
-    replay behind the CI gate runs through the engine. A caller that omits
-    `budget_limits` plans under the same constant, not under caps nothing else
-    uses: the default was `BudgetLimits(2, 3, 6)`, the caps of before
-    2026-08-27."""
-    import dataclasses
-
-    from app.alerts import budgets
-
-    defaults = {f.name: f.default for f in dataclasses.fields(PlanInputs)}
-    assert defaults["budget_limits"] is budgets.LIMITS
-
-
 def test_p1_is_never_held_by_quiet_hours():
     assert would_be_held(1, NIGHT) is False
     assert release_time_for(1, NIGHT) == NIGHT

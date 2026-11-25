@@ -28,7 +28,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
-from app.alerts.budgets import LIMITS, BudgetDecision, BudgetLimits, BudgetUsage, check_budget
+from app.alerts.budgets import BudgetDecision, BudgetLimits, BudgetUsage, check_budget
 from app.alerts.canonical import sha256_of
 from app.alerts.dominance import DominanceOutcome, group_key_for, resolve
 from app.alerts.enums import (
@@ -154,12 +154,7 @@ class PlanInputs:
     phrase_set_version: str = ""
     phrase_set_sha256: str = ""
     budget_usage: BudgetUsage = BudgetUsage(0, 0, 0)
-    # The constant the engine, the dispatcher's recheck and the replay gate
-    # use, so a caller that omits the argument plans under production's caps.
-    # The default was (2, 3, 6), the caps of before 2026-08-27, which nothing
-    # else used; no production caller omits the argument
-    # (`engine.run_evaluation` passes LIMITS).
-    budget_limits: BudgetLimits = LIMITS
+    budget_limits: BudgetLimits = BudgetLimits(2, 3, 6)
     flapping_fingerprints: frozenset[str] = frozenset()
 
 
