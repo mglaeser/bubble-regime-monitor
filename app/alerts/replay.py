@@ -66,10 +66,8 @@ WINDOW_24H = timedelta(hours=24)
 WINDOW_168H = timedelta(hours=168)
 
 #: regime.band_to_derisk (config/alert_rules.v3.2.yaml): "Keep it only while
-#: replay shows <= 1 transient one-snapshot P1 per 24 months". A month is
-#: 30.44 days, as in `band_excursion_months`.
+#: replay shows <= 1 transient one-snapshot P1 per 24 months".
 TRANSIENT_DERISK_P1_CAP = 1
-WINDOW_24_MONTHS = timedelta(days=24 * 30.44)
 
 _MANDATORY_EVENT_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 _MANDATORY_EVENT_FIELDS = frozenset({
@@ -717,7 +715,7 @@ def _collect_band_excursions(summary: ReplaySummary,
     episode. Those cases are reported separately as indeterminate.
     """
     states = [r.effective_action_state for r in records]
-    transient: list[datetime] = []
+    transient = 0
     indeterminate = 0
     for i in range(1, len(states) - 1):
         if states[i] != BAND_DERISK:
@@ -730,9 +728,8 @@ def _collect_band_excursions(summary: ReplaySummary,
         if _band_unknown(before) or _band_unknown(after):
             indeterminate += 1
         else:
-            transient.append(_moment_of(records[i]))
-    summary.transient_one_snapshot_band_p1 = _max_in_window(
-        transient, WINDOW_24_MONTHS)
+            transient += 1
+    summary.transient_one_snapshot_band_p1 = transient
     summary.indeterminate_band_excursions = indeterminate
 
     if len(records) >= 2:
@@ -967,12 +964,12 @@ def _decide(summary: ReplaySummary) -> None:
                 f"{evaluable_events} evaluable event(s)"
             )
     if summary.transient_one_snapshot_band_p1 > TRANSIENT_DERISK_P1_CAP:
-        # Like the volume caps: a breach is provable on any history length.
+        # The count is over the whole history, which is never more lenient
+        # than the rule's 24 months.
         failures.append(
-            "transient one-snapshot de-risk entries breached the keep "
-            "condition of regime.band_to_derisk: "
-            f"{summary.transient_one_snapshot_band_p1} > "
-            f"{TRANSIENT_DERISK_P1_CAP} per 24 months")
+            f"{summary.transient_one_snapshot_band_p1} transient one-snapshot "
+            "de-risk entries in this history; regime.band_to_derisk is kept "
+            f"only while replay shows <= {TRANSIENT_DERISK_P1_CAP} per 24 months")
     elif summary.band_excursion_months < 24.0:
         unmeasured.append(
             f"transient_derisk_p1_rate — the window spans "

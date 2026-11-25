@@ -10,7 +10,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -646,45 +646,19 @@ def test_a_derisk_neighbour_settles_an_excursion(tmp_path, artifacts):
     assert summary.indeterminate_band_excursions == 0
 
 
-# ---------------------------------------------------------------------------
-# the de-risk P1's keep condition (config/alert_rules.v3.2.yaml,
-# regime.band_to_derisk): "Keep it only while replay shows <= 1 transient
-# one-snapshot P1 per 24 months"
-# ---------------------------------------------------------------------------
-
-
-def _one_snapshot_entries(*days):
-    """Recompute inputs: on each given day the band goes trim, de-risk, trim."""
-    start = datetime(2026, 8, 15, 2, 0, tzinfo=UTC)
-    return [
-        make_input(identity=f"k{day}-{i}", effective=state, base=state,
-                   computed_at=(start + timedelta(days=day, hours=4 * i)).isoformat(),
-                   median=63.0 if state == "de-risk" else 52.0)
-        for day in days for i, state in enumerate(("trim", "de-risk", "trim"))
+def test_two_one_snapshot_derisk_entries_fail_the_gate(tmp_path, artifacts):
+    """config/alert_rules.v3.2.yaml, regime.band_to_derisk: "Keep it only while
+    replay shows <= 1 transient one-snapshot P1 per 24 months"."""
+    history = [
+        make_input(identity=f"k{hour}", computed_at=f"2026-08-15T{hour:02d}:00:00+00:00",
+                   effective=band, base=band, median=63.0 if band == "de-risk" else 52.0)
+        for hour, band in ((2, "trim"), (6, "de-risk"), (10, "trim"), (14, "de-risk"), (18, "trim"))
     ]
-
-
-def test_two_one_snapshot_derisk_entries_fail_the_gate_on_a_short_history(
-        tmp_path, artifacts):
-    summary = _run(tmp_path, artifacts, name="keep.db",
-                   inputs=_one_snapshot_entries(0, 3))
+    summary = _run(tmp_path, artifacts, name="keep.db", inputs=history)
     assert summary.transient_one_snapshot_band_p1 == 2
-    assert any("keep condition of regime.band_to_derisk: 2 > 1 per 24 months"
-               in failure for failure in summary.failures), summary.failures
-    assert not any("transient_derisk_p1_rate" in note
-                   for note in summary.not_measured)
-
-
-def test_the_keep_condition_counts_the_busiest_24_months(tmp_path, artifacts):
-    far = _run(tmp_path, artifacts, name="far.db",
-               inputs=_one_snapshot_entries(0, 800))
-    assert far.transient_one_snapshot_band_p1 == 1
-    assert not any("keep condition" in failure for failure in far.failures)
-
-    near = _run(tmp_path, artifacts, name="near.db",
-                inputs=_one_snapshot_entries(0, 700, 1500))
-    assert near.transient_one_snapshot_band_p1 == 2
-    assert any("keep condition" in failure for failure in near.failures)
+    assert any("2 transient one-snapshot de-risk entries in this history" in failure
+               for failure in summary.failures), summary.failures
+    assert not any("transient_derisk_p1_rate" in note for note in summary.not_measured)
 
 
 # ---------------------------------------------------------------------------
