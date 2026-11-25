@@ -166,7 +166,7 @@ The ladder below is statistic-agnostic; `gsadf.statistic` selects what `stat` is
 | Flat | `0.95 <= ratio <= 1.0` | `1.05` | `v_vix.py` |
 | Backwardation | `ratio > 1.0` | `1.15` | `v_vix.py` |
 
-Applied as `D = min(D_raw * V, 1.0)`. Neutral fallback when the ratio is missing: `v_state = "contango"`, `V = 1.0`. Ratio divides only on an IDENTICAL VIX/VIX3M observation date (v3.7.6/X-01).
+Applied as `D = min(D_raw * V, 1.0)`. No usable ratio (none fetched, or a non-finite or non-positive one): `V = 1.0`, the neutral multiplier, and `v_state = "unknown"`. Ratio divides only on an IDENTICAL VIX/VIX3M observation date (v3.7.6/X-01).
 
 ## 6. Red-flag keys and thresholds
 
@@ -240,8 +240,8 @@ Source: `compute.py`, `d4_lppls.py`.
 
 | Constant | Value | Source |
 |---|---|---|
-| Sample count `N` | `100_000` | `montecarlo.py`; `config.py:mc_samples` |
-| Seed | `20260711` | `montecarlo.py`; `config.py:mc_seed` |
+| Sample count `N` | `100_000` | `montecarlo.py`; `app/services/compute.py:MC_SAMPLES` |
+| Seed | `20260711` | `montecarlo.py`; `app/services/compute.py:MC_SEED` |
 | RNG | `numpy.random.default_rng(seed)` (PCG64) | `montecarlo.py` |
 | Dirichlet concentration | `DIRICHLET_CONCENTRATION = 50.0`; weights ~ `Dirichlet(base * 50)` | `montecarlo.py` |
 | Alpha | `alpha ~ U(0.40, 0.60)` (`ALPHA_RANGE`), `beta = 1 - alpha` | `montecarlo.py:ALPHA_RANGE` |

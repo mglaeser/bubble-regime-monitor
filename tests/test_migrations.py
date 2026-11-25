@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+import warnings
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -155,6 +156,22 @@ def test_fresh_db_migrates_and_stamps(tmp_path):
     assert "stooq_series_cache" not in tables  # 0003 dropped it
     assert "judgment_error" in tables["snapshots"]  # 0002 added it
     c.close()
+
+
+def test_a_migration_run_raises_no_alembic_deprecation(tmp_path):
+    """alembic.ini names its path separator (`path_separator = os`). Without
+    it Alembic 1.20 reads `prepend_sys_path` by its legacy splitting rule and
+    says at every migration run that the fallback is deprecated ("No
+    path_separator found in configuration; falling back to legacy splitting
+    ..."): 5 such warnings in the 15 tests of tests/test_degradation.py.
+    `prepend_sys_path` holds one entry (`.`), so either rule reads it the
+    same; the line only keeps the migration at boot off a deprecated path."""
+    from app.db_migrate import upgrade_to_head
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert _run_with_db(str(tmp_path / "fresh.db"), upgrade_to_head) == "upgraded"
+    assert [str(w.message) for w in caught if "path_separator" in str(w.message)] == []
 
 
 def test_only_test_may_reach_sending_without_a_represented_member(tmp_path):
