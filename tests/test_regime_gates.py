@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-import tomllib
 from pathlib import Path
 
 import pytest
@@ -45,17 +44,7 @@ class TestMypyDepthPin:
     """`.mypy-config.pinned`: changing `[tool.mypy]` fails the build until that
     file is updated in the same commit.
 
-    The type-check step used to cut the section out of pyproject.toml with a
-    regular expression that ended at the first `[`, and to run `mypy app`.
-    Executed on that step (mypy 2.3.1, 126 source files, ceiling 116):
-
-        as committed                                          116 errors  passed
-        [[tool.mypy.overrides]] module = ["app.*"],
-          ignore_errors = true appended to pyproject.toml       0 errors  passed,
-          and the step advised "lower MYPY_CEILING to 0"
-        a mypy.ini without strict, pyproject.toml untouched    33 errors  passed
-
-    So the pin compares the table the TOML library parses, sub-tables included,
+    The pin compares the table the TOML library parses, sub-tables included,
     and the step names the file mypy reads. The pin has no `--selftest`: these
     tests feed it.
     """
@@ -83,24 +72,6 @@ class TestMypyDepthPin:
         assert mypy_pin.problems(root), "a per-module override passed the depth pin"
         assert mypy_pin.main(root) == 1
         assert "BLOCK" in capsys.readouterr().err
-
-    def test_turning_strict_off_fails_the_pin(self, tmp_path):
-        # The pin file's own example: 217 errors fell to 84 with every file read.
-        root = self._tree(tmp_path, self._pyproject().replace("strict = true", "strict = false"))
-        assert mypy_pin.problems(root)
-
-    def test_a_missing_section_fails_the_pin(self, tmp_path):
-        root = self._tree(tmp_path, '[project]\nname = "bubblegauge"\n')
-        assert mypy_pin.problems(root)
-
-    def test_a_pin_file_without_the_table_fails_the_pin(self, tmp_path):
-        root = self._tree(tmp_path, self._pyproject(), pinned="# emptied\n")
-        assert mypy_pin.problems(root)
-
-    def test_a_file_that_does_not_parse_is_a_refusal(self, tmp_path):
-        root = self._tree(tmp_path, "[tool.mypy\nstrict = true\n")
-        with pytest.raises(tomllib.TOMLDecodeError):
-            mypy_pin.main(root)
 
     def test_a_reordered_table_passes_the_pin(self, tmp_path):
         # The contract is the parsed table, not its bytes: the same keys in

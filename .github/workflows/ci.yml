@@ -108,14 +108,7 @@ jobs:
           # scripts/regime/mypy_pin.py compares the [tool.mypy] table, as the
           # TOML library parses it (sub-tables included), with the table in
           # .mypy-config.pinned; changing it fails the build until that file is
-          # updated in the same commit, deliberately. Measured on the step this
-          # replaces (a regular expression that cut the section at the first
-          # `[`, then `mypy app`; mypy 2.3.1, 126 source files):
-          #   as committed                                         116 errors, passed
-          #   [[tool.mypy.overrides]] module = ["app.*"],
-          #     ignore_errors = true appended to pyproject.toml      0 errors, passed,
-          #     and the step advised "lower MYPY_CEILING to 0"
-          #   a mypy.ini without strict, pyproject.toml untouched   33 errors, passed
+          # updated in the same commit, deliberately.
           # A mypy.ini outranks pyproject.toml, so the step names the file.
           # The pin runs before `set +e`: its failure fails the step.
         run: |

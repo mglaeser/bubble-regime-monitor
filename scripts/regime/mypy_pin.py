@@ -8,19 +8,6 @@ that. It compares the two tables as the TOML library parses them (tomllib, which
 mypy reads pyproject.toml with), so `[[tool.mypy.overrides]]` and every other
 sub-table are part of the comparison. The step then runs
 `mypy --config-file pyproject.toml app`, so the table compared is the one read.
-
-Measured on the step this replaces (a regular expression that cut the section
-at the first `[`, then `mypy app`; mypy 2.3.1, 126 source files, ceiling 116):
-
-    as committed                                             116 errors  passed
-    [[tool.mypy.overrides]] module = ["app.*"],
-      ignore_errors = true appended to pyproject.toml          0 errors  passed
-    a mypy.ini without strict, pyproject.toml untouched       33 errors  passed
-
-A file that is missing or does not parse raises, and the step fails: a refusal,
-never a pass. Outside this pin, as `.mypy-config.pinned` states: a per-file
-`# mypy:` line and `# type: ignore` comments, which are in the diff of the file
-they loosen.
 """
 
 from __future__ import annotations
