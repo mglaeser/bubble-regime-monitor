@@ -47,7 +47,7 @@ def test_the_boot_migration_leaves_the_process_logging_alone(tmp_path, monkeypat
         assert not server.disabled
         assert (root.level, list(root.handlers)) == (level, handlers)
     finally:
-        # Whatever the outcome, the next test finds the logging it would have found.
+        # The server logger's switch and the root logger's level and handlers go back to what this test found.
         server.disabled = disabled
         root.setLevel(level)
         root.handlers[:] = handlers
@@ -77,10 +77,14 @@ def test_a_boot_that_fails_its_migration_names_the_revision(tmp_path):
 def test_the_libraries_that_would_flood_the_journal_are_held():
     """With Alembic's setup out of the boot the root logger stays at LOG_LEVEL,
     as configure_logging sets it, and every library logger is on."""
+    import structlog
+
     from app.logging_conf import configure_logging
 
     root = logging.getLogger()
-    level = root.level
+    loggers = [root, *map(logging.getLogger, ("httpx", "apscheduler", "slowapi"))]
+    levels = [logger.level for logger in loggers]
+    configured, configuration = structlog.is_configured(), structlog.get_config()
     # The server's root logger has no handler before configure_logging, so its
     # basicConfig sets the level; under pytest it has one, and basicConfig
     # leaves the level alone.
@@ -93,7 +97,16 @@ def test_the_libraries_that_would_flood_the_journal_are_held():
         assert not logging.getLogger("slowapi").isEnabledFor(logging.WARNING)   # a line per 429
         assert not logging.getLogger("httpx").isEnabledFor(logging.INFO)        # the URL, the provider's key in it
     finally:
-        root.setLevel(level)
+        # These four levels and structlog's configuration are the whole
+        # process's: the tests after this one find what it found.
+        for logger, level in zip(loggers, levels, strict=True):
+            logger.setLevel(level)
+        if configured:
+            structlog.configure(**configuration)
+        else:
+            structlog.reset_defaults()
+    assert [logger.level for logger in loggers] == levels
+    assert (structlog.is_configured(), structlog.get_config()) == (configured, configuration)
 
 
 def test_the_image_serves_without_an_access_log():
