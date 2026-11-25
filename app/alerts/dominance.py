@@ -13,7 +13,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from app.alerts.enums import SuppressionReason
 from app.alerts.rulespec import RuleSpec
 
 
@@ -24,9 +23,6 @@ class DominanceOutcome:
     suppressed: dict[str, str] = field(default_factory=dict)
     #: rule_ids whose UNSENT deliveries the winner asked to cancel
     cancel_unsent: frozenset[str] = frozenset()
-
-    def reason_for(self, rule_id: str) -> str | None:
-        return SuppressionReason.SUPERSEDED if rule_id in self.suppressed else None
 
 
 def resolve(firing: list[RuleSpec],
