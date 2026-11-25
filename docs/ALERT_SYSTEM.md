@@ -106,7 +106,7 @@ the decomposition it already knows:
 
 | column | meaning |
 |---|---|
-| `score_action_band` | band implied by the Monte Carlo **median** alone |
+| `score_action_band` | band of the published Monte Carlo **median**. A fired override already holds that median at 70 or above, so this then reads `de-risk` like the base band (the two were equal on all 606 production snapshots carrying both, 2026-11-10) |
 | `base_action_band` | after the override, before coverage suppression |
 | `effective_action_state` | `hold` / `trim` / `de-risk` / `suppressed` |
 | `band_suppressed_by_coverage` | coverage suppressed the base decision |
@@ -342,9 +342,13 @@ sipgate; there is no send-failure fallback. It has no retirement switch: the
 process environment or the `.env` file the settings read - changes nothing,
 and never in silence: the boot logs `retired_setting_present`, the
 alerts preflight fails `no_retired_settings`, and the alert health projection
-names it. Turning the alert system on never changes the digest's transport,
-and a digest without one is named by the alert health projection ("the daily
-digest has no transport").
+names it. A key one character off a transport, message-engine or LLM setting
+(`MESSAGE_ENGINE_ENABLD`) is read by nothing either, and has the same three
+surfaces, whatever the transports do: the boot logs `misspelt_setting_present`,
+the alerts preflight fails `no_misspelt_settings`, and the alert health
+projection names it and is `degraded` at best. Turning the alert system on
+never changes the digest's transport, and a digest without one is named by the
+alert health projection ("the daily digest has no transport").
 
 Volume, lease, retention and LLM settings live in `app/config.py`; each has a
 safe default. Alert phrasing has no model path: configuring the runtime
@@ -608,8 +612,9 @@ Separately, the dispatcher has no LLM path at any stage.
 What the runtime no longer checks, by that decision: the evidence and the
 stage, and nothing is re-checked at the wire - a demotion after planning no
 longer withholds work already queued, and a promotion change reaches the wire
-at the next dispatch pass, at most one pass later (the job runs at least every
-20 s). What stops a live send now: ALERTS_MODE other than `live`; a silence;
+at the next dispatch pass, at most one pass later (the job runs every 20 s;
+`ALERTS_DISPATCH_POLL_S` sets a longer interval, never a shorter one). What
+stops a live send now: ALERTS_MODE other than `live`; a silence;
 the dispatch job's own check before every pass - a candidate that is not the
 promoted artifact refuses the pass before any sender exists
 (tests/test_alert_promotion.py::test_the_live_dispatch_job_refuses_an_unpromoted_candidate);
@@ -787,8 +792,8 @@ older reading, up to 27.5 days older than the trigger: 445 of production's 490
 recompute sidecars were `PARTIAL` (a month label dated after the run), 45
 `EVALUABLE`, none `NOT_EVALUABLE` (read-only, 2026-11-11).
 
-A fact the current sidecar lacks (an indicator the recompute dropped) is the
-trigger's, also with `CONTEXT_STALE`; the render does not fail for it
+A fact a compatible current sidecar lacks (an indicator the recompute dropped)
+is the trigger's, also with `CONTEXT_STALE`; the render does not fail for it
 (`app/alerts/render_context.py` `build_member_context`,
 tests/test_alert_fact_fallback.py). A stale member carries no material-change
 clause, whichever way it became stale: the ruleset validator proves the stale

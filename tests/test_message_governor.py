@@ -386,3 +386,26 @@ class TestRoundSevenOn140:
         _row(gov.Outcome.TECHNICAL_ERROR, minutes_ago=30, finished_minutes_ago=29)
         decision, _claim = _reserve()
         assert decision.may_ask
+
+
+@pytest.mark.parametrize("settings, priority, trigger", [
+    ({"message_engine_enabled": False}, 2, "daily_digest"),
+    ({}, gov.P1, "daily_digest"),
+    ({}, 2, "NOT_A_TRIGGER"),
+], ids=["the engine off", "a P1", "the bare event"])
+def test_a_deterministic_text_writes_no_row(monkeypatch, settings, priority, trigger):
+    """What a row's `source` can be: `generated` or `fallback`. A deterministic
+    text asks no model and writes no attempt row (docs/MESSAGE_ENGINE.md,
+    decisions 4 and 8), so no row carries that word: production held 50
+    `generated`, 4 `fallback` and 4 failed calls without a source on
+    2026-11-11."""
+    from app.message_engine import composer
+    from app.message_engine.checks import Channel
+
+    monkeypatch.setattr(composer, "complete",
+                        lambda **_kw: (_ for _ in ()).throw(AssertionError("no model is asked")))
+    out = composer.compose(trigger=trigger, channel=Channel.IMESSAGE, priority=priority,
+                           facts={"median": 59}, lib=composer.library(), settings=_settings(**settings))
+    assert out.source == "deterministic"
+    with session_scope() as s:
+        assert s.query(MessageEngineAttempt).count() == 0

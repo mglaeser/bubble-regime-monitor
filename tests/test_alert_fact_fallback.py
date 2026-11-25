@@ -18,6 +18,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from app.alerts.dto import ALERT_INPUT_SCHEMA_VERSION
 from app.alerts.models import AlertDelivery, AlertEpisode, AlertRender, AlertRuleState
 from app.db import session_scope
 from tests.test_alert_end_to_end import _dispatch, _red_flag_meta, _snapshot, _stage3_shadow
@@ -25,7 +26,7 @@ from tests.test_alert_end_to_end import _dispatch, _red_flag_meta, _snapshot, _s
 pytestmark = pytest.mark.usefixtures("isolated_db")
 
 
-def _run(at, prev_id, *, rf4, breadth):
+def _run(at, prev_id, *, rf4, breadth, methodology=None):
     """One recompute. rf4: 'off', 'on' or 'unreadable' (breadth was dropped)."""
     from app.services.alert_integration import capture_alert_input, evaluate_input
 
@@ -44,6 +45,7 @@ def _run(at, prev_id, *, rf4, breadth):
             if breadth is None else
             {"value": breadth, "as_of": at.date().isoformat(), "stale": False})}}
         snap.expected_recompute_slot = at + timedelta(hours=4)
+        snap.methodology_sha256 = methodology
         snapshot_id = snap.id
     evaluate_input(capture_alert_input(snapshot_id, now=at), now=at)
     return snapshot_id
@@ -80,6 +82,40 @@ def test_a_held_alert_whose_reading_the_next_run_dropped_is_still_sent(
                     "Naechster Lauf 06:00 UTC. Kontext veraltet. Zustand unklar."), body
 
 
+@pytest.mark.parametrize("methodology, expected", [
+    # the trigger's own: the 02:00 run is the current view
+    ("m" * 64, "Breitenflagge rf4 erstmals aktiv, Breite 30.0%. "
+               "Naechster Lauf 06:00 UTC. Ausloeser 49.9, jetzt 30.0."),
+    # another: the trigger's facts alone, and the message says so
+    ("n" * 64, "Breitenflagge rf4 erstmals aktiv, Breite 49.9%. "
+               "Naechster Lauf 02:00 UTC. Kontext veraltet."),
+], ids=["same", "another"])
+def test_a_newer_run_under_another_methodology_gives_the_message_no_fact(
+        tmp_path, monkeypatch, methodology, expected):
+    """End to end: an alert held across a run with breadth 30.0. Computed
+    under another methodology, that run gives the message nothing."""
+    from app.alerts.sender import NullSender
+
+    _stage3_shadow(tmp_path, monkeypatch, "other-methodology")
+    evening = datetime(2026, 8, 20, 18, 0, tzinfo=UTC)
+    first = _run(evening, None, rf4="off", breadth=60.0, methodology="m" * 64)
+    night = evening + timedelta(hours=4)            # 22:00 UTC: held for quiet hours
+    second = _run(night, first, rf4="on", breadth=49.9, methodology="m" * 64)
+    sender = NullSender()
+    _dispatch(sender, night + timedelta(minutes=2))
+    _run(night + timedelta(hours=4), second, rf4="on", breadth=30.0,           # 02:00 UTC
+         methodology=methodology)
+
+    _dispatch(sender, datetime(2026, 8, 21, 5, 0, 5, tzinfo=UTC))             # 07:00 Berlin
+
+    with session_scope() as session:
+        delivery = session.query(AlertDelivery).one()
+        assert delivery.transport_status == "SENT", (
+            delivery.transport_status, delivery.last_error_message_redacted)
+        body = session.query(AlertRender).one().final_message
+    assert body == expected, body
+
+
 def test_a_missing_current_fact_is_the_triggers_and_marked_stale():
     from app.alerts.render_context import build_member_context
     from tests.test_alert_evaluation import make_input
@@ -109,6 +145,52 @@ def test_a_missing_current_fact_is_the_triggers_and_marked_stale():
 
     complete = build_member_context(current=trigger, **common)
     assert "CONTEXT_STALE" not in complete.required_caveat_codes
+
+
+@pytest.mark.parametrize("differs", [
+    {"methodology_sha256": "n" * 64},
+    {"schema_version": ALERT_INPUT_SCHEMA_VERSION + 1},
+], ids=["methodology", "schema"])
+@pytest.mark.parametrize("status", [
+    "STILL_FIRING", "MATERIALLY_CHANGED_BUT_ACTIVE", "UNKNOWN_AT_RENDER"])
+def test_an_incompatible_current_input_contributes_no_fact(differs, status):
+    """Another methodology or schema version: every fact is the trigger's.
+
+    docs/ALERT_SYSTEM.md 11e (17.4): numbers computed two different ways never
+    share a message. The per-fact merge is over a compatible current input
+    only. For any other, `current_facts` is empty: neither a fact both inputs
+    have nor one only the incompatible input has reaches the message.
+    """
+    from app.alerts.render_context import build_member_context
+    from tests.test_alert_evaluation import make_input
+
+    trigger = make_input(identity="x" * 64, computed_at="2026-08-24T06:00:00+00:00",
+                         effective="de-risk", base="de-risk", median=None,
+                         ).model_copy(update={"methodology_sha256": "m" * 64})
+    newer = make_input(identity="y" * 64, computed_at="2026-08-24T10:00:00+00:00",
+                       effective="trim", base="trim", median=40.0,
+                       ).model_copy(update={"methodology_sha256": "m" * 64})
+    common = dict(
+        episode_id="01M0FACTFALLBACK000000000C", rule_id="ops.coverage_risk_masking",
+        priority=2, trigger=trigger,
+        authorized_fact_ids=frozenset({
+            "F_BAND_BASE", "F_BAND_EFFECTIVE", "F_HEADLINE_MEDIAN"}),
+        authorized_phrase_codes=frozenset(), required_caveat_codes=(),
+        condition_status=status, origin_phrase_set_version="v3.5",
+        origin_phrase_set_sha256="s" * 64, origin_rules_sha256="r" * 64)
+
+    member = build_member_context(current=newer.model_copy(update=differs), **common)
+    assert member.current_facts == {}
+    assert member.facts == {"F_BAND_BASE": "de-risk", "F_BAND_EFFECTIVE": "de-risk"}
+    assert member.fact_deltas == {} and member.material_change_fact_id is None
+    assert "CONTEXT_STALE" in member.required_caveat_codes
+    assert "MATERIAL_CHANGE" not in member.required_caveat_codes
+
+    # the same input under the trigger's methodology and schema is the current view
+    used = build_member_context(current=newer, **common)
+    assert used.current_facts == {"F_BAND_BASE": "trim", "F_BAND_EFFECTIVE": "trim",
+                                  "F_HEADLINE_MEDIAN": "40.0"}
+    assert "CONTEXT_STALE" not in used.required_caveat_codes
 
 
 def test_a_stale_member_carries_no_material_change_clause():
