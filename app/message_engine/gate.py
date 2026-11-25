@@ -34,10 +34,8 @@ def admission_blockers(session: Any) -> list[str]:
     ones - and that message is the blocker.
 
     FAIL-CLOSED, including when the check itself breaks. An exception
-    escaping here would propagate to whatever called the engine, and the
-    engine's own callers treat a raised exception as a technical error to
-    retry - which would turn "this deployment is not authorised to send" into
-    "try again in two minutes", forever.
+    escaping here would reach the caller as a failure of the send, not as a
+    refusal that says what withholds authorisation.
 
     An unevaluatable gate is a blocker. It is not an absence of blockers.
     """

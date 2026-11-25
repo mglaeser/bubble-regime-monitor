@@ -3,11 +3,14 @@ through the engine when MESSAGE_ENGINE_ENABLED is on, untouched when off."""
 from __future__ import annotations
 
 import copy
+import inspect
+import re
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
-from app.config import get_settings
+from app.config import Settings, get_settings
 from app.db import session_scope
 from app.message_engine import composer
 from app.models import MessageEngineAttempt, Snapshot
@@ -71,6 +74,14 @@ def _admitted():
 
     with session_scope() as session:
         register_promoted(session, load_active(session))
+
+
+def _decision(number: int) -> str:
+    """One decision of docs/MESSAGE_ENGINE.md as running text: from its
+    heading to the next heading of that level, line breaks folded."""
+    document = (Path(__file__).resolve().parents[1] / "docs" / "MESSAGE_ENGINE.md").read_text(encoding="utf-8")
+    [section] = re.findall(rf"^## Decision {number} —.*?(?=^## )", document, flags=re.M | re.S)
+    return " ".join(section.split())
 
 
 #: What `load_active_for_mode(mode="live")` says when nothing is promoted.
@@ -512,3 +523,69 @@ class TestAdmission:
         assert out["status"] == "refused" and sent == []
         assert out["blockers"] == ["live mode refuses an unpromoted ruleset"]
         assert out["source"] == "generated"         # composed, then refused at the wire
+
+    def test_the_decision_names_the_function_that_asks(self):
+        """Decision 5 describes the gate that runs since re-evaluation E7
+        (2026-10-04): `engine_delivery.deliver` asks `gate.admission_blockers`,
+        which takes the session and nothing else, so no priority reaches it,
+        and no function is called `emit`."""
+        from app.message_engine import gate
+
+        decision = _decision(5)
+        assert "`engine_delivery.deliver` asks `gate.admission_blockers`" in decision
+        assert "`emit` asks" not in decision and "inside `emit`" not in decision
+        assert "records `priority`" not in decision
+        assert list(inspect.signature(gate.admission_blockers).parameters) == ["session"]
+        assert not hasattr(service, "emit") and not hasattr(gate, "emit")
+
+
+def test_the_document_states_the_deadline_of_the_one_call():
+    """Decision 1: a compose is one model call (decision 27 removed the
+    content iterations and the pause after an error), and how long it can take
+    is that call's deadline - the number decision 5's "ten minutes" refers to."""
+    assert f"its deadline is {composer._DEADLINE_S:.0f} s (`composer._DEADLINE_S`)" in _decision(1)
+
+
+def test_the_document_states_the_channel_cap_the_settings_hold():
+    """Decision 4 gives the length of an iMessage body as a reason for a
+    table of the engine's own: the number is the setting's default (350
+    since the owner's request of 2026-10-04, decision 28)."""
+    cap = Settings.model_fields["message_engine_imessage_max_chars"].default
+    assert f"up to {cap} code points (`MESSAGE_ENGINE_IMESSAGE_MAX_CHARS`)" in _decision(4)
+
+
+def test_an_imessage_at_the_cap_with_an_emoji_is_sent_and_is_no_alert_render(monkeypatch, engine_on):
+    """Decision 4: the engine's iMessage text, up to the cap and with emoji,
+    cannot compute `AlertRender.gsm7_septets` (NOT NULL, CHECK 0..160), and it
+    never has to: `deliver` sends it without the alert dispatcher and stores
+    it in the engine's own attempt row. The alert renderer, the one producer
+    of an `AlertRender` row's body, refuses a body over 160 septets or outside
+    GSM-7 before the row is written."""
+    from app.alerts.enums import RenderSource
+    from app.alerts.errors import RenderRejected
+    from app.alerts.gsm7 import Gsm7Error, septets
+    from app.alerts.models import AlertRender
+    from app.alerts.renderer import _validate
+
+    _admitted()
+    cap = get_settings().message_engine_imessage_max_chars
+    reading = "bubblegauge 51/100, band trim \U0001f539 valuations lead the reading, credit stays calm. "
+    reply = (reading * 10)[:cap - 1].rstrip()
+    reply += "." * (cap - len(reply))
+    sends: list[str] = []
+    TestEngineOn()._sent(monkeypatch, sends)
+    monkeypatch.setattr(composer, "complete", lambda **_kw: type("C", (), {"text": reply})())
+    out = service.deliver(trigger="daily_digest", facts=digest.digest_facts(_snapshot()), priority=3)
+
+    assert (out["status"], out["source"], sends) == ("sent", "generated", [reply])
+    assert len(reply) == cap == 350
+    with pytest.raises(Gsm7Error):
+        septets(reply)
+    with session_scope() as s:
+        assert s.query(AlertRender).count() == 0
+        [row] = s.query(MessageEngineAttempt).all()
+        assert (row.message, row.code_points) == (reply, cap)
+    for body in ("a" * 161, "bubblegauge \U0001f539"):
+        with pytest.raises(RenderRejected):
+            _validate(body, [], [], [], RenderSource.TEMPLATE_FULL, None,
+                      represented_member_ids=[], named_member_ids=[], overflow_count=0)
