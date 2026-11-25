@@ -748,6 +748,43 @@ class TestTransportSelection:
         assert retired and retired[0]["ok"] is False and "DAILY_SMS_ENABLED" in retired[0]["detail"]
         get_settings.cache_clear()
 
+    def test_a_misspelt_setting_is_said_at_boot_while_a_transport_works(
+            self, isolated_db, imessage_env, monkeypatch):
+        """A key one character off a setting is read by nothing (README, "Mind
+        the spelling"). The boot named it only inside the reason of a digest
+        WITHOUT a transport, so with iMessage working MESSAGE_ENGINE_ENABLD=true
+        left the engine off and the boot silent (executed 2026-11-11). The boot
+        names every near miss, whatever the transports do: the key and the
+        setting it looks like, never the value."""
+        from app import scheduler
+        from app.config import get_settings
+
+        monkeypatch.setenv("MESSAGE_ENGINE_ENABLD", "true")
+        get_settings.cache_clear()
+        assert get_settings().daily_digest_transport == "imessage"
+        assert get_settings().message_engine_enabled is False
+        logged: list[tuple[str, dict]] = []
+        monkeypatch.setattr(scheduler.log, "error", lambda event, **kw: logged.append((event, kw)))
+
+        class _FakeScheduler:
+            def __init__(self, **_kwargs):
+                pass
+
+            def add_job(self, *_args, **_kwargs):
+                return None
+
+            def start(self):
+                return None
+
+        monkeypatch.setattr(scheduler, "BackgroundScheduler", lambda **_kw: _FakeScheduler())
+        monkeypatch.setattr(scheduler, "_scheduler", None)
+        try:
+            scheduler.start()
+        finally:
+            scheduler._scheduler = None
+        assert [kw for event, kw in logged if event == "misspelt_setting_present"] == [
+            {"key": "MESSAGE_ENGINE_ENABLD", "looks_like": "MESSAGE_ENGINE_ENABLED"}]
+
     def test_a_key_written_only_in_the_dotenv_file_is_seen(self, monkeypatch, tmp_path):
         """#151 round 6, SOTA-A: the detectors read the process environment
         only, but Settings also loads .env from the working directory, so a
