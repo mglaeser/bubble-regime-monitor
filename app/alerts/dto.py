@@ -18,7 +18,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.alerts.canonical import identity_hash
 from app.alerts.enums import Evaluability, InputOrigin
-from app.alerts.observation import Evidence
 
 #: Bumped when the sidecar's SHAPE changes. Part of every input identity, so a
 #: schema change produces new identities rather than silently reinterpreting
@@ -50,9 +49,6 @@ class EvidenceModel(BaseModel):
     distance_to_threshold: float | None = None
     attribution: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
-
-    def to_evidence(self) -> Evidence:
-        return Evidence(**self.model_dump())
 
 
 class RedFlagFactModel(BaseModel):
@@ -175,12 +171,6 @@ def watchdog_input_identity(expected_slot_key: str) -> str:
     return identity_hash("WATCHDOG", expected_slot_key, ALERT_INPUT_SCHEMA_VERSION)
 
 
-def manual_input_identity(operator_request_id: str, source_snapshot_id: int | None) -> str:
-    return identity_hash(
-        "MANUAL", operator_request_id, source_snapshot_id, ALERT_INPUT_SCHEMA_VERSION
-    )
-
-
 def evaluation_identity(
     *,
     input_identity: str,
@@ -199,26 +189,3 @@ def evaluation_identity(
         input_identity, current_rules_sha256, evaluation_set_sha256,
         mode, live_profile, evaluator_version,
     )
-
-
-# ---------------------------------------------------------------------------
-# structured LLM selection contract (mandate 17.7)
-# ---------------------------------------------------------------------------
-
-
-class PhraseSelection(BaseModel):
-    """What the model is allowed to return: codes, and only codes.
-
-    No free text, no numbers, no units. Every field is validated against the
-    per-member authorization set before a single character is assembled.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    headline_code: str
-    phrase_codes: list[str] = Field(default_factory=list, max_length=6)
-    fact_ids: list[str] = Field(default_factory=list, max_length=8)
-    next_check_code: str | None = None
-    caveat_codes: list[str] = Field(default_factory=list, max_length=4)
-
-
