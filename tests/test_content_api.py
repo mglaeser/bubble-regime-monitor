@@ -115,6 +115,30 @@ class TestDynamicContent:
         r = client.get("/api/v1/content/dynamic")
         assert "max-age=60" in r.headers.get("cache-control", "")
 
+    def test_the_doc_counts_the_slots_as_the_endpoint_serves_them(self, client):
+        # docs/CONTENT_API.md says how many slots the endpoint serves and what
+        # they hold; its numbers are recomputed here from the endpoint. Until
+        # 2026-11 the doc listed three slots as "placeholders in this PR" while
+        # the endpoint served 82, every one a placeholder that no code replaces
+        # (44 pending notes, 38 values dated 2026-07). A slot that is added,
+        # removed, generated or re-dated turns this red, and the doc sentence
+        # is corrected in the same change.
+        from pathlib import Path
+
+        doc = (Path(__file__).resolve().parents[1] / "docs" / "CONTENT_API.md").read_text(encoding="utf-8")
+        section = " ".join(doc[doc.index("### DYNAMIC"):doc.index("### The dynamic-content marker")].split())
+        slots = client.get("/api/v1/content/dynamic").json()["data"]["slots"]
+        pending = sum("pending" in slot["text"].lower() for slot in slots.values())
+        dated = sum(slot["as_of"] is not None for slot in slots.values())
+        assert pending + dated == len(slots)
+        assert {slot["source"] for slot in slots.values()} == {"placeholder"}
+        assert {slot["as_of"] for slot in slots.values()} == {None, "2026-07"}
+        assert f"serves {len(slots)} slots" in section
+        assert f"the other {len(slots) - 3} are the companion dashboard's" in section
+        assert f"{pending} say that a note is pending" in section
+        assert f"{dated} carry the companion dashboard's editorial value of July 2026" in section
+        assert "in this PR" not in doc
+
     def test_every_slot_carries_its_provenance_and_the_marker_rides_along(self, client):
         # The dynamic-content marker (owner, 2026-09-21): a renderer appends
         # DOT ABOVE to every dynamic text and tints it by provenance; the API
