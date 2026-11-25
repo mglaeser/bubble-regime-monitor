@@ -130,9 +130,16 @@ def deliver(*, trigger: str, facts: dict[str, object], priority: int,
 
     result = _send(channel, composed.text, recipient)
     ok = bool(getattr(result, "ok", False))
+    # The line says why the model's text was not used: the composer's reason,
+    # on a fallback the one message_engine_attempts stores. Without it, 12
+    # fallbacks in a row (2026-11-11..22) showed in the journal as
+    # "source": "fallback" and nothing else. Every reason is a string this
+    # code writes - a governor refusal, a failed basic check, or a fixed
+    # phrase with an exception's class name, never the exception's message
+    # nor the model's text - so decision 19 and AGENTS.md invariant 1 hold.
     log.info("message_engine_delivery", trigger=composed.trigger, channel=channel,
-             sent=ok, source=composed.source, chars=len(composed.text),
-             status=getattr(result, "status_code", None))
+             sent=ok, source=composed.source, compose_reason=composed.reason,
+             chars=len(composed.text), status=getattr(result, "status_code", None))
     return {**common, "status": "sent" if ok else "failed",
             "transport_status": getattr(result, "status_code", None),
             "operation_id": getattr(result, "operation_id", None),

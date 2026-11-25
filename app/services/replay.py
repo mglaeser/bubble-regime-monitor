@@ -97,7 +97,16 @@ def _block_coverage(indicators: dict[str, Any], weights: dict[str, float]) -> di
     for key, w in weights.items():
         p = indicators.get(key) or {}
         fresh = (not p.get("dropped", True)) and p.get("stale") is False
-        q = float(p.get("quality", 0.0) or 0.0)
+        # A payload stored before v3.3.0 has no quality key. The gate's default
+        # is 1.0 (IndicatorOutput.quality), and the gate of that time added the
+        # whole weight. Production holds ten such snapshots (ids 1-10,
+        # 2026-07-11..14). Read as 0.0, the report over 615 snapshots counted
+        # them as ten runs with both blocks degraded: one block 50, both 10,
+        # bands suppressed 60. Read as 1.0 it says 55 / 0 / 55, and the
+        # fractions equal the ones the gate persisted for ids 3-10 (S 1.0 or
+        # 0.87, D 0.45 or 1.0; ids 1-2 predate the gate). A stored 0.0 (FLOOR)
+        # or null is a statement, not a missing key, and stays 0.0.
+        q = float(p.get("quality", 1.0) or 0.0)
         if fresh:
             obtained += w * max(0.0, min(1.0, q))
             if p.get("sub_score") is not None:
