@@ -23,8 +23,10 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 
 import pytest
+import yaml
 
 from app import methodology as M
 from app.services.compute import compute_snapshot, scored_s4_statistic
@@ -77,13 +79,39 @@ def _raw_diverging():
 
 
 def _require_r():
-    """Skip where R/exuber is absent — which includes CI's unit job (CI installs
-    R only for the image build). Runs on a developer host and in the container."""
+    """Skip where R/exuber is absent (CI's test job). CI's image job runs this
+    file inside the built image, where a skip fails the step."""
     import shutil
     import subprocess
     if shutil.which("Rscript") is None or subprocess.run(
             ["Rscript", "-e", "library(exuber)"], capture_output=True).returncode != 0:
-        pytest.skip("R/exuber not available (CI unit job installs R only for the image build)")
+        pytest.skip("R/exuber not available (CI's image job runs this file inside the built image)")
+
+
+def test_the_image_job_runs_this_file():
+    """The eight tests of this file that call `_require_r()` are the only tests
+    that execute r/gsadf.R, and they skip where R/exuber is absent, which is
+    CI's test job: with a syntax error in the script this file is as green
+    there as without it (44 passed, 8 skipped). The gate that runs them is one
+    step of CI's `image` job, after the build: it runs this file inside the
+    built image, loads exuber first (the condition `_require_r` skips on) and
+    fails when the summary reports a skipped test.
+
+    The step's script is taken from the parsed workflow, so a comment that
+    names this file cannot stand in for the command."""
+    workflow = yaml.safe_load(
+        (Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml")
+        .read_text(encoding="utf-8"))
+    scripts = [step.get("run", "") for step in workflow["jobs"]["image"]["steps"]]
+    (build,) = [i for i, script in enumerate(scripts) if "docker build" in script]
+    runs_this_file = [i for i, script in enumerate(scripts)
+                      if "pytest" in script and "tests/test_s4_endpoint_statistic.py" in script]
+    assert len(runs_this_file) == 1, f"steps of the image job that run this file: {runs_this_file}"
+    (position,) = runs_this_file
+    script = scripts[position]
+    assert position > build and script.startswith("docker run "), script
+    assert 0 <= script.find('Rscript -e "library(exuber)"') < script.find("pytest"), script
+    assert 'grep -q " skipped"' in script and "exit 1" in script, script
 
 
 def _clean_series():
@@ -607,9 +635,9 @@ class TestTheRScriptReturnsTheEndpointNotTheSup:
     endpoint with the wrong CV row — mutations no Python test can see, because R
     is the thing producing the numbers.
 
-    SKIPS where R/exuber is absent, which includes CI's unit job (CI installs R
-    only for the image build). It runs on a developer host and inside the
-    container, which is where the R contract can actually be exercised.
+    SKIPS where R/exuber is absent, which is CI's test job. CI's image job runs
+    this file inside the built image, where a skip fails the step: that is the
+    gate in which the R contract is exercised.
     """
 
     NREP, SEED = 40, 20260711
