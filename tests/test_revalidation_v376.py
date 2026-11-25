@@ -146,7 +146,7 @@ def _patch_vix_to_fred(monkeypatch, vix_date, vix3m_date):
     monkeypatch.setattr(vixmod, "_cboe_last", _boom)     # cboe primary
 
     def _fred(series_id):
-        d, v = {"VIXCLS": (vix_date, 18.0), "VIX3M": (vix3m_date, 20.0)}[series_id]
+        d, v = {"VIXCLS": (vix_date, 18.0), "VXVCLS": (vix3m_date, 20.0)}[series_id]
         return SourceResult(v, Provenance(source="fred", as_of=d))
 
     monkeypatch.setattr(vixmod, "fred_latest", _fred)
