@@ -63,6 +63,9 @@ log = get_logger(__name__)
 #: exactly (#150 round 4: a backup beside aggregate.py is not scoring code).
 SCORING_CODE = ("app/indicators/", "app/engine/aggregate.py", "app/engine/montecarlo.py",
                 "app/engine/legs.py", "app/engine/snapshot_contract.py",
+                # the S4 bridge: it hands r/gsadf.R its series and parses the
+                # statistic S4 is scored on
+                "app/engine/gsadf_runner.py",
                 "app/services/compute.py", "app/methodology.py", "frozen_methodology.json", "r/")
 #: Paths whose change can move the inputs the score is computed from.
 DATA_INPUTS = ("app/sources/",)
