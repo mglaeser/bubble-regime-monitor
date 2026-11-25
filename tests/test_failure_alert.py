@@ -544,13 +544,19 @@ class TestTheStateFileIsWrittenAtomically:
 
     def test_a_delivered_outage_still_reloads_after_the_failed_write(self, monkeypatch, sent):
         notify_recompute_outcome(EBP_ERROR)
-        monkeypatch.setattr(failure_alert.os, "replace",
-                            lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
-        notify_recompute_outcome(EBP_ERROR)
-        monkeypatch.undo()
+        with monkeypatch.context() as patch:
+            patch.setattr(failure_alert.os, "replace",
+                          lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
+            notify_recompute_outcome(EBP_ERROR)
         failure_alert._current = None
         failure_alert._loaded = False
+        before = len(sent)
         assert notify_recompute_outcome(None)["kind"] == "recovery"
+        # The all-clear went to the captured outbox. With monkeypatch.undo() in
+        # place of the context above, the fixture's sender stubs were undone too
+        # and the all-clear went to a socket: a name lookup of the fixture's
+        # example.com host, and this test passed all the same.
+        assert len(sent) == before + 1
 
 
 class TestAMalformedStateFileCannotSilenceOrLie:
