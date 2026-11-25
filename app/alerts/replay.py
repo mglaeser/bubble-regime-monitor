@@ -65,11 +65,9 @@ REPLAY_SCHEMA_VERSION = 4
 WINDOW_24H = timedelta(hours=24)
 WINDOW_168H = timedelta(hours=168)
 
-#: The keep condition of the immediate de-risk P1, as its rule states it
-#: (config/alert_rules.v3.2.yaml, regime.band_to_derisk): "Keep it only while
-#: replay shows <= 1 transient one-snapshot P1 per 24 months". Judged like the
-#: volume caps, on the busiest window. A month is 30.44 days here, as in
-#: `band_excursion_months`.
+#: regime.band_to_derisk (config/alert_rules.v3.2.yaml): "Keep it only while
+#: replay shows <= 1 transient one-snapshot P1 per 24 months". A month is
+#: 30.44 days, as in `band_excursion_months`.
 TRANSIENT_DERISK_P1_CAP = 1
 WINDOW_24_MONTHS = timedelta(days=24 * 30.44)
 
@@ -181,9 +179,6 @@ class ReplaySummary:
     p1_total: int = 0
 
     # -- governance metrics ----------------------------------------------
-    #: The most one-snapshot entries into de-risk inside any 24 months: the
-    #: figure `TRANSIENT_DERISK_P1_CAP` bounds. On a history shorter than 24
-    #: months that is every one of them.
     transient_one_snapshot_band_p1: int = 0
     #: De-risk slots whose neighbours were blind, so "transient" cannot be
     #: decided either way. Reported, never folded into the count above.
@@ -707,28 +702,13 @@ def _band_unknown(state: str | None) -> bool:
     return state is None or state == STATE_SUPPRESSED
 
 
-def _stay_lasted_two_or_more_snapshots(before: str | None,
-                                       after: str | None) -> bool:
-    """A de-risk snapshot with a de-risk neighbour: the band stayed in de-risk.
-
-    The keep condition counts transient one-snapshot P1s, entries into de-risk
-    that the band left after one snapshot. A stay of two or more snapshots is
-    not one, so none of its snapshots is counted. The rule still sends its P1
-    for that entry. Replayed both ways, with two P1s each time, by
-    `test_the_keep_condition_fails_on_one_snapshot_p1s_and_holds_on_longer_stays`:
-    one-snapshot stays count 2 and fail the condition, two-snapshot stays count 0.
-    """
-    return BAND_DERISK in (before, after)
-
-
 def _collect_band_excursions(summary: ReplaySummary,
                              records: list[AlertInput]) -> None:
     """Transient one-snapshot entries into de-risk.
 
     The mandate keeps the immediate de-risk P1 only while replay shows at most
-    one transient one-snapshot excursion per 24 months. The harness counts the
-    one-snapshot entries of the busiest 24 months here (a longer stay is not
-    one, `_stay_lasted_two_or_more_snapshots`) and `_decide` judges the count.
+    one transient one-snapshot excursion per 24 months, so the harness has to
+    measure it rather than assert it.
 
     A neighbour that is UNKNOWN — degraded coverage, a suppressed band, a blind
     slot — is NOT evidence that the excursion ended. Counting it as one would
@@ -743,9 +723,9 @@ def _collect_band_excursions(summary: ReplaySummary,
         if states[i] != BAND_DERISK:
             continue
         before, after = states[i - 1], states[i + 1]
-        if _stay_lasted_two_or_more_snapshots(before, after):
-            # Settled: not one snapshot long, whatever the other neighbour did
-            # or did not say. Not counted.
+        if before == BAND_DERISK or after == BAND_DERISK:
+            # Settled: a de-risk neighbour means this was not one snapshot
+            # long, whatever the other neighbour did or did not say.
             continue
         if _band_unknown(before) or _band_unknown(after):
             indeterminate += 1
@@ -987,13 +967,7 @@ def _decide(summary: ReplaySummary) -> None:
                 f"{evaluable_events} evaluable event(s)"
             )
     if summary.transient_one_snapshot_band_p1 > TRANSIENT_DERISK_P1_CAP:
-        # The same asymmetry as the volume caps above: the busiest window only
-        # grows with more history, so a breach is provable on a history of any
-        # length and staying within the bound is not. Without this comparison
-        # the figure was measured and judged by nothing: production's sidecars
-        # of 2026-08-20 .. 2026-11-10 (2.69 months) hold four one-snapshot
-        # entries into de-risk, two of them sent as a P1, and the verdict
-        # listed the figure under `not_measured`.
+        # Like the volume caps: a breach is provable on any history length.
         failures.append(
             "transient one-snapshot de-risk entries breached the keep "
             "condition of regime.band_to_derisk: "

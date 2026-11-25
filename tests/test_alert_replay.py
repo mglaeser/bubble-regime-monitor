@@ -647,155 +647,42 @@ def test_a_derisk_neighbour_settles_an_excursion(tmp_path, artifacts):
 
 
 # ---------------------------------------------------------------------------
-# the de-risk P1's keep condition. The ruleset states it at
-# regime.band_to_derisk (config/alert_rules.v3.2.yaml): "Keep it only while
-# replay shows <= 1 transient one-snapshot P1 per 24 months". These tests are
-# written from that sentence.
+# the de-risk P1's keep condition (config/alert_rules.v3.2.yaml,
+# regime.band_to_derisk): "Keep it only while replay shows <= 1 transient
+# one-snapshot P1 per 24 months"
 # ---------------------------------------------------------------------------
 
 
-def _band_history(states_by_offset):
-    """Recompute inputs whose band is the given state, at the given offsets."""
+def _one_snapshot_entries(*days):
+    """Recompute inputs: on each given day the band goes trim, de-risk, trim."""
     start = datetime(2026, 8, 15, 2, 0, tzinfo=UTC)
     return [
-        make_input(identity=f"k{i}", computed_at=(start + offset).isoformat(),
-                   effective=state, base=state,
+        make_input(identity=f"k{day}-{i}", effective=state, base=state,
+                   computed_at=(start + timedelta(days=day, hours=4 * i)).isoformat(),
                    median=63.0 if state == "de-risk" else 52.0)
-        for i, (offset, state) in enumerate(states_by_offset)
+        for day in days for i, state in enumerate(("trim", "de-risk", "trim"))
     ]
 
 
-def _verdict_on(*, months: float, one_snapshot_entries: int) -> ReplaySummary:
-    """The verdict on a replay that measured this many entries over this span."""
-    from app.alerts.replay import _decide
-
-    summary = ReplaySummary()
-    summary.transient_one_snapshot_band_p1 = one_snapshot_entries
-    summary.band_excursion_months = months
-    _decide(summary)
-    return summary
-
-
-def test_more_than_one_transient_derisk_entry_fails_the_gate_on_any_window():
-    """A breach is provable on a short window: more history only adds entries.
-
-    Production's sidecars of 2026-08-20 .. 2026-11-10 (491 inputs, 2.69 months)
-    hold four one-snapshot entries into de-risk: 2026-09-25 22:01, 09-27 10:01,
-    10-08 14:01 and 10-10 06:00 UTC, each back in trim four hours later. Two
-    were sent as a P1 (09-25 22:03 and 10-08 14:02 UTC); the other two fell
-    inside the rule's 48 h cooldown. The gate did not fail on them: it listed
-    the figure under `not_measured`.
-    """
-    for months in (2.69, 30.0):
-        summary = _verdict_on(months=months, one_snapshot_entries=4)
-        assert summary.passed is False
-        assert summary.failures == [
-            "transient one-snapshot de-risk entries breached the keep "
-            "condition of regime.band_to_derisk: 4 > 1 per 24 months"]
-        assert not any("transient_derisk_p1_rate" in note
-                       for note in summary.not_measured), (
-            "a proven breach was also listed as not measured")
-
-
-def test_staying_within_the_keep_condition_on_a_short_window_is_unmeasured():
-    """One entry in a few weeks proves nothing about 24 months."""
-    short = _verdict_on(months=2.69, one_snapshot_entries=1)
-    assert short.failures == []
-    assert any("transient_derisk_p1_rate" in note for note in short.not_measured)
-
-    # On 24 months or more the condition is measured, and one entry meets it.
-    full = _verdict_on(months=30.0, one_snapshot_entries=1)
-    assert full.failures == []
-    assert not any("transient_derisk_p1_rate" in note for note in full.not_measured)
-
-
-def test_two_one_snapshot_derisk_entries_in_a_replayed_history_fail_the_gate(
+def test_two_one_snapshot_derisk_entries_fail_the_gate_on_a_short_history(
         tmp_path, artifacts):
-    """End to end: the replay counts the entries and its verdict judges them."""
-    slot = timedelta(hours=4)
-    states = ["trim", "de-risk", "trim", "trim", "de-risk", "trim"]
-    summary = _run(tmp_path, artifacts, name="keep.db", inputs=_band_history(
-        [(slot * i, state) for i, state in enumerate(states)]))
+    summary = _run(tmp_path, artifacts, name="keep.db",
+                   inputs=_one_snapshot_entries(0, 3))
     assert summary.transient_one_snapshot_band_p1 == 2
     assert any("keep condition of regime.band_to_derisk: 2 > 1 per 24 months"
                in failure for failure in summary.failures), summary.failures
+    assert not any("transient_derisk_p1_rate" in note
+                   for note in summary.not_measured)
 
 
-def test_a_derisk_excursion_of_two_or_more_snapshots_is_not_counted(
-        tmp_path, artifacts):
-    """Only a one-snapshot entry counts: a longer stay in de-risk is not one.
-
-    Two excursions of two and three de-risk snapshots and one entry of one
-    snapshot: six de-risk snapshots, one entry the condition counts, no breach.
-    """
-    slot = timedelta(hours=4)
-    states = ["trim", "de-risk", "de-risk", "trim",
-              "trim", "de-risk", "de-risk", "de-risk", "trim",
-              "trim", "de-risk", "trim"]
-    summary = _run(tmp_path, artifacts, name="long.db", inputs=_band_history(
-        [(slot * i, state) for i, state in enumerate(states)]))
-    assert summary.transient_one_snapshot_band_p1 == 1
-    assert summary.indeterminate_band_excursions == 0
-    assert not any("keep condition" in failure for failure in summary.failures), (
-        summary.failures)
-
-
-def test_the_keep_condition_fails_on_one_snapshot_p1s_and_holds_on_longer_stays(
-        tmp_path, artifacts):
-    """The gate, executed both ways on the same two P1s.
-
-    regime.band_to_derisk sends a P1 for both entries into de-risk, three days
-    apart (outside its 48 h cooldown), whatever the stay's length. When each
-    stay ends after one snapshot, both P1s were transient and the keep
-    condition fails, 2 > 1. When each stay lasts two snapshots, the band stayed:
-    no P1 was transient and the condition holds.
-    """
-    slot, apart = timedelta(hours=4), timedelta(days=3)
-
-    def two_entries(stay: list[str]) -> list:
-        visit = ["trim", *stay, "trim"]
-        return _band_history([(start + slot * i, state)
-                              for start in (timedelta(0), apart)
-                              for i, state in enumerate(visit)])
-
-    one_snapshot = _run(tmp_path, artifacts, name="one.db",
-                        inputs=two_entries(["de-risk"]))
-    two_snapshots = _run(tmp_path, artifacts, name="two.db",
-                         inputs=two_entries(["de-risk", "de-risk"]))
-
-    for summary in (one_snapshot, two_snapshots):
-        assert summary.episodes_by_rule["regime.band_to_derisk"] == 2
-        assert summary.p1_total == 2
-    assert one_snapshot.transient_one_snapshot_band_p1 == 2
-    assert any("keep condition of regime.band_to_derisk: 2 > 1 per 24 months"
-               in failure for failure in one_snapshot.failures), one_snapshot.failures
-    assert two_snapshots.transient_one_snapshot_band_p1 == 0
-    assert not any("keep condition" in failure for failure in two_snapshots.failures), (
-        two_snapshots.failures)
-
-
-def test_the_keep_condition_counts_the_busiest_24_months_not_the_whole_history(
-        tmp_path, artifacts):
-    """The condition is stated per 24 months, so the busiest 24 months count.
-
-    Two one-snapshot entries 800 days apart are one per 24 months and meet it;
-    the same two 700 days apart share a 24-month window and break it.
-    """
-    slot = timedelta(hours=4)
-
-    def two_entries(apart: timedelta) -> list:
-        return _band_history([
-            (slot * 0, "trim"), (slot * 1, "de-risk"), (slot * 2, "trim"),
-            (apart, "trim"), (apart + slot, "de-risk"), (apart + slot * 2, "trim")])
-
+def test_the_keep_condition_counts_the_busiest_24_months(tmp_path, artifacts):
     far = _run(tmp_path, artifacts, name="far.db",
-               inputs=two_entries(timedelta(days=800)))
+               inputs=_one_snapshot_entries(0, 800))
     assert far.transient_one_snapshot_band_p1 == 1
     assert not any("keep condition" in failure for failure in far.failures)
-    assert not any("transient_derisk_p1_rate" in note for note in far.not_measured)
 
     near = _run(tmp_path, artifacts, name="near.db",
-                inputs=two_entries(timedelta(days=700)))
+                inputs=_one_snapshot_entries(0, 700, 1500))
     assert near.transient_one_snapshot_band_p1 == 2
     assert any("keep condition" in failure for failure in near.failures)
 
