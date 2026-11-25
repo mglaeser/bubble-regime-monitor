@@ -10,15 +10,22 @@ additive-epsilon form, see the RESCALE_FLOOR note below):
     Score_raw = 100 * S^alpha * D^beta          # baseline alpha = beta = 0.5
 
 Why geometric (per OECD/JRC Handbook on Constructing Composite Indicators,
-2008): linear/additive aggregation implies full compensability — a calm
-indicator can fully offset an alarming one — which is wrong for a risk gauge.
-The weighted geometric mean makes compensation only partial and penalizes
-imbalance. The RESCALE_FLOOR = 0.10 rescale (r(x) = 0.10 + 0.90*x, applied
+2008): a weighted geometric mean makes compensation between indicators only
+partial and penalizes imbalance. With high = alarming that makes the block
+conjunctive: it reads high only when its indicators agree, and one calm
+reading pulls it down further than a linear mean of the same rescaled values
+would (Block D with d1 at 1.0 and the other three at 0.0: 0.224 against 0.415;
+d1 at 0.0 and the other three at 1.0: 0.447 against 0.685). A single alarming
+indicator is therefore NOT protected from being offset by calm ones; the only
+non-compensatory part is the red-flag override below, and it needs three
+flags at once. The RESCALE_FLOOR = 0.10 rescale (r(x) = 0.10 + 0.90*x, applied
 BEFORE the product) keeps zeros from annihilating the block — it supersedes the
 original additive-epsilon (eps = 0.02) form, which is no longer used (v3.3.0).
 
 Non-compensatory override (OECD/JRC multi-criteria logic): if >= 3 of the 4
-red flags fire simultaneously -> Score = max(Score, 70).
+red flags fire simultaneously -> Score = max(Score, 70). While the GSADF flag
+is contested (the standing default) it cannot fire, so the override needs the
+other three at once.
 
 EPISTEMIC GUARDRAILS: the five, verbatim, are in app/references.py.
 """
@@ -187,10 +194,11 @@ def apply_override(score: float, red_flags: RedFlags) -> float:
 def action_band(score: float) -> str:
     """Action bands: < 45 hold; 45-60 trim; >= 60 or override -> de-risk.
 
-    The 45 lower edge follows a balanced loss L = theta*(missed peaks) +
-    (1-theta)*(false alarms) with theta = 0.5 (Alessi & Detken 2011); an
-    alternative false-alarm-tilted band edge of 52 follows theta = 0.4
-    motivated by the missing-best-days asymmetry (Estrada 2008, 2009).
+    The edges are judgmental cut-offs. No loss function was fitted and, with
+    about four comparable episodes, none can be (guardrail 2 in
+    app/references.py). Alessi & Detken (2011) and Estrada (2008, 2009) are
+    cited for the trade-off the edges express, missed peaks against false
+    alarms and the cost of missing the best days, not for an estimate.
     """
     if score >= _BAND_DERISK_AT:
         return "de-risk"
