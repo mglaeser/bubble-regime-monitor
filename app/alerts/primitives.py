@@ -49,15 +49,15 @@ class EvaluationContext:
     """Everything a rule may see. Immutable, and it holds no live connection.
 
     `previous` is the immediately preceding input; `history` is the ordered
-    window used by delta windows. `is_cold_start` distinguishes "no predecessor
-    exists" from "the predecessor is unreadable" — the first is an answer, the
-    second is UNKNOWN.
+    window used by delta windows. `previous is None` is the cold start, and it
+    is what the transition conditions test: "no predecessor exists" is an
+    answer (`cold_start_no_predecessor`, not a transition), "the predecessor
+    is unreadable" is UNKNOWN (`previous_unavailable`).
     """
 
     current: AlertInput
     previous: AlertInput | None = None
     history: tuple[AlertInput, ...] = ()
-    is_cold_start: bool = False
 
     def input_at_or_before(self, iso_moment: str) -> AlertInput | None:
         """The most recent historical input at or before an ISO instant."""
@@ -80,10 +80,6 @@ class ConditionOutcome:
     reasons: list[str] = field(default_factory=list)
     evidence: dict[str, SourceValue] = field(default_factory=dict)
     unfresh_hold_sources: list[str] = field(default_factory=list)
-
-    @property
-    def is_unknown(self) -> bool:
-        return self.truth is None
 
     def merged(self, other: ConditionOutcome) -> ConditionOutcome:
         self.reasons.extend(other.reasons)
@@ -256,6 +252,7 @@ def _eval_crossing(node: CrossingCondition, ctx: EvaluationContext,
     value = _as_number(now.value)
     if not now.available or value is None:
         return _unknown(f"{node.source}:unavailable", {node.source: now})
+    # The level's pinned value: the hold and the crossing below both compare against it.
     level = thresholds.get(node.level)
     if level is None:
         return ConditionOutcome(truth=None, status=EvaluationStatus.DISABLED,

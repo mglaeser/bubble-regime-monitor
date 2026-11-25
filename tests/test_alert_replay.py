@@ -713,6 +713,84 @@ def test_the_150_pp_tier_is_reminded_only_while_the_run_up_stays_beyond_it(
                 ).deliveries_by_kind == {"INITIAL": 1}
 
 
+def test_a_replay_leaves_a_due_live_alert_and_its_cooldown_alone(
+        tmp_path, artifacts, isolated_db):
+    """The step that takes planned alerts as sent names no mode, because the
+    database it runs on holds one: `run_replay` creates it empty for the run
+    and writes to it under DRYRUN only. The application's database is read for
+    its sidecars and nothing else. So a LIVE P1 that is due there stays
+    undelivered and its rule's cooldown does not start, also when a copy of
+    that database lies at the replay's own path before the run."""
+    import sqlite3
+    from contextlib import closing
+
+    from sqlalchemy import create_engine, select
+    from sqlalchemy.orm import sessionmaker
+
+    from app.alerts.engine import run_evaluation
+    from app.alerts.models import (
+        AlertDelivery,
+        AlertDeliveryMember,
+        AlertInstanceNotificationState,
+    )
+    from app.config import get_settings
+    from app.db import session_scope
+    from tests.conftest import register_promoted
+    from tests.test_alert_evaluation import _store_input
+
+    def outbox(path) -> list[tuple]:
+        """Every alert in the database at `path`: (mode, profile, release
+        time, member taken as sent, start of its rule's cooldown)."""
+        engine = create_engine(f"sqlite:///{path}", future=True)
+        try:
+            with sessionmaker(bind=engine)() as session:
+                return [(delivery.mode, delivery.live_profile, delivery.not_before,
+                         member.delivered,
+                         session.get(AlertInstanceNotificationState, (
+                             delivery.mode, delivery.live_profile,
+                             member.instance_fingerprint)).last_sent_at)
+                        for delivery, member in session.execute(
+                            select(AlertDelivery, AlertDeliveryMember).join(
+                                AlertDeliveryMember,
+                                AlertDeliveryMember.delivery_id == AlertDelivery.delivery_id)
+                            .order_by(AlertDelivery.mode)).all()]
+        finally:
+            engine.dispose()
+
+    # The application's side: de-risk is entered at 10:00 and LIVE plans its
+    # P1. Due at 10:00, not sent, no cooldown: what the replay's 14:00 step
+    # would take as sent if it could reach this row.
+    history = _band_arc(["trim", "de-risk", "de-risk"])
+    moments = [datetime.fromisoformat(record.computed_at) for record in history]
+    with session_scope() as session:
+        register_promoted(session, artifacts, now=moments[0])
+    for record, moment in zip(history, moments, strict=True):
+        _store_input(record, moment)
+    for record, moment in zip(history[:2], moments[:2], strict=True):
+        assert run_evaluation(session_scope, alert_input=record, current=artifacts.ruleset,
+                              mode=Mode.LIVE, now=moment).status == "COMMITTED"
+    live = [("live", "default", moments[1], False, None)]
+    assert outbox(isolated_db) == live
+
+    # The same rows at the replay's own path, before it runs.
+    state = tmp_path / "replay.db"
+    with closing(sqlite3.connect(isolated_db)) as source, \
+            closing(sqlite3.connect(state)) as copy:
+        source.backup(copy)
+    assert outbox(state) == live
+
+    summary = run_replay(
+        config=ReplayConfig(source_db_url=get_settings().db_url, state_db_path=state,
+                            evaluate_at_stage=3),
+        ruleset=artifacts.ruleset, phrase_set=artifacts.phrase_set)
+
+    assert outbox(isolated_db) == live
+    # The replay's database: its own P1 and no other row, taken as sent at
+    # its release time.
+    assert outbox(state) == [("dryrun", "replay", moments[1], True, moments[1])]
+    assert (summary.inputs_total, summary.p1_total) == (3, 1)
+
+
 # ---------------------------------------------------------------------------
 # the committed gate artifact
 # ---------------------------------------------------------------------------

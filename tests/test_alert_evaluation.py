@@ -135,8 +135,7 @@ def _rule(**overrides) -> RuleSpec:
 
 def _ctx(current: AlertInput, previous: AlertInput | None = None) -> EvaluationContext:
     return EvaluationContext(current=current, previous=previous,
-                             history=(previous,) if previous else (),
-                             is_cold_start=previous is None)
+                             history=(previous,) if previous else ())
 
 
 # ---------------------------------------------------------------------------
