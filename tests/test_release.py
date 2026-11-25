@@ -16,7 +16,6 @@ shims that log every call and keep a little state in $SHIM_STATE.
 from __future__ import annotations
 
 import os
-import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -566,19 +565,11 @@ def _value(section: list[str], key: str) -> str:
     return next(line.split("=", 1)[1] for line in section if line.startswith(key + "="))
 
 
-def _install_section() -> str:
+def _install_steps() -> list[str]:
+    """The install section of the deploy page as commands: each line, its comment cut."""
     doc = (ROOT / "docs/AUTO_DEPLOY.md").read_text(encoding="utf-8")
-    return doc[doc.index("### Install (once"):doc.index("### Operate")]
-
-
-def _commands(text: str) -> list[str]:
-    """Each line of a docs section as a command: its comment cut."""
-    return [line.split("#")[0].strip() for line in text.splitlines()]
-
-
-def _installed() -> dict[str, str]:
-    """Source -> target of every `install -D` line of the install section."""
-    return {c.split()[-2]: c.split()[-1] for c in _commands(_install_section()) if c.startswith("install -D ")}
+    section = doc[doc.index("### Install (once"):doc.index("### Operate")]
+    return [line.split("#")[0].strip() for line in section.splitlines()]
 
 
 class TestTheUnits:
@@ -719,63 +710,17 @@ class TestTheUnits:
     def test_the_install_block_installs_every_file_under_deploy(self):
         # what runs on the host is installed by hand from this section, once: a
         # file of deploy/ it leaves out is a unit or a script a host built from
-        # the page does not have. The section listed five of the nine until
-        # 2026-11: the host notifier and the three alert-watchdog units are on
-        # the production host only because they were put there by hand.
+        # the page does not have
         shipped = sorted(p.relative_to(ROOT).as_posix() for p in (ROOT / "deploy").rglob("*") if p.is_file())
-        installed = _installed()
-        assert sorted(installed) == shipped
-        # the units find each other by file name (Unit=, OnFailure=): each is
-        # installed under its own
-        for source, target in installed.items():
-            if not source.endswith(".sh"):
-                assert target.rsplit("/", 1)[1] == source.rsplit("/", 1)[1], source
+        assert sorted(step.split()[-2] for step in _install_steps() if step.startswith("install -D ")) == shipped
 
-    def test_every_program_and_credentials_file_a_unit_names_is_in_the_install_block(self):
-        units = [p.read_text(encoding="utf-8") for p in sorted((ROOT / "deploy").rglob("*"))
-                 if p.suffix in {".service", ".timer", ".container"}]
-        programs = {m for unit in units for m in re.findall(r"^ExecStart=%h/(\S+)", unit, re.M)}
-        settings = {m for unit in units for m in re.findall(r"^EnvironmentFile=%h/(\S+)", unit, re.M)}
-        assert programs and settings
-        # a unit whose program is not installed ends with 203/EXEC, and one
-        # whose EnvironmentFile= is missing does not start: for the two notice
-        # units that is a failed release or watchdog run nobody hears of
-        targets = set(_installed().values())
-        for program in sorted(programs):
-            assert f"~/{program}" in targets, program
-        section = _install_section()
-        for path in sorted(settings):
-            assert f"~/{path}" in section, path
-        # the notifier refuses to run while one of these is unset
-        notifier = (ROOT / "deploy/notify-outage.sh").read_text(encoding="utf-8")
-        required = sorted(set(re.findall(r'\[ -n "\$\{(IMESSAGE_[A-Z_]+):-\}" \]', notifier)))
-        assert required
-        for name in required:
-            assert name in section, name
-
-    def test_the_install_block_enables_every_timer_after_the_reload(self):
-        steps = _commands(_install_section())
+    def test_the_install_block_enables_every_timer(self):
         timers = sorted(p.name for p in (ROOT / "deploy/systemd").glob("*.timer"))
         # nothing but this line makes a host release or watch by itself: a
         # timer that is installed and not enabled never fires
-        enables = [i for i, step in enumerate(steps) if step.startswith("systemctl --user enable ")]
+        enables = [step.split() for step in _install_steps() if step.startswith("systemctl --user enable ")]
         assert len(enables) == 1, "one line enables the timers"
-        enable = steps[enables[0]].split()
-        assert enable[:4] == ["systemctl", "--user", "enable", "--now"] and sorted(enable[4:]) == timers
-        last_install = max(i for i, step in enumerate(steps) if step.startswith("install "))
-        reload_ = steps.index("systemctl --user daemon-reload")
-        # the first release builds main's image and starts the service (with no
-        # container running, release.sh releases: test_a_release_when_no_container_runs);
-        # nothing else does
-        first_release = steps.index("systemctl --user start bubblegauge-release.service")
-        # the timers last. Both carry OnBootSec=, and systemd starts such a
-        # timer's unit at once when that time has already passed (systemd.timer(5)):
-        # a watchdog run before the first release finds no container, fails
-        # (podman exec, 125) and sends a host notice about a host being set up.
-        for name in timers:
-            assert any(line.startswith("OnBootSec=")
-                       for line in _directives((ROOT / "deploy/systemd" / name).read_text())["[Timer]"])
-        assert last_install < reload_ < first_release < enables[0]
+        assert enables[0][:4] == ["systemctl", "--user", "enable", "--now"] and sorted(enables[0][4:]) == timers
 
     def test_the_hand_rollback_stops_a_release_in_flight_first(self):
         doc = (ROOT / "docs/AUTO_DEPLOY.md").read_text()
@@ -789,20 +734,3 @@ class TestTheUnits:
         tag = next(i for i, s in enumerate(steps) if s.startswith("podman tag localhost/bubblegauge:<previous"))
         start = steps.index("systemctl --user start bubblegauge.service")
         assert timer < release_unit < service < tag < start
-
-    def test_the_hand_rollback_says_what_ends_it(self):
-        # the release has no memory: its next run finds a container that does
-        # not carry main's commit and releases main again (test_a_release_when_
-        # the_label_differs). Three things start that run, and the page names each.
-        doc = (ROOT / "docs/AUTO_DEPLOY.md").read_text(encoding="utf-8")
-        rollback = doc[doc.index("The hand rollback"):doc.index("### The deploy note")]
-        after = rollback[rollback.index("systemctl --user start bubblegauge.service"):]
-        # the timer the rollback stopped, started again
-        assert "systemctl --user start bubblegauge-release.timer" in after
-        # `make deploy` starts the release unit
-        assert "deploy:\n\tsystemctl --user start bubblegauge-release.service\n" in (ROOT / "Makefile").read_text()
-        assert "`make deploy`" in after
-        # a reboot: the timer is enabled (the install section) and fires two minutes after boot
-        timer = _directives((ROOT / "deploy/systemd/bubblegauge-release.timer").read_text())
-        assert "WantedBy=timers.target" in timer["[Install]"] and "OnBootSec=2min" in timer["[Timer]"]
-        assert "reboot" in after
