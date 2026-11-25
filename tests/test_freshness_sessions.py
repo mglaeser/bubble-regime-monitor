@@ -124,6 +124,20 @@ def test_a_reading_dated_in_the_future_is_stale(on):
         assert _reading(indicator_id, "2026-11-13").stale is True
 
 
+def test_the_rule_runs_on_the_real_clock_with_the_modules_own_date_names():
+    """No patched clock here. `_past_sla` parses with `date` and `stale` asks
+    `datetime.now(UTC)`: the names compute.py imports from the standard library
+    at its top, on a line this change leaves as it was. Were one of them not
+    bound there, the calls below would raise NameError."""
+    today = datetime.now(UTC).date()
+    assert compute._past_sla("d1", today.isoformat(), today) is False
+    for indicator_id in (*DAILY, *SLOW):
+        assert _reading(indicator_id, today.isoformat()).stale is False
+    assert compute.date is date
+    assert compute.datetime is datetime
+    assert compute.UTC is UTC
+
+
 def _raw(today: str, breadth_as_of: str):
     """The golden inputs, every reading dated `today` except breadth."""
     from tests.conftest import make_golden_raw_inputs

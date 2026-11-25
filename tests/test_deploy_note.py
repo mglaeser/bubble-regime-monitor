@@ -5,6 +5,7 @@ text, and the note renders their fixed phrases; the likelihood line is the
 code's; the bare deploy goes out when the reply is not codes only."""
 from __future__ import annotations
 
+import ast
 import os
 import re
 from pathlib import Path
@@ -89,12 +90,56 @@ def _model(monkeypatch, reply=None, error=None) -> dict[str, object]:
     (("app/engine/aggregate.py", "tests/test_golden_fixture.py"), "high"),
     (("app/indicators/s3_semis.py",), "medium"),
     (("r/gsadf.R",), "medium"),
+    (("app/engine/gsadf_runner.py",), "medium"),
+    (("app/engine/gsadf_runner.py", "tests/test_golden_fixture.py"), "high"),
     (("app/sources/fred.py",), "low"),
     (("docs/AUTO_DEPLOY.md", "deploy/release.sh"), "very low"),
 ])
 def test_the_likelihood_is_a_class_of_the_changed_files(tmp_path, files, expected):
     note = dn.read_note(_write(tmp_path / "n", files=files))
     assert note is not None and note.likelihood().startswith(expected + " - ")
+
+
+#: The engine modules the pipeline imports that cannot move the score: the
+#: model's note (judgment) is written from the finished score, and the slot
+#: times (recompute_slots) date the run.
+NOT_SCORING = {"app/engine/judgment.py", "app/engine/recompute_slots.py"}
+
+
+def test_every_engine_module_the_pipeline_imports_is_decided():
+    """SCORING_CODE is "paths whose change can move the score itself", and it
+    names the engine's files one by one. One was missing: the S4 bridge,
+    app/engine/gsadf_runner.py, which hands r/gsadf.R its series and parses
+    the statistic S4 is scored on. Executed before the entry was added:
+    `Note("a", "b", 1, [], ["app/engine/gsadf_runner.py"]).likelihood()` gave
+    "very low - no scoring code and no data-input adapter changed", and the
+    same with tests/test_golden_fixture.py beside it, while r/gsadf.R, the
+    script the bridge runs, gave "medium". No note that went out was wrong:
+    the bridge last changed on 2026-08-22 and the note exists since 2026-10-03.
+
+    So every app.engine module the pipeline (app/services/compute.py) imports
+    is decided: it is matched by SCORING_CODE or named in NOT_SCORING with its
+    reason - never both, never neither. A new engine module in the pipeline
+    fails here until it is classed."""
+    compute = Path(__file__).resolve().parents[1] / "app" / "services" / "compute.py"
+    imported: set[str] = set()
+    for node in ast.walk(ast.parse(compute.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.ImportFrom) and node.module == "app.engine":
+            modules = [f"app.engine.{alias.name}" for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            modules = [node.module or ""]
+        elif isinstance(node, ast.Import):
+            modules = [alias.name for alias in node.names]
+        else:
+            continue
+        imported.update(f"app/engine/{module.split('.')[2]}.py" for module in modules
+                        if module.startswith("app.engine."))
+    assert imported, "compute.py imports nothing from app.engine: the test reads the wrong file"
+    scoring = set(dn.Note("a", "b", 1, [], sorted(imported)).touched(dn.SCORING_CODE))
+    assert scoring | NOT_SCORING == imported and not scoring & NOT_SCORING, {
+        "undecided": sorted(imported - scoring - NOT_SCORING),
+        "both": sorted(scoring & NOT_SCORING),
+        "no longer imported": sorted(NOT_SCORING - imported)}
 
 
 def test_a_path_with_a_space_is_one_path(tmp_path):
