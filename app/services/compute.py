@@ -1528,13 +1528,7 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
 
 
 def persist_snapshot(data: SnapshotData, raw: RawInputs) -> int:
-    """Write snapshot + indicator_readings; return snapshot id.
-
-    No network call sits between the computation and its commit. The row
-    carries the previous snapshot's judgment note, marked stale, until
-    `write_judgment` replaces it (run_recompute's last step). Production, 222
-    runs to 2026-11-10: the commit used to wait 22 to 289 s for the model
-    (median 97 s), two thirds of the time in which a restart lost the slot."""
+    """Write snapshot + indicator_readings + source_health; return snapshot id."""
     from app.models import IndicatorReading
 
     settings = get_settings()
@@ -1620,9 +1614,7 @@ def persist_snapshot(data: SnapshotData, raw: RawInputs) -> int:
             trend_states=data.trend_states,
             fast_alarm=data.fast_alarm,
             # Until write_judgment replaces it, GET /api/v1/score and the
-            # status page serve this as what it is: the previous note, stale
-            # (about 100 s at the median, every four hours). The alert input
-            # (app/alerts/input_builder.py) reads none of the three columns.
+            # status page serve this as what it is: the previous note, stale.
             judgment_call=last_text,
             judgment_stale=True,
             judgment_error=None,
@@ -1656,25 +1648,12 @@ def persist_snapshot(data: SnapshotData, raw: RawInputs) -> int:
                 data_source=ind.data_source, fallback_used=ind.fallback_used,
                 dropped=ind.dropped, note=ind.note, timestamp=now,
             ))
+        for h in raw.source_health:
+            session.add(SourceHealth(source=h["source"], ok=h["ok"], latency_ms=h["latency_ms"],
+                                     http_status=h["http_status"], checked_at=now, note=h["note"]))
         session.flush()
         snap_id = snap.id
     return snap_id
-
-
-def persist_source_health(raw: RawInputs) -> None:
-    """Write the gather's per-source health, whatever becomes of the run.
-
-    GET /readyz and the status page show the newest row per source and call it
-    the latest gather's. Written with the snapshot, in its transaction, it was
-    the latest snapshot's (production to 2026-11-10: 11,048 rows at 615 times,
-    each a snapshot's computed_at): a gather whose run could not score left no
-    row, and both pages kept showing the run before it."""
-    now = datetime.now(UTC)
-    with session_scope() as session:
-        session.add_all(
-            SourceHealth(source=h["source"], ok=h["ok"], latency_ms=h["latency_ms"],
-                         http_status=h["http_status"], checked_at=now, note=h["note"])
-            for h in raw.source_health)
 
 
 def write_judgment(snap_id: int, data: SnapshotData) -> None:
@@ -1700,18 +1679,12 @@ def write_judgment(snap_id: int, data: SnapshotData) -> None:
 
 
 def run_recompute() -> int | None:
-    """Full recompute: gather -> source health -> compute -> persist -> alert
-    capture -> Parquet export -> feed -> judgment note.
+    """Full recompute: gather -> compute -> persist -> alert capture ->
+    Parquet export -> feed -> judgment note.
 
     Returns the snapshot id, or None if scoring was impossible (an entire
     block empty). Never raises upstream failures."""
     raw = gather_inputs()
-    try:
-        persist_source_health(raw)
-    except Exception as exc:
-        # The health rows must not cost the score: "database is locked" has
-        # occurred (2026-11-01 06:15, on the alert dispatcher's heartbeat).
-        log.warning("source_health_write_failed", error=sanitize(exc, limit=300))
     try:
         # The real evaluation date: without it a completed month is invisible
         # until the next month's first bar lands.
@@ -1723,12 +1696,9 @@ def run_recompute() -> int | None:
     # Alert system: directly after the snapshot commits, before anything that
     # waits on a disk or a network. The capture is the one step of a run that
     # nothing makes up for: a snapshot without its sidecar is a hole in the
-    # replay record (app/services/alert_integration.py), and
-    # app/alerts/recovery.py reports such a gap and never fills it. Its own
-    # transaction and its own exception boundary: it cannot delay, alter or
-    # roll back the snapshot. Production, 222 runs to 2026-11-10: behind the
-    # feed the capture followed the commit by 4.5 to 40 s (median 6.8 s), and
-    # on 2026-11-01 the container was killed 3.7 s after it.
+    # replay record (app/services/alert_integration.py). Its own transaction
+    # and its own exception boundary: it cannot delay, alter or roll back the
+    # snapshot.
     try:
         from app.services.alert_integration import on_snapshot_committed
 
@@ -1750,8 +1720,7 @@ def run_recompute() -> int | None:
     except Exception as exc:
         log.warning("dashboard_feed_failed", error=str(exc)[:300])
     # The judgment note last: the one model call of the run, onto the committed
-    # snapshot. Nothing above waits for it (22 to 289 s in production, up to
-    # the gateway's 900 s deadline).
+    # snapshot. Nothing above waits for it.
     try:
         write_judgment(snap_id, data)
     except Exception as exc:
