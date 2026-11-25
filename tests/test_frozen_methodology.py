@@ -1,8 +1,10 @@
 """F-01 / L-07 — the canonical frozen_methodology.json is the CAUSAL runtime source.
 
 Three guarantees:
-  1. IDENTITY / COMPLETENESS — every score-effective runtime constant IS the value
-     loaded from the artifact (no hardcoded duplicate remains outside it).
+  1. IDENTITY / COMPLETENESS — every runtime constant the modules load IS the
+     artifact's value (the numeric literals that still repeat an artifact value
+     without reading it are counted below, KNOWN_COLLISIONS, save the values its
+     scan skips, _TRIVIAL_VALUES; wiring them is the operator's decision).
   2. SHA-256 GUARD — the file's exact bytes are pinned; any edit fails CI and must
      go through the v4 process (or a freeze-scope re-pin with identical values).
   3. MUTATION — changing a value in the artifact flows through the loader (the file
@@ -129,6 +131,7 @@ def test_engine_constants_are_the_artifact():
     assert mc.ALPHA_RANGE == M.as_tuple("monte_carlo", "alpha_range")
     assert mc.RNG_ALGORITHM == M.get_path("monte_carlo", "rng_algorithm")
     assert mc.PERCENTILE_METHOD == M.get_path("monte_carlo", "percentile_method")
+    assert mc._OVERRIDE_TARGET == M.get_path("override", "target_score")
 
 
 def test_indicator_constants_are_the_artifact():
@@ -181,8 +184,16 @@ def test_freshness_and_coverage_are_the_artifact():
 # artifact leaf, pinned as (module, value) -> exact occurrence count. The scan
 # below fails on ANY deviation: a NEW collision (the ATH-defect class) fails
 # immediately, and fixing/removing a ledgered one forces a reviewed ledger
-# update. Classifications (operator-reported 2026-07-23, none authorized for
-# wiring yet except the ATH entry, which is FIXED and therefore absent):
+# update. Classifications (operator-reported 2026-07-23). Two entries are wired
+# and therefore absent: the ATH fraction, and the Monte Carlo's override floor
+# (montecarlo.py 70.0 x1, override.target_score: now montecarlo._OVERRIDE_TARGET,
+# read from the artifact). The floor was wired because it sits inside the
+# published headline: the point score followed the artifact and the median did
+# not (test_the_monte_carlo_floors_at_the_artifacts_override_target). It is a
+# cleanup under docs/GOVERNANCE_FREEZE_RULE.md: no value, no artifact byte, no
+# golden and no seeded Monte Carlo output moved. The operator's merge of the
+# change that wired it is its wiring authorization, for that entry and no
+# other. None of the duplicates below is authorized yet:
 #
 # GENUINE DUPLICATES of artifact constants (same semantics, awaiting the
 # operator's wiring authorization; wiring any of them is behavior-identical):
@@ -193,7 +204,6 @@ def test_freshness_and_coverage_are_the_artifact():
 #   compute.py      20/41 x1 monte_carlo.anchor_ranges.cape_window_years_int (range(20,41))
 #   compute.py      35.0/0.99 + 0.5 (3 of the 5) indicators.s1.no_history_shim_* + blend weights
 #   compute.py      0.5 x1 / 0.3 x1  quality.s5_baa_dgs10 / quality.s5_hy_oas tier literals
-#   montecarlo.py   70.0 x1  override.target_score (np.maximum(scores, 70.0))
 #   aggregate.py    0.5 x2   aggregation.alpha_baseline (combine/deterministic_score defaults)
 #   d4_lppls.py     0.5 x1   quality.d4_partial (_quality shortened-scan tier)
 #   d1_breadth.py   50.0 x1  red_flags.breadth_lt_pct — in red_flag_breadth(), which is
@@ -217,7 +227,6 @@ KNOWN_COLLISIONS: dict[tuple[str, float], int] = {
     ("app/engine/aggregate.py", 0.5): 2,
     ("app/engine/montecarlo.py", 5.0): 1,
     ("app/engine/montecarlo.py", 25.0): 1,
-    ("app/engine/montecarlo.py", 70.0): 1,
     ("app/engine/montecarlo.py", 75.0): 1,
     ("app/engine/montecarlo.py", 95.0): 1,
     ("app/indicators/d1_breadth.py", 50.0): 1,
@@ -427,3 +436,48 @@ def test_mutation_changes_engine_score(tmp_path, monkeypatch):
         importlib.reload(agg)
         importlib.reload(mc)
     assert _score(mc) == baseline   # fully restored
+
+
+def test_the_monte_carlo_floors_at_the_artifacts_override_target(tmp_path, monkeypatch):
+    """A fired override floors the point score and every Monte Carlo draw at ONE
+    constant, override.target_score: point score and median are the two halves of
+    the published headline, and "a change to the artifact is the ONLY way to
+    change a frozen constant" (app/methodology.py). So a copy of the artifact that
+    says 80 must move both. With a literal 70.0 as the Monte Carlo's floor the
+    point score went to 80.0 and the median stayed at 70.0."""
+    from app.engine import aggregate as agg
+    from app.engine import montecarlo as mc
+    from tests.conftest import GOLDEN_SUB_D, GOLDEN_SUB_S
+
+    def _point_and_median() -> tuple[float, float]:
+        # Golden sub-scores (headline 52.43, every draw below the floor) and three
+        # of the four red flags: the override fires.
+        flags = agg.RedFlags(gsadf_explosive_noncontested=True, semi_runup_ge_150pp=True,
+                             hy_oas_widen_gt_100bps=True)
+        point = agg.deterministic_score(dict(GOLDEN_SUB_S), dict(GOLDEN_SUB_D), 1.0, flags,
+                                        mc.BASE_WEIGHTS_S, mc.BASE_WEIGHTS_D).score
+        s, d = GOLDEN_SUB_S, GOLDEN_SUB_D
+        inputs = mc.MonteCarloInputs(
+            s1_sub=s["s1"], s2_sub=s["s2"], s3_sub=s["s3"], s4_sub=s["s4"], s5_sub=s["s5"],
+            d1_sub=d["d1"], d2_sub=d["d2"], d3_sub=d["d3"], d4_sub=d["d4"], red_flags=flags)
+        return point, mc.monte_carlo(inputs, n=2000, seed=20260711).median
+
+    assert _point_and_median() == (70.0, 70.0)
+    try:
+        data = json.loads(M.FROZEN_PATH.read_bytes())
+        data["override"]["target_score"] = 80.0
+        f = tmp_path / "frozen.json"
+        f.write_text(json.dumps(data))
+        monkeypatch.setattr(M, "FROZEN_PATH", f)
+        for fn in (M.frozen_bytes, M.frozen_sha256, M.frozen_methodology):
+            fn.cache_clear()
+        importlib.reload(agg)
+        importlib.reload(mc)
+        assert _point_and_median() == (80.0, 80.0)
+    finally:
+        monkeypatch.undo()
+        for fn in (M.frozen_bytes, M.frozen_sha256, M.frozen_methodology):
+            fn.cache_clear()
+        importlib.reload(agg)
+        importlib.reload(mc)
+    assert _point_and_median() == (70.0, 70.0)   # the real artifact is back
