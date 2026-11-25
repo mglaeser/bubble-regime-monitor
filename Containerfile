@@ -34,6 +34,17 @@ RUN mkdir -p /data
 # --cap-drop=ALL --security-opt no-new-privileges at run time (the Quadlet
 # unit deploy/quadlet/bubblegauge.container / compose.yml), which does not
 # fight the bind-mount ownership.
-ENV TZ=UTC PYTHONUNBUFFERED=1
+# PYTHONPATH: the project is installed before the source is copied, so that
+# the package layer stays cached across releases; the installed distribution
+# is therefore the `bubblegauge` command and no package. A console script's
+# first import path is its own directory (/usr/local/bin), not the working
+# directory, and without this line the documented command (README, "the CLI
+# in the container"; docs/ALERT_SYSTEM.md, "Operating it") ended in
+# "ModuleNotFoundError: No module named 'app'". `python -m` and uvicorn put
+# the working directory on the path themselves, so the service, the release
+# and the watchdog never met it, and /app is already first on their path:
+# nothing new becomes importable. CI's image job runs the command in the
+# built image.
+ENV TZ=UTC PYTHONUNBUFFERED=1 PYTHONPATH=/app
 EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
