@@ -206,8 +206,11 @@ def test_freshness_and_coverage_are_the_artifact():
 #   compute.py 252.0: days-per-year display arithmetic
 #   montecarlo.py 5/25/75/95: percentile POINTS (reporting quantiles), not the
 #                        colliding d2/s3 anchors
-#   d2_margin.py 3.0 x5, 4.0/5.0 x2: rollover month-structure constants and
-#                        slice indices (rollover structure is an artifact GAP)
+#   d2_margin.py 3.0 x4, 4.0/5.0 x2: rollover month-structure constants and
+#                        slice indices (rollover structure is an artifact GAP).
+#                        3.0 is the two "fewer than three months" guards and
+#                        the two [-3:] slices; a third slice went with the
+#                        12-month-high test that decided nothing.
 #   d3_hyperscaler_fcf.py 0.5 x2: the (r-0.5)/0.5 ratio anchors (artifact GAP,
 #                        colliding with unrelated 0.5 leaves)
 KNOWN_COLLISIONS: dict[tuple[str, float], int] = {
@@ -218,7 +221,7 @@ KNOWN_COLLISIONS: dict[tuple[str, float], int] = {
     ("app/engine/montecarlo.py", 75.0): 1,
     ("app/engine/montecarlo.py", 95.0): 1,
     ("app/indicators/d1_breadth.py", 50.0): 1,
-    ("app/indicators/d2_margin.py", 3.0): 5,
+    ("app/indicators/d2_margin.py", 3.0): 4,
     ("app/indicators/d2_margin.py", 4.0): 2,
     ("app/indicators/d2_margin.py", 5.0): 2,
     ("app/indicators/d3_hyperscaler_fcf.py", 0.5): 2,
@@ -303,12 +306,90 @@ def test_no_unregistered_scored_literal_collisions():
     )
 
 
-def test_config_mc_defaults_are_the_artifact():
-    from app.config import Settings
+# ---- The Monte Carlo runs the artifact's seed and sample count ---------------
 
-    s = Settings()
-    assert s.mc_samples == M.get_path("monte_carlo", "samples")
-    assert s.mc_seed == M.get_path("monte_carlo", "seed")
+def test_the_environment_cannot_move_the_monte_carlo(isolated_db, monkeypatch):
+    """AGENTS.md ground rule 6: the seed is pinned, and a snapshot records the
+    artifact's hash and version and nothing else about the Monte Carlo's run,
+    so no setting may change its seed or sample count. When both were
+    settings, under one hash (bfb3d9a5) and at the artifact's 100 000 draws,
+    MC_SEED=1 gave the golden inputs a median of 53.4515 for 53.4119 and
+    MC_SAMPLES=2000 gave 53.3795."""
+    from app.config import get_settings
+    from app.services.compute import compute_snapshot
+    from tests.conftest import make_golden_raw_inputs
+
+    def scored() -> tuple[float, tuple[float, float], tuple[float, float]]:
+        get_settings.cache_clear()
+        data = compute_snapshot(make_golden_raw_inputs())
+        return data.median, data.iqr, data.band_5_95
+
+    before = scored()
+    monkeypatch.setenv("MC_SEED", "1")
+    monkeypatch.setenv("MC_SAMPLES", "2000")
+    assert scored() == before
+
+
+def test_the_seed_and_the_sample_count_are_no_settings():
+    """Neither is a setting any more, and a host that still sets one is told
+    so (app/config.py RETIRED_ENV_KEYS: named at boot, in the alerts preflight
+    and in alert health). Dropped without a word, a value other than the
+    artifact's would move that host's score at the deploy that stops reading
+    it: on production's snapshots by about 0.02 for seed 1 and about 0.13 for
+    2 000 draws."""
+    from app.config import Settings, retired_env_keys
+
+    old = {"MC_SAMPLES", "MC_SEED"}
+    assert not {key.lower() for key in old} & set(Settings.model_fields)
+    named = dict(retired_env_keys({"mc_samples": "2000", "MC_SEED": "1"}))
+    assert set(named) == old
+    assert all("frozen_methodology.json" in why for why in named.values())
+
+
+def test_the_pipeline_runs_the_artifacts_seed_and_sample_count(monkeypatch):
+    """A caller that names neither runs the artifact's monte_carlo.samples and
+    monte_carlo.seed: 100 000 draws, seed 20260711. The recompute is that
+    caller (the next test)."""
+    from app.services import compute
+    from tests.conftest import make_golden_raw_inputs
+
+    # M is app.methodology, imported at the top of this module.
+    assert (compute.MC_SAMPLES, compute.MC_SEED) == (
+        M.get_path("monte_carlo", "samples"), M.get_path("monte_carlo", "seed")) == (100_000, 20260711)
+
+    ran: dict[str, int] = {}
+    monte_carlo = compute.monte_carlo
+    monkeypatch.setattr(compute, "monte_carlo",
+                        lambda inputs, **run: ran.update(run) or monte_carlo(inputs, **run))
+    compute.compute_snapshot(make_golden_raw_inputs())
+    assert ran == {"n": 100_000, "seed": 20260711}
+
+
+def test_the_recompute_passes_no_seed_and_no_sample_count(isolated_db, monkeypatch):
+    """compute_snapshot's mc_samples and mc_seed are for tests, and they do move
+    the median (mc_seed=1 gives the golden inputs 53.4515 for 53.4119). The
+    recompute (run_recompute: the scheduler's and the admin endpoint's path,
+    and the only one that stores a snapshot) passes neither, so a stored
+    snapshot ran the 100 000 draws and the seed 20260711 its methodology hash
+    covers. A recompute that passed either would fail here."""
+    from app.db import session_scope
+    from app.models import Snapshot
+    from app.services import compute
+    from tests.conftest import make_golden_raw_inputs
+
+    # The suite draws 20 000 (conftest); this test runs what production runs.
+    monkeypatch.setattr(compute, "MC_SAMPLES", M.get_path("monte_carlo", "samples"))
+    monkeypatch.setattr(compute, "gather_inputs", make_golden_raw_inputs)
+    ran: dict[str, int] = {}
+    monte_carlo = compute.monte_carlo
+    monkeypatch.setattr(compute, "monte_carlo",
+                        lambda inputs, **run: ran.update(run) or monte_carlo(inputs, **run))
+
+    snap_id = compute.run_recompute()
+
+    assert ran == {"n": 100_000, "seed": 20260711}
+    with session_scope() as session:
+        assert session.get(Snapshot, snap_id).methodology_sha256 == M.frozen_sha256()
 
 
 # ---- MUTATION: a changed artifact flows through to the engine ---------------
