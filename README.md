@@ -301,7 +301,7 @@ Everything bubblegauge sends to a person, by itself or on request. Times are UTC
 2. Score > 60 sustained through 24 months of > 10% annualized gains without a > 15% drawdown → **falsified**.
 3. Override fires and no > 20% drawdown within 12 months → **override falsified**.
 
-The service evaluates none of these. The operator judges them and records an outcome by hand (`POST /api/v1/admin/falsification`, append-only); recorded outcomes are exposed via `/api/v1/meta/methodology`. The tracking start date (`frozen_methodology.json`, `_meta.falsification_tracking_since`) is not set yet and only the operator sets it, so the empty list of outcomes is not a track record.
+The service evaluates none of these. The operator judges them and records an outcome by hand (`POST /api/v1/admin/falsification`, append-only); recorded outcomes are exposed via `/api/v1/meta/methodology`. An empty list there means only that no outcome has been recorded; the list is a track record only from the tracking start date (`frozen_methodology.json`, `_meta.falsification_tracking_since`), if the operator has recorded one there.
 
 ## Changelog
 

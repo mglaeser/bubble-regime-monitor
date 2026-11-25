@@ -49,15 +49,16 @@ def get_methodology(request: Request, _: None = Depends(require_read_access)) ->
         ],
         # The service evaluates no criterion: the operator judges the three
         # sentences above and records an outcome by hand (POST
-        # /api/v1/admin/falsification). The artifact holds no start date
-        # (frozen_methodology.json, _meta.falsification_tracking_since): an
-        # empty list says that nothing was recorded, and without a start date
-        # it is no track record.
+        # /api/v1/admin/falsification). The note is fixed text and does not
+        # read the start date (frozen_methodology.json,
+        # _meta.falsification_tracking_since), so it says only what holds
+        # with a date set and without one.
         "falsification_outcomes_note": (
             "The service evaluates no criterion: the operator judges the criteria "
             "and records an outcome by hand. "
-            "No tracking start date is recorded yet, so an empty list means only "
-            "that no outcome has been recorded; it is not a track record."
+            "An empty list means only that no outcome has been recorded. "
+            "The list is a track record only from the tracking start date in "
+            "frozen_methodology.json, if one is recorded there."
         ),
         "changelog": CHANGELOG,
         "unverified_citations": UNVERIFIED_CITATIONS,   # [] — all resolved (audit 2026-07-14)

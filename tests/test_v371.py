@@ -9,8 +9,6 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from app import methodology as M
-
 # ---- weights: code vs. documentation registry must be identical -----------
 
 def test_registry_weights_equal_engine_weights():
@@ -138,15 +136,14 @@ def test_methodology_documents_empty_outcomes(isolated_db, monkeypatch):
 
     with TestClient(create_app()) as client:
         d = client.get("/api/v1/meta/methodology").json()["data"]
-    # frozen_methodology.json, _meta._note: falsification_tracking_since stays
-    # <PIN> until the operator supplies it, and "it must not be backdated". While
-    # no start is recorded the page may not speak of a time "since tracking
-    # began", and an empty list of outcomes is not a track record.
-    assert M.get_path("_meta", "falsification_tracking_since") == M.PIN_SENTINEL
     assert d["falsification_outcomes"] == []
     note = d["falsification_outcomes_note"]
+    # The note is fixed text and does not read the tracking start date
+    # (frozen_methodology.json, _meta.falsification_tracking_since), so it
+    # says nothing that turns false when the operator sets one: no time
+    # "since tracking began", and a start date only as "if one is recorded".
     assert "since tracking began" not in note
-    assert "No tracking start date is recorded" in note
+    assert "if one is recorded there" in note
     # README "Falsification criteria": no job decides a criterion; the operator
     # judges and records by hand. Said on the page, not implied.
     assert "evaluates no criterion" in note and "by hand" in note
