@@ -87,8 +87,11 @@ class TestRM1Evidence:
             assert row.detail == "original detail"
         assert record_outcome("second criterion") == oid + 1  # appends still work
 
-    # No test of record_outcome refusing a blank criterion: the body model of the
-    # admin route, its one caller, refuses it (TestApiSurfaces, REFUSED_BODIES).
+    def test_record_outcome_rejects_empty_criterion(self, isolated_db):
+        from app.services.replay import record_outcome
+
+        with pytest.raises(ValueError):
+            record_outcome("   ")
 
     def test_evidence_summary(self, isolated_db):
         from app.services.replay import evidence_summary, record_outcome
@@ -232,92 +235,7 @@ class TestRM5Assembler:
         assert pkg["B_coverage_floor"]["report"]["snapshots"] == 1
 
 
-# What POST /api/v1/admin/falsification refuses. README "Falsification criteria"
-# publishes three numbered criteria and an outcome is an outcome of one of them.
-# The table is append-only and published on /api/v1/meta/methodology, so
-# whatever the route accepts stays there for good. Before the body was typed,
-# every body from "null" on was recorded with 201: the criterion as "None", "0",
-# "4", "-1", "2", "True", "2.0", "2.5", "{'a': 1}", "[2]" or the free text, a
-# detail of 0 or "" dropped, an object as its repr, 2001 characters cut to 2000,
-# the misspelt field ignored.
-REFUSED_BODIES = [
-    pytest.param({}, id="no-criterion"),
-    pytest.param({"criterion": ""}, id="empty-text"),
-    pytest.param({"criterion": "   "}, id="blank-text"),
-    pytest.param({"criterion": None}, id="null"),
-    pytest.param({"criterion": 0}, id="zero"),
-    pytest.param({"criterion": 4}, id="four"),
-    pytest.param({"criterion": -1}, id="negative"),
-    pytest.param({"criterion": "2"}, id="number-as-text"),
-    pytest.param({"criterion": True}, id="true"),
-    pytest.param({"criterion": 2.0}, id="float-2.0"),
-    pytest.param({"criterion": 2.5}, id="float-2.5"),
-    pytest.param({"criterion": {"a": 1}}, id="object"),
-    pytest.param({"criterion": [2]}, id="list"),
-    pytest.param({"criterion": "Score < 30 through a > 30% S&P drawdown"}, id="free-text"),
-    pytest.param({"criterion": 2, "detail": {"k": "v"}}, id="detail-object"),
-    pytest.param({"criterion": 2, "detail": 0}, id="detail-number"),
-    pytest.param({"criterion": 2, "detail": ""}, id="detail-empty"),
-    pytest.param({"criterion": 2, "detail": "x" * 2001}, id="detail-2001-characters"),
-    pytest.param({"criterion": 2, "critereon": 1}, id="misspelt-field"),
-]
-
-
-@pytest.fixture()
-def client(isolated_db):
-    from fastapi.testclient import TestClient
-
-    from app.main import create_app
-
-    with TestClient(create_app()) as c:
-        yield c
-
-
-def _record(client, body, keyed=True):
-    from tests.conftest import TEST_ADMIN_KEY
-
-    return client.post("/api/v1/admin/falsification", json=body,
-                       headers={"X-API-Key": TEST_ADMIN_KEY} if keyed else {})
-
-
-def _stored():
-    """The outcome table as it is: (criterion, detail) in the order recorded."""
-    from app.db import session_scope
-    from app.models import FalsificationOutcome
-
-    with session_scope() as session:
-        rows = session.execute(
-            select(FalsificationOutcome).order_by(FalsificationOutcome.id)).scalars().all()
-        return [(row.criterion, row.detail) for row in rows]
-
-
 class TestApiSurfaces:
-    @pytest.mark.parametrize("body", REFUSED_BODIES)
-    def test_a_body_that_names_no_published_criterion_records_nothing(self, client, body):
-        assert _record(client, body).status_code == 422
-        assert _stored() == []
-
-    @pytest.mark.parametrize("number", [1, 2, 3])
-    def test_an_outcome_is_published_as_the_criterion_it_names(self, client, number):
-        made = _record(client, {"criterion": number, "detail": "manual test"})
-        assert made.status_code == 201 and made.json()["data"]["recorded"] is True
-        page = client.get("/api/v1/meta/methodology").json()["data"]
-        assert len(page["falsification_criteria"]) == 3
-        assert [(o["criterion"], o["detail"]) for o in page["falsification_outcomes"]] == \
-            [(page["falsification_criteria"][number - 1], "manual test")]
-
-    def test_the_detail_is_optional_and_kept_whole(self, client):
-        assert _record(client, {"criterion": 3}).status_code == 201
-        assert _record(client, {"criterion": 3, "detail": "y" * 2000}).status_code == 201
-        assert [detail for _, detail in _stored()] == [None, "y" * 2000]
-
-    def test_without_the_key_no_body_is_judged_or_recorded(self, client):
-        # FastAPI resolves the key dependency before it validates the fields of
-        # the body, so the typed body put no 422 in front of the 401.
-        assert _record(client, {"criterion": None}, keyed=False).status_code == 401
-        assert _record(client, {"criterion": 1}, keyed=False).status_code == 401
-        assert _stored() == []
-
     def test_replay_endpoints_and_admin_recording(self, isolated_db):
         from fastapi.testclient import TestClient
 
@@ -338,7 +256,8 @@ class TestApiSurfaces:
             assert client.post("/api/v1/admin/falsification",
                                json={"criterion": "c"}).status_code in (401, 403)
             ok = client.post("/api/v1/admin/falsification",
-                             json={"criterion": 1, "detail": "manual test"},
+                             json={"criterion": "score<30 through >30% drawdown",
+                                   "detail": "manual test"},
                              headers={"X-API-Key": TEST_ADMIN_KEY})
             assert ok.status_code == 201
             assert ok.json()["data"]["recorded"] is True

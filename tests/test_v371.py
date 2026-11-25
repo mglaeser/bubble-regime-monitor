@@ -6,8 +6,6 @@ never silently diverge again, and close the VALID_ZERO producer-path gap."""
 
 from __future__ import annotations
 
-import json
-
 import numpy as np
 import pytest
 
@@ -125,61 +123,30 @@ def test_s4_as_of_uses_gsadf_series_date(isolated_db):
     assert data.indicators["s4"].as_of == "2026-06-30"
 
 
-# ---- methodology payload: what the artifact records about falsification ----
+# ---- methodology payload documents the empty falsification_outcomes -------
 
-def _methodology() -> dict:
+def test_methodology_documents_empty_outcomes(isolated_db, monkeypatch):
     from fastapi.testclient import TestClient
 
+    import app.scheduler as scheduler
+    import app.services.backfill as backfill
+
+    monkeypatch.setattr(scheduler, "start", lambda: None)
+    monkeypatch.setattr(scheduler, "shutdown", lambda: None)
+    monkeypatch.setattr(backfill, "seed_hy_oas_history", lambda: 0)
     from app.main import create_app
 
     with TestClient(create_app()) as client:
-        return client.get("/api/v1/meta/methodology").json()["data"]
-
-
-def test_methodology_says_no_tracking_start_is_recorded(isolated_db):
+        d = client.get("/api/v1/meta/methodology").json()["data"]
     # frozen_methodology.json, _meta._note: falsification_tracking_since stays
     # <PIN> until the operator supplies it, and "it must not be backdated". While
     # no start is recorded the page may not speak of a time "since tracking
     # began", and an empty list of outcomes is not a track record.
     assert M.get_path("_meta", "falsification_tracking_since") == M.PIN_SENTINEL
-    d = _methodology()
     assert d["falsification_outcomes"] == []
     note = d["falsification_outcomes_note"]
     assert "since tracking began" not in note
     assert "No tracking start date is recorded" in note
-    assert d["falsification_tracking_since"] is None
     # README "Falsification criteria": no job decides a criterion; the operator
     # judges and records by hand. Said on the page, not implied.
-    assert "evaluates no criterion" in note and "by hand" in note
-
-
-@pytest.fixture()
-def tracking_start_set(tmp_path):
-    """The artifact with a start date in _meta. 2099-01-01 is a test value, not
-    a proposal: only the operator sets the date. The real artifact is put back
-    before the caches are cleared, so no later test reads this copy."""
-    caches = (M.frozen_bytes, M.frozen_sha256, M.frozen_methodology)
-    real = M.FROZEN_PATH
-    data = json.loads(real.read_bytes())
-    data["_meta"]["falsification_tracking_since"] = "2099-01-01"
-    swapped = tmp_path / "frozen.json"
-    swapped.write_text(json.dumps(data))
-    M.FROZEN_PATH = swapped
-    for fn in caches:
-        fn.cache_clear()
-    yield "2099-01-01"
-    M.FROZEN_PATH = real
-    for fn in caches:
-        fn.cache_clear()
-
-
-def test_methodology_names_the_tracking_start_once_the_operator_sets_it(
-        isolated_db, tracking_start_set):
-    # The note is derived from the artifact at request time, so the day the
-    # operator sets the date the page serves it and stops saying none is recorded.
-    d = _methodology()
-    assert d["falsification_tracking_since"] == tracking_start_set
-    note = d["falsification_outcomes_note"]
-    assert tracking_start_set in note
-    assert "No tracking start date is recorded" not in note
     assert "evaluates no criterion" in note and "by hand" in note

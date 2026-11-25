@@ -20,7 +20,7 @@ two-thirds band gate is the only live rule.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -42,17 +42,16 @@ _DROP = _M.get_path("coverage", "drop_threshold")          # 1/3 -> degraded < 2
 
 def record_outcome(criterion: str, detail: str | None = None) -> int:
     """Append one falsification outcome (manual recording path, spec 15).
-    The table is append-only at the DB level (migration 0006 triggers).
+    The table is append-only at the DB level (migration 0006 triggers)."""
+    criterion = (criterion or "").strip()
+    if not criterion:
+        raise ValueError("criterion must be non-empty")
+    from datetime import UTC
 
-    No check and no cut here. The one caller, the admin route, passes one of
-    the three published criteria (76 to 103 characters, never blank) and a
-    detail its body model has bounded (app/routers/admin.py,
-    FalsificationRequest), so the strip, the refusal of a blank criterion and
-    the cut to 500 characters that stood here had nothing left to act on."""
     with session_scope() as session:
-        row = FalsificationOutcome(criterion=criterion,
+        row = FalsificationOutcome(criterion=criterion[:500],
                                    tripped_at=datetime.now(UTC),
-                                   detail=detail)
+                                   detail=(detail or None))
         session.add(row)
         session.flush()
         return row.id

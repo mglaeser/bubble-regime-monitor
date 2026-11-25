@@ -15,11 +15,9 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import get_settings
 from app.logging_conf import get_logger
-from app.references import FALSIFICATION_CRITERIA
 from app.security import require_admin_key
 
 log = get_logger(__name__)
@@ -208,50 +206,24 @@ def send_sms_now(_: None = Depends(require_admin_key)) -> dict[str, Any]:
     return {"data": result, "meta": {}}
 
 
-class FalsificationRequest(BaseModel):
-    """One outcome, named by the number of the published criterion it is an
-    outcome of. The table is append-only and published on
-    /api/v1/meta/methodology, so a mistaken row stays there for good: nothing
-    is coerced, nothing is cut, and an unknown field is refused.
-
-    The body used to be an untyped object whose criterion went through str():
-    null was recorded and published as "None", a number or an object as its
-    repr and any free text as a criterion; a detail of 0 was dropped, a long
-    one cut, a misspelt field ignored. The criterion is now its number, so the
-    published row is always one of the published sentences and the only
-    possible mistake is the wrong number. The operator's own words go into
-    `detail`. Production holds 0 rows in this append-only table, so the route
-    has never recorded anything there: no stored row and no caller depends on
-    the old body."""
-
-    # strict is load-bearing. Measured on pydantic 2.13.5: Literal[1, 2, 3]
-    # takes true and 2.0 as a number, a plain int also takes "2"; the strict
-    # int refuses true, 2.0, "2", null, objects and lists.
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    criterion: int = Field(ge=1, le=len(FALSIFICATION_CRITERIA))
-    detail: str | None = Field(default=None, min_length=1, max_length=2000)
-
-
 @router.post(
     "/falsification",
     status_code=201,
     summary="Record a falsification outcome (X-API-Key required; append-only)",
     description=("RM-1 manual recording path (spec 15): appends one outcome row. "
-                 "`criterion` is the number (1-3) of the criterion as published on "
-                 "/api/v1/meta/methodology and is recorded as that sentence, not as "
-                 "a text of the caller's; `detail` is the operator's evidence, "
-                 "optional, at most 2000 characters. Any other body is refused "
-                 "with 422 and records nothing. "
                  "The table is append-only at the DB level (triggers, migration "
                  "0006) — recorded history cannot be silently rewritten."),
 )
-def record_falsification(body: FalsificationRequest,
+def record_falsification(body: dict[str, Any],
                          _: None = Depends(require_admin_key)) -> dict[str, Any]:
+    from fastapi import HTTPException
+
     from app.services.replay import record_outcome
 
-    # The model has refused a missing or blank criterion with 422 before this
-    # runs, and the three sentences it admits are never blank: record_outcome
-    # raises no ValueError, so none is translated into a 422 here.
-    outcome_id = record_outcome(FALSIFICATION_CRITERIA[body.criterion - 1], body.detail)
+    try:
+        outcome_id = record_outcome(str(body.get("criterion", "")),
+                                    (str(body["detail"])[:2000] if body.get("detail") else None))
+    except ValueError as exc:
+        # panel finding: an empty criterion must be a client error, never a 500
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"data": {"id": outcome_id, "recorded": True}, "meta": {}}

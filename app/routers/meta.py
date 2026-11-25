@@ -7,7 +7,6 @@ from typing import Any
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy import select
 
-from app import methodology as _M
 from app.config import get_settings
 from app.db import session_scope
 from app.models import FalsificationOutcome
@@ -32,11 +31,6 @@ router = APIRouter(prefix="/api/v1/meta", tags=["meta"])
 def get_methodology(request: Request, _: None = Depends(require_read_access)) -> dict[str, Any]:
     with session_scope() as session:
         outcomes = session.execute(select(FalsificationOutcome)).scalars().all()
-    # The start of falsification tracking as frozen_methodology.json records it
-    # (_meta): <PIN> until the operator supplies the date, served as null.
-    since = _M.get_path("_meta", "falsification_tracking_since")
-    if since == _M.PIN_SENTINEL:
-        since = None
     data = {
         "framework": FRAMEWORK,
         # The full framework disclaimer stays HERE (this endpoint is the spec);
@@ -53,25 +47,17 @@ def get_methodology(request: Request, _: None = Depends(require_read_access)) ->
             {"criterion": o.criterion, "tripped_at": o.tripped_at.isoformat(), "detail": o.detail}
             for o in outcomes
         ],
-        # What the artifact and the table record, said as it is. The service
-        # evaluates no criterion: the operator judges the three sentences above
-        # and records an outcome by hand (POST /api/v1/admin/falsification). The
-        # note is built from the artifact's start date on every request, so it
-        # cannot contradict the artifact, also not on the day the operator sets
-        # the date. It used to read "no falsification criterion has tripped
-        # since tracking began" while the artifact held no start date and no
-        # code decided whether a criterion had tripped: an empty list (0 rows in
-        # production) says that nothing was recorded, and without a start date
+        # The service evaluates no criterion: the operator judges the three
+        # sentences above and records an outcome by hand (POST
+        # /api/v1/admin/falsification). The artifact holds no start date
+        # (frozen_methodology.json, _meta.falsification_tracking_since): an
+        # empty list says that nothing was recorded, and without a start date
         # it is no track record.
-        "falsification_tracking_since": since,
         "falsification_outcomes_note": (
             "The service evaluates no criterion: the operator judges the criteria "
             "and records an outcome by hand. "
-            + (f"Tracking runs since {since}: an empty list means no outcome has "
-               "been recorded since then."
-               if since else
-               "No tracking start date is recorded yet, so an empty list means only "
-               "that no outcome has been recorded; it is not a track record.")
+            "No tracking start date is recorded yet, so an empty list means only "
+            "that no outcome has been recorded; it is not a track record."
         ),
         "changelog": CHANGELOG,
         "unverified_citations": UNVERIFIED_CITATIONS,   # [] — all resolved (audit 2026-07-14)
