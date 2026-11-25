@@ -246,9 +246,11 @@ jobs:
           # and none for "without the required approver".
           VERIFIER_STRICT_ANY_REFUTATION: ${{ vars.VERIFIER_STRICT_ANY_REFUTATION }}
           # Require every APPROVING voice to carry a machine-readable "defects"
-          # ledger, and block when that ledger contradicts the boolean. Hardcoded
-          # rather than a repo variable for the same reason as the line above: a
+          # ledger, and block when that ledger contradicts the boolean. Hardcoded,
+          # not a repo variable: the script reads this one's absence as OFF, and a
           # merge control that a variable can silently switch off is not a control.
+          # (The variable above can be one because the script reads its absence
+          # as ON.)
           # Compliance measured against all three panel groups before enabling --
           # planted defect: 3/3 refuted with a populated ledger; clean diff: empty
           # ledgers. Set to "false" only in a fork whose models do not answer it.

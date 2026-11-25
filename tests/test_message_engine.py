@@ -1030,6 +1030,8 @@ class TestTypedFacts:
         ("action_band", "de-risk (data degraded)", "de-risk (data degraded)"),
         ("override_suffix", " OVERRIDE", " OVERRIDE"), ("override_suffix", "", ""),
         ("F_NEXT_CHECK", "22:00", "22:00"), ("F_BAND_PREVIOUS", "suppressed", "suppressed"),
+        # a run without a usable VIX / VIX3M ratio: compute's word for it, as the trends carry theirs
+        ("vol_state", "unknown", "unknown"), ("vol_state", "backwardation", "backwardation"),
         ("median", float("nan"), None), ("median", float("inf"), None), ("median", "59", None),
         ("action_band", "IN", None), ("spy_trend", "trim", None), ("override_suffix", " override", None),
         ("F_NEXT_CHECK", "14:30", None), ("F_BAND_BASE", "suppressed", None), ("median", {"v": 59}, None),
@@ -1146,9 +1148,9 @@ class TestRoundTwoOn145:
                       "failure_alert_stuck", "breaker_notify", "breaker_all_clear", "test_message", "host_outage"})
 
     def test_every_declared_fact_has_a_producer_that_types_it(self):
-        from app.alerts.render_context import FACT_SOURCES, MEMBER_FACT_BUILDERS
+        from app.alerts.render_context import MEMBER_FACT_BUILDERS
 
-        producers = (set(digest_facts(_snapshot())) | set(FACT_SOURCES) | set(MEMBER_FACT_BUILDERS)
+        producers = (set(digest_facts(_snapshot())) | set(MEMBER_FACT_BUILDERS)
                      | set(composer.WORDS) | {composer.JUDGMENT})
         for trigger, entry in composer.library()["prompts"].items():
             declared = set(entry.get("grounding_fields") or [])

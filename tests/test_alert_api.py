@@ -211,6 +211,46 @@ def test_health_names_a_retired_setting(client, monkeypatch):
     assert payload["status"] in ("degraded", "critical")
 
 
+def test_health_names_a_misspelt_setting_while_a_transport_works(client, monkeypatch):
+    """A key one character off a setting is read by nothing: the settings drop
+    an unknown key without a word (README, "Mind the spelling"). Only a digest
+    without a transport and the hand-run preflight named it, so
+    MESSAGE_ENGINE_ENABLD=true beside a working iMessage left the engine off
+    and health "ok" (executed 2026-11-11). Health names the key, never its
+    value, and is degraded, as for a retired key."""
+    from datetime import UTC, datetime
+
+    from app.alerts.models import AlertComponentHeartbeat
+    from app.config import get_settings
+    from app.db import session_scope
+
+    # A working transport and every component reporting: nothing else degrades.
+    monkeypatch.setenv("IMESSAGE_ENABLED", "true")
+    monkeypatch.setenv("IMESSAGE_API_BASE_URL", "http://127.0.0.1:12345")
+    monkeypatch.setenv("IMESSAGE_API_KEY", "configured-test-key-123456789")  # pragma: allowlist secret
+    monkeypatch.setenv("IMESSAGE_RECIPIENT", "+491510000000")
+    get_settings.cache_clear()
+    with session_scope() as session:
+        session.add_all([
+            AlertComponentHeartbeat(component=component, last_heartbeat_at=datetime.now(UTC), status="ok",
+                                    detail_json={"mode": "disabled", "live_profile": "default"})
+            for component in ("dispatcher", "watchdog", "recovery", "sidecar_reconciliation", "retention")
+        ])
+    condition = "setting MESSAGE_ENGINE_ENABLD is read by nothing: it looks like MESSAGE_ENGINE_ENABLED"
+    try:
+        spelt_right = client.get("/api/v1/alerts/health", headers={"X-API-Key": TEST_ADMIN_KEY}).json()
+        monkeypatch.setenv("MESSAGE_ENGINE_ENABLD", "true")
+        payload = client.get("/api/v1/alerts/health", headers={"X-API-Key": TEST_ADMIN_KEY}).json()
+        assert get_settings().daily_digest_transport == "imessage"
+        assert get_settings().message_engine_enabled is False
+    finally:
+        get_settings.cache_clear()
+    assert spelt_right["status"] == "ok", spelt_right["conditions"]
+    assert condition not in spelt_right["conditions"]
+    assert condition in payload["conditions"], payload["conditions"]
+    assert payload["status"] == "degraded"
+
+
 def test_a_live_send_test_is_planned_under_the_promoted_ruleset_only(client, monkeypatch):
     """#153 round 2, SOTA-A: with the planning-ruleset admission gone (owner
     decision D2d), live work must never be planned under a ruleset that was
