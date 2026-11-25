@@ -339,9 +339,13 @@ sipgate; there is no send-failure fallback. It has no retirement switch: the
 process environment or the `.env` file the settings read - changes nothing,
 and never in silence: the boot logs `retired_setting_present`, the
 alerts preflight fails `no_retired_settings`, and the alert health projection
-names it. Turning the alert system on never changes the digest's transport,
-and a digest without one is named by the alert health projection ("the daily
-digest has no transport").
+names it. A key one character off a transport, message-engine or LLM setting
+(`MESSAGE_ENGINE_ENABLD`) is read by nothing either, and has the same three
+surfaces, whatever the transports do: the boot logs `misspelt_setting_present`,
+the alerts preflight fails `no_misspelt_settings`, and the alert health
+projection names it and is `degraded` at best. Turning the alert system on
+never changes the digest's transport, and a digest without one is named by the
+alert health projection ("the daily digest has no transport").
 
 Volume, lease, retention and LLM settings live in `app/config.py`; each has a
 safe default. Alert phrasing has no model path: configuring the runtime
@@ -605,8 +609,9 @@ Separately, the dispatcher has no LLM path at any stage.
 What the runtime no longer checks, by that decision: the evidence and the
 stage, and nothing is re-checked at the wire - a demotion after planning no
 longer withholds work already queued, and a promotion change reaches the wire
-at the next dispatch pass, at most one pass later (the job runs at least every
-20 s). What stops a live send now: ALERTS_MODE other than `live`; a silence;
+at the next dispatch pass, at most one pass later (the job runs every 20 s;
+`ALERTS_DISPATCH_POLL_S` sets a longer interval, never a shorter one). What
+stops a live send now: ALERTS_MODE other than `live`; a silence;
 the dispatch job's own check before every pass - a candidate that is not the
 promoted artifact refuses the pass before any sender exists
 (tests/test_alert_promotion.py::test_the_live_dispatch_job_refuses_an_unpromoted_candidate);

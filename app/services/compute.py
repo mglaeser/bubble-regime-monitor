@@ -181,10 +181,17 @@ def _coverage_gate(indicators: dict[str, Any]) -> dict[str, Any]:
     obtained, each live indicator scaled by its quality in [0,1].
 
     A dropped OR stale indicator counts as fully lost weight; a low-quality one
-    (e.g. d1 measured from a partial constituent universe, quality=n/503) counts
-    as w*quality. A proxy substitution does not reduce quality. If >1/3 of a
-    block's nominal weight is lost the block is degraded (band suppressed) — so a
-    breadth reading from only a handful of names now correctly degrades Block D."""
+    (e.g. d1 measured from a partial constituent universe, quality = resolved /
+    current universe) counts as w*quality. A proxy substitution does not reduce
+    quality. If >1/3 of a block's nominal weight is lost the block is degraded
+    (band suppressed).
+
+    The quality discount alone cannot degrade Block D: d1 weighs 0.35, so that
+    would take a quality below 4.8% (fewer than 24 of 504 names), and breadth is
+    published from 25 names up (25 of 504: coverage 0.6674, not degraded). A
+    thin universe lowers the coverage figure and degrades the block only
+    together with weight lost elsewhere in it (33 of 503 names with d4 dropped:
+    0.473). A dropped or stale d1 degrades the block by itself (0.65)."""
     blocks: dict[str, Any] = {}
     degraded_any = False
     for block_id, prefix in (("S", "s"), ("D", "d")):
@@ -446,6 +453,40 @@ def _track(raw: RawInputs, source: str, fn: Any) -> Any:
         return None
 
 
+def _track_closes(raw: RawInputs, source: str, canonical: str) -> Any:
+    """One daily price series through `_track`.
+
+    When every provider failed and the cache answered, the series is kept (it
+    is dated by its last bar, and that age is what the freshness SLA reads)
+    and the pull is recorded as the failure it was, with the chain's note.
+    The adapter's flag and note used to stop here: with Tiingo, Twelve Data
+    and Alpha Vantage all failing, GET /readyz and the status page listed the
+    price pulls as ok, HTTP 200, no note. The same case for HY OAS is
+    recorded this way already: FRED fails, the stored history is served, the
+    pull is not ok (below).
+
+    The note quotes the providers' errors. Provider error text can hold a
+    credential (Alpha Vantage's request URL carries its key) and GET /readyz
+    serves the note without authentication, so it passes `sanitize` like
+    every other gather failure.
+
+    Production shows no such outage: to 2026-11-10, 2452 price pulls, and the
+    provider health table holds one row, Tiingo with no failure. No stored
+    row and no score changes."""
+    from app.sources import prices as price_src
+
+    result = _track(raw, source, lambda: price_src.get_daily_closes(canonical))
+    # `fallback_used` on a price result means exactly this: no provider
+    # answered and the cache did (app/sources/prices.py). A provider further
+    # down the chain answering is a successful pull.
+    if result is not None and result.provenance.fallback_used:
+        raw.source_health[-1].update(   # the entry `_track` has just appended
+            ok=False, http_status=None, note=sanitize(result.provenance.note, limit=400))
+        log.warning("price_chain_served_stale_cache", source=source,
+                    as_of=result.provenance.as_of)
+    return result
+
+
 def gather_inputs() -> RawInputs:
     """Fetch all upstream sources with per-source circuit breakers.
 
@@ -488,11 +529,8 @@ def gather_inputs() -> RawInputs:
     # SPX->SPY); proxy substitutions are flagged in the note.
     from app.sources import prices as price_src
 
-    def _closes(canonical: str):
-        return price_src.get_daily_closes(canonical)
-
     # SPY (also the ATH gate) and QQQ.
-    spy = _track(raw, "price_SPY", lambda: _closes("SPY"))
+    spy = _track_closes(raw, "price_SPY", "SPY")
     if spy:
         raw.spy_daily = spy.value
         raw.spy_daily_closes = [c for _, c in spy.value]
@@ -504,17 +542,19 @@ def gather_inputs() -> RawInputs:
             pass
         closes = raw.spy_daily_closes
         raw.index_within_2pct_of_ath = closes[-1] >= _NEAR_ATH_FRAC * max(closes)
-    qqq = _track(raw, "price_QQQ", lambda: _closes("QQQ"))
+    qqq = _track_closes(raw, "price_QQQ", "QQQ")
     if qqq:
         raw.qqq_daily = qqq.value
         raw.qqq_daily_closes = [c for _, c in qqq.value]
 
     # SMH/SPY 2-yr run-up via the price chain (SOXX as SMH substitute).
-    semis = _track(raw, "price_SMH", lambda: _closes("SMH"))
+    semis = _track_closes(raw, "price_SMH", "SMH")
     if semis is None:
-        semis = _track(raw, "price_SOXX", lambda: _closes("SOXX"))
+        semis = _track_closes(raw, "price_SOXX", "SOXX")
         raw.semis_symbol = "SOXX"
         raw.semis_fallback = True
+    # Whichever answered, SMH or SOXX, feeds S3 through the fields below; the
+    # gather keeps no semis series of its own (RawInputs has no semis_daily).
     if semis:
         raw.semis_source = semis.provenance.source  # real provenance, e.g. "tiingo:SMH"
         try:
@@ -529,7 +569,7 @@ def gather_inputs() -> RawInputs:
     # proxy's 1999. Switching to it is a source substitution (PIN C, CONDITIONAL
     # HOLD), not made here.
     # R subprocess degrades to the contested/stale 0.25 floor.
-    ndx = _track(raw, "price_NDX", lambda: _closes("NDX"))
+    ndx = _track_closes(raw, "price_NDX", "NDX")
     if ndx:
         import math
 
@@ -813,6 +853,13 @@ def _feed_is_current(daily: list[tuple[str, float]], as_of_date: str | None) -> 
     return last_bar >= previous
 
 
+#: The Monte Carlo's sample count and seed: the frozen artifact's, read through
+#: app.methodology (this module's _M) like the frozen constants above, never
+#: the environment's (app/config.py says why they are no settings).
+MC_SAMPLES: int = _M.get_path("monte_carlo", "samples")
+MC_SEED: int = _M.get_path("monte_carlo", "seed")
+
+
 def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
                      mc_seed: int | None = None,
                      gsadf_contested: bool | None = None,
@@ -828,8 +875,12 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
     of the NEXT month arrives, which delays a month-end P1 by a day or more.
     """
     settings = get_settings()
-    n = mc_samples or settings.mc_samples
-    seed = mc_seed or settings.mc_seed
+    # mc_samples and mc_seed are for tests (fewer draws for speed). The
+    # recompute, the only path that stores a snapshot, passes neither, so a
+    # stored snapshot ran the artifact's seed and sample count (pinned:
+    # tests/test_frozen_methodology.py::test_the_recompute_passes_no_seed_and_no_sample_count).
+    n = mc_samples or MC_SAMPLES
+    seed = mc_seed or MC_SEED
     contested = settings.gsadf_contested if gsadf_contested is None else gsadf_contested
 
     indicators: dict[str, IndicatorOutput] = {}

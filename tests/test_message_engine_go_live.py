@@ -269,6 +269,41 @@ class TestEngineOn:
         assert out["status"] == "sent" and out["source"] == "fallback" and out["llm_used"] is False
         assert sends == ["bubblegauge 51/100 trim. range 40-61. SPY IN, QQQ OUT. Flags 2/4."]
 
+    def test_a_fallbacks_delivery_line_names_its_reason(self, monkeypatch, engine_on):
+        """The journal says why the template went out. From 2026-11-11 to
+        2026-11-22 the digest fell back on all 12 days (a gateway timeout,
+        7 gateway HTTP errors after about 182 s, 4 days of an open breaker)
+        and each delivery line said only "source": "fallback"; the reason
+        was in message_engine_attempts alone. The line carries the reason
+        the attempt row stores: the failure's class, never its message
+        (decision 19)."""
+        from app.llm_gateway import GatewayHTTPError
+
+        with session_scope() as s:
+            s.add(_snapshot())
+            s.commit()
+        _admitted()
+        self._sent(monkeypatch, [])
+        logged: list[tuple[str, dict]] = []
+
+        class _Log:
+            def info(self, event: str, **fields: object) -> None:
+                logged.append((event, fields))
+
+            warning = info
+
+        monkeypatch.setattr(service, "log", _Log())
+        monkeypatch.setattr(composer, "complete",
+                            lambda **_kw: (_ for _ in ()).throw(GatewayHTTPError(504)))
+        assert digest.send_daily_digest()["source"] == "fallback"
+        [line] = [fields for event, fields in logged if event == "message_engine_delivery"]
+        with session_scope() as s:
+            stored = s.query(MessageEngineAttempt.failure_reason).filter_by(
+                outcome="fallback_used").scalar()
+        assert line["source"] == "fallback"
+        assert line.get("compose_reason") == stored == "gateway GatewayHTTPError"
+        assert "returned HTTP" not in repr(logged)
+
     def test_no_transport_configured_is_skipped_before_composing(self, monkeypatch):
         monkeypatch.setenv("MESSAGE_ENGINE_ENABLED", "true")
         monkeypatch.setenv("IMESSAGE_ENABLED", "false")
