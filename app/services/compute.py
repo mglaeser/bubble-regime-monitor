@@ -212,19 +212,14 @@ COVERAGE_DROP_THRESHOLD = _M.get_path("coverage", "drop_threshold")  # 1/3
 # That reading is a tier of the fallback chain (AGENTS.md rule 3), not the
 # neutral placeholder rule 4 forbids: the service measured it itself, it keeps
 # the day it was measured on, it is flagged fallback_used, and it ends with
-# the SLA. Without a stored reading nothing is filled in and S1 is dropped
-# (tests/test_s1_last_reading.py). D2's cached reading, the price cache and
-# the HY OAS history are tiers of the same kind.
+# the SLA. Without a stored reading nothing is filled in and S1 is dropped.
 #
 # Why: on 2026-10-21 18:00, 22:00 and 10-22 02:00 UTC FRED answered the DFII10
-# request with a body that was not JSON (3 of 615 recomputes; CAPE has failed
-# in none). S1 (weight 0.33, sub-score 0.975, the highest of Block S) was
-# dropped and the block renormalized onto the lower four: the median read
+# request with a body that was not JSON. S1 was dropped and the median read
 # 47.94 / 47.51 / 48.07 where S1's reading of 14:00 UTC gives 52.72 / 52.25 /
-# 52.86, and one P2 message (ops.coverage_risk_masking) went out. Over the 612
-# stored S1 readings (2026-07-11 .. 2026-11-10) the sub-score moved by at most
-# 0.0143 within three days, which is 0.11 headline points; dropping S1 moved
-# the headline by 3.9 to 5.3 points on the stored snapshots replayed.
+# 52.86. Over the 612 stored S1 readings (2026-07-11 .. 2026-11-10) the
+# sub-score moved by at most 0.0143 within three days, which is 0.11 headline
+# points.
 REAL10Y_SLA_DAYS: int = next(
     spec.sla_days for spec in SOURCE_REGISTRY if spec.key == "fred_real10y")
 
