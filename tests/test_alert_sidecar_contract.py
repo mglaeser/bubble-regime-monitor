@@ -921,8 +921,7 @@ def test_a_same_period_re_transition_is_not_suppressed(isolated_db):
     for gate, ident in ((True, "a"), (False, "b"), (True, "c")):
         current = one(gate, ident)
         ctx = EvaluationContext(current=current, previous=previous,
-                                history=(previous,) if previous else (),
-                                is_cold_start=previous is None)
+                                history=(previous,) if previous else ())
         decision = evaluate_state(rule=rule, instance_fingerprint="fp", memory=memory,
                                   outcome=evaluate_rule(rule, ctx), ctx=ctx, now=BUILT_AT)
         activations.append(decision.activate_episode)
@@ -1156,7 +1155,7 @@ def test_a_run_without_a_ratio_leaves_an_open_backwardation_episode_open(isolate
 
     def decide(stored: str):
         ctx = EvaluationContext(current=_input_with_v_state(stored), previous=previous,
-                                history=(previous,), is_cold_start=False)
+                                history=(previous,))
         return evaluate_state(rule=rule, instance_fingerprint="fp", memory=firing,
                               outcome=evaluate_rule(rule, ctx, currently_firing=True),
                               ctx=ctx, now=BUILT_AT)
