@@ -10,7 +10,8 @@ mirrors the series for display only.
 ROW ORDER IS NOT ASSUMED. The live file lists months NEWEST-FIRST, which a
 naive column read once inverted into a -22% "YoY" computed across the series
 start (Jan 1997). Rows are parsed as (date, debit) PAIRS and sorted by date
-ascending; a parseable date column is mandatory.
+ascending; a month column written as the file writes it, "YYYY-MM", is
+mandatory.
 """
 
 from __future__ import annotations
@@ -53,7 +54,15 @@ def parse_debit_balances(content: bytes) -> tuple[list[float], list[str], str]:
     for j in range(raw.shape[1]):
         if j == debit_col:
             continue
-        dates = pd.to_datetime(body.iloc[:, j], errors="coerce")
+        # The month cells are the text "YYYY-MM", and no other text is a month
+        # here. Without a format pandas guesses one from the first cell and
+        # takes the day it lacks from today: on 2026-10-31, September being
+        # the newest month, all six recomputes logged "Could not infer
+        # format". A guess also reads other spellings as a healthy pull
+        # ("Sep-26": 36 months ending 1999-12). Those now end in "no parseable
+        # date column", and so does a spelling the guess read right
+        # ("2026-09-01"): the file's cells carry no day.
+        dates = pd.to_datetime(body.iloc[:, j], format="%Y-%m", errors="coerce")
         if (values.notna() & dates.notna()).sum() >= 13:
             date_series = dates
             break

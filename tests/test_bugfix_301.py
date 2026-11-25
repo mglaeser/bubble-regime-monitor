@@ -25,7 +25,9 @@ def _make_finra_xlsx(newest_first: bool = True) -> bytes:
     for i in range(14):
         month_total = 4 + i  # April 2025 start
         y, m = 2025 + (month_total - 1) // 12, (month_total - 1) % 12 + 1
-        rows.append([f"{y}-{m:02d}-01", 900_000.0 + i * 1000])
+        # The month as FINRA's file writes it, "YYYY-MM": the reader takes no
+        # other text for a month (tests/test_sources.py::TestFinraMonths).
+        rows.append([f"{y}-{m:02d}", 900_000.0 + i * 1000])
     rows[-1][1] = 1_415_557.0          # 2026-05
     rows[1][1] = 1_415_557 / 1.537     # 2025-05 (12 months before the latest)
     if newest_first:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import calendar
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -93,6 +94,56 @@ class TestStaleness:
         assert data.freshness.get("d1") == "0d"
         payload = data.indicators["s1"].payload()
         assert payload["stale"] is False and payload["age_days"] == 0
+
+
+def _finra_xlsx(month_cells: list) -> bytes:
+    """A margin-statistics file: the heading row, then one row per month cell."""
+    import io
+
+    import pandas as pd
+
+    rows = [["Year-Month", "Debit Balances in Customers' Securities Margin Accounts"]]
+    rows += [[cell, 900_000.0 + i] for i, cell in enumerate(month_cells)]
+    buf = io.BytesIO()
+    pd.DataFrame(rows).to_excel(buf, header=False, index=False)
+    return buf.getvalue()
+
+
+class TestFinraMonths:
+    """app/sources/finra.py: the month cells are the text "YYYY-MM". A column
+    in another spelling is no date column, and the pull fails."""
+
+    MONTHS = [(y, m) for y in range(1997, 2027) for m in range(1, 13)][:-3]      # 1997-01 .. 2026-09
+
+    def test_the_files_months_are_read_without_a_guess(self):
+        """Without a format pandas guesses one and takes the day a cell lacks
+        from today: it warned on 2026-10-31, September being the newest month.
+        A test cannot set that clock, so on the unchanged code this is red only
+        on a day the newest month lacks."""
+        import warnings
+
+        from app.sources.finra import parse_debit_balances
+
+        content = _finra_xlsx([f"{y}-{m:02d}" for y, m in reversed(self.MONTHS)])
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            _, labels, as_of = parse_debit_balances(content)
+        assert labels == [f"{y}-{m:02d}" for y, m in self.MONTHS] and as_of == "2026-09-30"
+
+    @pytest.mark.parametrize("spell", [
+        lambda y, m: f"{calendar.month_abbr[m]}-{y % 100:02d}",
+        lambda y, m: y * 100 + m,
+        lambda y, m: f"{y}-{m:02d}-01",
+    ], ids=["Sep-26", "202609-a-number", "2026-09-01"])
+    def test_a_month_in_another_spelling_is_a_failure_not_a_guess(self, spell):
+        """Guessed, "Sep-26" came back as 36 months ending 1999-12 and the
+        numbers as the one month 1970-01, each a healthy pull. The full date
+        was read right and fails as well: the file's cells carry no day, and a
+        month is what pandas reads with "%Y-%m"."""
+        from app.sources.finra import parse_debit_balances
+
+        with pytest.raises(SourceError, match="no parseable date column"):
+            parse_debit_balances(_finra_xlsx([spell(y, m) for y, m in reversed(self.MONTHS)]))
 
 
 class _Response:
