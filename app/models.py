@@ -1,4 +1,4 @@
-"""ORM models: snapshots, indicator_readings, source_health, hy_oas_history."""
+"""ORM models: the service's own tables. The alert system's are in app/alerts/models.py."""
 
 from __future__ import annotations
 
