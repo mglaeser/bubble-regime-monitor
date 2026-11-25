@@ -55,11 +55,7 @@ at curl's five seconds, the next starts thirty after it ended), longer on a
 stalled one, because podman's clock ends no check; and no failure counts in
 the five minutes after a start (`HealthStartPeriod`), so an app that never
 answers after a start is killed after those five minutes and five more
-failed checks. A tick that falls into such a
-restart waits for the container, a minute at most, before it compares:
-`podman run --rm` leaves none in between, and with none to read the release
-took the commit that was coming back for a new one (2026-11-01). A service
-that stays down is released after that minute. Nothing rolls back: a release
+failed checks. Nothing rolls back: a release
 that answers nothing after the switch is what main says to run, and the next
 commit fixes it. The hand rollback, valid while the schema has not moved (the
 five newest commit tags are kept):
