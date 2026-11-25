@@ -24,18 +24,6 @@ from app.alerts.dto import AlertInput
 from app.alerts.enums import ConditionState
 from app.alerts.rulespec import OPTIONAL_RUNTIME_FACT_IDS
 
-#: Numbers the renderer knows how to produce. `F_SCORE` deliberately does not
-#: exist: the median and the point score are different numbers implying
-#: different bands, so there is no field that could mean either.
-FACT_SOURCES: dict[str, str] = {
-    "F_HEADLINE_MEDIAN": "headline_median",
-    "F_POINT_SCORE": "point_score",
-    "F_IQR_LO": "iqr_lo",
-    "F_IQR_HI": "iqr_hi",
-    "F_BAND_EFFECTIVE": "effective_action_state",
-    "F_BAND_BASE": "base_action_band",
-    "F_BAND_SCORE": "score_action_band",
-}
 
 @dataclass(frozen=True)
 class MemberContext:
@@ -64,7 +52,6 @@ class MemberContext:
     #: both rendered values are numeric; enum changes retain the two values.
     fact_deltas: dict[str, dict[str, str | None]] = field(default_factory=dict)
     material_change_fact_id: str | None = None
-    escalation_of: str | None = None
     notes: tuple[str, ...] = ()
     labels: dict[str, str] = field(default_factory=dict)
     headline_code: str | None = None
@@ -344,7 +331,6 @@ def build_member_context(
     origin_phrase_set_version: str,
     origin_phrase_set_sha256: str,
     origin_rules_sha256: str,
-    escalation_of: str | None = None,
     # Keyword-only, so its position carries no meaning — but sitting between
     # two required parameters it read like a syntax error to more than one
     # reviewer, and it costs nothing to put the optional ones together.
@@ -359,8 +345,8 @@ def build_member_context(
     Uses current values only when they are compatible with the trigger;
     otherwise it falls back to trigger values and adds `CONTEXT_STALE` to the
     required caveats. Silently mixing the two would produce a message whose
-    numbers came from two different methodologies. A fact the current input
-    lacks is the trigger's, with the same caveat.
+    numbers came from two different methodologies. A fact a compatible current
+    input lacks is the trigger's, with the same caveat.
     """
     notes: list[str] = []
     caveats = list(required_caveat_codes)
@@ -381,18 +367,21 @@ def build_member_context(
             trigger=trigger, source=current, previous=previous, labels=labels,
             authorized_fact_ids=authorized_fact_ids, notes=notes,
         )
+        # Only a compatible current input gives facts: for another methodology
+        # or schema version this is empty, and the merge below is the
+        # trigger's facts alone (tests/test_alert_fact_fallback.py).
         if current is not None and use_current else {}
     )
     deltas = material_fact_deltas(
         trigger=trigger, current=current, previous=previous, labels=labels,
         authorized_fact_ids=authorized_fact_ids,
     )
-    # Per fact, not all or nothing: a reading the current sidecar lacks (a
-    # dropped indicator, AGENTS.md invariant 4) is the trigger's, and the
-    # message says so. Taking the trigger's facts only when the current view
-    # was EMPTY left the headline slot unfillable whenever one fact was missing
-    # beside another (F_NEXT_CHECK is always there), and the delivery ended
-    # RENDER_FAILED for good: no alert at all.
+    # Per fact, not all or nothing: a reading a compatible current sidecar
+    # lacks (a dropped indicator, AGENTS.md invariant 4) is the trigger's, and
+    # the message says so. Taking the trigger's facts only when the current
+    # view was EMPTY left the headline slot unfillable whenever one fact was
+    # missing beside another (F_NEXT_CHECK is always there), and the delivery
+    # ended RENDER_FAILED for good: no alert at all.
     facts = {**trigger_facts, **current_facts}
     lacks_a_fact = use_current and bool(trigger_facts.keys() - current_facts.keys())
     if lacks_a_fact:
@@ -435,7 +424,6 @@ def build_member_context(
         current_facts=current_facts,
         fact_deltas=deltas,
         material_change_fact_id=material_fact_id,
-        escalation_of=escalation_of,
         notes=tuple(notes),
         labels=labels,
         headline_code=headline_code,
