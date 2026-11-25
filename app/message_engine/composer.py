@@ -201,8 +201,9 @@ WORDS: dict[str, frozenset[str]] = {
     "qqq_trend": _TRENDS,
     "spy_trend_1d_ago": _TRENDS,
     "qqq_trend_1d_ago": _TRENDS,
-    # the VIX term structure, v_vix.state's three states
-    "vol_state": frozenset({"contango", "flat", "backwardation"}),
+    # the VIX term structure: v_vix.state's three states, and compute.py's
+    # word for a run without a usable ratio (the multiplier beside it is 1.0)
+    "vol_state": frozenset({"contango", "flat", "backwardation", "unknown"}),
     # the alert contract's facts the entries declare as words
     # (app/alerts/render_context.py): the band states, the asset, the next
     # check. The other facts an entry declares there are numbers by their
