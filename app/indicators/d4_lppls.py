@@ -5,9 +5,12 @@ WHAT/HOW/WHY/references/caveats: see app.references.REGISTRY["d4"]; summary:
     lppls PyPI 0.6.24 (PINNED). v3.3.2 SINGLE-ENDPOINT DENSE SCAN: one fitting
     endpoint t2 = today, start times t1 shrinking from dt=750 down to dt=30
     trading days in steps of 5 (~144 windows); filters m in (0,1), w in [4,25].
-    confidence = fraction of start-time windows whose calibration passes the
-    filters AT THIS ENDPOINT (Sornette et al. 2015; Demirer et al. 2019) —
-    the library's per-endpoint pos_conf, reported as the scalar directly.
+    confidence = the library's per-endpoint pos_conf, reported as the scalar
+    directly: of the start-time windows whose fit is a positive bubble
+    (b < 0), the fraction whose calibration passes the filters AT THIS
+    ENDPOINT, not a share of all fitted windows (the confidence indicator
+    of Sornette et al. 2015 and Demirer et al. 2019, as the library
+    computes it).
     Three dt-band fractions (short 30-63 / medium 63-252 / long 252-750) are
     partitioned from the SAME fits (Demirer 2019 multi-scale structure at zero
     extra cost) and surfaced as payload diagnostics — never headline inputs.
