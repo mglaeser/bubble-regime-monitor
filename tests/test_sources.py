@@ -198,6 +198,24 @@ class TestSourceChains:
         assert result.value[-1] == pytest.approx(13.00)
 
 
+@pytest.mark.parametrize("row", [
+    "<tr><td>Co0</td><td>SY0</td><td>10.40%</td></tr>",
+    "<tr><td>Top three</td><td>-</td><td>20.00%</td></tr>",
+    "<tr><td>Total</td><td></td><td>100.00%</td></tr>",
+], ids=["a-holding", "a-subtotal", "a-total"])
+def test_slickcharts_gives_no_reading_when_a_row_stands_above_ten_percent(row):
+    """The weight does not say which of the three a row is, so none is left
+    out and none is summed. Left out, each table read 35.3, and with the
+    holding the ten largest add up to 44.2."""
+    from app.sources.ssga import _top10_from_slickcharts
+
+    weights = [7.9, 6.5, 4.2, 3.9, 3.0, 2.5, 2.2, 1.9, 1.7, 1.5] + [0.1] * 60
+    rows = "".join(f"<tr><td>Co{i}</td><td>SY{i}</td><td>{w:.2f}%</td></tr>" for i, w in enumerate(weights, 1))
+    html = f"<table><tr><th>Company</th><th>Symbol</th><th>Weight</th></tr>{row}{rows}</table>"
+    with pytest.raises(SourceError, match="a row above 10 %"):
+        _top10_from_slickcharts(html)
+
+
 class TestBreadthIsPolygonOnly:
     """Owner decision D9 (2026-09-28): breadth comes from Polygon grouped-daily
     only. Without a Polygon key there is no sweep to fall back to: the refresh

@@ -114,12 +114,18 @@ def _top10_from_slickcharts(html: str) -> float:
             continue
         cleaned = df[wcol].astype(str).str.replace("%", "", regex=False).str.strip()
         weights = pd.to_numeric(cleaned, errors="coerce").dropna()
-        # single-name index weights only (no S&P 500 name exceeds ~8%)
-        weights = weights[(weights > 0.0) & (weights <= 10.0)]
+        weights = weights[weights > 0.0]
         if len(weights) >= 10 and (best is None or len(weights) > len(best)):
             best = weights
     if best is None:
         raise SourceError("Slickcharts: no holdings weight column in any table")
+    # No reading when a row of the chosen table stands above 10 %. The largest
+    # holding weighs about 8 %, and the weight does not say whether a larger row
+    # is a holding, a total or a subtotal: left out, a holding is missing from
+    # the sum; summed, a total is in it. The price: a holding above 10 % gives
+    # no reading that day, and so does a total or subtotal row.
+    if best.max() > 10.0:
+        raise SourceError(f"Slickcharts: a row above 10 % ({best.max()})")
     top10 = float(best.nlargest(10).sum())
     if not 5.0 < top10 < 80.0:
         raise SourceError(f"Slickcharts: implausible top-10 sum {top10}")
