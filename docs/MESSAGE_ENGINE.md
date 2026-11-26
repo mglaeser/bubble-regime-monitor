@@ -151,29 +151,33 @@ about the alert render path changes.
 
 ## Decision 1 — compose BEFORE the delivery is queued
 
-The pacing rules (>=5 min between LLM requests, up to 3 content iterations,
->=2 min after a technical error) mean a single message can take ~15 minutes to
-compose. The dispatcher holds a 120 s lease (`alerts_dispatch_lease_s`), polls
-on >=20 s, runs `max_instances=1`, and treats a render as immutable and never
-re-rendered on retry. Composing inside a claimed delivery would therefore
-either expire the lease or wedge the only worker — and a wedged worker delays
-P1, which is the one thing the alert system refuses to allow.
+A compose is one model call (decision 27: no content iterations and no pause
+of its own), and that call can take minutes: its deadline is 600 s
+(`composer._DEADLINE_S`). In production the 37 calls from 2026-10-05 to
+2026-11-10 took 83 to 600 s, median 233 s, and 36 of them outlasted the lease
+named next. The dispatcher holds a 120 s lease (`alerts_dispatch_lease_s`),
+polls on >=20 s, runs `max_instances=1`, and treats a render as immutable and
+never re-rendered on retry. Composing inside a claimed delivery would
+therefore either expire the lease or wedge the only worker — and a wedged
+worker delays P1, which is the one thing the alert system refuses to allow.
 
-So: **the engine composes first and queues an already-final text.** Delivery
-keeps its existing semantics (immutable render, retry transports the same
-bytes). Composition latency is bounded by the engine's own governor and never
-by a lease.
+So: **the engine composes first, outside any claimed delivery, and what goes
+to a wire is an already-final text.** The alert system's delivery keeps its
+semantics (immutable render, retry transports the same bytes) and never waits
+for a model: `engine_delivery.deliver`, which the daily digest alone calls,
+composes and sends outside the dispatcher
+(`tests/test_message_engine.py::TestRoundOneOn145::test_only_the_daily_digest_reaches_the_engine`).
+Composition latency is bounded by that deadline and never by a lease.
 
 ## Decision 2 — the P1 exemption
 
 A P1 is the message that must arrive. The engine never sits on its critical
 path:
 
-- the deterministic/evergreen text is produced FIRST and is what gets sent;
-- an LLM attempt may replace it only if it returns AND validates before the
-  trigger's compose deadline;
-- if the pacing governor would delay a P1 for any reason, the governor yields:
-  the P1 goes out immediately with the deterministic text.
+- a P1's text is the deterministic one;
+- no model is asked for it: the governor refuses a P1 before any query or
+  write (`governor.short_circuit`, decision 8;
+  `tests/test_message_governor.py::TestRoundFourOn140::test_a_p1_is_issued_while_another_writer_holds_the_database`).
 
 Pacing, budget and breaker state can delay or downgrade phrasing. They can
 never delay delivery of a P1.
@@ -199,13 +203,30 @@ to REQUEST an amendment, never to ship the opposite quietly.
 ## Decision 4 — a separate render/audit table, not a relaxed CHECK
 
 `AlertRender.gsm7_septets` is NOT NULL with `CHECK (0..160)` and
-`app/alerts/gsm7.py:septets()` RAISES on emoji. An iMessage body of up to 200
-code points carrying up to two emoji cannot compute that column at all.
+`app/alerts/gsm7.py:septets()` RAISES on emoji. An iMessage body of up to 350
+code points (`MESSAGE_ENGINE_IMESSAGE_MAX_CHARS`), emoji allowed, cannot
+compute that column at all.
 Relaxing the constraint would weaken a live SMS invariant to make room for a
 different channel. Instead the engine persists its own rows: code-point count,
-emoji count, channel, source (`generated` | `fallback` | `deterministic`),
-every attempt including timeouts and rejections (Q46: full rows, 90-day
-retention). The alert schema is untouched.
+channel, source (`generated` | `fallback`; a `deterministic` text asks no
+model and writes no row, decision 8),
+every attempt including timeouts and rejections (Q46: full rows). The rows are
+kept: on 2026-11-25 the owner delegated the decision ("Do it as most sensible
+or recommend"), and it strikes Q46's 90-day retention for them. They are the
+governor's state - the breaker counts the failed calls since the last success
+at any age (`governor.refusal`), so deleting one can hand a failing model more
+calls - and they are small and the owner's own: 58 rows and 0.04 MB on
+2026-11-11, about 0.3 MB a year, every text in them a daily digest for the
+owner. The alert schema is untouched.
+The engine's text is never an `AlertRender` row: `engine_delivery.deliver`
+sends it without the alert dispatcher, and the alert renderer refuses a body
+over 160 septets or outside GSM-7 before a row is written
+(`tests/test_message_engine_go_live.py::test_an_imessage_at_the_cap_with_an_emoji_is_sent_and_is_no_alert_render`).
+
+Two columns of the table carry nothing: `emoji_count` was never written and is
+NULL, and `iteration` is 1, on all 58 rows of 2026-11-11 - the emoji cap the
+first was made for went with the validator (decision 24), and a compose asks
+the model once (decision 27).
 
 ## Decision 5 — admission is a GATE, not a re-modelled delivery
 
@@ -244,18 +265,16 @@ Implemented in `app/message_engine/gate.py`. Three things about it are load
 bearing, each pinned by a test in `tests/test_message_engine_go_live.py`
 (`TestAdmission`):
 
-2026-10-04, re-evaluation E7: `emit` went; `engine_delivery.deliver` asks
-`gate.admission_blockers`, which takes no priority, after the compose and
-right before the wire, and the tests named below drive `deliver`
-(`test_admission_is_asked_after_the_compose` pins the order).
-
-**It is checked immediately before the wire, not once per compose.** `emit`
-asks, right before the transport: admission can turn false in the gap - a new
-ruleset file deployed and not yet promoted - and a compose can legitimately
-take fifteen minutes, so a gate checked at the start of one is a gate with a
-fifteen-minute hole in it (`test_a_gate_that_cannot_be_evaluated_refuses` and
+**It is checked immediately before the wire, not once per compose.**
+`engine_delivery.deliver` asks `gate.admission_blockers` after the compose and
+right before the transport (re-evaluation E7, 2026-10-04: `emit` went):
+admission can turn false in the gap - a new ruleset file deployed and not yet
+promoted - and a compose can take ten minutes (the call's deadline, decision
+1), so a gate checked at the start of one is a gate with a ten-minute hole in
+it (`test_admission_is_asked_after_the_compose`;
+`test_a_gate_that_cannot_be_evaluated_refuses` and
 `test_nothing_promoted_refuses_every_priority` refuse an already-composed
-message inside `emit`).
+message inside `deliver`).
 
 **A P1 does NOT bypass it.** This is the one place the P1 exemption stops, and
 the distinction is worth stating plainly: decision 2 exempts a P1 from pacing,
@@ -263,14 +282,12 @@ budget and breaker because those govern PHRASING, and delaying the message that
 must arrive in order to think about wording is indefensible. Admission is not
 phrasing - it is whether this deployment may put bytes on a wire at all. A P1
 that bypassed it would send from a deployment whose loaded artifacts nobody
-promoted. The gate records `priority` and never branches on it
+promoted. The gate takes no priority, so it cannot branch on one
 (`test_nothing_promoted_refuses_every_priority`, priorities 1 to 3).
 
 **A gate that cannot be evaluated is a blocker, not an absence of blockers.**
-An exception escaping the check would reach the engine's caller, which
-classifies exceptions as `TECHNICAL_ERROR` and retries - silently converting
-"this deployment is not authorised to send" into "try again in two minutes",
-forever (`test_a_gate_that_cannot_be_evaluated_refuses`).
+An exception escaping the check would reach the engine's caller as a failure
+of the send, not as a refusal (`test_a_gate_that_cannot_be_evaluated_refuses`).
 
 ## The governor settings (ruling Q42 — settings, these defaults)
 
