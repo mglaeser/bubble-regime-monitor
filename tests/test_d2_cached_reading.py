@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -11,24 +12,50 @@ from app.services import compute
 from tests.conftest import make_golden_raw_inputs
 
 SLA_DAYS = methodology.get_path("freshness_sla_days", "d2")
+NOW = datetime(2026, 11, 10, 2, 0, tzinfo=UTC)
+
+
+@pytest.fixture(autouse=True)
+def clock(monkeypatch):
+    """compute's datetime.now() returns NOW, or the moment a test sets, and
+    every date these tests compute is counted from NOW: none moves while a
+    test runs."""
+    def _set(moment: datetime) -> None:
+        class _Clock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return moment.astimezone(tz) if tz else moment.replace(tzinfo=None)
+
+        monkeypatch.setattr(compute, "datetime", _Clock)
+    _set(NOW)
+    return _set
 
 
 def _day(days_ago: int) -> str:
-    return (datetime.now(UTC) - timedelta(days=days_ago)).date().isoformat()
+    return (NOW.date() - timedelta(days=days_ago)).isoformat()
 
 
 def _snapshot(raw):
     return compute.compute_snapshot(raw, mc_samples=2_000, mc_seed=1)
 
 
-def _live(as_of: str):
+def _golden():
+    """The golden inputs, each dated reading re-dated to NOW's day."""
     raw = make_golden_raw_inputs()
+    for f in dataclasses.fields(raw):
+        if f.name.endswith("_as_of") and getattr(raw, f.name) is not None:
+            setattr(raw, f.name, _day(0))
+    return raw
+
+
+def _live(as_of: str):
+    raw = _golden()
     raw.margin_as_of = as_of
     return raw
 
 
 def _without_the_file(last: dict | None):
-    raw = make_golden_raw_inputs()
+    raw = _golden()
     raw.margin_balances = raw.margin_months = raw.margin_as_of = None
     raw.margin_cached = last
     return raw
@@ -79,7 +106,7 @@ def test_a_file_older_than_the_sla_is_not_scored_through_the_stored_reading():
     assert "older than" in (d2.note or "")
 
 
-def test_a_cached_reading_is_never_read_back(isolated_db):
+def test_a_cached_reading_is_never_read_back(isolated_db, clock):
     """Three recomputes without the file: each serves the reading the file
     gave, with its month, and the store still answers with that reading."""
     assert compute.last_finra_reading() is None
@@ -92,7 +119,8 @@ def test_a_cached_reading_is_never_read_back(isolated_db):
                      "sub_score": pytest.approx(live.indicators["d2"].sub_score),
                      "as_of": _day(40)}
 
-    for _ in range(3):
+    for hour in (6, 10, 14):   # the later recomputes of NOW's day: each row is newer
+        clock(NOW.replace(hour=hour))
         raw = _without_the_file(compute.last_finra_reading())
         data = _snapshot(raw)
         assert data.indicators["d2"].as_of == _day(40)
@@ -103,6 +131,7 @@ def test_a_cached_reading_is_never_read_back(isolated_db):
 
     # A row stored as a fallback is skipped whatever it carries. Production
     # holds two that carry another date than the file's reading (2026-07-16).
+    clock(NOW.replace(hour=18))
     raw = _without_the_file({"value": 1.0, "sub_score": 0.01, "as_of": _day(10)})
     other = _snapshot(raw)
     assert other.indicators["d2"].fallback_used is True
