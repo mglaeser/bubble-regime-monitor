@@ -31,7 +31,7 @@ dependencies = [
     "numpy>=1.26,<2.3",
     "pandas>=2.2,<3.0",
     "openpyxl>=3.1",
-    "xlrd>=2.0.1",  # legacy .xls support (shillerdata ie_data.xls CAPE fallback)
+    "xlrd>=2.0.1",  # legacy .xls support (Shiller's ie_data.xls, S1's CAPE)
     "lxml>=5.2",
     # The NYSE calendar, one-off closures included. Exact: a release can add a
     # closure, which moves trading-day arithmetic, so the version moves on purpose.

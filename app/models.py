@@ -184,7 +184,8 @@ class ProviderHealth(Base):
 class DailyClose(Base):
     """Per-symbol daily close for the D1 breadth 200-DMA, populated from the
     Polygon/Massive grouped-daily endpoint (one call = the whole US market for
-    one day). Keyed (symbol, date); the 200-day SMA is computed on read from the
+    one day). Keyed (symbol, date); the 200-day SMA is computed on read, inside
+    the newest 210 stored sessions (breadth.py, POLYGON_TARGET_DAYS), from the
     most recent 200 rows per symbol. The only breadth source (owner decision
     D9, 2026-09-28)."""
 
@@ -252,8 +253,10 @@ END
 class DashboardFeed(Base):
     """Cached dashboard-feed payload (v3.4.0, DASHBOARD_FEED_SPEC.md): the full
     series+metrics JSON assembled once per recompute (AFTER the score persists)
-    and served verbatim by GET /api/v1/dashboard/feed — endpoints never pull
-    upstream on request. Only the newest ~14 rows are retained."""
+    and served by GET /api/v1/dashboard/feed through the contract of the day
+    (`app.services.dashboard_feed.to_contract`: a stored row can be older than
+    the contract) — endpoints never pull upstream on request. Only the newest
+    ~14 rows are retained."""
 
     __tablename__ = "dashboard_feed"
 
