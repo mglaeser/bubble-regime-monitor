@@ -44,7 +44,8 @@ def test_c08_monthly_join_keeps_weekend_first_months():
 def _finra_xlsx(rows: list[tuple[str, float]]) -> bytes:
     """Minimal FINRA-shaped XLSX: a header row then (month-label, debit) rows."""
     df = pd.DataFrame(
-        [["Month", "Debit Balances in Customers' Securities Margin Accounts"]]
+        # The file's own heading: the reader takes the months from this column only.
+        [["Year-Month", "Debit Balances in Customers' Securities Margin Accounts"]]
         + [[m, v] for m, v in rows]
     )
     buf = io.BytesIO()
