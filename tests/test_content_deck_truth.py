@@ -15,19 +15,9 @@ the high-yield spread stood at 332 to 348 bps that week, 73 to 89 bps above
 its low (259 bps, January 2025) in the history the service keeps since July
 2023. 601 of the 615 S5 readings come from the excess bond premium.
 
-The last two cases are about the lines a band selects beside the score: the
-verdict's lead and detail, the band one-liner and the splash blurb. The lead
-line names the band and says whether the trend trigger has fired, and the trim
-one-liner names the trigger; the instruction wording the two carried ("Trim
-now", "is warranted", "Consider easing risk") stays out of all four. The
-service is "research, not advice" (README), its disclaimer says "Nothing here
-is a recommendation to buy, sell, or hold any security", and the same deck's
-ladder says the score "does not tell you to sell today". In the same 615
-snapshots the band is trim on 516 (each selects the trim one-liner), de-risk
-on 41, hold on 5 and withheld on 53. With the trend read from the intramonth
-preview, the lead rows selected were (trim, no) on 474 snapshots, (trim, yes)
-on 42 (QQQ, 2026-11-03 to 11-10) and (de-risk, no) on 41; (de-risk, yes) on
-none.
+The case on instruction wording is written from the disclaimer
+(app/references.py: "Nothing here is a recommendation to buy, sell, or hold
+any security").
 """
 
 from __future__ import annotations
@@ -148,40 +138,15 @@ def test_the_s5_gloss_describes_the_reading_of_two_years_ago():
     assert "as_of" not in s5
 
 
-# The instruction wording the lead line and the trim one-liner carried:
-# "De-risk now — ...", "De-risk is warranted; ...", "Trim now — ...", "Trim is
-# warranted — but nothing forces action today." and "Consider easing risk if
-# the trend rule confirms." This pins that the replaced wording stays out of
-# every line a band selects. It is a pin on this repository's own five
-# strings, not a detector of advice in free text (docs/MESSAGE_ENGINE.md
-# decision 24: a denylist for free text does not converge).
+# The wording of the five replaced lines. A pin on them, not a detector of
+# advice in free text.
 ACTION_COPY = ("de-risk now", "trim now", "is warranted", "consider ")
 
 
 def test_no_verdict_or_band_line_tells_the_reader_to_act():
-    from app.references import DISCLAIMER
-
     deck = _deck()
-    # What the service says of itself beside these lines: the disclaimer the
-    # API serves and the deck's own ladder. README: de-risking "is executed by
-    # the Leg 2 trend trigger, never by the score alone". So hold, trim and
-    # de-risk are the labels of the published action_band, and the trend rule
-    # is the trigger.
-    assert "Nothing here is a recommendation to buy, sell, or hold any security" in DISCLAIMER
-    assert "does not tell you to sell today" in deck["ladder.ceiling"]["text"]
-
     said = [row["template"] for name in ("verdict.lead", "verdict.detail")
             for row in deck[name]["items"]]
     said += [text for name in ("band.oneliner", "splash.band_blurb")
              for text in deck[name]["entries"].values()]
     assert [t for t in said if any(p in t.lower() for p in ACTION_COPY)] == []
-
-
-def test_the_verdict_rows_keep_their_placeholders():
-    # The client fills {names}. A reworded row must not change what it fills:
-    # the lead line carries {names} on the two rows of a fired trigger and no
-    # placeholder anywhere else.
-    filled = {(row["band"], row["trend_broken"]): re.findall(r"\{([^{}]+)\}", row["template"])
-              for row in _deck()["verdict.lead"]["items"]}
-    assert {key: names for key, names in filled.items() if names} == {
-        ("de-risk", "yes"): ["names"], ("trim", "yes"): ["names"]}

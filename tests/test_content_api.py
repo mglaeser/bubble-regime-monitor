@@ -596,10 +596,6 @@ class TestBlockArtifact:
             unknown_rows = [r for r in blocks[table]["items"] if r.get("band") == "unknown"]
             for row in unknown_rows:
                 text = row.get("template", "").lower()
-                # A band's lead line names its band ("Band de-risk ...",
-                # "Band trim ...", "... hold — ..."); the unknown row names
-                # none. The bare words "de-risk" and "trim" also cover the
-                # earlier "De-risk now" and "Trim now".
                 for verb in ("de-risk", "trim", "hold —", "hold -"):
                     assert verb not in text, f"{table} unknown row carries action copy"
         reg._clear_artifact_cache()
@@ -982,9 +978,9 @@ class TestBlockArtifact:
         reg._clear_artifact_cache()
         # The version rises with every change of served text, so a client sees
         # that the content changed. 3: the deck statements the service
-        # contradicted are corrected. 4: the verdict's lead line and the trim
-        # one-liner name the band and the state of the trend trigger and give
-        # no instruction (both in tests/test_content_deck_truth.py).
+        # contradicted are corrected (tests/test_content_deck_truth.py).
+        # 4: the de-risk and trim rows of gauge.verdict.lead and
+        # gauge.band.oneliner's trim entry are reworded.
         assert reg.content_version() == 4
         payload = reg.dashboard_payload()
         assert payload["content_version"] == 4
