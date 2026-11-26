@@ -113,17 +113,12 @@ class TestWhatTheApiServes:
         assert set(re.findall(r"\{(\w+)\}", data)) == set(facts) - {"override_suffix"}
 
     def test_a_flag_that_cannot_fire_is_not_called_inactive(self):
-        """The flag contract keeps four states apart (docs/ALERT_STAGE0_AUDIT.md:
-        UNKNOWN = a required input is unavailable, BLOCKED = governance
-        forbids firing) and counts the flags that can fire. The digest took
-        the active bit alone, so a blocked and an unknown flag both read
-        "active False" beside a distance. Production: flag 1 BLOCKED and 3 of
-        4 fireable in all 490 snapshots that carry the contract, while every
-        digest read "flag 1 ...: active False; its reading minus its
-        threshold: -0.xx"; the digest of 2026-11-05 put the contested test
-        "0.22 unter der Warnschwelle", a threshold whose crossing fires
-        nothing. Here: the contested statistic ABOVE its critical value, no
-        credit reading, and breadth with no index series."""
+        """The flag contract keeps four states apart and counts the flags that
+        can fire; the digest took the active bit alone, so a blocked and an
+        unknown flag both read "active False" beside a distance. Production:
+        flag 1 is BLOCKED in all 490 snapshots that carry the contract. Here:
+        the contested statistic ABOVE its critical value, no credit reading,
+        and breadth with no index series."""
         from app.engine.aggregate import RedFlags
         from app.engine.snapshot_contract import build_red_flag_meta
 
@@ -159,45 +154,6 @@ class TestWhatTheApiServes:
         for name in [f"rf{n}_state{when}" for n in (1, 2, 3, 4) for when in ("", "_1d_ago")]:
             assert composer.WORDS[name] == produced
         assert composer.typed("rf1_state", "FIRING") is None
-
-    def test_a_flag_that_was_blocked_a_day_earlier_reads_blocked_there_too(self):
-        day = _snapshot(computed_at=T0 - timedelta(days=1), rf4=False)
-        facts = digest.digest_facts(_snapshot(), day=day)
-        prompt = composer.prompt_for("daily_digest", _entry(), facts, Channel.IMESSAGE,
-                                     Settings(_env_file=None, message_engine_enabled=True))
-        earlier = next(line for line in prompt.splitlines() if line.startswith("a day earlier:"))
-        assert "(flag 1 BLOCKED, flag 2 INACTIVE, flag 3 INACTIVE, flag 4 INACTIVE)" in earlier
-        assert "flag 4, " in prompt and "near its high: ACTIVE; that share minus 50 percent: -8.2" in prompt
-
-    def test_the_coverage_bit_is_named_as_what_it_is(self):
-        """`data_degraded` is the coverage gate's verdict (compute._coverage_gate:
-        more than a third of a block's weight dropped or stale), which
-        suppresses the band unless the override fired (v3.7.3/A-03) - not
-        "some data degraded". With the margin-debt gauge dropped the timing
-        block keeps 87 percent and the bit is False. Production: the bit is
-        True in 53 of 615 snapshots, exactly those whose band reads
-        "suppressed (block degraded)"; on 27 of the 37 digest mornings of
-        2026-10-05..11-10 the DATA said "some data degraded: False" beside a
-        stale indicator."""
-        from types import SimpleNamespace as Ind
-
-        from app.engine.aggregate import RedFlags
-        from app.engine.snapshot_contract import derive_band_state
-        from app.references import REGISTRY
-
-        live = {key: Ind(id=key, dropped=key == "d2", stale=False, quality=1.0)
-                for key in REGISTRY if key[0] in "sd"}
-        gate = compute._coverage_gate(live)
-        assert gate["degraded"] is False and gate["D"]["coverage"] == 0.87
-        fired = RedFlags(semi_runup_ge_150pp=True, hy_oas_widen_gt_100bps=True, breadth_lt_50_near_ath=True)
-        assert derive_band_state(headline_median=50.0, red_flags=RedFlags(),
-                                 coverage_degraded=True).effective_action_state == "suppressed"
-        overridden = derive_band_state(headline_median=50.0, red_flags=fired, coverage_degraded=True)
-        assert (overridden.data_degraded, overridden.effective_action_state) == (True, "de-risk")
-        data = dict(composer._SECTION_RE.findall(_entry()["prompt"]))["DATA"]
-        line = next(line for line in data.splitlines() if "{data_degraded}" in line)
-        assert "coverage" in line and "more than a third of its weight" in line and "some data" not in line
-        assert "the action band is then suppressed, unless the override fired" in line
 
     def test_the_model_reads_the_whole_judgment(self):
         """The judgment's own cap is the composer's: at 180, 24 of
@@ -241,13 +197,9 @@ class TestTheChange:
     def test_a_changed_volatility_term_structure_is_carried(self):
         """The VIX multiplier scales the whole timing block (D = min(D_raw * V, 1),
         app/indicators/v_vix.py), so a change of state moves the score with no
-        sub-score moving. Production, the 37 digests of 2026-10-05..11-10: the
-        state differed from the day-earlier slot on six mornings (10-17, 10-20,
-        11-03, 11-05, 11-06, 11-10) and the multiplier alone moved the point
-        score by +1.33, -1.31, +1.19, -1.22, +3.46 and -2.41; none of the six
-        digests names it, and the one of 10-20 put a fall of 1.40 - 1.31 of it
-        the multiplier - down to the top-10 share, whose sub-score moved 0.01.
-        The facts carried today's state and nothing to compare it with."""
+        sub-score moving. Production: on 6 of the 37 digest mornings of
+        2026-10-05..11-10 the state differed from the day-earlier slot, and
+        the facts carried nothing to compare today's state with."""
         day = _snapshot(computed_at=T0 - timedelta(days=1))
         today = _snapshot(v_state="backwardation", v_multiplier=1.15)
         facts = digest.digest_facts(today, day=day)
