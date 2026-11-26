@@ -155,9 +155,10 @@ def start() -> BackgroundScheduler:
                            CronTrigger(minute="5,35", timezone="UTC"),
                            id="stuck_watchdog", replace_existing=True,
                            coalesce=True, misfire_grace_time=1800, max_instances=1)
-        # Metadata is retained for at least 800 days and message bodies for the
-        # shorter configured horizon. Daily is frequent enough to bound disk
-        # growth without making deletion part of a delivery transaction.
+        # The alert retention run: the message horizon is for the text of a
+        # render, the metadata horizon for the rows of alert_event
+        # (app/alerts/retention.py). Daily and a job of its own, so that
+        # deletion is no part of a delivery transaction.
         _scheduler.add_job(_alert_retention_job,
                            CronTrigger(hour=3, minute=25, timezone="UTC"),
                            id="alert_retention", replace_existing=True,

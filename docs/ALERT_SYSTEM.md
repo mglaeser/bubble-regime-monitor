@@ -557,7 +557,7 @@ reason instead of pretending to evaluate.
 
 ```bash
 ALERTS_MESSAGE_RETENTION_DAYS=400    # rendered message BODIES
-ALERTS_METADATA_RETENTION_DAYS=800   # the audit trail
+ALERTS_METADATA_RETENTION_DAYS=800   # the rows of alert_event
 python -m app.alerts.cli retention [--dry-run]
 ```
 
@@ -573,6 +573,8 @@ with one that permits *exactly* the transition `final_message -> ''` at the
 same moment `body_redacted_at` goes from NULL to set. A rewrite still aborts, a
 second redaction still aborts, and `gsm7_septets` is left alone so the length
 of what was sent stays auditable after the text is gone.
+
+The long sweep deletes rows of `alert_event` and of no other table.
 
 Two things are never swept: a body whose delivery is not yet terminal (a retry
 could still reuse that exact render), and events belonging to an open episode
