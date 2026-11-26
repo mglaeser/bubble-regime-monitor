@@ -210,8 +210,14 @@ Relaxing the constraint would weaken a live SMS invariant to make room for a
 different channel. Instead the engine persists its own rows: code-point count,
 channel, source (`generated` | `fallback`; a `deterministic` text asks no
 model and writes no row, decision 8),
-every attempt including timeouts and rejections (Q46: full rows, 90-day
-retention). The alert schema is untouched.
+every attempt including timeouts and rejections (Q46: full rows). The rows are
+kept: on 2026-11-25 the owner delegated the decision ("Do it as most sensible
+or recommend"), and it strikes Q46's 90-day retention for them. They are the
+governor's state - the breaker counts the failed calls since the last success
+at any age (`governor.refusal`), so deleting one can hand a failing model more
+calls - and they are small and the owner's own: 58 rows and 0.04 MB on
+2026-11-11, about 0.3 MB a year, every text in them a daily digest for the
+owner. The alert schema is untouched.
 The engine's text is never an `AlertRender` row: `engine_delivery.deliver`
 sends it without the alert dispatcher, and the alert renderer refuses a body
 over 160 septets or outside GSM-7 before a row is written
@@ -289,7 +295,7 @@ of the send, not as a refusal (`test_a_gate_that_cannot_be_evaluated_refuses`).
 |---|---|---|
 | `MESSAGE_ENGINE_MIN_INTERVAL_S` | 300 | floor between two model calls |
 | `MESSAGE_ENGINE_BREAKER_STRIKES` | 5 | failed calls in a row before the cooldown; read within [1, 1000], so a zero never switches the breaker off |
-| `MESSAGE_ENGINE_BREAKER_COOLDOWN_S` | 86400 | no model call for this long after them |
+| `MESSAGE_ENGINE_BREAKER_COOLDOWN_S` | 43200 | no model call for this long after them (86400 until 2026-11-25, decision 27) |
 | `MESSAGE_ENGINE_DAILY_BUDGET` | 100 | model calls per UTC day (ruling Q40) |
 
 Plus `MESSAGE_ENGINE_ENABLED` (default false — inert until switched on, Q42).
@@ -321,7 +327,12 @@ still derived from the attempt rows alone:
 * after `MESSAGE_ENGINE_BREAKER_STRIKES` failed calls in a row (a reply that
   fails the basic checks, or a gateway failure), no call for
   `MESSAGE_ENGINE_BREAKER_COOLDOWN_S` after the last of them; the next call is
-  the probe.
+  the probe. The default cooldown is 12 hours, a day until 2026-11-25 (the
+  owner delegated the decision: "Do it as most sensible or recommend"). A
+  failed digest call ends minutes after its trigger, so a day's cooldown
+  covered the next morning's digest too and an open breaker asked the model
+  only every second day
+  (`tests/test_message_governor.py::TestAnyFailedCallIsAStrike::test_by_default_the_next_mornings_digest_is_the_probe`).
 
 | the engine… | outcome | a call? | a strike? |
 |---|---|---|---|
