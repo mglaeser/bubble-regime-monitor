@@ -107,6 +107,9 @@ stamp; the reviewed allowlist lives in `test_dated_editorial_carries_as_of`.
 - `source` on a dynamic slot is `placeholder` for every slot; `generated` and
   `fallback` are the values a generator would serve under the identical shape,
   and no generator exists.
+- A dynamic slot no longer carries `writer` (`model` | `data`): the key left
+  v1 without a deprecation period, as the owner ruled out backward
+  compatibility (AGENTS.md).
 
 ## 3 · Decisions & trade-offs
 

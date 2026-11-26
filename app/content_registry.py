@@ -661,7 +661,10 @@ def provenance_of(source: str) -> str:
 
 
 def dynamic_slots_payload() -> dict[str, dict[str, Any]]:
-    """Serve every dynamic slot. Placeholder-backed until generation lands."""
+    """Serve every dynamic slot. Placeholder-backed until generation lands.
+
+    A slot no longer carries `writer` (docs/CONTENT_API.md, "Endpoints").
+    """
     return {
         s.slug: {
             "text": s.placeholder,
