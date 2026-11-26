@@ -45,7 +45,9 @@ class IndicatorPayload(BaseModel):
     dropped: bool = Field(False, description="True if the indicator was dropped and its block renormalized")
     as_of: str | None = Field(None, description="ISO date of the underlying reading (not the fetch time)")
     age_days: int | None = Field(None, description="Age of the reading in days; null when unknown")
-    stale: bool | None = Field(None, description="True when age_days exceeds the source freshness SLA")
+    stale: bool | None = Field(None, description=(
+        "True past the source's freshness SLA (S2, S3, D1 and D4 count NYSE sessions since as_of, "
+        "the others calendar days)"))
     note: str | None = Field(None, description="Provenance note")
     timestamp: str | None = Field(None, description="Reading timestamp (ISO-8601)")
 

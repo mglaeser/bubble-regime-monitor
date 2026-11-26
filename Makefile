@@ -1,4 +1,4 @@
-.PHONY: install dev lock lint type test run build up deploy migrate
+.PHONY: install dev lock lint type test run deploy migrate
 
 # Installs come from the locks, hash-checked: the image and CI get exactly the
 # versions that were tested. `make lock` re-resolves after pyproject.toml changes.
@@ -21,19 +21,13 @@ lint:
 	ruff check app tests scripts
 
 type:
-	mypy app
+	mypy --config-file pyproject.toml app
 
 test:
 	pytest -q
 
 run:
 	uvicorn app.main:app --host 0.0.0.0 --port 8000
-
-build:
-	podman build -t bubblegauge -f Containerfile .
-
-up:
-	podman-compose up -d
 
 # Release main now; the release timer does it five minutes after every merge
 # (docs/AUTO_DEPLOY.md).
