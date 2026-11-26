@@ -680,7 +680,6 @@ def test_the_gate_judges_the_busiest_24_months_of_one_snapshot_derisk_entries(
         if busiest > 1 else [])
     assert (summary.transient_one_snapshot_band_p1,
             summary.transient_one_snapshot_band_p1_busiest_24_months) == (2, busiest)
-    assert not any("transient_derisk_p1_rate" in note for note in summary.not_measured)
 
 
 # ---------------------------------------------------------------------------

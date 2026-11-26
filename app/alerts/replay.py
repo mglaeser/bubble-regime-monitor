@@ -978,7 +978,7 @@ def _decide(summary: ReplaySummary) -> None:
             f"{busiest} transient one-snapshot de-risk entries inside one window of "
             "24 months; regime.band_to_derisk is kept only while replay shows <= "
             f"{TRANSIENT_DERISK_P1_CAP} per 24 months")
-    elif summary.band_excursion_months < 24.0:
+    if summary.band_excursion_months < 24.0:
         unmeasured.append(
             f"transient_derisk_p1_rate — the window spans "
             f"{summary.band_excursion_months} months; the target is stated per "
