@@ -12,8 +12,8 @@ import pytest
 
 # The two bootstraps do NOT agree today, and the divergence is real rather than
 # cosmetic: every column below is NOT NULL under create_all and NULLABLE under
-# Alembic. Production boots from Alembic, so a production database permits nulls
-# the models declare impossible.
+# Alembic. A database built by the migration chain permits nulls the models
+# declare impossible.
 #
 # They are WAIVED, not fixed, and the difference matters. Migrations 0001-0004
 # are already applied to the live database; rewriting them would not change it,
