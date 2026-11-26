@@ -21,6 +21,18 @@ The mutations of the checks against the pinned reference are applied to the
 REAL accepted baseline rather than to a hand-written fixture. A hand-written one
 would drift from the shape the gate actually produces, and then these tests
 would be about a document nobody ships.
+
+## `.secrets.baseline` cannot carry 64-hex digests
+
+The byte-identical baseline ratchet and the entropy detector are in tension:
+detect-secrets cannot distinguish a published sha256 digest from a leaked
+token, so any doc or fixture that gains a literal 64-hex string needs a
+`# pragma: allowlist secret` rather than a baseline entry. Discovered while
+adding gate evidence. Not a defect in either tool — a constraint worth writing
+down, because the obvious fix (grow the baseline) is the wrong one.
+
+This was U-05 of docs/UNRELATED_DEFECTS.md, which is deleted: nothing
+referenced it, and what its other four notes describe has changed since.
 """
 
 from __future__ import annotations

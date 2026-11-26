@@ -17,7 +17,9 @@ class Settings(BaseSettings):
     # Hosted OpenAI-compatible gateway. All application routing details are
     # operator config: these defaults carry no deployment hostname, key, model
     # route, or auth-header value. Partial configuration is unavailable, never
-    # inferred from a public default.
+    # inferred from a public default. The gate is GatewayConfig at the use site
+    # (app/llm_gateway.py): it refuses a partial or malformed configuration
+    # before a client is built.
     llm_api_base_url: str = Field(default="", repr=False)
     llm_api_key: SecretStr = SecretStr("")
     llm_model: str = Field(default="", repr=False)
@@ -185,7 +187,6 @@ class Settings(BaseSettings):
     # 0.02 off, 2 000 draws about 0.13. A host that still sets one of the two
     # - .env.example carried both lines, with the artifact's values - is told
     # to remove it (RETIRED_ENV_KEYS below).
-    tz: str = "UTC"
     # Set by the test suite (conftest): skips the boot warm-up threads and the
     # scheduler in lifespan. Leaked daemon threads (hy-oas-seed /
     # breadth-backfill) crossing test boundaries corrupted other tests'
@@ -240,21 +241,6 @@ class Settings(BaseSettings):
     # 150; iMessage counts CODE POINTS, not septets. 350 since the owner's
     # request of 2026-10-04: one point per message, explained at more length.
     message_engine_imessage_max_chars: int = 350
-
-    @property
-    def llm_configured(self) -> bool:
-        """All values needed to open the gateway connection are present.
-
-        Shape and transport-safety validation happens in ``GatewayConfig`` at
-        the use site; this property only distinguishes deliberately unavailable
-        from an attempted call whose configuration is invalid.
-        """
-        return bool(
-            self.llm_api_base_url
-            and self.llm_api_key.get_secret_value()
-            and self.llm_model
-            and self.llm_auth_header
-        )
 
     @property
     def sms_configured(self) -> bool:
@@ -349,7 +335,8 @@ def configured_environment() -> dict[str, str]:
 #: one of these keys changes nothing, and that is said loudly - at boot, in the
 #: alerts preflight, in health. The list is not every removed setting: one that
 #: is not named here is dropped without a word, as `extra="ignore"` drops any
-#: unknown key.
+#: unknown key. `TZ` is not named: the image sets it on every boot
+#: (Containerfile), so naming it would report every boot.
 RETIRED_ENV_KEYS: dict[str, str] = {
     "DAILY_SMS_ENABLED": (
         "removed with the Stage-4 cutover (owner decision D2c, 2026-10-02): the daily "
