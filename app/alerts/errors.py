@@ -67,18 +67,3 @@ class RenderRejected(AlertError):
     over the septet cap). The caller falls back down the template cascade."""
 
     code = "RENDER_REJECTED"
-
-
-class NotEvaluable(AlertError):
-    """A rule cannot be evaluated from this input at all. Distinct from 'the
-    condition is false' and never counted as recall."""
-
-    code = "NOT_EVALUABLE"
-
-
-class PinMissing(AlertError):
-    """A rule references a threshold no operator artifact supplies. The rule
-    stays disabled and the API reports null plus this reason — never the literal
-    string '<PIN>' in a numeric field."""
-
-    code = "PIN_MISSING"

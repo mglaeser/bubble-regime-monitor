@@ -400,22 +400,30 @@ REGISTRY: dict[str, Methodology] = {
         weight=0.13,
         grounding="judgmental",
         block="D",
+        # `what`, `why` and the first caveat are what the digest's model reads
+        # for D2 (app/message_engine/context.py). They describe the number the
+        # code computes: it follows the growth rate, and the rollover is the
+        # balances falling two months running, not growth turning down.
+        # Production, 2026-07-11 to 2026-11-10: growth 53.7 -> 31.4 % with "no
+        # rollover" 609 times and a confirmed one never; the sub-score fell
+        # from 0.492 to 0.109, 3.30 headline points (tests/test_d2_registry.py).
         what=(
-            "FINRA customer margin debit balances: year-over-year growth plus a "
-            "rollover-confirmation multiplier, read as a deleveraging-confirmation signal."
+            "FINRA customer margin debit balances: their year-over-year growth, counted in full "
+            "while the balances have fallen two months running and scaled down otherwise. The "
+            "reading follows the growth rate, so it falls when growth slows."
         ),
         how=(
             "Parse the FINRA margin-statistics XLSX debit-balance column; yoy = 12-month % change "
-            "of debit balances. base = clip((yoy - 25)/35, 0, 1). mult = 1.0 if there have been two "
-            "consecutive monthly declines from a trailing-12-month high, else 0.6. "
+            "of debit balances. base = clip((yoy - 25)/35, 0, 1). mult = 1.0 if debit balances fell "
+            "in each of the last two months (three consecutive published months), else 0.6. "
             "sub_score = base * mult."
         ),
         why=(
-            "Rapid leverage expansion marks exuberance, and the rollover — margin debt YoY turning "
-            "down — is the confirmation that deleveraging has begun; at the 2000, 2007, and 2021 "
-            "peaks, margin-debt YoY rolled over 2-6 months before or at the index peak. Because the "
-            "level itself trends mechanically with the market, only the rate of change and the "
-            "rollover carry signal."
+            "Rapid leverage expansion marks exuberance, and the rollover — the balances themselves "
+            "falling two months running — is the confirmation that deleveraging has begun; at the "
+            "2000, 2007, and 2021 peaks, margin-debt YoY rolled over 2-6 months before or at the "
+            "index peak. Because the level itself trends mechanically with the market, only the "
+            "rate of change and the rollover carry signal."
         ),
         references=[
             "FINRA Rule 4521 margin statistics",
@@ -427,7 +435,17 @@ REGISTRY: dict[str, Methodology] = {
             "returns and a 1-2 month lag versus stocks -> this is confirmation-only, low weight. "
             "There is a 3-4 week publication lag (published ~third week of the following month) and "
             "no true fallback source — cache and tolerate staleness (MacroMicro mirrors the same "
-            "series for display only)."
+            "series for display only).",
+            # Second, so the prompt still reads the caveat above (it takes
+            # caveats[0]); the endpoints serve both. The numbers are the
+            # artifact's anchor 25, span 35 and multipliers 1.0 / 0.6:
+            # 46 = 25 + 0.6 * 35 (tests/test_d2_registry.py computes them).
+            "The sub-score is high only while year-over-year growth is still high; once leverage "
+            "has unwound it reads 0. Growth at or below 25% reads 0 with or without a confirmed "
+            "rollover, and a confirmed rollover reads above the unconfirmed maximum of 0.6 only "
+            "while growth is still above 46%. While no rollover is confirmed, a falling reading "
+            "means that margin debt is growing more slowly; it does not say that the risk of a "
+            "turn has fallen.",
         ],
     ),
     "d3": Methodology(
@@ -479,8 +497,9 @@ REGISTRY: dict[str, Methodology] = {
         block="D",
         what=(
             "The Log-Periodic Power Law Singularity (LPPLS) confidence indicator on the Nasdaq-100 "
-            "(QQQ proxy): the fraction of start-time fitting windows, at the present endpoint, whose "
-            "calibrated parameters satisfy bubble-consistency filters."
+            "(QQQ proxy): of the start-time fitting windows that fit a positive-bubble shape at the "
+            "present endpoint, the fraction whose calibrated parameters also satisfy the "
+            "bubble-consistency filters. It is not a share of all fitted windows."
         ),
         how=(
             "Use lppls PyPI 0.6.24 (PINNED). v3.3.2 SINGLE-ENDPOINT DENSE SCAN: one fitting endpoint "
@@ -488,8 +507,17 @@ REGISTRY: dict[str, Methodology] = {
             "days in 5-day steps (~144 windows). Fit ln p(t) = A + B*(t_c - t)^m + C*(t_c - t)^m * "
             "cos(w*ln(t_c - t) - phi); filter conditions m in (0,1), w in [4,25] (flat "
             "filter_conditions_config dict; qualification via compute_indicators). confidence = "
-            "fraction of start-time windows passing the filters AT t2 (the library's per-endpoint "
-            "pos_conf; == n_qualifying/n_evaluated with a single endpoint); sub_score = confidence. "
+            # The denominator is the library's (lppls 0.6.24, compute_indicators:
+            # pos_conf = pos_qual_count / pos_count, pos_count the fits with b < 0),
+            # not every fitted window. Production, the 601 readings that carry the
+            # counts (2026-07-15 to 2026-11-10): value == qualifying / positive on
+            # 601, == qualifying / fitted on none; 83 to 130 of 144 windows were
+            # positive; mean value 0.299 against 0.208 over all fitted windows.
+            "the library's per-endpoint pos_conf AT t2: the positive-bubble windows (fit b < 0) "
+            "that pass the filters, divided by all positive-bubble windows, NOT by all fitted "
+            "windows, so it is never below the share of all fitted windows and usually above it "
+            "(in production 0.30 against 0.21 on average, July to November 2026); sub_score = "
+            "confidence. "
             "Three dt-band fractions (short 30-63d, medium 63-252d, long 252-750d) are partitioned "
             "from the SAME fits as multi-scale diagnostics (payload only, never headline inputs). "
             "States: VALID / VALID_ZERO (a computed zero ENTERS the aggregation) / "
@@ -535,7 +563,8 @@ REGISTRY: dict[str, Methodology] = {
             "weighted sub-score. Label: LAGGING CONFIRMATION."
         ),
         how=(
-            "Compute ratio = VIX / VIX3M (CBOE delayed quotes, or FRED VIXCLS / VIX3M). "
+            "Compute ratio = VIX / VIX3M (CBOE delayed quotes, or FRED's daily closes "
+            "VIXCLS / VXVCLS, FRED's series id for VIX3M). "
             "State: ratio < 0.95 -> contango -> V = 1.00; 0.95 <= ratio <= 1.0 -> flat -> "
             "V = 1.05; ratio > 1.0 -> backwardation -> V = 1.15. Applied as "
             "D = min(D_raw * V, 1.0). Source order: CBOE delayed quotes (primary) -> FRED ratio "
@@ -673,8 +702,9 @@ CHANGELOG: list[dict[str, str]] = [
         "score": "D4 METHOD CHANGE — values not comparable across the v3.3.0->v3.3.2 boundary",
         "notes": "(1) D4 LPPLS redesigned to a SINGLE-ENDPOINT DENSE SCAN: one endpoint t2=today, "
         "start-time windows dt 30-750 trading days in 5-day steps (~144 windows); confidence = "
-        "fraction qualifying at t2 (Sornette 2015 / Demirer 2019 definition — with one endpoint "
-        "this equals n_qualifying/n_evaluated, dissolving the earlier reviewer dispute). Replaces "
+        "fraction qualifying at t2 (the library's pos_conf: qualifying windows over the "
+        "positive-bubble windows, b < 0; this entry said it equals n_qualifying/n_evaluated, "
+        "which it does not, corrected 2026-11). Replaces "
         "the ~40-endpoint x <=120-day grid with a recent-endpoint mean: cheaper (~144 fits vs "
         "~600) and examines 6x the scale range, so readings are NOT comparable to v3.3.0/1. "
         "Three dt-band diagnostics (short/medium/long) partitioned from the same fits at zero "
@@ -1058,9 +1088,17 @@ LEG_CAVEATS: dict[str, str] = {
         "timing rules is data-mining-fragile; the honest expectation is drawdown reduction, not "
         "return enhancement."
     ),
+    # 131 is the top 5% of the sample the cited analysis used, not of the index
+    # in 2026. This service's 615 stored readings (2026-07-11 to 2026-11-10):
+    # minimum 126.4, median 148.5, maximum 168.6; 609 are above 131. The text
+    # is served as `skew_caveat` beside the level (GET /api/v1/legs/fast-alarm)
+    # and on the status page, and it is a line of the framework block in the
+    # digest's prompt (app/message_engine/context.py, framework_for).
     "skew": (
-        "Bilello's analysis shows SKEW in its top 5% (>~131) has had ~zero forward predictive "
-        "value -> LABEL: COINCIDENT CONTEXT ONLY."
+        "Bilello's analysis shows that a SKEW reading in its top 5% (above ~131 in his sample) "
+        "has had ~zero forward predictive value. That level is no extreme in 2026: 609 of this "
+        "service's 615 stored readings (July to November 2026) are above 131, median 148.5 -> "
+        "LABEL: COINCIDENT CONTEXT ONLY."
     ),
     "derisking": (
         "Cederburg, O'Doherty, Wang & Yan (2020) — any de-risking rule may destroy value net of "
@@ -1208,8 +1246,9 @@ KNOWN_ISSUES: list[dict[str, str]] = [
      "ref": "epistemic caveat 2"},
     {"id": "judgmental-anchors", "severity": "info", "category": "judgmental-parameter",
      "title": "Several anchors/weights are expert-judgmental, not estimated",
-     "detail": "S2 concentration lo/hi, D1 breadth lo/hi and weight, and the alpha split have no "
-     "labeled-crash-dataset calibration. No sensitivity report is kept: the script meant to "
+     "detail": "S2 concentration lo/hi, D1 breadth lo/hi and weight, the alpha split and the "
+     "action-band edges (45 and 60) have no labeled-crash-dataset calibration. No sensitivity "
+     "report is kept: the script meant to "
      "produce one failed at import from v3.3.0 on (2026-07-12, when EPSILON left "
      "app/engine/aggregate.py), so it produced no report or warning after that, and it was "
      "deleted by owner decision on 2026-09-28 rather than rebuilt. A weight change fails the "

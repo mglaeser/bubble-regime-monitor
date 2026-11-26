@@ -1,4 +1,4 @@
-"""ORM models: snapshots, indicator_readings, source_health, hy_oas_history."""
+"""ORM models: the service's own tables. The alert system's are in app/alerts/models.py."""
 
 from __future__ import annotations
 
@@ -310,14 +310,19 @@ class MessageEngineAttempt(Base):
     finished_at: Mapped[datetime | None] = mapped_column(TZDateTime, nullable=True)
     #: ok | format_rejected | content_rejected | technical_error | budget_skipped
     outcome: Mapped[str] = mapped_column(String(32), index=True)
-    #: Which iteration within one compose (1-based), so a re-ask is visible.
+    #: Always 1: a compose asks the model once (docs/MESSAGE_ENGINE.md,
+    #: decision 4). The column stays until a schema revision is cut.
     iteration: Mapped[int] = mapped_column(Integer, default=1)
     #: Never the model's raw error body — only a class name or short reason;
     #: the gateway's own error boundary is preserved (app/llm_gateway.py).
     failure_reason: Mapped[str | None] = mapped_column(String(200), nullable=True)
     #: The text that was ultimately used, whatever its source.
     message: Mapped[str | None] = mapped_column(Text, nullable=True)
-    #: generated | fallback | deterministic
+    #: generated | fallback; none on a failed call's own row. A deterministic
+    #: text (a P1, the engine off, the bare event) asks no model and writes
+    #: no row (docs/MESSAGE_ENGINE.md, decision 8).
     source: Mapped[str | None] = mapped_column(String(16), nullable=True)
     code_points: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: Written by nothing, NULL on every row: the emoji cap it was made for
+    #: went with the validator (decision 24). It stays as `iteration` does.
     emoji_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
