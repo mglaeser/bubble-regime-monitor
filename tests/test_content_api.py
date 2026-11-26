@@ -976,12 +976,11 @@ class TestBlockArtifact:
         import app.content_registry as reg
 
         reg._clear_artifact_cache()
-        # The version rises with every change of served text, so a client sees
-        # that the content changed. 3: the deck statements the service
-        # contradicted are corrected (tests/test_content_deck_truth.py).
-        assert reg.content_version() == 3
+        # 3: the deck's gauge.reg.d3 names total revenue as what fires the gate.
+        # 4: four deck statements the service contradicted are corrected.
+        assert reg.content_version() == 4
         payload = reg.dashboard_payload()
-        assert payload["content_version"] == 3
+        assert payload["content_version"] == 4
         assert len(payload["blocks"]) >= 211
         reg._clear_artifact_cache()
 

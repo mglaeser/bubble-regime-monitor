@@ -34,7 +34,7 @@ PROTECTED: tuple[tuple[str, str], ...] = (
     (".github/", "workflow definitions and the CODEOWNERS list itself"),
     ("scripts/", "the review panel and the regime gates"),
     ("governance/", "the constitution and its attested hash"),
-    ("audit/", "the findings ledger the deploy gate reads"),
+    ("audit/", "the 2026-07 audit's findings ledger, which the findings gate reports"),
     ("frozen_methodology.json", "the frozen scoring methodology (F-01/L-07)"),
     ("app/methodology.py", "the code that reads the frozen methodology"),
     ("app/alerts/", "the rules that decide whether a human is woken"),
