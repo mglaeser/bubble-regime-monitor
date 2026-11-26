@@ -216,7 +216,4 @@ addressed:
   majorities, whitespace-padded reasons, challenge-tier bounds, single-pin
   no-corroboration).
 - `tests/test_independent_verify.py` pins the same semantics in pytest and
-  proves the standalone script's no-key mode is green-but-loud. Its class
-  `TestTheDocumentDescribesThisPanel` holds this document to the workflow and
-  the script: the trigger, the job, the status, the dormant status, and the
-  settings.
+  proves the standalone script's no-key mode is green-but-loud.
