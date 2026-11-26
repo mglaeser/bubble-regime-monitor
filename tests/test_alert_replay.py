@@ -727,6 +727,18 @@ def test_a_replay_plans_the_one_reminder_of_a_condition_that_lasts(tmp_path, art
     assert summary.deliveries_by_kind == {"INITIAL": 1, "REMINDER": 1}
 
 
+def test_a_replay_takes_no_member_as_sent_that_the_dispatcher_drops(tmp_path, artifacts):
+    """Hold to trim at 22:00 UTC (00:00 in Berlin: the P2 waits for 07:00), back to
+    hold at 02:00, trim again at 06:00. At the release the dispatcher drops the
+    first, its episode over (`outbox.revalidate_members`), so no cooldown starts
+    and the second is planned."""
+    rule = artifacts.ruleset.rule("regime.band_hold_to_trim")
+    assert (rule.priority, rule.cooldown_seconds) == (2, 24 * 3600)
+    summary = _run(tmp_path, artifacts, inputs=_band_arc(["hold"] * 4 + ["trim", "hold", "trim"]))
+    assert summary.episodes_by_rule["regime.band_hold_to_trim"] == 2
+    assert (summary.deliveries_planned, summary.suppressions_by_reason.get("COOLDOWN")) == (3, None)
+
+
 # ---------------------------------------------------------------------------
 # the committed gate artifact
 # ---------------------------------------------------------------------------

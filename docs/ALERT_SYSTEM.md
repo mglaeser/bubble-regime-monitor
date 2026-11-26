@@ -292,8 +292,10 @@ contention — a lost alert plan rather than a slower one.
 Two switches:
 
 ```bash
-ALERT_INPUT_CAPTURE=true    # persist the point-in-time sidecar  (Stage 1: ON)
-ALERTS_MODE=disabled        # disabled | shadow | live           (Stage 1: off)
+# persist the point-in-time sidecar (Stage 1: ON)
+ALERT_INPUT_CAPTURE=true
+# disabled | shadow | live (Stage 1: off)
+ALERTS_MODE=disabled
 ```
 
 Capture runs with alerting fully disabled — that is how Stage 1 collects replay
@@ -338,8 +340,10 @@ stop capture: the sidecars are exactly what an operator needs to diagnose the
 ruleset that failed, and a lost sidecar can never be backfilled.
 
 ```bash
-ALERTS_WRITE_API_KEY=         # silences
-ADMIN_API_KEY=                # alert reads (render text included), promotion, evaluation, recovery
+# silences
+ALERTS_WRITE_API_KEY=
+# alert reads (render text included), promotion, evaluation, recovery
+ADMIN_API_KEY=
 ```
 
 Two scopes. **The alert reads are operator-only** (owner decision D3a,
@@ -570,8 +574,10 @@ reason instead of pretending to evaluate.
 ## 11a. Retention: two horizons
 
 ```bash
-ALERTS_MESSAGE_RETENTION_DAYS=400    # rendered message BODIES
-ALERTS_METADATA_RETENTION_DAYS=800   # the audit trail
+# rendered message BODIES
+ALERTS_MESSAGE_RETENTION_DAYS=400
+# the audit trail
+ALERTS_METADATA_RETENTION_DAYS=800
 python -m app.alerts.cli retention [--dry-run]
 ```
 
@@ -842,10 +848,10 @@ Three properties are structural rather than a matter of care:
   JSON.
 
 A replay sends nothing, so before each evaluation it takes every planned alert
-released by then as sent at its release time, through the step
-`outbox.mark_sent` takes for each member it sends: a rule's cooldown and its
-reminders run from that time. A hold by budget, a drop and a withdrawal before
-sending are not modelled.
+released by then as sent at its release time: the members the dispatcher's
+`outbox.revalidate_members` keeps then, each through the step
+`outbox.mark_sent` takes for a member it sends. A rule's cooldown and its
+reminders run from that time. A hold by budget is not modelled.
 
 `--stage N` gates the rules at a rollout stage other than the committed one.
 That is the reason replay exists: the evidence for advancing to stage N is what
