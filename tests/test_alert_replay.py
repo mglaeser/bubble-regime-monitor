@@ -1031,18 +1031,26 @@ def test_the_committed_stage_is_not_one_whose_replay_failed():
         "or lower the stage — do not ship a stage its own replay refuses.")
 
 
-def test_the_artifact_carries_evidence_for_the_stage_the_cutover_targets():
-    """Stage 4 is where the cutover goes, so its evidence is produced here.
+def test_the_gate_replays_stage_1_and_the_committed_stage_and_no_deleted_stage():
+    """The gate replays stage 1 and stage 3, and no stage 4.
 
-    Without it the Stage 4 decision would have had to generate its own evidence
-    by hand on the day, and the absence would have surfaced at exactly the
-    wrong moment.
+    Stage 4 was the legacy daily-digest cutover, deleted with its switch (owner
+    decision D2c, 2026-10-02; the rollout table in docs/ALERT_SYSTEM.md). A rule
+    active at one of stages 3 and 4 and not the other would make a stage-4
+    replay evidence of its own, and this fails then. The paths are the
+    script's own, so the test reads the file the script writes.
     """
-    payload = json.loads(Path("docs/alert-stage1-gate.json").read_text(encoding="utf-8"))
-    assert "stage_4" in payload["runs"], sorted(payload["runs"])
-    stage4 = payload["runs"]["stage_4"]
-    assert stage4["evaluated_at_stage"] == 4
-    assert stage4["passed"] is (stage4["failures"] == [])
+    from scripts import export_alert_stage1_gate as gate
+
+    payload = json.loads(gate.ARTIFACT.read_text(encoding="utf-8"))
+    assert sorted(payload["runs"]) == ["stage_1", "stage_3"]
+    assert gate.STAGES == (1, 3)
+
+    ruleset = validate_from_disk(rules_path=gate.RULES, phrase_path=gate.PHRASES,
+                                 service_version="3.8.0").ruleset
+    at_stage_3 = [rule.rule_id for rule in ruleset.active_rules(3)]
+    at_stage_4 = [rule.rule_id for rule in ruleset.active_rules(4)]
+    assert at_stage_3 and at_stage_3 == at_stage_4
 
 
 def test_the_ci_replay_gate_is_the_evidence_and_it_blocks():
