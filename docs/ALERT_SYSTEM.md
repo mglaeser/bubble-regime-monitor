@@ -266,10 +266,12 @@ the same triggers on the `create_all` path. The guarantee must not depend on
 which bootstrap ran; `tests/test_migrations.py::test_migrations_match_models`
 checks the schemas match.
 
-`busy_timeout` is now set (`ALERTS_BUSY_TIMEOUT_MS`, default 5000). The alert
-system adds a second and third writer to what was a single-writer service;
-without it SQLite returns `SQLITE_BUSY` immediately on contention — a lost
-alert plan rather than a slower one.
+`busy_timeout` is set explicitly (`ALERTS_BUSY_TIMEOUT_MS`, default 5000 ms,
+the value Python's sqlite3 driver would also use). The alert system adds a
+second and third writer to what was a single-writer service: a writer that
+finds the lock held waits that long for it, and the wait is this service's
+setting rather than the driver's. At 0 SQLite returns `SQLITE_BUSY` at once on
+contention — a lost alert plan rather than a slower one.
 
 ---
 
