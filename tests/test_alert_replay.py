@@ -656,8 +656,9 @@ def test_two_one_snapshot_derisk_entries_fail_the_gate(tmp_path, artifacts):
     ]
     summary = _run(tmp_path, artifacts, name="keep.db", inputs=history)
     assert summary.transient_one_snapshot_band_p1 == 2
-    assert any("2 transient one-snapshot de-risk entries in this history" in failure
-               for failure in summary.failures), summary.failures
+    assert ("2 transient one-snapshot de-risk entries in this history of 0.0 months, where more "
+            "than 1 put more than 1 into one 24-month window; regime.band_to_derisk is kept only "
+            "while replay shows <= 1 per 24 months") in summary.failures, summary.failures
     assert not any("transient_derisk_p1_rate" in note for note in summary.not_measured)
 
 
@@ -679,6 +680,26 @@ def test_over_the_cap_on_a_history_longer_than_24_months_is_not_measured(tmp_pat
         "transient_derisk_p1_rate — 2 transient one-snapshot de-risk entries were counted "
         "over the whole history of 48.0 months; the target is stated per 24 months and the "
         "count does not say when they occurred"]
+
+
+def test_more_entries_than_a_long_history_can_hold_fail_the_gate(tmp_path, artifacts):
+    """Three entries in the same 48 months, which two windows of 24 months cover:
+    one window holds two of them, whenever they occurred."""
+    moments = (("2026-08-15T02", "trim"), ("2026-08-15T06", "de-risk"), ("2026-08-15T10", "trim"),
+               ("2028-09-15T06", "de-risk"), ("2028-09-15T10", "trim"), ("2028-09-15T14", "de-risk"),
+               ("2028-09-15T18", "trim"), ("2030-08-15T02", "trim"))
+    history = [
+        make_input(identity=f"m{i}", computed_at=f"{moment}:00:00+00:00",
+                   effective=band, base=band, median=63.0 if band == "de-risk" else 52.0)
+        for i, (moment, band) in enumerate(moments)
+    ]
+    summary = _run(tmp_path, artifacts, name="breach.db", stage=1, inputs=history)
+    assert (summary.transient_one_snapshot_band_p1, summary.band_excursion_months) == (3, 48.0)
+    assert summary.failures == [
+        "3 transient one-snapshot de-risk entries in this history of 48.0 months, where more "
+        "than 2 put more than 1 into one 24-month window; regime.band_to_derisk is kept only "
+        "while replay shows <= 1 per 24 months"]
+    assert not any("transient_derisk_p1_rate" in note for note in summary.not_measured)
 
 
 # ---------------------------------------------------------------------------

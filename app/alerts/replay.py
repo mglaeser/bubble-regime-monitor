@@ -27,6 +27,7 @@ is `DRYRUN`, which is its own state namespace.
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections import Counter
 from dataclasses import dataclass, field
@@ -963,21 +964,29 @@ def _decide(summary: ReplaySummary) -> None:
                 f"{evaluable_events - summary.mandatory_event_detected} of "
                 f"{evaluable_events} evaluable event(s)"
             )
-    if summary.transient_one_snapshot_band_p1 > TRANSIENT_DERISK_P1_CAP:
-        # A count above the cap fails on a history of at most 24 months, where
-        # every two entries share a 24-month window. On a longer one the count
-        # does not say when the entries occurred: not measured, not failed.
-        if summary.band_excursion_months <= 24.0:
-            failures.append(
-                f"{summary.transient_one_snapshot_band_p1} transient one-snapshot "
-                "de-risk entries in this history; regime.band_to_derisk is kept "
-                f"only while replay shows <= {TRANSIENT_DERISK_P1_CAP} per 24 months")
-        else:
-            unmeasured.append(
-                f"transient_derisk_p1_rate — {summary.transient_one_snapshot_band_p1} "
-                "transient one-snapshot de-risk entries were counted over the whole "
-                f"history of {summary.band_excursion_months} months; the target is "
-                "stated per 24 months and the count does not say when they occurred")
+    # regime.band_to_derisk allows TRANSIENT_DERISK_P1_CAP transient one-snapshot
+    # entries per 24 months; the summary holds their count over the whole history
+    # and that history's length in months. A history of that length is covered by
+    # max(1, ceil(months / 24)) windows of at most 24 months, so a count above the
+    # cap times that number puts more than the cap into one window: a breach. A
+    # count above the cap but within that bound may lie in one window or be spread
+    # over them, and the two figures do not say which: not measured, not failed.
+    entries = summary.transient_one_snapshot_band_p1
+    bound = TRANSIENT_DERISK_P1_CAP * max(
+        1, math.ceil(summary.band_excursion_months / 24.0))
+    if entries > bound:
+        failures.append(
+            f"{entries} transient one-snapshot de-risk entries in this history of "
+            f"{summary.band_excursion_months} months, where more than {bound} put "
+            f"more than {TRANSIENT_DERISK_P1_CAP} into one 24-month window; "
+            "regime.band_to_derisk is kept only while replay shows <= "
+            f"{TRANSIENT_DERISK_P1_CAP} per 24 months")
+    elif entries > TRANSIENT_DERISK_P1_CAP:
+        unmeasured.append(
+            f"transient_derisk_p1_rate — {entries} transient one-snapshot de-risk "
+            "entries were counted over the whole history of "
+            f"{summary.band_excursion_months} months; the target is stated per 24 "
+            "months and the count does not say when they occurred")
     elif summary.band_excursion_months < 24.0:
         unmeasured.append(
             f"transient_derisk_p1_rate — the window spans "
