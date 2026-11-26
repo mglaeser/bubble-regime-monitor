@@ -47,8 +47,10 @@ class GsadfOutput:
     # this is below bsadf_n: the sup cannot be honestly date-stamped over a
     # sequence with holes, though the ENDPOINT may still be perfectly valid.
     bsadf_n_finite: int | None = None
-    # Which route produced the endpoint CVs: the direct cv$bsadf_cv field, the
-    # public augment_join() fallback, or "unavailable" when neither worked.
+    # Which route produced the endpoint CVs: "bsadf_cv", the direct cv$bsadf_cv
+    # field, or "unavailable". There is no second route: r/gsadf.R ships none,
+    # because augment_join() reads the same field and fails whenever the
+    # direct read does.
     bsadf_cv_route: str | None = None
 
 

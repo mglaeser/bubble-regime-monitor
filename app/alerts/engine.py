@@ -436,10 +436,8 @@ def run_evaluation(
             if evaluation is not None:
                 evaluation.status = EvaluationRunStatus.COMMITTED
                 evaluation.plan_applied = True
-                evaluation.finished_at = now
                 evaluation.rules_evaluated = len(planned)
-                evaluation.plan_applied = True
-                evaluation.duration_ms = int((time.monotonic() - started) * 1000)
+                evaluation.duration_ms, evaluation.finished_at = _run_end(now, started)
                 evaluation.lease_until = None
             for item in session.execute(
                 select(AlertEvaluationRuleset).where(
@@ -485,6 +483,16 @@ def _input_moment(alert_input: AlertInput, fallback: datetime) -> datetime:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
+def _run_end(now: datetime, started: float) -> tuple[int, datetime]:
+    """What a run took, in milliseconds, and when it ended: its start plus that.
+
+    Not the wall clock: `now` is injected by the tests and by the replay,
+    whose evaluations carry historical instants.
+    """
+    duration_ms = int((time.monotonic() - started) * 1000)
+    return duration_ms, now + timedelta(milliseconds=duration_ms)
+
+
 def _recipient_ref(live_profile: str) -> str:
     """The opaque recipient handle stored on a delivery.
 
@@ -514,8 +522,7 @@ def _finish(session_factory: Any, evaluation_id: str, status: str, now: datetime
         if row is not None:
             row.status = status
             row.plan_applied = False
-            row.finished_at = now
-            row.duration_ms = int((time.monotonic() - started) * 1000)
+            row.duration_ms, row.finished_at = _run_end(now, started)
             row.lease_until = None
             row.error_code = str(code)[:64]
             row.error_message_redacted = (error_message if error is None
