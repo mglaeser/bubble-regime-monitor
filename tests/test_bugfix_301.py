@@ -18,15 +18,15 @@ def _make_finra_xlsx(newest_first: bool = True) -> bytes:
     ws = wb.active
     ws.append(["FINRA Margin Statistics"])
     ws.append([])
-    ws.append(["Month/Year", "Debit Balances in Customers' Securities Margin Accounts"])
+    # The heading and the months as FINRA's file writes them, "Year-Month" and
+    # "YYYY-MM": the reader takes no other (tests/test_sources.py::TestFinraMonths).
+    ws.append(["Year-Month", "Debit Balances in Customers' Securities Margin Accounts"])
     # 14 months, 2025-04 .. 2026-05; May 2026 = 1,415,557 and May 2025 set
     # twelve rows earlier so the YoY works out to +53.7%.
     rows = []
     for i in range(14):
         month_total = 4 + i  # April 2025 start
         y, m = 2025 + (month_total - 1) // 12, (month_total - 1) % 12 + 1
-        # The month as FINRA's file writes it, "YYYY-MM": the reader takes no
-        # other text for a month (tests/test_sources.py::TestFinraMonths).
         rows.append([f"{y}-{m:02d}", 900_000.0 + i * 1000])
     rows[-1][1] = 1_415_557.0          # 2026-05
     rows[1][1] = 1_415_557 / 1.537     # 2025-05 (12 months before the latest)

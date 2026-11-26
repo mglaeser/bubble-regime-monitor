@@ -10,8 +10,8 @@ mirrors the series for display only.
 ROW ORDER IS NOT ASSUMED. The live file lists months NEWEST-FIRST, which a
 naive column read once inverted into a -22% "YoY" computed across the series
 start (Jan 1997). Rows are parsed as (date, debit) PAIRS and sorted by date
-ascending; a month column written as the file writes it, "YYYY-MM", is
-mandatory.
+ascending; the one column headed "Year-Month", its cells written as the file
+writes them, "YYYY-MM", is mandatory.
 """
 
 from __future__ import annotations
@@ -54,19 +54,18 @@ def parse_debit_balances(content: bytes) -> tuple[list[float], list[str], str]:
     body = raw.iloc[header_row + 1:]
     values = pd.to_numeric(body.iloc[:, debit_col], errors="coerce")
 
-    date_series = None
-    for j in range(raw.shape[1]):
-        if j == debit_col:
-            continue
-        # A column is the month column when every cell under the heading is a
-        # month cell (_MONTH). Any other cell, an empty one too, and it is not:
-        # nothing is guessed, and no row is left out for its date.
-        column = body.iloc[:, j]
-        if all(isinstance(c, str) and _MONTH.fullmatch(c) for c in column):
-            date_series = column.map(lambda c: date.fromisoformat(f"{c}-01"))
-            break
-    if date_series is None:
+    # The months are read from one column only: the one headed "Year-Month" in
+    # the heading row, every cell under it a month cell (_MONTH). Without
+    # exactly one such heading, or with any other cell under it, an empty one
+    # too, the pull fails: no other column stands in, nothing is guessed, and
+    # no row is left out for its date.
+    heading = [str(c).strip().lower() for c in raw.iloc[header_row].tolist()]
+    month_cols = [j for j, c in enumerate(heading) if c == "year-month"]
+    if len(month_cols) != 1 or not all(
+        isinstance(c, str) and _MONTH.fullmatch(c) for c in body.iloc[:, month_cols[0]]
+    ):
         raise SourceError("FINRA XLSX: no parseable date column — cannot establish month order")
+    date_series = body.iloc[:, month_cols[0]].map(lambda c: date.fromisoformat(f"{c}-01"))
 
     mask = values.notna()
     pairs = sorted(zip(date_series[mask], values[mask], strict=True), key=lambda p: p[0])

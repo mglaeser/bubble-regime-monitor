@@ -96,22 +96,25 @@ class TestStaleness:
         assert payload["stale"] is False and payload["age_days"] == 0
 
 
-def _finra_xlsx(month_cells: list) -> bytes:
-    """A margin-statistics file: the heading row, then one row per month cell."""
+def _finra_xlsx(month_cells: list, heading: str = "Year-Month", third: tuple[str, list] | None = None) -> bytes:
+    """A margin-statistics file: the heading row, then one row per month cell.
+    `third` adds a column behind the debit column: its heading and its cells."""
     import io
 
     import pandas as pd
 
-    rows = [["Year-Month", "Debit Balances in Customers' Securities Margin Accounts"]]
+    rows = [[heading, "Debit Balances in Customers' Securities Margin Accounts"]]
     rows += [[cell, 900_000.0 + i] for i, cell in enumerate(month_cells)]
+    if third:
+        rows = [row + [cell] for row, cell in zip(rows, [third[0], *third[1]], strict=True)]
     buf = io.BytesIO()
     pd.DataFrame(rows).to_excel(buf, header=False, index=False)
     return buf.getvalue()
 
 
 class TestFinraMonths:
-    """app/sources/finra.py: the month cells are the text "YYYY-MM". A column
-    with any other cell is no date column, and the pull fails."""
+    """app/sources/finra.py: the months are the one column headed "Year-Month",
+    every cell the text "YYYY-MM". Otherwise the pull fails."""
 
     MONTHS = [(y, m) for y in range(1997, 2027) for m in range(1, 13)][:-3]      # 1997-01 .. 2026-09
 
@@ -155,6 +158,24 @@ class TestFinraMonths:
         cells = [newest] + [f"{y}-{m:02d}" for y, m in reversed(self.MONTHS[:-1])]
         with pytest.raises(SourceError, match="no parseable date column"):
             parse_debit_balances(_finra_xlsx(cells))
+
+    @pytest.mark.parametrize(("newest", "heading", "other_heading"), [
+        ("2026-9", "Year-Month", "Posted"),
+        ("2026-09", "Year-Month", "Year-Month"),
+        ("2026-09", "Month", "Posted"),
+    ], ids=["headed-column-malformed", "two-headed-columns", "no-headed-column"])
+    def test_no_other_column_stands_in_for_the_month_column(self, newest, heading, other_heading):
+        """Only the one column headed "Year-Month" is read for the months.
+        Beside it stands a column of valid months of the following year. It
+        does not stand in when the headed column has a cell that is no month;
+        under the same heading there is no single month column; and without
+        the heading neither column is read. The pull fails each time."""
+        from app.sources.finra import parse_debit_balances
+
+        cells = [newest] + [f"{y}-{m:02d}" for y, m in reversed(self.MONTHS[:-1])]
+        other = [f"{y + 1}-{m:02d}" for y, m in reversed(self.MONTHS)]
+        with pytest.raises(SourceError, match="no parseable date column"):
+            parse_debit_balances(_finra_xlsx(cells, heading, third=(other_heading, other)))
 
 
 class _Response:
