@@ -579,6 +579,8 @@ def run_replay(
                 # NOT_EVALUABLE is reported, never counted as a detection.
                 continue
 
+            with scope() as session:
+                _take_released_alerts_as_sent(session, now=_moment_of(alert_input))
             outcome = run_evaluation(
                 scope,
                 alert_input=alert_input,
@@ -616,6 +618,24 @@ def run_replay(
     )
     _decide(summary)
     return summary
+
+
+def _take_released_alerts_as_sent(session: Session, *, now: datetime) -> None:
+    """Take each planned alert released by `now` as sent at its release time,
+    through the step `outbox.mark_sent` takes for each member it sends. The
+    delivery row is left as it is, so nothing reaches SENT; a hold by budget,
+    a drop or a withdrawal before sending is not modelled."""
+    from app.alerts.models import AlertDelivery, AlertDeliveryMember
+    from app.alerts.outbox import mark_member_sent
+
+    for delivery, member in session.execute(
+        select(AlertDelivery, AlertDeliveryMember)
+        .join(AlertDeliveryMember, AlertDeliveryMember.delivery_id == AlertDelivery.delivery_id)
+        .where(AlertDeliveryMember.delivered.is_(False))
+        .order_by(AlertDelivery.not_before)
+    ).all():
+        if delivery.not_before is not None and delivery.not_before <= now:
+            mark_member_sent(session, delivery, member, now=delivery.not_before)
 
 
 def _collect_episodes(session: Session, summary: ReplaySummary,

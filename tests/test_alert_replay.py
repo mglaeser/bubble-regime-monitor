@@ -699,6 +699,34 @@ def test_a_history_of_one_whole_window_measures_the_keep_condition(tmp_path, art
     assert (summary.band_excursion_months, summary.band_excursion_covers_24_months) == (23.98, covered)
 
 
+def _band_arc(states: list[str]) -> list:
+    """One input every four hours from 2026-08-17 06:00 UTC, one band each."""
+    start = datetime(2026, 8, 17, 6, tzinfo=UTC)
+    return [make_input(identity=f"arc-{index}", computed_at=(start + timedelta(hours=4 * index)).isoformat(),
+                       effective=state, base=state, median=64.0 if state == "de-risk" else 52.0)
+            for index, state in enumerate(states)]
+
+
+def test_a_replay_runs_the_cooldown_from_the_release_of_the_alert(tmp_path, artifacts):
+    """De-risk at 4 h, 24 h and 52 h. The P1 released at 4 h starts the rule's
+    48 h cooldown, so the entry at 24 h is suppressed and the one at 52 h is
+    planned (`planner._cooldown_active`)."""
+    assert artifacts.ruleset.rule("regime.band_to_derisk").cooldown_seconds == 48 * 3600
+    summary = _run(tmp_path, artifacts, inputs=_band_arc(
+        ["de-risk" if index in (1, 6, 13) else "trim" for index in range(14)]))
+    assert summary.episodes_by_rule["regime.band_to_derisk"] == 3
+    assert (summary.p1_total, summary.suppressions_by_reason.get("COOLDOWN")) == (2, 1)
+
+
+def test_a_replay_plans_the_one_reminder_of_a_condition_that_lasts(tmp_path, artifacts):
+    """De-risk from 4 h to 108 h: the P1, and 48 h after it the one reminder
+    the rule allows; the reminder counts for its episode, so none follows at 100 h."""
+    policy = artifacts.ruleset.rule("regime.band_to_derisk").reminder_policy
+    assert (policy.after_seconds, policy.max_reminders) == (48 * 3600, 1)
+    summary = _run(tmp_path, artifacts, inputs=_band_arc(["trim"] + ["de-risk"] * 27))
+    assert summary.deliveries_by_kind == {"INITIAL": 1, "REMINDER": 1}
+
+
 # ---------------------------------------------------------------------------
 # the committed gate artifact
 # ---------------------------------------------------------------------------
