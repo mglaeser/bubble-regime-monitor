@@ -27,7 +27,6 @@ is `DRYRUN`, which is its own state namespace.
 from __future__ import annotations
 
 import json
-import math
 import re
 from collections import Counter
 from dataclasses import dataclass, field
@@ -60,7 +59,8 @@ log = get_logger(__name__)
 #: be told apart from one produced by a different harness. 3: unknown_blocks
 #: and p1_bypasses_of_unknown went with the replanning block (owner decision
 #: D2f). 4: digest_items went with the weekly digest (owner decision D2a).
-REPLAY_SCHEMA_VERSION = 4
+#: 5: transient_one_snapshot_band_p1_busiest_24_months was added.
+REPLAY_SCHEMA_VERSION = 5
 
 #: Rolling windows the load report uses.
 WINDOW_24H = timedelta(hours=24)
@@ -179,6 +179,8 @@ class ReplaySummary:
 
     # -- governance metrics ----------------------------------------------
     transient_one_snapshot_band_p1: int = 0
+    #: The most of those entries that any one window of 24 months holds.
+    transient_one_snapshot_band_p1_busiest_24_months: int = 0
     #: De-risk slots whose neighbours were blind, so "transient" cannot be
     #: decided either way. Reported, never folded into the count above.
     indeterminate_band_excursions: int = 0
@@ -717,6 +719,7 @@ def _collect_band_excursions(summary: ReplaySummary,
     """
     states = [r.effective_action_state for r in records]
     transient = 0
+    moments: list[datetime] = []
     indeterminate = 0
     for i in range(1, len(states) - 1):
         if states[i] != BAND_DERISK:
@@ -730,12 +733,16 @@ def _collect_band_excursions(summary: ReplaySummary,
             indeterminate += 1
         else:
             transient += 1
+            moments.append(_moment_of(records[i]))
     summary.transient_one_snapshot_band_p1 = transient
     summary.indeterminate_band_excursions = indeterminate
 
     if len(records) >= 2:
         span = _moment_of(records[-1]) - _moment_of(records[0])
         summary.band_excursion_months = round(span.days / 30.44, 2)
+    # 24 of those months; both edges count: entries exactly that far apart share a window.
+    summary.transient_one_snapshot_band_p1_busiest_24_months = _max_in_window(
+        moments, timedelta(days=24 * 30.44))
 
 
 def _activated_episodes(session: Session) -> list[ActivatedEpisode]:
@@ -964,29 +971,13 @@ def _decide(summary: ReplaySummary) -> None:
                 f"{evaluable_events - summary.mandatory_event_detected} of "
                 f"{evaluable_events} evaluable event(s)"
             )
-    # regime.band_to_derisk allows TRANSIENT_DERISK_P1_CAP transient one-snapshot
-    # entries per 24 months; the summary holds their count over the whole history
-    # and that history's length in months. A history of that length is covered by
-    # max(1, ceil(months / 24)) windows of at most 24 months, so a count above the
-    # cap times that number puts more than the cap into one window: a breach. A
-    # count above the cap but within that bound may lie in one window or be spread
-    # over them, and the two figures do not say which: not measured, not failed.
-    entries = summary.transient_one_snapshot_band_p1
-    bound = TRANSIENT_DERISK_P1_CAP * max(
-        1, math.ceil(summary.band_excursion_months / 24.0))
-    if entries > bound:
+    busiest = summary.transient_one_snapshot_band_p1_busiest_24_months
+    if busiest > TRANSIENT_DERISK_P1_CAP:
+        # A breach inside one window stands on a history of any length.
         failures.append(
-            f"{entries} transient one-snapshot de-risk entries in this history of "
-            f"{summary.band_excursion_months} months, where more than {bound} put "
-            f"more than {TRANSIENT_DERISK_P1_CAP} into one 24-month window; "
-            "regime.band_to_derisk is kept only while replay shows <= "
+            f"{busiest} transient one-snapshot de-risk entries inside one window of "
+            "24 months; regime.band_to_derisk is kept only while replay shows <= "
             f"{TRANSIENT_DERISK_P1_CAP} per 24 months")
-    elif entries > TRANSIENT_DERISK_P1_CAP:
-        unmeasured.append(
-            f"transient_derisk_p1_rate — {entries} transient one-snapshot de-risk "
-            "entries were counted over the whole history of "
-            f"{summary.band_excursion_months} months; the target is stated per 24 "
-            "months and the count does not say when they occurred")
     elif summary.band_excursion_months < 24.0:
         unmeasured.append(
             f"transient_derisk_p1_rate — the window spans "

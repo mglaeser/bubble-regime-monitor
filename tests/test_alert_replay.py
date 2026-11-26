@@ -10,7 +10,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -646,59 +646,40 @@ def test_a_derisk_neighbour_settles_an_excursion(tmp_path, artifacts):
     assert summary.indeterminate_band_excursions == 0
 
 
-def test_two_one_snapshot_derisk_entries_fail_the_gate(tmp_path, artifacts):
+_FIRST_ENTRY = datetime(2026, 8, 15, 6, tzinfo=UTC)
+_AFTER_48_MONTHS = datetime(2030, 8, 15, 2, tzinfo=UTC)
+_24_MONTHS = timedelta(days=24 * 30.44)
+
+
+@pytest.mark.parametrize(("second_entry", "last_snapshot", "busiest"), [
+    pytest.param(_FIRST_ENTRY + timedelta(hours=12), None, 2, id="12 hours apart in one day"),
+    pytest.param(datetime(2028, 9, 15, 6, tzinfo=UTC), _AFTER_48_MONTHS, 1, id="25 months apart in 48"),
+    pytest.param(datetime(2028, 7, 15, 6, tzinfo=UTC), _AFTER_48_MONTHS, 2, id="23 months apart in 48"),
+    pytest.param(_FIRST_ENTRY + _24_MONTHS, _AFTER_48_MONTHS, 2, id="exactly 24 months apart"),
+    pytest.param(_FIRST_ENTRY + _24_MONTHS + timedelta(seconds=1), _AFTER_48_MONTHS, 1,
+                 id="24 months and one second apart"),
+])
+def test_the_gate_judges_the_busiest_24_months_of_one_snapshot_derisk_entries(
+        tmp_path, artifacts, second_entry, last_snapshot, busiest):
     """config/alert_rules.v3.2.yaml, regime.band_to_derisk: "Keep it only while
-    replay shows <= 1 transient one-snapshot P1 per 24 months"."""
+    replay shows <= 1 transient one-snapshot P1 per 24 months". A month is 30.44
+    days, and two entries exactly 24 of them apart lie in one window."""
+    moments = [(entry + timedelta(hours=offset), band) for entry in (_FIRST_ENTRY, second_entry)
+               for offset, band in ((-4, "trim"), (0, "de-risk"), (4, "trim"))]
+    if last_snapshot is not None:
+        moments.append((last_snapshot, "trim"))
     history = [
-        make_input(identity=f"k{hour}", computed_at=f"2026-08-15T{hour:02d}:00:00+00:00",
-                   effective=band, base=band, median=63.0 if band == "de-risk" else 52.0)
-        for hour, band in ((2, "trim"), (6, "de-risk"), (10, "trim"), (14, "de-risk"), (18, "trim"))
-    ]
-    summary = _run(tmp_path, artifacts, name="keep.db", inputs=history)
-    assert summary.transient_one_snapshot_band_p1 == 2
-    assert ("2 transient one-snapshot de-risk entries in this history of 0.0 months, where more "
-            "than 1 put more than 1 into one 24-month window; regime.band_to_derisk is kept only "
-            "while replay shows <= 1 per 24 months") in summary.failures, summary.failures
-    assert not any("transient_derisk_p1_rate" in note for note in summary.not_measured)
-
-
-def test_over_the_cap_on_a_history_longer_than_24_months_is_not_measured(tmp_path, artifacts):
-    """Two entries 25 months apart in a history of 48, and the count does not say
-    when they occurred: one `not_measured` entry and no failure. `passed` reads
-    the failures alone."""
-    moments = (("2026-08-15T02", "trim"), ("2026-08-15T06", "de-risk"), ("2026-08-15T10", "trim"),
-               ("2028-09-15T06", "de-risk"), ("2028-09-15T10", "trim"), ("2030-08-15T02", "trim"))
-    history = [
-        make_input(identity=f"m{i}", computed_at=f"{moment}:00:00+00:00",
-                   effective=band, base=band, median=63.0 if band == "de-risk" else 52.0)
+        make_input(identity=f"k{i}", computed_at=moment.isoformat(), effective=band, base=band,
+                   median=63.0 if band == "de-risk" else 52.0)
         for i, (moment, band) in enumerate(moments)
     ]
-    summary = _run(tmp_path, artifacts, name="long.db", stage=1, inputs=history)
-    assert (summary.transient_one_snapshot_band_p1, summary.band_excursion_months) == (2, 48.0)
-    assert summary.passed, summary.failures
-    assert [note for note in summary.not_measured if "transient_derisk_p1_rate" in note] == [
-        "transient_derisk_p1_rate — 2 transient one-snapshot de-risk entries were counted "
-        "over the whole history of 48.0 months; the target is stated per 24 months and the "
-        "count does not say when they occurred"]
-
-
-def test_more_entries_than_a_long_history_can_hold_fail_the_gate(tmp_path, artifacts):
-    """Three entries in the same 48 months, which two windows of 24 months cover:
-    one window holds two of them, whenever they occurred."""
-    moments = (("2026-08-15T02", "trim"), ("2026-08-15T06", "de-risk"), ("2026-08-15T10", "trim"),
-               ("2028-09-15T06", "de-risk"), ("2028-09-15T10", "trim"), ("2028-09-15T14", "de-risk"),
-               ("2028-09-15T18", "trim"), ("2030-08-15T02", "trim"))
-    history = [
-        make_input(identity=f"m{i}", computed_at=f"{moment}:00:00+00:00",
-                   effective=band, base=band, median=63.0 if band == "de-risk" else 52.0)
-        for i, (moment, band) in enumerate(moments)
-    ]
-    summary = _run(tmp_path, artifacts, name="breach.db", stage=1, inputs=history)
-    assert (summary.transient_one_snapshot_band_p1, summary.band_excursion_months) == (3, 48.0)
-    assert summary.failures == [
-        "3 transient one-snapshot de-risk entries in this history of 48.0 months, where more "
-        "than 2 put more than 1 into one 24-month window; regime.band_to_derisk is kept only "
-        "while replay shows <= 1 per 24 months"]
+    summary = _run(tmp_path, artifacts, name="keep.db", stage=1, inputs=history)
+    assert summary.failures == ([
+        "2 transient one-snapshot de-risk entries inside one window of 24 months; "
+        "regime.band_to_derisk is kept only while replay shows <= 1 per 24 months"]
+        if busiest > 1 else [])
+    assert (summary.transient_one_snapshot_band_p1,
+            summary.transient_one_snapshot_band_p1_busiest_24_months) == (2, busiest)
     assert not any("transient_derisk_p1_rate" in note for note in summary.not_measured)
 
 
