@@ -716,11 +716,11 @@ class TestTheUnits:
 
     def test_the_install_block_enables_every_timer(self):
         timers = sorted(p.name for p in (ROOT / "deploy/systemd").glob("*.timer"))
-        # nothing but this line makes a host release or watch by itself: a
+        # nothing but these lines make a host release or watch by itself: a
         # timer that is installed and not enabled never fires
         enables = [step.split() for step in _install_steps() if step.startswith("systemctl --user enable ")]
-        assert len(enables) == 1, "one line enables the timers"
-        assert enables[0][:4] == ["systemctl", "--user", "enable", "--now"] and sorted(enables[0][4:]) == timers
+        assert all(enable[:4] == ["systemctl", "--user", "enable", "--now"] for enable in enables)
+        assert sorted(timer for enable in enables for timer in enable[4:]) == timers
 
     def test_the_hand_rollback_stops_a_release_in_flight_first(self):
         doc = (ROOT / "docs/AUTO_DEPLOY.md").read_text()

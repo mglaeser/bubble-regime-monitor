@@ -36,7 +36,7 @@ The deploy note's prompt is the one exception, outside that containment: it carr
 
 ## Personal data (C-04/C-23)
 
-The only personal data processed are the operator's **own** recipients - the SMS number and the iMessage handle - and an SEC-etiquette contact email (all in `.env`; the iMessage recipient also in the host notices' credentials file, `docs/AUTO_DEPLOY.md`). No third-party personal data is collected or stored. Both recipients are masked before logging (`app/notify/sipgate.py:_mask_recipient`, `app/notify/imessage.py:_mask_recipient`).
+The personal data in the service's configuration are the operator's **own** recipients - the SMS number and the iMessage handle - and the SEC-etiquette contact's name and email (all in `.env`; the iMessage recipient also in the host notices' credentials file, `docs/AUTO_DEPLOY.md`). The deploy note's prompt (above) carries this repository's commit titles and descriptions, which may name people, to the gateway, and the image that carries the note keeps them (`/app/deploy-note`). Both recipients are masked before logging (`app/notify/sipgate.py:_mask_recipient`, `app/notify/imessage.py:_mask_recipient`).
 
 ## Supply chain (B-04/C-03)
 

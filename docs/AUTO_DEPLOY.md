@@ -137,14 +137,25 @@ unset). The service's settings are the checkout's
 systemctl --user daemon-reload
 loginctl enable-linger "$USER"         # keep the user's units running without a login
 systemctl --user start bubblegauge-release.service      # the first release: builds main's image and starts the service
-systemctl --user enable --now bubblegauge-release.timer bubblegauge-alert-watchdog.timer
+systemctl --user enable --now bubblegauge-release.timer
 ```
 
-`systemctl enable` is for the two timers and nothing else. The first release
-starts the service; the release unit is started by its timer, the two notice
-units by `OnFailure=`. The timers come after the first release, so that the
-watchdog's first run finds a container. The production host was set up by
-hand, piece by piece: this sequence as a whole has not been run on a new host.
+The watchdog's timer is enabled only once a release has put a running
+container there: `podman inspect -f '{{.State.Health.Status}}' bubblegauge`
+says `healthy`. Then:
+
+```bash
+systemctl --user enable --now bubblegauge-alert-watchdog.timer
+```
+
+`systemctl enable` is for the two timers and nothing else. A release starts
+the service; the release unit is started by its timer, the two notice units
+by `OnFailure=`. The release timer needs no container, since a release
+builds the image the container runs, and a failed release is tried again at
+the next tick. The watchdog's timer needs a running container: each run of
+the watchdog is a `podman exec` into it and fails without one. The
+production host was set up by hand, piece by piece: this sequence as a
+whole has not been run on a new host.
 
 ### Operate
 
