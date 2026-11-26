@@ -409,6 +409,24 @@ def test_an_answer_that_is_not_freds_observations_json_is_a_source_error(monkeyp
     assert text is None or str(caught.value) == text
 
 
+@pytest.mark.parametrize(("body", "message"), [
+    ({}, "with a body that is not FRED's observations JSON"),
+    ({"observations": None}, "with a body that is not FRED's observations JSON"),
+    ({"observations": ""}, "with a body that is not FRED's observations JSON"),
+    ({"observations": {}}, "with a body that is not FRED's observations JSON"),
+    ({"observations": []}, "no non-missing observations"),
+    ({"observations": [{"date": "2026-11-10", "value": "."}]}, "no non-missing observations"),
+], ids=["no-observations", "null", "an-empty-string", "an-empty-object", "an-empty-list",
+        "a-list-without-a-value"])
+def test_only_a_list_of_observations_can_be_no_data_and_no_exception_is_chained(monkeypatch, body, message):
+    from app.sources import fred
+
+    monkeypatch.setattr(fred, "fetch", lambda *_args, **_kwargs: httpx.Response(200, json=body))
+    with pytest.raises(SourceError, match=message) as caught:
+        fred.observations("DGS10")
+    assert (caught.value.__cause__, caught.value.__context__) == (None, None)
+
+
 def test_freds_newest_first_answer_to_a_limit_is_read_oldest_first(monkeypatch):
     from app.sources import fred
 

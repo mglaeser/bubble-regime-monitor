@@ -24,13 +24,16 @@ BASE = "https://api.stlouisfed.org/fred/series/observations"
 def observations(series_id: str, limit: int | None = None) -> list[tuple[str, float]]:
     """All non-missing (date, value) pairs, oldest first.
 
-    The body of FRED's answer gives pairs in one case only: it is a JSON
-    object whose "observations" are objects, each with a "date" that is a
-    date written YYYY-MM-DD and a "value" that is missing (".", null or
-    absent) or a string float() reads as a finite number; the dates of the
-    values are distinct and in the order asked for (newest first with a
-    limit, else oldest first); and at least one value is not missing. Any
-    other body is SourceError, every exception of reading it included."""
+    The answer fetch() returns gives pairs in one case only: its body is a
+    JSON object whose "observations" is a list of objects, each with a
+    "date" that is a date written YYYY-MM-DD and a "value" that is missing
+    (".", null or absent) or a string float() reads as a finite number; the
+    dates of the values are distinct and in the order asked for (newest
+    first with a limit, else oldest first); and at least one value is not
+    missing. Such a list without a value is SourceError "no non-missing
+    observations"; any other body is SourceError naming the answer's
+    status, content type and size, with no exception of the reading chained
+    to it."""
     settings = get_settings()
     params = {
         "series_id": series_id,
@@ -42,9 +45,13 @@ def observations(series_id: str, limit: int | None = None) -> list[tuple[str, fl
         params["limit"] = str(limit)
         params["sort_order"] = "desc"
     resp = fetch(f"fred:{series_id}", BASE, params=params)
+    pairs: list[tuple[str, float]] = []
+    malformed = False
     try:
-        pairs = []
-        for observation in resp.json().get("observations", []):
+        rows = resp.json()["observations"]
+        if not isinstance(rows, list):
+            raise TypeError("the observations are not a list")
+        for observation in rows:
             day, value = observation["date"], observation.get("value")
             if date.fromisoformat(day).isoformat() != day:
                 raise ValueError("the date is not written YYYY-MM-DD")
@@ -57,11 +64,15 @@ def observations(series_id: str, limit: int | None = None) -> list[tuple[str, fl
             pairs.reverse()
         if any(earlier >= later for (earlier, _), (later, _) in pairwise(pairs)):
             raise ValueError("the dates of the values are not distinct and in the order asked for")
-    except Exception as exc:
+    except Exception:
+        malformed = True
+    if malformed:
+        # Raised here and not in the except, so no exception of the reading,
+        # whose text can quote the body, is chained to it.
         raise SourceError(
             f"FRED {series_id}: HTTP {resp.status_code} with a body that is not FRED's observations JSON "
             f"({resp.headers.get('content-type') or 'no content type'}, "
-            f"{len(resp.content)} bytes)") from exc
+            f"{len(resp.content)} bytes)")
     if not pairs:
         raise SourceError(f"FRED {series_id}: no non-missing observations")
     return pairs
