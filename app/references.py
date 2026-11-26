@@ -241,9 +241,13 @@ REGISTRY: dict[str, Methodology] = {
             "stdin/stdout. Which statistic is scored is the frozen constant gsadf.statistic "
             "(\"bsadf_endpoint\"); it is a methodology value in the SHA-pinned artifact, not a "
             "setting, so it cannot be moved by configuration. The endpoint statistic is compared "
-            "against the LAST row of the simulated BSADF critical-value matrix (~1.38-1.43 at the "
-            "95% level for T~330-490, materially below the GSADF CVs above, because a single "
-            "endpoint is not a supremum over hundreds of them). The GSADF sup is still computed and "
+            # Read from the objects r/gsadf.R caches (n = 329..333): the last row of
+            # cv$bsadf_cv equals cv$sadf_cv at 90, 95 and 99 %.
+            "against the LAST row of exuber's bsadf_cv, the library's date-stamping critical "
+            "values (~1.38-1.43 at the 95% level for T~330-490, materially below the GSADF CVs "
+            "above). That row is the critical value of the SADF statistic for the sample size, "
+            "NOT a quantile of the endpoint statistic's own null distribution, so the 90% and 95% "
+            "levels are not this statistic's test size. The GSADF sup is still computed and "
             "REPORTED alongside it. Sub-score mapping: stat > cv95 AND non-contested -> 1.0; "
             "> cv90 -> 0.5; contested-or-stale-or-data-missing -> 0.25; "
             "tested-and-not-explosive -> 0.05. Since v4.1 gsadf.contested_rule = 'asymmetric': "
@@ -285,7 +289,8 @@ REGISTRY: dict[str, Methodology] = {
             "(Cowles d2430, 2025), who date-stamped explosiveness in Nasdaq/Mag-7 prices through "
             "January 2025. Because a false-positive-prone test should not dominate a risk gauge, the "
             "weight is deliberately tiny (0.07) and the indicator carries a permanent CONTESTED "
-            "flag. The p<0.05 red-flag additionally requires non-contested, i.e. it fires only if "
+            "flag. Red flag #1 (the statistic above the 95% critical value) additionally requires "
+            "non-contested, i.e. it fires only if "
             "the dispute resolves in favor of genuine explosiveness — controlled by the manual "
             "GSADF_CONTESTED=true config flag."
         ),

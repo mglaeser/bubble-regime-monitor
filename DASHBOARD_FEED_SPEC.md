@@ -366,9 +366,11 @@ present-tense regime. Selection lives in the SHA-pinned `frozen_methodology.json
 under `gsadf.statistic`; there is no environment variable.
 
 `metrics.gsadf.value` is `IndicatorOutput("s4").value`, so it is now the endpoint
-BSADF. `detail.cv90`/`detail.cv95` are the **endpoint** CV row — the same family
-as the value, so a consumer never compares a statistic to the wrong null. Two
-detail keys are new; none are removed:
+BSADF. `detail.cv90`/`detail.cv95` are the **endpoint** CV row — the values the
+library pairs with the value (the last row of exuber's date-stamping critical
+values, which is the SADF critical value for the sample size, not a quantile of
+the endpoint statistic itself), so a consumer never compares the statistic to
+the sup's critical values. Two detail keys are new; none are removed:
 
 ```jsonc
 "gsadf": { "value": 1.1315, "unit": "stat", "source": "exuber",
