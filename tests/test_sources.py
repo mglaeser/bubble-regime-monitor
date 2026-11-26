@@ -111,7 +111,7 @@ def _finra_xlsx(month_cells: list) -> bytes:
 
 class TestFinraMonths:
     """app/sources/finra.py: the month cells are the text "YYYY-MM". A column
-    in another spelling is no date column, and the pull fails."""
+    with any other cell is no date column, and the pull fails."""
 
     MONTHS = [(y, m) for y in range(1997, 2027) for m in range(1, 13)][:-3]      # 1997-01 .. 2026-09
 
@@ -138,12 +138,23 @@ class TestFinraMonths:
     def test_a_month_in_another_spelling_is_a_failure_not_a_guess(self, spell):
         """Guessed, "Sep-26" came back as 36 months ending 1999-12 and the
         numbers as the one month 1970-01, each a healthy pull. The full date
-        was read right and fails as well: the file's cells carry no day, and a
-        month is what pandas reads with "%Y-%m"."""
+        was read right and fails as well: the file's cells carry no day."""
         from app.sources.finra import parse_debit_balances
 
         with pytest.raises(SourceError, match="no parseable date column"):
             parse_debit_balances(_finra_xlsx([spell(y, m) for y, m in reversed(self.MONTHS)]))
+
+    @pytest.mark.parametrize("newest", ["2026-9", "Sep-26", "2026-13", None, "0000-09"],
+                             ids=["unpadded", "another-spelling", "month-13", "empty", "year-0000"])
+    def test_one_cell_that_is_no_month_fails_the_pull(self, newest):
+        """The newest row's cell is the only one that is not "YYYY-MM" with a
+        year from 1000 and a month 01 to 12. The pull fails: the column is not
+        read without that row, and "2026-9" is not read as September."""
+        from app.sources.finra import parse_debit_balances
+
+        cells = [newest] + [f"{y}-{m:02d}" for y, m in reversed(self.MONTHS[:-1])]
+        with pytest.raises(SourceError, match="no parseable date column"):
+            parse_debit_balances(_finra_xlsx(cells))
 
 
 class _Response:

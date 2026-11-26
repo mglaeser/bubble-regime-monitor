@@ -17,6 +17,8 @@ mandatory.
 from __future__ import annotations
 
 import io
+import re
+from datetime import date
 
 import pandas as pd
 
@@ -24,6 +26,8 @@ from app.http_client import fetch
 from app.sources import Provenance, SourceError, SourceResult
 
 XLSX_URL = "https://www.finra.org/sites/default/files/2021-03/margin-statistics.xlsx"
+# A month cell: the text "YYYY-MM", a year 1000 to 9999 and a month 01 to 12.
+_MONTH = re.compile(r"[1-9][0-9]{3}-(0[1-9]|1[0-2])")
 
 
 def parse_debit_balances(content: bytes) -> tuple[list[float], list[str], str]:
@@ -54,29 +58,23 @@ def parse_debit_balances(content: bytes) -> tuple[list[float], list[str], str]:
     for j in range(raw.shape[1]):
         if j == debit_col:
             continue
-        # The month cells are the text "YYYY-MM", and no other text is a month
-        # here. Without a format pandas guesses one from the first cell and
-        # takes the day it lacks from today: on 2026-10-31, September being
-        # the newest month, all six recomputes logged "Could not infer
-        # format". A guess also reads other spellings as a healthy pull
-        # ("Sep-26": 36 months ending 1999-12). Those now end in "no parseable
-        # date column", and so does a spelling the guess read right
-        # ("2026-09-01"): the file's cells carry no day.
-        dates = pd.to_datetime(body.iloc[:, j], format="%Y-%m", errors="coerce")
-        if (values.notna() & dates.notna()).sum() >= 13:
-            date_series = dates
+        # A column is the month column when every cell under the heading is a
+        # month cell (_MONTH). Any other cell, an empty one too, and it is not:
+        # nothing is guessed, and no row is left out for its date.
+        column = body.iloc[:, j]
+        if all(isinstance(c, str) and _MONTH.fullmatch(c) for c in column):
+            date_series = column.map(lambda c: date.fromisoformat(f"{c}-01"))
             break
     if date_series is None:
         raise SourceError("FINRA XLSX: no parseable date column — cannot establish month order")
 
-    mask = values.notna() & date_series.notna()
+    mask = values.notna()
     pairs = sorted(zip(date_series[mask], values[mask], strict=True), key=lambda p: p[0])
     if len(pairs) < 13:
         raise SourceError("FINRA XLSX: fewer than 13 dated monthly observations")
     # De-duplicate by calendar month, last value wins (v3.7.4/C-07): a duplicated
     # month would otherwise shift the 12-month YoY offset off a true year.
     import calendar
-    from datetime import date
 
     by_month: dict[tuple[int, int], float] = {}
     order: list[tuple[int, int]] = []
