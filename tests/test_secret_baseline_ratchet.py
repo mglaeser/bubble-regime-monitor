@@ -17,9 +17,10 @@ commit id. This file proves the arrangement actually holds:
   * the reference cannot be moved by branch or merge-base movement;
   * both baseline tests read the one reference and neither carries its own.
 
-The mutations are applied to the REAL accepted baseline rather than to a
-hand-written fixture. A hand-written one would drift from the shape the gate
-actually produces, and then these tests would be about a document nobody ships.
+The mutations of the checks against the pinned reference are applied to the
+REAL accepted baseline rather than to a hand-written fixture. A hand-written one
+would drift from the shape the gate actually produces, and then these tests
+would be about a document nobody ships.
 """
 
 from __future__ import annotations
@@ -46,12 +47,24 @@ def accepted():
     return {"bytes": raw, "doc": json.loads(raw)}
 
 
-@pytest.fixture
-def committed():
-    """The committed baseline, parsed: the document the real-file test reads.
+_FIXTURE = "tests/test_fixture.py"
 
-    Read from the working tree, so no git object is needed and nothing skips."""
-    return json.loads((ROOT / ref.BASELINE_PATH).read_text(encoding="utf-8"))
+
+@pytest.fixture
+def one_record(tmp_path, monkeypatch):
+    """A baseline of one record, written to and read from tmp_path, with
+    `ACCEPTED_ENTRIES` naming exactly that record: the check accepts the pair
+    as it stands. Built here, so the mutations below do not depend on what the
+    committed baseline holds; an approved empty one passes the real-file test."""
+    record = {"filename": _FIXTURE, "hashed_secret": "1" * 40,  # pragma: allowlist secret
+              "is_verified": False, "line_number": 7, "type": "Secret Keyword"}
+    path = tmp_path / ".secrets.baseline"
+    path.write_text(json.dumps({"results": {_FIXTURE: [record]}}), encoding="utf-8")
+    monkeypatch.setattr(ref, "ACCEPTED_ENTRIES",
+                        {_FIXTURE: [(record["type"], record["hashed_secret"])]})
+    document = json.loads(path.read_text(encoding="utf-8"))
+    ref.assert_accepted_entries(document)
+    return document
 
 
 def _rewrite(document: dict) -> bytes:
@@ -158,50 +171,38 @@ class TestRemovalIsNotSilentlyEquivalent:
 class TestTheAcceptedEntriesRedden:
     """The committed baseline holds exactly `ref.ACCEPTED_ENTRIES`: under each
     file the same entries, each named by detector type and hash. Every
-    mutation below is applied to the committed file through the function the
-    real-file test calls (tests/test_secret_gate_policy.py::TestBaselineShape::
+    mutation below is applied to a baseline of one record that the check
+    accepts as it stands (`one_record`), through the function the real-file
+    test calls (tests/test_secret_gate_policy.py::TestBaselineShape::
     test_the_baseline_holds_exactly_the_accepted_entries)."""
 
-    def test_one_added_entry_reddens(self, committed):
-        """The case that matters: someone adds an entry and says nothing.
-
-        The growth check accepted exactly this document on 9f79c7a."""
-        grown = copy.deepcopy(committed)
-        path, entry = _some_entry(grown)
+    def test_one_added_entry_reddens(self, one_record):
+        """The case that matters: someone adds an entry and says nothing."""
         # A different hash under the same file: one more entry, nothing else.
-        extra = dict(entry, hashed_secret="0" * 40,  # pragma: allowlist secret
-                     line_number=int(entry.get("line_number") or 1) + 1)
-        grown["results"][path] = list(grown["results"][path]) + [extra]
+        extra = dict(one_record["results"][_FIXTURE][0], line_number=8,
+                     hashed_secret="0" * 40)  # pragma: allowlist secret
+        one_record["results"][_FIXTURE].append(extra)
         with pytest.raises(AssertionError, match="are not the accepted"):
-            ref.assert_accepted_entries(grown)
+            ref.assert_accepted_entries(one_record)
 
-    def test_a_removed_entry_reddens_too(self, committed):
+    def test_a_removed_entry_reddens_too(self, one_record):
         """A removed entry has to leave the literal in the same change. The
         growth check let a shrink pass in silence, which is how the room for 15
         additions opened (19 entries -> 5 -> 4 while the reference stayed at
         19)."""
-        shrunk = copy.deepcopy(committed)
-        path, _ = _some_entry(shrunk)
-        shrunk["results"][path] = shrunk["results"][path][1:]
+        del one_record["results"][_FIXTURE]
         with pytest.raises(AssertionError, match="are not the accepted"):
-            ref.assert_accepted_entries(shrunk)
+            ref.assert_accepted_entries(one_record)
 
-    def test_an_entry_exchanged_inside_one_file_reddens(self, committed):
+    def test_an_entry_exchanged_inside_one_file_reddens(self, one_record):
         """A fixture leaves a file, another secret enters the same file, and
         its record is regenerated. The file holds as many entries as before and
         the scan passes, because the baseline now holds the new secret's hash.
         A count per file cannot tell the two baselines apart. The literal names
-        each entry by its hash, so the exchange is refused. Every entry of the
-        committed baseline is exchanged in turn."""
-        for path, entries in committed["results"].items():
-            for position in range(len(entries)):
-                exchanged = copy.deepcopy(committed)
-                exchanged["results"][path][position] = dict(
-                    entries[position], hashed_secret="3" * 40)  # pragma: allowlist secret
-                assert [len(found) for found in exchanged["results"].values()] \
-                    == [len(found) for found in committed["results"].values()]
-                with pytest.raises(AssertionError, match="are not the accepted"):
-                    ref.assert_accepted_entries(exchanged)
+        each entry by its hash, so the exchange is refused."""
+        one_record["results"][_FIXTURE][0]["hashed_secret"] = "3" * 40  # pragma: allowlist secret
+        with pytest.raises(AssertionError, match="are not the accepted"):
+            ref.assert_accepted_entries(one_record)
 
 
 # -------------------------------------------------- filters and exclusions ----
