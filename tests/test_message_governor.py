@@ -169,7 +169,9 @@ class TestAnyFailedCallIsAStrike:
         after the last trigger is admitted as the probe. With the day's
         cooldown it was refused, so an open breaker asked the model only every
         second day."""
-        defaults = Settings(_env_file=None, message_engine_enabled=True)
+        # the field's declared default, whatever the process environment sets
+        cooldown = Settings.model_fields["message_engine_breaker_cooldown_s"].default
+        defaults = _settings(message_engine_breaker_cooldown_s=cooldown)
         day = 24 * 60
         for days in (5, 4, 3, 2, 1):
             _row(gov.Outcome.TECHNICAL_ERROR, minutes_ago=days * day,
