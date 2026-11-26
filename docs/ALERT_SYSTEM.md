@@ -836,10 +836,10 @@ Three properties are structural rather than a matter of care:
   JSON.
 
 A replay sends nothing, so before each evaluation it takes every planned alert
-released by then as sent at its release time, through the step
-`outbox.mark_sent` takes for each member it sends: a rule's cooldown and its
-reminders run from that time. A hold by budget, a drop and a withdrawal before
-sending are not modelled.
+released by then as sent at its release time: the members the dispatcher's
+`outbox.revalidate_members` keeps then, each through the step
+`outbox.mark_sent` takes for a member it sends. A rule's cooldown and its
+reminders run from that time. A hold by budget is not modelled.
 
 `--stage N` gates the rules at a rollout stage other than the committed one.
 That is the reason replay exists: the evidence for advancing to stage N is what
