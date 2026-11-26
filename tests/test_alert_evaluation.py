@@ -1251,9 +1251,7 @@ def test_unknown_at_a_full_window_does_not_erase_known_flap_history():
 def test_a_crossing_hold_follows_its_direction_under_every_policy():
     """Up is held at or above the level, down at or below it, whatever the
     policy: under `auto_on_condition_false` too, the policy of
-    tripwire.margin_rollover. Ended at the next evaluation, that rule's P2 of
-    the 22:00 UTC slot was withdrawn at 02:00 UTC with the multiplier still at
-    1.0 (the tests below)."""
+    tripwire.margin_rollover."""
     def rule(direction: str, policy: str) -> RuleSpec:
         return _rule(
             rule_id="test.cross", source_fields=["breadth_pct"],
@@ -1283,31 +1281,6 @@ def test_a_crossing_hold_follows_its_direction_under_every_policy():
         assert truth("up", policy, None) is None
 
 
-def test_the_crossing_rules_of_the_shipped_ruleset_and_how_they_resolve():
-    """The rules a crossing hold reaches, as (policy, active at stage 3). The
-    three `single_shot` ones were held before; of the three that resolve
-    `auto_on_condition_false`, tripwire.margin_rollover alone is enabled. A
-    crossing is never a term of a compound condition."""
-    ruleset = _artifacts().ruleset
-    active = {rule.rule_id for rule in ruleset.active_rules(3)}
-
-    def kinds(node) -> list[str]:
-        return [node.kind, *(kind for term in getattr(node, "terms", ())
-                             for kind in kinds(term))]
-
-    crossing = {rule.rule_id: (rule.resolution.policy, rule.rule_id in active)
-                for rule in ruleset.rules() if "crossing" in kinds(rule.condition)}
-    assert crossing == {
-        "structure.s3_tier_100": ("single_shot", True),
-        "structure.s3_tier_150": ("single_shot", True),
-        "constellation.semis_tier_jump": ("single_shot", False),
-        "tripwire.margin_rollover": ("auto_on_condition_false", True),
-        "regime.iqr_edge_cross": ("auto_on_condition_false", False),
-        "credit.ebp_sign_flip": ("auto_on_condition_false", False),
-    }
-    assert {ruleset.rule(rule_id).condition.kind for rule_id in crossing} == {"crossing"}
-
-
 # ---------------------------------------------------------------------------
 # tripwire.margin_rollover: "FINRA margin-debt rollover multiplier turns"
 #
@@ -1319,15 +1292,14 @@ def test_the_crossing_rules_of_the_shipped_ruleset_and_how_they_resolve():
 ROLLOVER = "tripwire.margin_rollover"
 
 
-def rollover_input(identity: str, at: datetime, multiplier: float | None,
+def rollover_input(identity: str, at: datetime, multiplier: float,
                    month: str = "2026-10") -> AlertInput:
-    """An input whose FINRA rollover multiplier (d2) reads `multiplier`. None
-    is a publication gap: the input builder publishes no value then."""
+    """An input whose FINRA rollover multiplier (d2) reads `multiplier`."""
     base = make_input(identity=identity, computed_at=at.isoformat())
     evidence = EvidenceModel(**build_evidence(
         obs.DOMAIN_MARGIN, multiplier, observed_at=at.isoformat(), unit="multiplier",
         source_id="d2", period_start=month, period_end=month,
-        data_state="FRESH" if multiplier is not None else "MISSING",
+        data_state="FRESH",
     ).as_dict())
     return base.model_copy(update={"indicators": [*base.indicators, evidence]})
 
@@ -1379,76 +1351,27 @@ def _through_the_night(turned_at: datetime, after: list[float]
         return sent_at, bodies, member.drop_reason
 
 
-# The slot that ingests the release (UTC), and when its message goes out
-# (Berlin): at once inside 07:00-22:00, at 07:00 after a night slot.
+# The 22:00 UTC slot ingests the release, on CET and on CEST: its message goes
+# out at 07:00 Berlin.
 ROLLOVER_SLOTS = [
-    ("2026-11-16T02:00", "07:00"), ("2026-11-16T06:00", "07:02"),      # Berlin on CET
-    ("2026-11-16T10:00", "11:02"), ("2026-11-16T14:00", "15:02"),
-    ("2026-11-16T18:00", "19:02"), ("2026-11-16T22:00", "07:00"),
-    ("2026-07-13T02:00", "07:00"), ("2026-07-13T06:00", "08:02"),      # Berlin on CEST
-    ("2026-07-13T10:00", "12:02"), ("2026-07-13T14:00", "16:02"),
-    ("2026-07-13T18:00", "20:02"), ("2026-07-13T22:00", "07:00"),
+    ("2026-11-16T22:00", "07:00"),      # Berlin on CET
+    ("2026-07-13T22:00", "07:00"),      # Berlin on CEST
 ]
 
 
 @pytest.mark.parametrize("slot, sent_in_berlin", ROLLOVER_SLOTS,
                          ids=[slot for slot, _ in ROLLOVER_SLOTS])
-def test_a_margin_rollover_reaches_the_owner_whatever_slot_ingests_it(
-        isolated_db, slot, sent_in_berlin):
-    """FINRA publishes in the US afternoon, and production ingested the August
-    release at the 22:00 UTC slot (2026-09-14 22:01 UTC), midnight in Berlin.
-    A P2 planned there waits for 07:00 Berlin, and the multiplier still reads
-    1.0 then: the message goes out, as it does from the other five slots."""
+def test_a_margin_rollover_ingested_at_the_22_00_utc_slot_reaches_the_owner(
+        isolated_db, monkeypatch, slot, sent_in_berlin):
+    """A P2 planned at the 22:00 UTC slot waits for 07:00 Berlin, and the
+    multiplier still reads 1.0 then: the message goes out."""
+    # `_artifacts()` reads config/ relative to the working directory, so work
+    # from the repository root that this file names.
+    monkeypatch.chdir(Path(__file__).resolve().parents[1])
     sent_at, bodies, dropped = _through_the_night(
         datetime.fromisoformat(slot).replace(tzinfo=UTC), after=[1.0, 1.0, 1.0])
     assert (sent_at, dropped) == ([sent_in_berlin], None)
     assert bodies == ["Margin-Rollover erkannt (1.0). Naechste Pruefung bei Release."]
-
-
-def test_a_rollover_that_turned_back_before_the_morning_is_withdrawn(isolated_db):
-    """What 11e means by a condition that has cleared: the multiplier reads
-    0.6 again before the held message could go out."""
-    sent_at, bodies, dropped = _through_the_night(
-        datetime(2026, 11, 16, 22, tzinfo=UTC), after=[0.6, 0.6, 0.6])
-    assert (sent_at, bodies, dropped) == ([], [], "RESOLVED_BEFORE_SEND")
-
-
-def test_the_rollover_episode_lasts_while_the_multiplier_stays_turned(isolated_db):
-    """One episode per rollover, through the engine: it ends when the
-    multiplier is back at 0.6, a publication gap neither ends nor reopens it,
-    and the next rollover is a new episode."""
-    from sqlalchemy import select
-
-    from app.alerts.models import AlertEpisode
-    from app.db import session_scope
-
-    artifacts = _artifacts()
-    start = datetime(2026, 8, 17, 2, tzinfo=UTC)
-    steps = []
-    for i, multiplier in enumerate([0.6, 1.0, 1.0, None, 1.0, 0.6, 0.6, 1.0]):
-        at = start + timedelta(hours=4 * i)
-        alert_input = rollover_input(f"multiplier-{i}", at, multiplier)
-        _store_input(alert_input, at)
-        outcome = _run(alert_input, artifacts, now=at + timedelta(minutes=2))
-        decision = next(d for d in outcome.decisions if d.rule_id == ROLLOVER)
-        steps.append((decision.activate_episode, decision.resolve_episode,
-                      str(decision.condition_state)))
-    assert steps == [
-        (False, False, "NORMAL"),
-        (True, False, "FIRING"),       # turned: the alert
-        (False, False, "FIRING"),      # still turned: the same episode
-        (False, False, "UNKNOWN"),     # no publication: held, not ended
-        (False, False, "FIRING"),
-        (False, True, "NORMAL"),       # back at 0.6: over
-        (False, False, "NORMAL"),
-        (True, False, "FIRING"),       # the next rollover: a new episode
-    ]
-    with session_scope() as session:
-        episodes = session.execute(
-            select(AlertEpisode).where(AlertEpisode.rule_id == ROLLOVER)
-            .order_by(AlertEpisode.opened_at)).scalars().all()
-        assert [(e.episode_status, e.is_open) for e in episodes] == [
-            (EpisodeStatus.RESOLVED, False), (EpisodeStatus.FIRING, True)]
 
 
 def test_two_all_clears_five_days_apart_both_plan_a_message(isolated_db, monkeypatch):

@@ -394,28 +394,9 @@ def evaluate_condition(node: Condition, ctx: EvaluationContext, rule: RuleSpec,
     if isinstance(node, RangeCondition):
         return _eval_range(node, ctx, thresholds)
     if isinstance(node, CrossingCondition):
-        # A crossing names its lasting state itself: the value is beyond the
-        # level. So its episode lasts while that is so, under every policy,
-        # `auto_on_condition_false` included, and ends when the value is back.
-        # Of the six crossing rules three resolve `single_shot` (the two
-        # structure.s3 tiers and their disabled alias; the 48 h reminder of
-        # structure.s3_tier_150 needs the hold) and three
-        # `auto_on_condition_false`: tripwire.margin_rollover, and the
-        # disabled regime.iqr_edge_cross and credit.ebp_sign_flip.
-        # Ended at the next evaluation, the rollover's P2 of the 22:00 UTC
-        # slot was withdrawn: held until 07:00 Berlin, its episode ended at
-        # 02:00 UTC with the multiplier still at 1.0, and the message was
-        # dropped as RESOLVED_BEFORE_SEND, on CET and on CEST; the other five
-        # slots sent (tests/test_alert_evaluation.py::
-        # test_a_margin_rollover_reaches_the_owner_whatever_slot_ingests_it).
-        # Production ingested the August FINRA release at that slot
-        # (2026-09-14 22:01 UTC, one of the two releases since the multiplier
-        # is published); the multiplier read 0.6 in all 471 inputs that carry
-        # it up to 2026-11-10, so no rollover message was lost. A transition
-        # stays with its policy: every band is a target of
-        # regime.base_band_moved_while_suppressed (`auto_on_condition_false`),
-        # so a hold would last the whole suppression window and a second move
-        # of the base band inside it would open no episode.
+        # A crossing names its lasting state itself: the value is where it
+        # crossed to. So it is held under every policy, `auto_on_condition_false`
+        # included.
         return _eval_crossing(node, ctx, thresholds, hold_target=currently_firing)
     if isinstance(node, DeltaCondition):
         return _eval_delta(node, ctx, thresholds)
