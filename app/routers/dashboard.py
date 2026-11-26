@@ -1,5 +1,5 @@
 """GET /api/v1/dashboard/feed — cached current-values feed for the companion
-"Crisis Winners" dashboard (crash.klee.me). Contract: DASHBOARD_FEED_SPEC.md.
+"Crisis Winners" dashboard (ai-bubble.fyi). Contract: DASHBOARD_FEED_SPEC.md.
 
 Semantics (dashboard-side sign-off 2026-07-15):
   * cheap cached read of the payload built with the scheduled (4-hourly)
@@ -32,7 +32,7 @@ _SECTIONS = ("series", "metrics")
 
 @router.get(
     "/feed",
-    summary="Dashboard feed: 12 monthly series (61 points, t-60..t0) + 34 scalar metrics",
+    summary="Dashboard feed: monthly series (61 points, t-60..t0) and scalar metrics",
     description=(
         "Read-only current-values feed for the companion dashboard. Series carry exactly "
         "61 monthly points (explicit nulls, never interpolated; client rebases); every "
