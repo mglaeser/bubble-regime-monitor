@@ -31,9 +31,7 @@ def _compute(raw, **kw):
 )
 def test_single_source_down_drops_and_renormalizes(isolated_db, monkeypatch, kill, indicator, mc_fields):
     """AGENTS.md rule 4, asked of what is aggregated and not only of the
-    indicator's row. A neutral 1/2 written for a failed s1, s2, s3 or s5 while
-    its row said dropped left 1099 tests green (main 9f79c7a). Production
-    dropped s1 in 3 snapshots and s3 in 2, of 615."""
+    indicator's row."""
     from app.engine.aggregate import geometric_block, renormalize
     from app.engine.montecarlo import BASE_WEIGHTS_D, BASE_WEIGHTS_S
     from app.services import compute

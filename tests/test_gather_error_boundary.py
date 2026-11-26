@@ -13,14 +13,11 @@ so when the Fed changed its date format the fetch stayed green and the
 DERIVATION raised — past every per-source guard, out of `gather_inputs`, and
 into the scheduler, which recorded "recompute_failed" and wrote no snapshot.
 Six times a day for twelve days, behind a green /healthz.
-
-That the two vendor-date derivations run inside the boundary is asserted by
-running them: tests/test_gather_inputs.py feeds each a date it cannot read. The
-two checks of the function's source text that stood here went with that:
-restoring either pre-fix wiring fails the behavioural test.
 """
 
 from __future__ import annotations
+
+import inspect
 
 from app.services import compute
 
@@ -48,3 +45,22 @@ class TestTrackAbsorbsDerivationFailures:
 
         compute._track(raw, "fed_ebp", _boom)
         assert not any(entry["ok"] for entry in raw.source_health)
+
+
+class TestVendorDateDerivationsAreTracked:
+    """Structural pin, in the style of tests/test_ath_provenance.py.
+
+    The behaviour above proves the boundary works; these assert the two vendor
+    date derivations are actually wired through it, which is the part that
+    regressed."""
+
+    def test_ebp_derivation_is_wired_through_track(self):
+        src = inspect.getsource(compute.gather_inputs)
+        assert '_track(raw, "fed_ebp", _ebp)' in src
+        # the pre-fix wiring, which tracked the bare adapter and derived outside
+        assert '_track(raw, "fed_ebp", fed_ebp_src.fetch_ebp)' not in src
+
+    def test_hy_oas_date_parse_is_wired_through_track(self):
+        src = inspect.getsource(compute.gather_inputs)
+        assert '_track(raw, "fred_BAMLH0A0HYM2", _hy_oas)' in src
+        assert 'lambda: fred_src.observations("BAMLH0A0HYM2")' not in src
