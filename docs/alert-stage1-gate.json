@@ -31,6 +31,7 @@
   "runs": {
     "stage_1": {
       "active_stage": 3,
+      "band_excursion_covers_24_months": false,
       "band_excursion_months": 0.1,
       "budget_limits": {},
       "cancelled_superseded": 0,
@@ -86,14 +87,16 @@
       "notification_planning_ran": false,
       "p1_total": 0,
       "passed": true,
-      "schema_version": 4,
+      "schema_version": 5,
       "suppressions_by_reason": {},
       "transient_one_snapshot_band_p1": 1,
+      "transient_one_snapshot_band_p1_busiest_24_months": 1,
       "window_first": "2026-07-10T02:00:00+00:00",
       "window_last": "2026-07-13T06:00:00+00:00"
     },
     "stage_3": {
       "active_stage": 3,
+      "band_excursion_covers_24_months": false,
       "band_excursion_months": 0.1,
       "budget_limits": {
         "cap_168h": 8,
@@ -175,17 +178,19 @@
       "notification_planning_ran": true,
       "p1_total": 5,
       "passed": true,
-      "schema_version": 4,
+      "schema_version": 5,
       "suppressions_by_reason": {
         "DATA_QUALITY_GUARD": 5,
         "SUPERSEDED": 4
       },
       "transient_one_snapshot_band_p1": 1,
+      "transient_one_snapshot_band_p1_busiest_24_months": 1,
       "window_first": "2026-07-10T02:00:00+00:00",
       "window_last": "2026-07-13T06:00:00+00:00"
     },
     "stage_4": {
       "active_stage": 3,
+      "band_excursion_covers_24_months": false,
       "band_excursion_months": 0.1,
       "budget_limits": {
         "cap_168h": 8,
@@ -269,12 +274,13 @@
       "notification_planning_ran": true,
       "p1_total": 5,
       "passed": true,
-      "schema_version": 4,
+      "schema_version": 5,
       "suppressions_by_reason": {
         "DATA_QUALITY_GUARD": 5,
         "SUPERSEDED": 4
       },
       "transient_one_snapshot_band_p1": 1,
+      "transient_one_snapshot_band_p1_busiest_24_months": 1,
       "window_first": "2026-07-10T02:00:00+00:00",
       "window_last": "2026-07-13T06:00:00+00:00"
     }
