@@ -123,24 +123,6 @@ class AlertRulesetRegistry(Base):
     )
 
 
-class AlertCalibrationRegistry(Base):
-    """Immutable statistical calibration artifacts (mandate 22.3).
-
-    EWMA/CUSUM rules stay disabled until the artifact they name exists here.
-    """
-
-    __tablename__ = "alert_calibration_registry"
-
-    calibration_id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    artifact_sha256: Mapped[str] = mapped_column(String(SHA_LEN), unique=True, nullable=False)
-    canonical_json: Mapped[str] = mapped_column(Text, nullable=False)
-    metric: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
-    validated_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False)
-    rules_sha256: Mapped[str | None] = mapped_column(
-        ForeignKey("alert_ruleset_registry.rules_sha256"), nullable=True)
-    code_revision: Mapped[str] = mapped_column(String(64), nullable=False)
-
-
 # ===========================================================================
 # A.4-A.5a  inputs and evaluations
 # ===========================================================================
@@ -459,7 +441,7 @@ class AlertEvent(Base):
 
 
 # ===========================================================================
-# A.12-A.15  deliveries, members, renders, LLM attempts
+# A.12-A.15  deliveries, members, renders
 # ===========================================================================
 
 
@@ -607,7 +589,7 @@ class AlertRender(Base):
 
 
 # ===========================================================================
-# A.16-A.19  silences, idempotency, reviews, heartbeats
+# A.16-A.19  silences, idempotency, heartbeats
 # ===========================================================================
 
 
@@ -632,7 +614,11 @@ class AlertSilence(Base):
 
 
 class ApiIdempotencyRecord(Base):
-    """Same key + different request body -> 409, never a silent re-execution."""
+    """Same key + different request body -> 409, never a silent re-execution.
+
+    A key is honoured for as long as its record exists; migration 0028 dropped
+    the expiry and the status code, which nothing read.
+    """
 
     __tablename__ = "api_idempotency_record"
 
@@ -640,10 +626,7 @@ class ApiIdempotencyRecord(Base):
     route: Mapped[str] = mapped_column(String(128), primary_key=True)
     request_sha256: Mapped[str] = mapped_column(String(SHA_LEN), nullable=False)
     response_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    status_code: Mapped[int] = mapped_column(Integer, nullable=False)
     created_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False)
-    expires_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False,
-                                                 index=True)
 
 
 class AlertComponentHeartbeat(Base):

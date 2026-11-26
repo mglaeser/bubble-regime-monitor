@@ -246,3 +246,61 @@ def test_score_history(client_with_snapshot):
     body = resp.json()
     assert isinstance(body["data"], list) and body["data"]
     assert "median" in body["data"][0]
+
+
+def test_every_public_read_answers_429_after_sixty_requests(client, monkeypatch):
+    """README: "Reads rate-limited 60/min/IP". Every GET operation the schema
+    lists under /api/v1/ outside /api/v1/admin/ and /api/v1/alerts answers
+    sixty requests from one address and refuses the sixty-first."""
+    import re
+
+    from app.config import get_settings
+    from app.security import limiter
+
+    monkeypatch.setenv("READ_ENDPOINTS_PUBLIC", "true")
+    get_settings.cache_clear()
+    operator_paths = ("/api/v1/admin/", "/api/v1/alerts")
+    reads = sorted(
+        re.sub(r"\{[^}]+\}", "no-such-id", path)
+        for path, operations in client.app.openapi()["paths"].items()
+        if "get" in operations and path.startswith("/api/v1/")
+        and not path.startswith(operator_paths))
+    # A filter that selects nothing must not pass.
+    assert "/api/v1/replay/evidence" in reads and len(reads) >= 12, reads
+
+    not_limited = {}
+    try:
+        for path in reads:
+            limiter.reset()   # one in-memory limiter for the whole test process
+            statuses = [client.get(path).status_code for _ in range(61)]
+            if 429 in statuses[:60] or statuses[60] != 429:
+                not_limited[path] = sorted(set(statuses))
+    finally:
+        limiter.reset()
+    assert not_limited == {}, f"public reads without the 60/minute limit: {not_limited}"
+
+
+def test_no_route_description_promises_backward_compatibility(client):
+    """AGENTS.md: "compatibility shims (none are kept: the owner ruled on
+    2026-09-20 that there is no backward compatibility anywhere)". A route's
+    description is part of the served contract (/openapi.json), and none of
+    them promises a caller of an older version that it keeps working. One did:
+    POST /api/v1/admin/send-sms called its path "kept as /send-sms so existing
+    operator scripts and bookmarks keep working", and the README said the same
+    of it. The route has one path and no alias; the path stays, the promise
+    went."""
+    import re
+    from pathlib import Path
+
+    promise = re.compile(r"keeps? working|backwards?[- ]compat", re.IGNORECASE)
+    described = {
+        f"{method.upper()} {path}": operation.get("description") or ""
+        for path, item in client.app.openapi()["paths"].items()
+        for method, operation in item.items() if isinstance(operation, dict)
+    }
+    assert "POST /api/v1/admin/send-sms" in described
+    assert [name for name, text in described.items() if promise.search(text)] == []
+
+    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
+    assert [line[:120] for line in readme.splitlines()
+            if "/admin/send-sms" in line and promise.search(line)] == []
