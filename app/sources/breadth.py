@@ -25,6 +25,7 @@ from datetime import UTC, date, datetime, timedelta
 
 from sqlalchemy import func, select
 
+from app.alerts.calendars import is_trading_day
 from app.config import get_settings
 from app.db import session_scope
 from app.logging_conf import get_logger
@@ -185,7 +186,7 @@ def refresh_breadth_polygon(target_days: int = POLYGON_TARGET_DAYS,
     calls = stored_days = trading_seen = span = 0
     while trading_seen < target_days and span < POLYGON_MAX_CALENDAR_DAYS:
         span += 1
-        if day.weekday() >= 5:            # weekend: not a trading day, no call
+        if not is_trading_day(day):    # not an NYSE session: no call
             day -= timedelta(days=1)
             continue
         if counts.get(day, 0) >= MIN_RESOLVED:  # COMPLETE cached day: count, no call
@@ -249,7 +250,8 @@ def refresh_breadth() -> dict[str, int]:
 def pct_above_200dma() -> SourceResult:
     """Percent of S&P 500 members with close > their own 200-day SMA.
 
-    RECOMPUTE PATH (no network): the Polygon daily_close cache (full universe,
+    RECOMPUTE PATH: one download, the SSGA constituent list (`sp500_symbols`);
+    the closes come from the Polygon daily_close cache (full universe,
     computed 200-DMA). Partial coverage is PUBLISHED with a provenance note +
     full-universe identification bounds (v3.7.8/B-05) plus structured metadata
     (B-06) rather than dropped. Raises SourceError without a Polygon key or
