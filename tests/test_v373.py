@@ -56,12 +56,15 @@ def test_a03_degraded_without_override_still_suppressed(isolated_db):
 
 # ---- B-01/02/07: breadth backfill fetches new days (no freeze) --------------
 
-def _recent_weekday(offset_from_yesterday: int = 0) -> date:
-    """The Nth most-recent weekday at/-before yesterday (skips Sat/Sun)."""
+def _recent_trading_day(offset_from_yesterday: int = 0) -> date:
+    """The Nth most-recent trading day at or before yesterday, by the calendar
+    the walk follows (it asks for no weekend and no exchange holiday)."""
+    from app.alerts.calendars import is_trading_day
+
     d = datetime.now(UTC).date() - timedelta(days=1)
     seen = 0
     while True:
-        if d.weekday() < 5:
+        if is_trading_day(d):
             if seen == offset_from_yesterday:
                 return d
             seen += 1
@@ -85,9 +88,9 @@ def test_b01_backfill_fetches_new_trading_days_when_cache_warm(isolated_db, monk
 
     monkeypatch.setattr(breadth, "fetch_polygon_grouped", _fake_grouped)
 
-    # Warm cache: 5 OLD trading days (~30 weekdays back) — already == target_days,
+    # Warm cache: 5 OLD trading days (~30 sessions back) — already == target_days,
     # so the buggy guard would fetch nothing.
-    old = [_recent_weekday(30 + i) for i in range(5)]
+    old = [_recent_trading_day(30 + i) for i in range(5)]
     with session_scope() as session:
         for d in old:
             for sym, c in (("AAA", 50.0), ("BBB", 60.0)):
@@ -97,15 +100,15 @@ def test_b01_backfill_fetches_new_trading_days_when_cache_warm(isolated_db, monk
     summary = breadth.refresh_breadth_polygon(target_days=5, pace_seconds=0)
 
     # FIXED behaviour: it fetched the recent missing trading days, and the newest
-    # cached date is now yesterday's weekday (forward progress), not the frozen
+    # cached date is now the latest trading day (forward progress), not the frozen
     # 30-days-old window.
     assert summary["calls"] > 0 and summary["stored_days"] > 0
-    assert fetched[0] == _recent_weekday(0).isoformat()  # started at yesterday
+    assert fetched[0] == _recent_trading_day(0).isoformat()  # started at yesterday
     with session_scope() as session:
         from sqlalchemy import func, select
 
         newest = session.execute(select(func.max(DailyClose.date))).scalar()
-    assert newest == _recent_weekday(0)  # not the old frozen window
+    assert newest == _recent_trading_day(0)  # not the old frozen window
 
 
 def test_b02_breadth_as_of_is_observation_date_not_today(isolated_db, monkeypatch):

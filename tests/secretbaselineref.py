@@ -54,6 +54,8 @@ from __future__ import annotations
 import json
 import subprocess
 
+from detect_secrets.core.secrets_collection import SecretsCollection
+
 #: The accepted baseline. A 40-hex commit id, written as a literal so that no
 #: ref lookup — and therefore no branch movement — can change it.
 #:
@@ -170,55 +172,46 @@ def _configuration(document: dict) -> dict:
     }
 
 
-#: What the committed baseline may hold, entry by entry: under each file the
-#: detector type and the `hashed_secret` of every record. File, type and hash
-#: are what the scan matches a secret to an entry by (detect-secrets 1.5.0:
-#: `PotentialSecret` compares `filename`, `secret_hash` and `type`), so an
-#: entry exchanged for another in the same file is a different literal.
-#: `line_number` is not named: it decides nothing in the scan, and the hook
-#: rewrites it itself when a fixture moves.
+#: The `results` of the approved baseline, in detect-secrets' record format:
+#: under each file, the detector type and the `hashed_secret` of every secret
+#: the committed baseline may hold. `line_number` and `is_verified` are left
+#: out: detect-secrets does not count them in a secret's identity.
 #:
 #: A literal, so that a change to it is in the diff a reviewer reads. The four
 #: are the SHA-1 digests of key fixtures of the admin-key and read-access tests
 #: in tests/test_audit_v331.py, as `.secrets.baseline` records them; a digest
 #: is credential-shaped to the scan, hence the pragmas.
-ACCEPTED_ENTRIES: dict[str, list[tuple[str, str]]] = {
+ACCEPTED_ENTRIES: dict[str, list[dict[str, str]]] = {
     "tests/test_audit_v331.py": [
         # the shipped placeholder key, which must not authenticate
-        ("Secret Keyword", "2d1c3689e7808257bc4766b7a041f4ab23f18221"),  # pragma: allowlist secret
+        {"type": "Secret Keyword", "hashed_secret": "2d1c3689e7808257bc4766b7a041f4ab23f18221"},  # pragma: allowlist secret
         # the made-up key the tests configure as the real one
-        ("Secret Keyword", "ae8d7f6c6ba6a60c610084db45a951794b1c3805"),  # pragma: allowlist secret
+        {"type": "Secret Keyword", "hashed_secret": "ae8d7f6c6ba6a60c610084db45a951794b1c3805"},  # pragma: allowlist secret
         # the wrong key, refused with 401
-        ("Secret Keyword", "a4b48a81cdab1e1a5dd37907d6c85ca1c61ddc7c"),  # pragma: allowlist secret
+        {"type": "Secret Keyword", "hashed_secret": "a4b48a81cdab1e1a5dd37907d6c85ca1c61ddc7c"},  # pragma: allowlist secret
         # the non-ASCII key, refused with 401
-        ("Secret Keyword", "7859fe48ea5b2d07394321d3d1b6c80e14a9abb8"),  # pragma: allowlist secret
+        {"type": "Secret Keyword", "hashed_secret": "7859fe48ea5b2d07394321d3d1b6c80e14a9abb8"},  # pragma: allowlist secret
     ],
 }
 
 
-def entries_by_file(document: dict) -> dict[str, list[tuple[str, str]]]:
-    """Each file's records as (type, hashed_secret), sorted.
-
-    A list and not a set, so that a record written twice counts twice."""
-    return {path: sorted((entry["type"], entry["hashed_secret"])
-                         for entry in found)
-            for path, found in document.get("results", {}).items()}
-
-
 def assert_accepted_entries(current: dict) -> None:
-    """The baseline holds exactly `ACCEPTED_ENTRIES`: the same entries, no
-    entry more, none fewer.
+    """The baseline holds exactly the secrets of `ACCEPTED_ENTRIES`, as
+    detect-secrets identifies them.
 
-    An added entry needs a reviewer, and so does one exchanged for another in
-    the same file: the scan accepts whatever secret the new hash belongs to. A
-    removed one leaves the literal in the same change, so that no room for a
-    later addition opens."""
-    now = entries_by_file(current)
-    accepted = {path: sorted(found) for path, found in ACCEPTED_ENTRIES.items()}
+    Both are loaded with detect-secrets' `SecretsCollection.load_from_baseline`
+    and compared with its `==`, under which a secret is its file, its hash and
+    its type (`PotentialSecret.fields_to_compare`), whatever its line number or
+    verification flag. An added secret needs a reviewer, and so does one
+    exchanged for another: the scan accepts whatever secret the new hash belongs
+    to. A removed one leaves the literal in the same change, so that no room for
+    a later addition opens."""
+    now = SecretsCollection.load_from_baseline(current)
+    accepted = SecretsCollection.load_from_baseline({"results": ACCEPTED_ENTRIES})
     if now != accepted:
         raise AssertionError(
-            f"baseline entries {now} are not the accepted {accepted}: an added "
-            "or exchanged entry needs review; a removed one has to leave "
+            f"baseline secrets {now.json()} are not the accepted {accepted.json()}: "
+            "an added or exchanged secret needs review; a removed one has to leave "
             "ACCEPTED_ENTRIES in tests/secretbaselineref.py in the same change")
 
 

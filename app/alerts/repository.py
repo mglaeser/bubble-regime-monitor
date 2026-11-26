@@ -476,9 +476,10 @@ def load_notification_memories(
 
 
 def load_reminders_sent(session: Session, *, episode_ids: set[str]) -> dict[str, int]:
-    """Reminders sent per episode: the REMINDER deliveries whose body
-    represented it, which `mark_sent` alone marks `delivered`. A queued,
-    UNKNOWN or failed reminder is not one. Episodes with none are absent."""
+    """Reminders sent per episode: the REMINDER members marked `delivered`,
+    by `mark_sent` for a body that represented them (never while queued,
+    UNKNOWN or failed) and by a replay for each one it takes as sent.
+    Episodes with none are absent."""
     if not episode_ids:
         return {}
     rows = session.execute(
