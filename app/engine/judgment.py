@@ -96,8 +96,8 @@ def generate(median: float, iqr: tuple[float, float], band: str,
              spy_state: str, qqq_state: str, fast_alarm: dict[str, object],
              last_successful: str | None = None) -> JudgmentCall:
     """Call the gateway; degrade to the last successful text on failure."""
-    # The VRP's day (vrp_as_of) is a date string out of FRED's payload, not a
-    # computed value: it stays out of the prompt (AGENTS.md ground rule 1).
+    # The VRP's day (vrp_as_of) is a date string out of FRED's payload, no number
+    # or enum the monitor computes: it stays out of the prompt (AGENTS.md ground rule 1).
     alarm = {key: value for key, value in fast_alarm.items() if key != "vrp_as_of"}
     prompt = PROMPT_TEMPLATE.format(
         median=round(median), iqr_lo=round(iqr[0]), iqr_hi=round(iqr[1]), band=band,

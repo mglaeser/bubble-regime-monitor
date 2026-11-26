@@ -384,9 +384,8 @@ def build_feed(raw: Any, data: Any) -> dict[str, Any]:
                                   detail={"state": data.v_state},
                                   available=data.v_ratio is not None)
     fa = data.fast_alarm or {}
-    # The VRP is computed from that level and SPY's closes through the level's
-    # own day (legs.closes_through), so it names the level's source and carries
-    # that day.
+    # The VRP is that level's close against SPY's closes through the same day
+    # (legs.closes_through): it names the level's source and carries that day.
     m["vrp"] = _scalar(fa.get("vrp"), fa.get("vrp_units", "annualized_variance_pts_pct2"),
                        fa.get("vrp_as_of"), f"{raw.vix_level_source}+spy_realized",
                        sla_days=SLA_DAILY)

@@ -238,11 +238,8 @@ class TestBuildFeedGolden:
         assert (raw.vix_level, raw.vix_level_source, raw.vix_level_as_of) == (19.92, source, as_of)
 
     def test_the_feed_dates_the_vrp_by_its_session(self, isolated_db, patched_sources, monday):
-        """The VRP is the level's close against SPY's closes through that same
-        day (legs.closes_through), and the feed row carries that day. It
-        published as_of null: on 2026-11-06 02:00 to 14:00 UTC -119.00, the VIX
-        of 11-04 against SPY through 11-05, with nothing to tell the two days
-        apart."""
+        """The VRP row carries the day of its two legs and ages as a daily
+        market value."""
         from app.services.compute import compute_snapshot
         from tests.conftest import make_golden_raw_inputs
 
