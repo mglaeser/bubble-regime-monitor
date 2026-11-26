@@ -3,8 +3,8 @@
 URL: https://www.finra.org/sites/default/files/2021-03/margin-statistics.xlsx
 Published third week of the month following the reference month; FINRA states
 "data feeds are not available" — there is NO true fallback: when the file
-cannot be read, the engine serves the last reading it computed from it while
-that reading's reference month is inside the D2 freshness SLA (75 days from
+cannot be read, the engine serves its stored reading of the latest month it
+computed from it while that month is inside the D2 freshness SLA (75 days from
 the reference month-END, which is as_of), then drops D2. MacroMicro mirrors
 the series for display only.
 

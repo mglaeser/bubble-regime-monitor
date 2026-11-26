@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app import methodology as _M
 from app.alerts.calendars import is_trading_day, trading_days_after
@@ -347,8 +347,8 @@ class RawInputs:
 
     index_within_2pct_of_ath: bool = False
 
-    # D2's newest stored reading that was computed from FINRA's file (never a
-    # cached one), with the reference month it was computed from:
+    # D2's stored reading of the latest readable month computed from FINRA's
+    # file (never a cached one), with that month as the row stores it:
     # {"value", "sub_score", "as_of"} (last_finra_reading)
     margin_cached: dict[str, Any] | None = None
 
@@ -522,32 +522,41 @@ def _track_closes(raw: RawInputs, source: str, canonical: str) -> Any:
 
 
 def last_finra_reading() -> dict[str, Any] | None:
-    """D2's newest stored reading that was computed from FINRA's file, with the
-    reference month it was computed from.
+    """D2's stored reading of the latest readable reference month that was
+    computed from FINRA's file, with that month as the row stores it.
 
     A cached reading is stored with fallback_used, so it is never read back:
-    the reading served is the last one the file gave, and its age keeps
-    counting from that file's reference month. Without the filter each cached
-    row after the first cited the cached row before it.
+    the reading served is one the file gave, and its age keeps counting from
+    that file's reference month. Without the filter each cached row after
+    the first cited the cached row before it.
 
     The month is the stored payload's own as_of (block_d.indicators.d2);
-    indicator_readings has no date column. A row without it yields as_of
-    None, which compute_snapshot does not serve."""
+    indicator_readings stores no reference month. It is readable when it is
+    a calendar date written YYYY-MM-DD (SQLite's date() returns it unchanged)
+    of a month that has ended by today. A row without a readable month is
+    never chosen, so it cannot hide another; of two rows of the same month
+    the newer is chosen. compute_snapshot then serves the reading or drops
+    D2 by the month's age."""
     from app.models import IndicatorReading
 
+    as_of = func.json_extract(Snapshot.block_d, "$.indicators.d2.as_of")
+    month_end = func.date(as_of, "start of month", "+1 month", "-1 day")
+    today = datetime.now(UTC).date().isoformat()
     with session_scope() as session:
-        row = session.execute(
-            select(IndicatorReading)
+        found = session.execute(
+            select(IndicatorReading.value, IndicatorReading.sub_score, as_of)
+            .join(Snapshot, IndicatorReading.snapshot_id == Snapshot.id)
             .where(IndicatorReading.indicator_id == "d2",
                    IndicatorReading.dropped.is_(False),
                    IndicatorReading.fallback_used.is_(False),
-                   IndicatorReading.sub_score.is_not(None))
-            .order_by(IndicatorReading.timestamp.desc()).limit(1)
-        ).scalars().first()
-        if row is None:
-            return None
-        stored = ((row.snapshot.block_d or {}).get("indicators") or {}).get("d2") or {}
-        return {"value": row.value, "sub_score": row.sub_score, "as_of": stored.get("as_of")}
+                   IndicatorReading.sub_score.is_not(None),
+                   func.date(as_of) == as_of,
+                   month_end <= today)
+            .order_by(month_end.desc(), IndicatorReading.timestamp.desc()).limit(1)
+        ).first()
+    if found is None:
+        return None
+    return {"value": found[0], "sub_score": found[1], "as_of": found[2]}
 
 
 def gather_inputs() -> RawInputs:
@@ -1284,8 +1293,8 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
           and (cached_age := _age_days(cached_as_of)) is not None
           and 0 <= cached_age <= FRESHNESS_SLA_DAYS["d2"]):
         # FINRA's file could not be read, or it lacks the month a year back:
-        # serve the last reading computed from the file, dated by its own
-        # reference month, while that month is inside the SLA (the same test
+        # serve the stored reading of the latest month computed from the file
+        # (last_finra_reading), while that month is inside the SLA (the same test
         # as IndicatorOutput.stale). It is a tier of the fallback chain
         # (AGENTS.md rule 3), not a placeholder (rule 4): the service computed
         # it from the file, it keeps its month, and it ends with the SLA.

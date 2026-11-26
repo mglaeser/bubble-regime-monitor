@@ -1,4 +1,4 @@
-"""D2 while FINRA's file cannot be read: the last reading, then the drop."""
+"""D2 while FINRA's file cannot be read: the latest month's reading, then the drop."""
 
 from __future__ import annotations
 
@@ -117,6 +117,26 @@ def test_a_file_older_than_the_sla_is_not_scored_through_the_stored_reading(cloc
     d2 = _snapshot(raw).indicators["d2"]
     assert d2.dropped is True and d2.sub_score is None
     assert "older than" in (d2.note or "")
+
+
+def test_the_latest_readable_month_is_served_whatever_is_stored_after_it(isolated_db, clock):
+    """The cached reading is the stored row with the latest readable month (an
+    as_of written YYYY-MM-DD, of a month that has ended), not the newest row:
+    a newer row without one never hides it."""
+    clock(_after(20))
+    raw = _live(AUGUST)
+    compute.persist_snapshot(_snapshot(raw), raw)
+    # Newer rows the live path stores: an older month, a month not over yet, a
+    # timestamp, no date, an empty one, and, newest of all, no month.
+    for hour, as_of in enumerate(("2026-07-31", "2026-12-31", "2026-09-30 12:00", "garbage",
+                                  "", None), start=3):
+        clock(_after(30).replace(hour=hour))
+        raw = _live(as_of)
+        compute.persist_snapshot(_snapshot(raw), raw)
+
+    clock(_after(30).replace(hour=10))
+    d2 = _snapshot(_without_the_file(compute.last_finra_reading())).indicators["d2"]
+    assert (d2.dropped, d2.as_of, d2.age_days) == (False, AUGUST, 30)
 
 
 def test_a_cached_reading_is_never_read_back(isolated_db, clock):
