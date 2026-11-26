@@ -137,10 +137,10 @@ class TestBaselineShape:
                                                json.loads(reference))
 
     def test_the_baseline_holds_exactly_the_accepted_entries(self):
-        # The accepted entries are a literal in `tests/secretbaselineref.py`,
-        # each named by file, detector type and hash, and the comparison is
-        # equality: an entry added, removed or exchanged for another fails
-        # here until the literal moves.
+        # The accepted secrets are a literal in `tests/secretbaselineref.py`,
+        # and the comparison is detect-secrets' own: a secret added, removed or
+        # exchanged for another, as detect-secrets identifies it, fails here
+        # until the literal moves.
         # No skip path: a literal needs no git object, so a checkout without
         # the pinned commit is checked like any other.
         secretbaselineref.assert_accepted_entries(_baseline())

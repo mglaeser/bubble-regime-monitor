@@ -61,7 +61,7 @@ def one_record(tmp_path, monkeypatch):
     path = tmp_path / ".secrets.baseline"
     path.write_text(json.dumps({"results": {_FIXTURE: [record]}}), encoding="utf-8")
     monkeypatch.setattr(ref, "ACCEPTED_ENTRIES",
-                        {_FIXTURE: [(record["type"], record["hashed_secret"])]})
+                        {_FIXTURE: [{"type": record["type"], "hashed_secret": record["hashed_secret"]}]})
     document = json.loads(path.read_text(encoding="utf-8"))
     ref.assert_accepted_entries(document)
     return document
@@ -169,8 +169,8 @@ class TestRemovalIsNotSilentlyEquivalent:
 
 
 class TestTheAcceptedEntriesRedden:
-    """The committed baseline holds exactly `ref.ACCEPTED_ENTRIES`: under each
-    file the same entries, each named by detector type and hash. Every
+    """The committed baseline holds exactly the secrets of `ref.ACCEPTED_ENTRIES`
+    as detect-secrets identifies them: by file, hash and type. Every
     mutation below is applied to a baseline of one record that the check
     accepts as it stands (`one_record`), through the function the real-file
     test calls (tests/test_secret_gate_policy.py::TestBaselineShape::
@@ -203,6 +203,21 @@ class TestTheAcceptedEntriesRedden:
         one_record["results"][_FIXTURE][0]["hashed_secret"] = "3" * 40  # pragma: allowlist secret
         with pytest.raises(AssertionError, match="are not the accepted"):
             ref.assert_accepted_entries(one_record)
+
+    def test_a_record_given_another_filename_reddens(self, one_record):
+        """detect-secrets takes a record's own `filename` over the key it is
+        listed under, so changing only that field makes it another secret."""
+        one_record["results"][_FIXTURE][0]["filename"] = "app/elsewhere.py"
+        with pytest.raises(AssertionError, match="are not the accepted"):
+            ref.assert_accepted_entries(one_record)
+
+    def test_what_detect_secrets_does_not_count_passes(self, one_record):
+        """The comparison is detect-secrets' own: the record written twice, on
+        another line and marked verified is the same secret to it, as it is to
+        the scan, so the baseline still passes."""
+        record = dict(one_record["results"][_FIXTURE][0], line_number=99, is_verified=True)
+        one_record["results"][_FIXTURE] = [record, dict(record)]
+        ref.assert_accepted_entries(one_record)
 
 
 # -------------------------------------------------- filters and exclusions ----
