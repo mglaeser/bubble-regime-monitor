@@ -15,7 +15,7 @@
 
 ## Product
 
-`bubblegauge` (`app/`) is a **single-tenant, self-hosted FastAPI research service** that publishes a 0–100 "AI-bubble regime" heuristic for US equities. It is explicitly *research, not advice* (`app/references.py:DISCLAIMER`, surfaced on every response). It has **no user accounts, no login, no per-user data, no multi-tenancy**. The read API (`GET /api/v1/score`, `/indicators`, `/legs`, `/meta`, `/replay`, `/content`, `/dashboard`, `/status`) is public (`READ_ENDPOINTS_PUBLIC=true`); `ADMIN_API_KEY` gates every admin route (`/api/v1/admin/*`) and every alert read (`GET /api/v1/alerts/*`), and a second key, `ALERTS_WRITE_API_KEY`, gates the alert silences (`POST` and `DELETE /api/v1/alerts/silences`); the guards are in `app/security.py`, and `scripts/regime/authz_coverage.py` fails CI on a route that has none and is not in its public allowlist.
+`bubblegauge` (`app/`) is a **single-tenant, self-hosted FastAPI research service** that publishes a 0–100 "AI-bubble regime" heuristic for US equities. It is explicitly *research, not advice* (`app/references.py:DISCLAIMER`, surfaced on every response). It has **no user accounts, no login, no per-user data, no multi-tenancy**. The read API (`GET /api/v1/score`, `/indicators`, `/legs`, `/meta`, `/replay`, `/content`, `/dashboard`, `/status`) is public while `READ_ENDPOINTS_PUBLIC=true`; `ADMIN_API_KEY` gates every admin route (`/api/v1/admin/*`) and every alert read (`GET /api/v1/alerts/*`), and a second key, `ALERTS_WRITE_API_KEY`, gates the silence writes (`POST` and `DELETE` under `/api/v1/alerts/silences`); the guards are in `app/security.py`.
 
 ## Runtime / deployment
 
@@ -25,7 +25,7 @@
 | Container | **rootless Podman**, `container_name: bubblegauge`, Python 3.12-slim base (`Containerfile`) |
 | Reverse proxy | **Nginx Proxy Manager**, public origin `bubblegauge.klee.me`; the browser dashboard at `ai-bubble.fyi` is the one CORS allow-origin (`app/main.py`) |
 | Process model | uvicorn (single instance) + **APScheduler** in-process: recompute every 4h (02/06/10/14/18/22 UTC), optional daily digest carried by **exactly one** transport — iMessage (imessage-proxy) or sipgate SMS — selected by `Settings.daily_digest_transport`. iMessage wins when both switches are on, and there is deliberately no fallback: a silent downgrade would hide the proxy being down. |
-| Scaling / rollout | single instance; **no canary, no progressive delivery — blast radius of any change is 100%**. A release timer on the host builds and starts `main`'s commit within about six minutes of a merge (docs/AUTO_DEPLOY.md). |
+| Scaling / rollout | single instance; **no canary, no progressive delivery — blast radius of any change is 100%** |
 | Heavy compute | R **`exuber` 1.1.0** subprocess for GSADF (`r/gsadf.R`); Python **`lppls==0.6.24`** subprocess for LPPLS (`app/indicators/d4_lppls.py`) — both subprocess-isolated with timeouts (SIGILL/hang protection) |
 
 ## Models and providers (the AI surface)
@@ -40,7 +40,7 @@
 | **Tools the model can call** | **NONE.** No function-calling, tool schema, or agent loop. The request payload structurally omits tool fields. Digest sinks remain code-driven. | `llm_gateway.py`, `judgment.py`, `services/digest.py` |
 | Fine-tuning / custom model | **None in this repository.** The opaque gateway route may change its underlying provider/model without this app observing it. | — |
 | Embeddings / vector store / RAG | **None.** No retrieval corpus, no vector DB, no memory store. | repo-wide search |
-| Prompt provenance | Judgment interpolates **numbers/enums**. The digest also receives a bounded prior LLM judgment. The deploy note's prompt carries this repository's merged commit titles, descriptions and changed paths: the one prompt with text that is not a number or an enum (AGENTS.md rule 1's one exception). **No user, scraped, or other external free text reaches a model prompt.** | `judgment.py`, `services/digest.py:digest_facts`, `services/deploy_note.py:prompt` |
+| Prompt provenance | Judgment interpolates **numbers/enums**. The digest also receives a bounded prior LLM judgment. **No user, scraped, or other external free text reaches a model prompt.** | `judgment.py`, `services/digest.py:digest_facts` |
 
 > **This is the single most consequential fact for the catalogue.** The mandate is written for agentic, tool-using, RAG-backed, multi-tenant, fine-tuned systems. This system is a **numbers-in / short-text-out hosted-API call with no tools and no untrusted free-text input**. That collapses most of the agentic (C-06, C-12, C-16–C-19), retrieval (A-21, C-22, C-32, B-33), fine-tuning (C-21, C-35), and multi-tenant (C-01 IDOR, C-32 tenant isolation) surface to NOT-APPLICABLE — **argued per-check in `audit/03`, never assumed.**
 
@@ -72,8 +72,6 @@ All credentials are **long-lived static API keys/tokens** held in the host `.env
 > **Container exposure (deploy prerequisite):** historical builds used `COPY . .` without a Docker/Podman ignore policy, so existing host images or build cache may contain `.env` and runtime `data/`. The synchronized ignore policies prevent recurrence only. Deploy the fixed build, purge old bubblegauge images/cache, and rotate every credential that may have entered a historical build.
 
 ## The merge / deploy gate at the audited commit (July 2026) — *the artifact this operating model lives or dies on*
-
-This section is the record of commit `b8d46bc`: its rows and the consequence under them are kept as written then, and they are not the gate of today. Today `.github/workflows/ci.yml` is blocking. A ruleset on `main` (as read on 2026-11-15) has no bypass actors and requires three status checks on a branch that is up to date with `main`: `test (3.12)` and `image`, that workflow's jobs, and `independent-verify`, the verdict of the cross-vendor review panel (docs/INDEPENDENT_REVIEW_PANEL.md); it requires no approving review. A merge deploys through the release timer (docs/AUTO_DEPLOY.md). What the gate runs is listed in AGENTS.md, "How to make a change".
 
 The mandate (Phase 0) requires: "record the policy bundle that gates merges, where it lives, and which identities can write to it."
 
