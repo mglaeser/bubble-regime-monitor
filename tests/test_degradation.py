@@ -143,7 +143,9 @@ def test_entire_block_down_raises_cleanly(isolated_db):
     raw.hyperscalers = None
     raw.lppls_confidence = None
     with pytest.raises(RuntimeError):
-        _compute(raw)  # admin router converts this to a degraded 200, never 500
+        # run_recompute catches this and returns None: a failed run, reported
+        # by the failure alarm.
+        _compute(raw)
 
 
 def test_lppls_subprocess_returns_failed_state_cleanly():
