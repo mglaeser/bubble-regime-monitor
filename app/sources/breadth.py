@@ -25,6 +25,7 @@ from datetime import UTC, date, datetime, timedelta
 
 from sqlalchemy import func, select
 
+from app.alerts.calendars import is_trading_day
 from app.config import get_settings
 from app.db import session_scope
 from app.logging_conf import get_logger
@@ -76,7 +77,8 @@ def sp500_symbols() -> list[str]:
 
 def _breadth_from_daily_close(symbols: list[str]) -> tuple[int, int, date | None]:
     """(above, counted, obs_date) — the %>200-DMA cross-section on ONE common
-    observation date (v3.7.6/B-07).
+    observation date (v3.7.6/B-07), read from the newest POLYGON_TARGET_DAYS
+    stored sessions, in which a member needs 200 closes.
 
     The prior version read each symbol's OWN last close and its own trailing 200
     and set obs_date = max over symbols, so constituents could be judged on
@@ -90,8 +92,24 @@ def _breadth_from_daily_close(symbols: list[str]) -> tuple[int, int, date | None
     wanted = set(symbols)
     by_sym: dict[str, dict[date, float]] = {}
     with session_scope() as session:
+        # Only the newest POLYGON_TARGET_DAYS stored sessions are read, the ones
+        # the sweep maintains. The table keeps older rows, and the last 200
+        # closes a symbol has reached back into them across any gap. In
+        # production on 2026-11-09 BNY had 223 closes: 104 of a security near
+        # 10 USD that last traded on 2026-02-06, and 119 of the bank that trades
+        # under the ticker since 2026-05-21. 81 of the 200 closes behind its mean
+        # were the other security's (mean 94.02, close 151.23), so it was counted
+        # above its mean whatever the truth. Inside the window it has 139 closes
+        # and is not counted until it has 200. 2026-11-09 reads 305/490 = 62.24 %
+        # instead of 306/491 = 62.32 %; BNY is the only member this changes.
+        # The window and its closes are one statement, which SQLite reads from
+        # one snapshot: a session the sweep stores meanwhile is in both or in
+        # neither.
+        window = (select(DailyClose.date).distinct().order_by(DailyClose.date.desc())
+                  .limit(POLYGON_TARGET_DAYS))
         rows = session.execute(
             select(DailyClose.symbol, DailyClose.date, DailyClose.close)
+            .where(DailyClose.date.in_(window))
             .order_by(DailyClose.symbol, DailyClose.date)
         ).all()
     for sym, d, close in rows:
@@ -168,7 +186,7 @@ def refresh_breadth_polygon(target_days: int = POLYGON_TARGET_DAYS,
     calls = stored_days = trading_seen = span = 0
     while trading_seen < target_days and span < POLYGON_MAX_CALENDAR_DAYS:
         span += 1
-        if day.weekday() >= 5:            # weekend: not a trading day, no call
+        if not is_trading_day(day):    # not an NYSE session: no call
             day -= timedelta(days=1)
             continue
         if counts.get(day, 0) >= MIN_RESOLVED:  # COMPLETE cached day: count, no call
