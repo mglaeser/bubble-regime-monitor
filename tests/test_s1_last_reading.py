@@ -71,7 +71,7 @@ def test_a_failed_yield_fetch_does_not_move_the_headline():
     s1 = live.indicators["s1"]
     carried = compute.compute_snapshot(_without_the_yield(
         {"value": s1.value, "sub_score": s1.sub_score, "data_source": "multpl",
-         "as_of": _day(0), "real10y_as_of": _day(1)}), **frozen)
+         "quality": s1.quality, "as_of": _day(0), "real10y_as_of": _day(1)}), **frozen)
 
     assert carried.point_score == pytest.approx(live.point_score, abs=1e-9)
     # The Monte Carlo resamples the CAPE window of a live S1 and uses a carried
@@ -92,7 +92,8 @@ def test_the_reading_is_served_for_the_sla_and_dropped_after_it():
     """The SLA counts from the real yield's own observation date. A reading
     without a readable one, as every row stored before that date was kept,
     is not carried."""
-    last = {"value": 40.0, "sub_score": 0.9, "data_source": "multpl", "as_of": _day(0)}
+    last = {"value": 40.0, "sub_score": 0.9, "data_source": "multpl", "quality": 1.0,
+            "as_of": _day(0)}
     at_the_sla = _snapshot(_without_the_yield({**last, "real10y_as_of": _day(SLA_DAYS)}))
     assert at_the_sla.indicators["s1"].sub_score == pytest.approx(0.9)
     assert at_the_sla.indicators["s1"].as_of == _day(0)
@@ -104,18 +105,44 @@ def test_the_reading_is_served_for_the_sla_and_dropped_after_it():
 
 
 def test_a_carried_reading_is_not_carried_again(isolated_db, clock):
-    """Each recompute without FRED serves the last MEASURED reading: a carried
-    one is stored as a fallback and never carried itself."""
+    """Each recompute without FRED serves the last MEASURED reading that can be
+    carried: a carried one is stored as a fallback and never carried itself,
+    and a newer one without its yield's date does not hide it."""
     raw = _golden()
+    compute.persist_snapshot(_snapshot(raw), raw)
+    clock(NOW.replace(hour=6))
+    raw = _golden()
+    raw.real10y_as_of = None
     compute.persist_snapshot(_snapshot(raw), raw)
 
     for hour in (6, 10, 14):              # three recomputes of the next day without FRED
         clock((NOW + timedelta(days=1)).replace(hour=hour))
         raw = _without_the_yield(compute.last_primary_reading("s1"))
+        assert raw.s1_last["note"] is None     # the measured reading; a carried one has a note
         data = _snapshot(raw)
-        assert data.indicators["s1"].as_of == _day(0)
         assert data.indicators["s1"].fallback_used is True
         compute.persist_snapshot(data, raw)
+
+
+@pytest.mark.parametrize("cape_history", [True, False], ids=["full", "ecy-only"])
+def test_the_carried_reading_is_the_stored_one_quality_included(isolated_db, clock, cape_history):
+    """Carried while FRED fails, S1 is the reading as it was stored, its
+    quality included (0.5 for the ECY-only blend without CAPE history), so
+    Block S coverage is what it was on the day the reading was stored."""
+    raw = _golden()
+    if not cape_history:
+        raw.cape_history = []
+    stored = _snapshot(raw)
+    compute.persist_snapshot(stored, raw)
+
+    clock(NOW.replace(hour=6))
+    carried = _snapshot(_without_the_yield(compute.last_primary_reading("s1")))
+    got, was = carried.indicators["s1"], stored.indicators["s1"]
+    assert got.fallback_used is True
+    assert ((got.value, got.sub_score, got.data_source, got.quality, got.as_of, got.extra)
+            == (was.value, was.sub_score, was.data_source, was.quality, was.as_of, was.extra))
+    assert (was.note or "") in (got.note or "")
+    assert carried.coverage["S"] == stored.coverage["S"]
 
 
 def test_a_yield_fred_served_old_is_carried_only_for_the_rest_of_its_sla(isolated_db, clock):

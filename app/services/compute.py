@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app import methodology as _M
 from app.alerts.calendars import is_trading_day, trading_days_after
@@ -212,11 +212,12 @@ COVERAGE_DROP_THRESHOLD = _M.get_path("coverage", "drop_threshold")  # 1/3
 # days older than the snapshot), and is dropped after it.
 #
 # That reading is a tier of the fallback chain (AGENTS.md rule 3), not the
-# neutral placeholder rule 4 forbids: the service measured it itself, it keeps
-# the day it was measured on, it is flagged fallback_used, and it ends with
-# the SLA. Without a stored reading, or with one that does not carry its
-# yield's date (every row stored before that date was kept), nothing is
-# filled in and S1 is dropped.
+# neutral placeholder rule 4 forbids: the service measured it itself, it is
+# carried as it was stored (value, quality, provenance, the day it was
+# measured on) and flagged fallback_used, and it ends with the SLA. Without a
+# stored reading whose payload holds its yield's date and its quality (no row
+# stored before this change holds the yield's date), nothing is filled in and
+# S1 is dropped.
 #
 # Why: on 2026-10-21 18:00, 22:00 and 10-22 02:00 UTC FRED answered the DFII10
 # request with a body that was not JSON. S1 was dropped and the median read
@@ -366,9 +367,9 @@ class RawInputs:
     # margin >90d staleness guard: {"value", "sub_score", "timestamp"}
     margin_cached: dict[str, Any] | None = None
 
-    # S1's last reading from its primary sources, read only when FRED did not
-    # serve the real yield: {"value", "sub_score", "data_source", "as_of",
-    # "real10y_as_of"} (last_primary_reading)
+    # S1's last reading from its primary sources, as stored, read only when
+    # FRED did not serve the real yield: {"value", "sub_score", "data_source",
+    # "quality", "as_of", "note", "real10y_as_of"} (last_primary_reading)
     s1_last: dict[str, Any] | None = None
 
     source_health: list[dict[str, Any]] = field(default_factory=list)
@@ -542,31 +543,41 @@ def _track_closes(raw: RawInputs, source: str, canonical: str) -> Any:
 
 def last_primary_reading(indicator_id: str) -> dict[str, Any] | None:
     """The newest stored reading of an indicator of Block S that its own
-    sources served, with the real yield's observation date its stored payload
-    carries (real10y_as_of, which S1 stores; None when that is no string).
+    sources served and that its stored payload lets carry, loaded in the same
+    read: value, sub-score, source, quality, date, note and the real yield's
+    observation date (real10y_as_of, which S1 stores).
 
     Not dropped and not a fallback: a carried reading is stored with
     fallback_used, so it is never carried again and its age keeps counting
-    from the yield of the last reading that was measured."""
+    from the yield of the last reading that was measured. A row whose payload
+    lacks a real10y_as_of written YYYY-MM-DD, a numeric quality from 0 to 1 or
+    a text as_of is never chosen, so it cannot hide another."""
     from app.models import IndicatorReading
 
+    path = f"$.indicators.{indicator_id}"
+    yield_on = func.json_extract(Snapshot.block_s, f"{path}.real10y_as_of")
+    quality = func.json_extract(Snapshot.block_s, f"{path}.quality")
     with session_scope() as session:
-        row = session.execute(
-            select(IndicatorReading)
+        found = session.execute(
+            select(IndicatorReading.value, IndicatorReading.sub_score,
+                   IndicatorReading.data_source, Snapshot.block_s)
+            .join(Snapshot, IndicatorReading.snapshot_id == Snapshot.id)
             .where(IndicatorReading.indicator_id == indicator_id,
                    IndicatorReading.dropped.is_(False),
                    IndicatorReading.fallback_used.is_(False),
-                   IndicatorReading.sub_score.is_not(None))
+                   IndicatorReading.sub_score.is_not(None),
+                   func.date(yield_on) == yield_on,
+                   func.json_type(Snapshot.block_s, f"{path}.quality").in_(("integer", "real")),
+                   quality.between(0, 1),
+                   func.json_type(Snapshot.block_s, f"{path}.as_of") == "text")
             .order_by(IndicatorReading.timestamp.desc()).limit(1)
-        ).scalars().first()
-        if row is None:
-            return None
-        stored = ((row.snapshot.block_s or {}).get("indicators") or {}).get(indicator_id) or {}
-        real10y_as_of = stored.get("real10y_as_of")
-        return {"value": row.value, "sub_score": row.sub_score,
-                "data_source": row.data_source,
-                "as_of": row.timestamp.date().isoformat(),
-                "real10y_as_of": real10y_as_of if isinstance(real10y_as_of, str) else None}
+        ).first()
+    if found is None:
+        return None
+    stored = found.block_s["indicators"][indicator_id]
+    return {"value": found.value, "sub_score": found.sub_score, "data_source": found.data_source,
+            "quality": float(stored["quality"]), "as_of": stored.get("as_of"),
+            "note": stored.get("note"), "real10y_as_of": stored["real10y_as_of"]}
 
 
 def gather_inputs() -> RawInputs:
@@ -1013,24 +1024,28 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
     elif (raw.real10y_decimal is None and raw.s1_last is not None
           and (_s1_last_age := _age_days(raw.s1_last.get("real10y_as_of"))) is not None
           and 0 <= _s1_last_age <= REAL10Y_SLA_DAYS):
-        # The real yield is unavailable: serve S1's last reading, with its own
-        # date, while the real yield it was computed from is inside the yield's
-        # SLA, counted from that yield's observation date and not from the day
-        # the reading was stored (see REAL10Y_SLA_DAYS). It counts with full
-        # quality, as D2's cached reading does; all 612 S1 readings stored by
-        # 2026-11-10 are the full blend from multpl. The Monte Carlo uses the
-        # sub-score pinned for every draw, as for the ECY-only reading above: on the
-        # golden raw inputs (tests/conftest.py) the point score is the same
-        # (53.30) and the median reads 53.43 against 53.41.
+        # The real yield is unavailable: serve S1's last reading as it was
+        # stored, while the real yield it was computed from is inside the
+        # yield's SLA, counted from that yield's observation date and not from
+        # the day the reading was stored (see REAL10Y_SLA_DAYS). Value,
+        # quality, source, date and note are the stored ones; the carry adds
+        # fallback_used and its own note. A reduced reading keeps its stored
+        # quality (0.5 for the ECY-only blend): that is what main scored on the
+        # day it was stored. The Monte Carlo uses the sub-score pinned for
+        # every draw, as for the ECY-only reading above: on the golden raw
+        # inputs (tests/conftest.py) the point score is the same (53.30) and
+        # the median reads 53.43 against 53.41.
         sub = float(raw.s1_last["sub_score"])
         sub_s["s1"] = sub
         mc_in.s1_sub = sub
+        carry = (f"real yield unavailable (FRED DFII10); serving the reading of "
+                 f"{raw.s1_last['as_of']} (real yield of {raw.s1_last['real10y_as_of']}) "
+                 f"for at most {REAL10Y_SLA_DAYS} days after the yield's date")
+        stored_note = raw.s1_last.get("note")
         indicators["s1"] = IndicatorOutput(
             "s1", raw.s1_last["value"], sub, False, raw.s1_last["data_source"], True,
-            note=f"real yield unavailable (FRED DFII10); serving the reading of "
-                 f"{raw.s1_last['as_of']} (real yield of {raw.s1_last['real10y_as_of']}) "
-                 f"for at most {REAL10Y_SLA_DAYS} days after the yield's date",
-            as_of=raw.s1_last["as_of"],
+            note=f"{carry}; {stored_note}" if stored_note else carry,
+            as_of=raw.s1_last["as_of"], quality=raw.s1_last["quality"],
             extra={"real10y_as_of": raw.s1_last["real10y_as_of"]})
     else:
         indicators["s1"] = IndicatorOutput("s1", None, None, True, raw.cape_source, False,
