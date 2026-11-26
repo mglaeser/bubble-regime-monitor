@@ -167,29 +167,37 @@ class TestFindingsGateComputesRatherThanAsserts:
         t = findings_gate.tally([{"id": "X", "verdict": "PARTIAL", "band": "STOP-SHIP"}])
         assert t["open_by_band"]["STOP-SHIP"] == 1
 
-    def test_the_real_ledger_is_not_eligible_and_says_why(self):
-        t = findings_gate.tally(findings_gate.load_findings())
-        eligible, why = findings_gate.production_eligible(t)
-        assert eligible is False, "blocking findings are open; this must not compute true"
-        assert why, "a refusal must carry its reason"
+    def test_an_unknown_argument_is_refused(self, capsys):
+        # A caller that still passes the removed `--admission` must fail: it
+        # must not get the report's exit 0 and take it for an admission.
+        assert findings_gate.main(["--admission"]) == 2
+        captured = capsys.readouterr()
+        assert captured.err == findings_gate.USAGE + "\n"
+        assert captured.out == "", "a refused call must not print the tally"
 
-    def test_admission_refuses_on_the_real_ledger(self):
-        out = subprocess.run([sys.executable, "-m", "scripts.regime.findings_gate", "--admission"],
-                             capture_output=True, text=True, cwd=ROOT, check=False)
-        assert out.returncode == 1
-        assert "REFUSE deploy admission" in out.stderr
+    @pytest.mark.parametrize("argv", [["--help", "--admission"], ["-h"], ["--help"], ["--admission", "--help"],
+                                      ["--strict", "--admission"], ["--stric"], ["--strict", "--strict"],
+                                      ["--selftest", "--strict"]])
+    def test_any_other_argument_list_is_refused(self, argv, capsys):
+        # argparse's help action exited 0 before it refused `--admission`
+        assert findings_gate.main(argv) == 2
+        assert capsys.readouterr() == ("", findings_gate.USAGE + "\n")
 
-    def test_an_unreadable_ledger_refuses_rather_than_admits(self, tmp_path, monkeypatch):
+    def test_an_unreadable_ledger_refuses_rather_than_admits(self, tmp_path, monkeypatch, capsys):
         bad = tmp_path / "03-findings.json"
         bad.write_text("{ not json", encoding="utf-8")
         monkeypatch.setattr(findings_gate, "FINDINGS_PATH", bad)
-        assert findings_gate.main(["--admission"]) == 1
+        assert findings_gate.main([]) == 1
+        assert "cannot evaluate the ledger" in capsys.readouterr().err
+        assert findings_gate.main(["--strict"]) == 1
 
-    def test_a_ledger_that_is_not_a_list_refuses(self, tmp_path, monkeypatch):
+    def test_a_ledger_that_is_not_a_list_refuses(self, tmp_path, monkeypatch, capsys):
         bad = tmp_path / "03-findings.json"
         bad.write_text(json.dumps({"A-01": {}}), encoding="utf-8")
         monkeypatch.setattr(findings_gate, "FINDINGS_PATH", bad)
-        assert findings_gate.main(["--admission"]) == 1
+        assert findings_gate.main([]) == 1
+        assert "cannot evaluate the ledger" in capsys.readouterr().err
+        assert findings_gate.main(["--strict"]) == 1
 
 
 class TestSeparationCheck:
@@ -252,23 +260,12 @@ class TestStrictModeIsActuallyReachable:
     it is not a reason for the code path to be untested.
     """
 
-    import json as _json
-
     @staticmethod
     def _gate_with(tmp_path, monkeypatch, records):
-        import json
-
-        from scripts.regime import findings_gate as fg
         path = tmp_path / "03-findings.json"
         path.write_text(json.dumps(records), encoding="utf-8")
-        # load_findings binds FINDINGS_PATH as a DEFAULT ARGUMENT, so patching
-        # the module attribute does not reach it -- the gate reads the real
-        # 119-record ledger and the assertions silently describe production
-        # instead of the fixture. Patching load_findings is what redirects it,
-        # and that binding is a fair part of why --strict went uncovered.
-        monkeypatch.setattr(fg, "FINDINGS_PATH", path)
-        monkeypatch.setattr(fg, "load_findings", lambda p=path: json.loads(p.read_text()))
-        return fg
+        monkeypatch.setattr(findings_gate, "FINDINGS_PATH", path)
+        return findings_gate
 
     def test_strict_blocks_on_an_open_blocking_band(self, tmp_path, monkeypatch, capsys):
         fg = self._gate_with(tmp_path, monkeypatch, [
@@ -302,9 +299,3 @@ class TestStrictModeIsActuallyReachable:
         fg = self._gate_with(tmp_path, monkeypatch, [
             {"id": "A-1", "verdict": "FAIL", "band": "STOP-SHIP"}])
         assert fg.main([]) == 0
-
-    def test_admission_still_refuses_where_strict_does(self, tmp_path, monkeypatch, capsys):
-        fg = self._gate_with(tmp_path, monkeypatch, [
-            {"id": "A-1", "verdict": "FAIL", "band": "STOP-SHIP"}])
-        assert fg.main(["--admission"]) == 1
-        assert "REFUSE deploy admission" in capsys.readouterr().err
