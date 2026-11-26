@@ -126,6 +126,37 @@ class TestSourceChains:
         assert result.provenance.fallback_used is False
         assert fetched == [vix.CBOE_VIX_URL, vix.CBOE_VIX3M_URL]
 
+    def test_the_vix_curve_falls_back_to_freds_vixcls_and_vxvcls(self, monkeypatch):
+        """FRED publishes the CBOE 3-month VIX as series VXVCLS
+        (fred.stlouisfed.org/series/VXVCLS) and has no series VIX3M: a request
+        for that id is answered 400 Bad Request. The fake FRED below knows only
+        the two real ids and answers any other id the same way."""
+        import app.sources.fred as fred
+        import app.sources.vix as vix
+
+        def cboe_down(source, url, **kwargs):
+            raise SourceError(f"{source}: 403 Forbidden")
+
+        closes = {"VIXCLS": 26.0, "VXVCLS": 24.0}
+        asked: list[str] = []
+
+        def fake_fred(source, url, params=None, **kwargs):
+            series_id = params["series_id"]
+            asked.append(series_id)
+            if series_id not in closes:
+                raise SourceError(f"{source}: 400 Bad Request")
+            return _Response(payload={"observations": [
+                {"date": "2026-11-20", "value": str(closes[series_id])}]})
+
+        monkeypatch.setattr(vix, "fetch", cboe_down)
+        monkeypatch.setattr(fred, "fetch", fake_fred)
+        result = vix.term_structure_ratio()
+        assert asked == ["VIXCLS", "VXVCLS"]
+        assert result.value == pytest.approx(26.0 / 24.0)
+        assert result.provenance.source == "fred_vix_ratio"
+        assert result.provenance.fallback_used is True
+        assert result.provenance.as_of == "2026-11-20"
+
     def test_shillerdata_follows_multpl_for_the_current_cape(self, monkeypatch):
         import app.sources.cape as cape
 
