@@ -654,12 +654,11 @@ def health_projection(
     # ABSENCE OF A MONITOR IS A FAULT, NOT SILENCE.
     #
     # Each component records liveness when it runs, and the projection above
-    # lists the rows that EXIST. So a component that has NEVER run — because its
-    # systemd timer was never installed on the host, which is the recorded state
-    # of this deployment — contributed no row, and no row rendered as nothing at
-    # all. The watchdog is the component this matters most for: it is the thing
-    # that notices recomputes have stopped, so a watchdog nobody installed is an
-    # outage detector that cannot detect, reporting no problem.
+    # lists the rows that EXIST. So a component that has NEVER run contributed
+    # no row, and no row rendered as nothing at all. The watchdog is the
+    # component this matters most for: it is the thing that notices recomputes
+    # have stopped, so a watchdog that never ran is an outage detector that
+    # cannot detect, reporting no problem.
     expected = {
         "watchdog": _WATCHDOG_MAX_SILENCE_S,
         "dispatcher": max(
