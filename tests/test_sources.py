@@ -5,6 +5,7 @@ from __future__ import annotations
 import calendar
 from datetime import UTC, date, datetime, timedelta
 
+import httpx
 import pytest
 
 from app.sources import SourceError
@@ -433,3 +434,76 @@ class TestBreadthIsPolygonOnly:
             assert not hasattr(breadth, name), name
         for name in ("constituent_closes", "twelvedata_credits_left"):
             assert not hasattr(prices, name), name
+
+
+@pytest.mark.parametrize(("answer", "text"), [
+    (httpx.Response(200, content=b"<html>maintenance</html>",
+                    headers={"content-type": "text/html; charset=utf-8"}),
+     "FRED DGS10: HTTP 200 with a body that is not FRED's observations JSON "
+     "(text/html; charset=utf-8, 24 bytes)"),
+    (httpx.Response(204),
+     "FRED DGS10: HTTP 204 with a body that is not FRED's observations JSON (no content type, 0 bytes)"),
+    (httpx.Response(200, json=[]), None),
+    (httpx.Response(200, json={"observations": [{"date": "20261110", "value": "4.1"}]}), None),
+    (httpx.Response(200, json={"observations": [{"date": "2026-11", "value": "."},
+                                                {"date": "2026-11-10", "value": "4.1"}]}), None),
+    (httpx.Response(200, json={"observations": [{"date": "2026-11-10", "value": "NaN"}]}), None),
+    (httpx.Response(200, json={"observations": [{"date": "2026-11-10", "value": True}]}), None),
+    (httpx.Response(200, json={"observations": [{"date": "2026-11-10", "value": "4.1"},
+                                                {"date": "2026-11-09", "value": "4.0"}]}), None),
+    (httpx.Response(200, json={"observations": [{"date": "2026-11-10", "value": "4.1"},
+                                                {"date": "2026-11-10", "value": "4.2"}]}), None),
+], ids=["a-maintenance-page", "a-204", "a-json-list", "a-date-not-written-yyyy-mm-dd",
+        "a-missing-value-whose-date-is-no-date", "a-value-that-is-not-finite",
+        "a-value-that-is-no-string", "newest-first-unasked", "two-values-of-one-date"])
+def test_an_answer_that_is_not_freds_observations_json_is_a_source_error(monkeypatch, answer, text):
+    from app.sources import fred
+
+    monkeypatch.setattr(fred, "fetch", lambda *_args, **_kwargs: answer)
+    with pytest.raises(SourceError, match="with a body that is not FRED's observations JSON") as caught:
+        fred.observations("DGS10")
+    assert text is None or str(caught.value) == text
+
+
+@pytest.mark.parametrize(("body", "message"), [
+    ({}, "with a body that is not FRED's observations JSON"),
+    ({"observations": None}, "with a body that is not FRED's observations JSON"),
+    ({"observations": ""}, "with a body that is not FRED's observations JSON"),
+    ({"observations": {}}, "with a body that is not FRED's observations JSON"),
+    ({"observations": []}, "no non-missing observations"),
+    ({"observations": [{"date": "2026-11-10", "value": "."}]}, "no non-missing observations"),
+], ids=["no-observations", "null", "an-empty-string", "an-empty-object", "an-empty-list",
+        "a-list-without-a-value"])
+def test_only_a_list_of_observations_can_be_no_data_and_no_exception_is_chained(monkeypatch, body, message):
+    from app.sources import fred
+
+    monkeypatch.setattr(fred, "fetch", lambda *_args, **_kwargs: httpx.Response(200, json=body))
+    with pytest.raises(SourceError, match=message) as caught:
+        fred.observations("DGS10")
+    assert (caught.value.__cause__, caught.value.__context__) == (None, None)
+
+
+def test_a_bare_nan_passes_in_a_field_the_reader_does_not_read_and_is_refused_as_a_value(monkeypatch):
+    """Python's JSON decoder reads a bare NaN; the reader judges only the fields it reads."""
+    from app.sources import fred
+
+    def answer(body: bytes) -> None:
+        monkeypatch.setattr(fred, "fetch", lambda *_args, **_kwargs: httpx.Response(
+            200, content=body, headers={"content-type": "application/json"}))
+
+    answer(b'{"count": NaN, "observations": [{"date": "2026-11-10", "value": "4.1"}]}')
+    assert fred.observations("DGS10") == [("2026-11-10", 4.1)]
+
+    answer(b'{"count": 1, "observations": [{"date": "2026-11-10", "value": NaN}]}')
+    with pytest.raises(SourceError, match="with a body that is not FRED's observations JSON"):
+        fred.observations("DGS10")
+
+
+def test_freds_newest_first_answer_to_a_limit_is_read_oldest_first(monkeypatch):
+    from app.sources import fred
+
+    answer = httpx.Response(200, json={"observations": [{"date": "2026-11-10", "value": "4.1"},
+                                                        {"date": "2026-11-09", "value": "."},
+                                                        {"date": "2026-11-06", "value": "4.0"}]})
+    monkeypatch.setattr(fred, "fetch", lambda *_args, **_kwargs: answer)
+    assert fred.observations("DGS10", limit=3) == [("2026-11-06", 4.0), ("2026-11-10", 4.1)]
