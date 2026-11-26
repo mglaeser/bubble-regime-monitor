@@ -375,14 +375,9 @@ def evaluate_condition(node: Condition, ctx: EvaluationContext, rule: RuleSpec,
     if isinstance(node, NeverCondition):
         return ConditionOutcome(truth=False, status=EvaluationStatus.DISABLED,
                                 reasons=[f"structurally dark: {node.reason}"])
-    # A transition episode lasts while the state it led to lasts: the flag
-    # stays off, the leg stays in. `single_shot` holds as `auto_on_inverse`
-    # does. Ending the episode at the next evaluation instead would lose the
-    # P2 of the 22:00 UTC slot: it is held until 07:00 Berlin, the 02:00 UTC
-    # evaluation would resolve its episode, and `outbox.revalidate_members`
-    # drops a resolved member as RESOLVED_BEFORE_SEND. With the hold a held
-    # all-clear is sent in the morning while it is still true and dropped when
-    # it is not. A crossing is held under every policy (below).
+    # `single_shot` holds as `auto_on_inverse` does: while firing, a transition
+    # stays true as long as the state it led to lasts (the flag stays off, the
+    # leg stays in). A crossing is held under every policy (below).
     hold_inverse_target = (
         currently_firing and rule.resolution.policy in ("auto_on_inverse", "single_shot")
     )

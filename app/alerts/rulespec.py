@@ -303,20 +303,16 @@ class CandidateTTLSpec(BaseModel):
 
 class ResolutionSpec(BaseModel):
     """How an episode ends, after which the instance fires again at the next
-    occurrence and `cooldown_seconds` alone limits a repeat message.
+    occurrence.
 
     A crossing episode lasts while the value stays beyond its level and ends
     when it is back, under each of the three policies that end an episode:
     tripwire.margin_rollover (`auto_on_condition_false`) stays open while the
     multiplier reads 1.0. For every other condition:
-    `auto_on_condition_false`: the episode ends at the first evaluation that
-    reads the condition false.
+    `auto_on_condition_false`: at the first evaluation whose condition is false.
     `auto_on_inverse` and `single_shot`: a transition episode lasts while the
     state it led to lasts (the flag stays off, the leg stays in) and ends when
-    that state ends; any other condition ends at the first false evaluation. A
-    transition whose `to_states` include its `from_states` never leaves its
-    target, so under these two its episode never ends (legs.sma200_flip and
-    vol.v_multiplier_change have that shape; both are disabled).
+    that state ends; any other condition ends at the first false evaluation.
     `manual` never self-resolves."""
 
     model_config = ConfigDict(extra="forbid")

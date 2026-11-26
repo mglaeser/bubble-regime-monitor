@@ -1,14 +1,17 @@
 """Canonical frozen-methodology artifact loader (F-01 / L-07).
 
-`frozen_methodology.json` is the SINGLE runtime source of every score-effective
-constant. The Python calculation paths and (via the GSADF bridge) the R path load
-their constants from here, so a change to the artifact is the ONLY way to change a
-frozen constant — enforced by:
+`frozen_methodology.json` is the runtime source of the score-effective constants
+the calculation modules load. The Python calculation paths and (via the GSADF
+bridge) the R path load their constants from here, so a change to the artifact is
+the ONLY way to change a frozen constant — enforced by:
 
   * a byte-level SHA-256 guard (tests/test_frozen_methodology.py) that fails CI on
     any edit and directs maintainers to the v4 process;
-  * a completeness test that every score-effective runtime constant equals the
-    artifact value (no hardcoded duplicate may remain);
+  * identity tests that the constants the modules load are the artifact's values,
+    and a ledger of the numeric literals that still repeat an artifact value
+    without reading it, in the calculation modules it scans (same file:
+    _SCANNED_MODULES, KNOWN_COLLISIONS and the classification above it). A new
+    one there fails CI, unless its value is one the scan skips (0, 1, 2, 100);
   * a mutation test proving a changed value changes engine output.
 
 `<PIN>` is rejected anywhere it would feed a calculation (get_path / the
@@ -16,8 +19,9 @@ score-effective tree). It is permitted ONLY inside the `_meta` block, which hold
 governance bookkeeping (methodology_frozen_at / falsification_tracking_since) that
 was never recorded in the codebase and only the operator can supply.
 
-The artifact is byte-faithful to the v3.7.8 runtime literals; the seeded-MC golden
-headline is 52.43 and is unchanged by wiring the engine to load from it.
+The artifact is byte-faithful to the v3.7.8 runtime literals; the golden fixture's
+deterministic point score is 52.43 (its seeded Monte Carlo median, the headline,
+52.56), and neither moved when the engine was wired to load from it.
 """
 
 from __future__ import annotations

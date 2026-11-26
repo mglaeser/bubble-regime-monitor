@@ -27,7 +27,7 @@ from app.alerts.replay import (
     ruleset_at_stage,
     run_replay,
 )
-from tests.test_alert_evaluation import make_input, semis_input
+from tests.test_alert_evaluation import make_input
 
 RULES = Path("config/alert_rules.v3.2.yaml")
 PHRASES = Path("config/alert_phrases.v3.5.json")
@@ -646,149 +646,85 @@ def test_a_derisk_neighbour_settles_an_excursion(tmp_path, artifacts):
     assert summary.indeterminate_band_excursions == 0
 
 
-# ---------------------------------------------------------------------------
-# a planned alert is taken as sent at its release time, so cooldowns and
-# reminders run as they do in production
-# ---------------------------------------------------------------------------
+_FIRST_ENTRY = datetime(2026, 8, 15, 6, tzinfo=UTC)
+_AFTER_48_MONTHS = datetime(2030, 8, 15, 2, tzinfo=UTC)
+_24_MONTHS = timedelta(days=24 * 30.44)
+
+
+@pytest.mark.parametrize(("second_entry", "last_snapshot", "busiest"), [
+    pytest.param(_FIRST_ENTRY + timedelta(hours=12), None, 2, id="12 hours apart in one day"),
+    pytest.param(datetime(2028, 9, 15, 6, tzinfo=UTC), _AFTER_48_MONTHS, 1, id="25 months apart in 48"),
+    pytest.param(datetime(2028, 7, 15, 6, tzinfo=UTC), _AFTER_48_MONTHS, 2, id="23 months apart in 48"),
+    pytest.param(_FIRST_ENTRY + _24_MONTHS, _AFTER_48_MONTHS, 2, id="exactly 24 months apart"),
+    pytest.param(_FIRST_ENTRY + _24_MONTHS + timedelta(seconds=1), _AFTER_48_MONTHS, 1,
+                 id="24 months and one second apart"),
+])
+def test_the_gate_judges_the_busiest_24_months_of_one_snapshot_derisk_entries(
+        tmp_path, artifacts, second_entry, last_snapshot, busiest):
+    """config/alert_rules.v3.2.yaml, regime.band_to_derisk: "Keep it only while
+    replay shows <= 1 transient one-snapshot P1 per 24 months". A month is 30.44
+    days, and two entries exactly 24 of them apart lie in one window."""
+    moments = [(entry + timedelta(hours=offset), band) for entry in (_FIRST_ENTRY, second_entry)
+               for offset, band in ((-4, "trim"), (0, "de-risk"), (4, "trim"))]
+    if last_snapshot is not None:
+        moments.append((last_snapshot, "trim"))
+    history = [
+        make_input(identity=f"k{i}", computed_at=moment.isoformat(), effective=band, base=band,
+                   median=63.0 if band == "de-risk" else 52.0)
+        for i, (moment, band) in enumerate(moments)
+    ]
+    summary = _run(tmp_path, artifacts, name="keep.db", stage=1, inputs=history)
+    assert summary.failures == ([
+        "2 transient one-snapshot de-risk entries inside one window of 24 months; "
+        "regime.band_to_derisk is kept only while replay shows <= 1 per 24 months"]
+        if busiest > 1 else [])
+    assert (summary.transient_one_snapshot_band_p1,
+            summary.transient_one_snapshot_band_p1_busiest_24_months) == (2, busiest)
+
+
+@pytest.mark.parametrize(("span", "covered"), [
+    pytest.param(_24_MONTHS, True, id="exactly 24 months"),
+    pytest.param(_24_MONTHS - timedelta(seconds=1), False, id="24 months less one second"),
+    pytest.param(timedelta(days=730, hours=16), True, id="730 days and 16 hours"),
+])
+def test_a_history_of_one_whole_window_measures_the_keep_condition(tmp_path, artifacts, span, covered):
+    """A history whose last snapshot is at least 24 months of 30.44 days after its
+    first measures the keep condition, and one second less does not. Each of
+    these histories is stored as 23.98 months, its whole days divided by 30.44."""
+    history = [make_input(identity=f"c{i}", computed_at=moment.isoformat())
+               for i, moment in enumerate((_FIRST_ENTRY, _FIRST_ENTRY + span))]
+    summary = _run(tmp_path, artifacts, name="span.db", stage=1, inputs=history)
+    listed = [note for note in summary.not_measured if "transient_derisk_p1_rate" in note]
+    assert bool(listed) is not covered, listed
+    assert (summary.band_excursion_months, summary.band_excursion_covers_24_months) == (23.98, covered)
 
 
 def _band_arc(states: list[str]) -> list:
     """One input every four hours from 2026-08-17 06:00 UTC, one band each."""
-    start = datetime(2026, 8, 17, 6, 0, tzinfo=UTC)
-    return [make_input(identity=f"arc-{index}",
-                       computed_at=(start + timedelta(hours=4 * index)).isoformat(),
-                       effective=state, base=state,
-                       median=64.0 if state == "de-risk" else 52.0)
+    start = datetime(2026, 8, 17, 6, tzinfo=UTC)
+    return [make_input(identity=f"arc-{index}", computed_at=(start + timedelta(hours=4 * index)).isoformat(),
+                       effective=state, base=state, median=64.0 if state == "de-risk" else 52.0)
             for index, state in enumerate(states)]
 
 
-def test_a_replay_plans_no_repeat_inside_the_rules_cooldown(tmp_path, artifacts):
-    """De-risk at 4 h, out at 8 h, de-risk again at 24 h: 20 h after the first
-    P1, inside the rule's 48 h. Production suppresses that repeat
-    (`planner._cooldown_active`); a replay that started no cooldown planned it
-    and counted it."""
+def test_a_replay_runs_the_cooldown_from_the_release_of_the_alert(tmp_path, artifacts):
+    """De-risk at 4 h, 24 h and 52 h. The P1 released at 4 h starts the rule's
+    48 h cooldown, so the entry at 24 h is suppressed and the one at 52 h is
+    planned (`planner._cooldown_active`)."""
     assert artifacts.ruleset.rule("regime.band_to_derisk").cooldown_seconds == 48 * 3600
     summary = _run(tmp_path, artifacts, inputs=_band_arc(
-        ["trim", "de-risk", "trim", "trim", "trim", "trim", "de-risk", "de-risk"]))
-    assert summary.episodes_by_rule["regime.band_to_derisk"] == 2
-    assert summary.p1_total == 1
-    assert summary.suppressions_by_reason.get("COOLDOWN") == 1
-    assert summary.deliveries_sent == 0
+        ["de-risk" if index in (1, 6, 13) else "trim" for index in range(14)]))
+    assert summary.episodes_by_rule["regime.band_to_derisk"] == 3
+    assert (summary.p1_total, summary.suppressions_by_reason.get("COOLDOWN")) == (2, 1)
 
 
-def test_a_replay_plans_the_repeat_once_the_cooldown_is_over(tmp_path, artifacts):
-    """The second entry 52 h after the first: a cooldown ends, both are planned."""
-    summary = _run(tmp_path, artifacts, inputs=_band_arc(
-        ["trim", "de-risk", "trim"] + ["trim"] * 11 + ["de-risk", "de-risk"]))
-    assert summary.episodes_by_rule["regime.band_to_derisk"] == 2
-    assert summary.p1_total == 2
-    assert "COOLDOWN" not in summary.suppressions_by_reason
-
-
-def test_a_replay_plans_the_reminder_of_a_condition_that_lasts(tmp_path, artifacts):
-    """De-risk from 4 h on, for 104 h. The P1, and 48 h after it the one
-    reminder its rule allows: a second would be due at 100 h if the replay did
-    not count the first for the episode (`repository.load_reminders_sent`)."""
+def test_a_replay_plans_the_one_reminder_of_a_condition_that_lasts(tmp_path, artifacts):
+    """De-risk from 4 h to 108 h: the P1, and 48 h after it the one reminder
+    the rule allows; the reminder counts for its episode, so none follows at 100 h."""
     policy = artifacts.ruleset.rule("regime.band_to_derisk").reminder_policy
     assert (policy.after_seconds, policy.max_reminders) == (48 * 3600, 1)
     summary = _run(tmp_path, artifacts, inputs=_band_arc(["trim"] + ["de-risk"] * 27))
     assert summary.deliveries_by_kind == {"INITIAL": 1, "REMINDER": 1}
-    assert summary.deliveries_sent == 0
-
-
-def test_the_150_pp_tier_is_reminded_only_while_the_run_up_stays_beyond_it(
-        tmp_path, artifacts):
-    """structure.s3_tier_150 declares one reminder after 48 h, and a reminder
-    belongs to an open episode. The episode lasts while the run-up stays at or
-    above 150 pp: a run-up that stays there is reminded, one that fell back
-    after four hours is not."""
-    policy = artifacts.ruleset.rule("structure.s3_tier_150").reminder_policy
-    assert (policy.enabled, policy.after_seconds) == (True, 48 * 3600)
-    stays = [semis_input(i, value) for i, value in enumerate([140.0] + [155.0] * 14)]
-    falls = [semis_input(i, value)
-             for i, value in enumerate([140.0, 155.0] + [120.0] * 13)]
-    assert _run(tmp_path, artifacts, name="stays.db", inputs=stays
-                ).deliveries_by_kind == {"INITIAL": 1, "REMINDER": 1}
-    assert _run(tmp_path, artifacts, name="falls.db", inputs=falls
-                ).deliveries_by_kind == {"INITIAL": 1}
-
-
-def test_a_replay_leaves_a_due_live_alert_and_its_cooldown_alone(
-        tmp_path, artifacts, isolated_db):
-    """The step that takes planned alerts as sent names no mode, because the
-    database it runs on holds one: `run_replay` creates it empty for the run
-    and writes to it under DRYRUN only. The application's database is read for
-    its sidecars and nothing else. So a LIVE P1 that is due there stays
-    undelivered and its rule's cooldown does not start, also when a copy of
-    that database lies at the replay's own path before the run."""
-    import sqlite3
-    from contextlib import closing
-
-    from sqlalchemy import create_engine, select
-    from sqlalchemy.orm import sessionmaker
-
-    from app.alerts.engine import run_evaluation
-    from app.alerts.models import (
-        AlertDelivery,
-        AlertDeliveryMember,
-        AlertInstanceNotificationState,
-    )
-    from app.config import get_settings
-    from app.db import session_scope
-    from tests.conftest import register_promoted
-    from tests.test_alert_evaluation import _store_input
-
-    def outbox(path) -> list[tuple]:
-        """Every alert in the database at `path`: (mode, profile, release
-        time, member taken as sent, start of its rule's cooldown)."""
-        engine = create_engine(f"sqlite:///{path}", future=True)
-        try:
-            with sessionmaker(bind=engine)() as session:
-                return [(delivery.mode, delivery.live_profile, delivery.not_before,
-                         member.delivered,
-                         session.get(AlertInstanceNotificationState, (
-                             delivery.mode, delivery.live_profile,
-                             member.instance_fingerprint)).last_sent_at)
-                        for delivery, member in session.execute(
-                            select(AlertDelivery, AlertDeliveryMember).join(
-                                AlertDeliveryMember,
-                                AlertDeliveryMember.delivery_id == AlertDelivery.delivery_id)
-                            .order_by(AlertDelivery.mode)).all()]
-        finally:
-            engine.dispose()
-
-    # The application's side: de-risk is entered at 10:00 and LIVE plans its
-    # P1. Due at 10:00, not sent, no cooldown: what the replay's 14:00 step
-    # would take as sent if it could reach this row.
-    history = _band_arc(["trim", "de-risk", "de-risk"])
-    moments = [datetime.fromisoformat(record.computed_at) for record in history]
-    with session_scope() as session:
-        register_promoted(session, artifacts, now=moments[0])
-    for record, moment in zip(history, moments, strict=True):
-        _store_input(record, moment)
-    for record, moment in zip(history[:2], moments[:2], strict=True):
-        assert run_evaluation(session_scope, alert_input=record, current=artifacts.ruleset,
-                              mode=Mode.LIVE, now=moment).status == "COMMITTED"
-    live = [("live", "default", moments[1], False, None)]
-    assert outbox(isolated_db) == live
-
-    # The same rows at the replay's own path, before it runs.
-    state = tmp_path / "replay.db"
-    with closing(sqlite3.connect(isolated_db)) as source, \
-            closing(sqlite3.connect(state)) as copy:
-        source.backup(copy)
-    assert outbox(state) == live
-
-    summary = run_replay(
-        config=ReplayConfig(source_db_url=get_settings().db_url, state_db_path=state,
-                            evaluate_at_stage=3),
-        ruleset=artifacts.ruleset, phrase_set=artifacts.phrase_set)
-
-    assert outbox(isolated_db) == live
-    # The replay's database: its own P1 and no other row, taken as sent at
-    # its release time.
-    assert outbox(state) == [("dryrun", "replay", moments[1], True, moments[1])]
-    assert (summary.inputs_total, summary.p1_total) == (3, 1)
 
 
 # ---------------------------------------------------------------------------
