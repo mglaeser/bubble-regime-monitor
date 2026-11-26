@@ -513,7 +513,7 @@ def _track_closes(raw: RawInputs, source: str, canonical: str) -> Any:
 
 
 def gather_inputs() -> RawInputs:
-    """Fetch all upstream sources, one after the other.
+    """Fetch all upstream sources.
 
     A source failure never raises out of here — the indicator is later
     dropped (or falls back) with a provenance note.

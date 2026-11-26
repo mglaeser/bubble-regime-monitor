@@ -8,50 +8,16 @@ Design notes:
   HTTP 5xx, and 429. A 404 for a delisted ticker or a 403 from a scraper wall
   will not improve on attempt three — retrying those tripled the latency of
   every miss.
-- There is no circuit breaker: every fetch asks its upstream. What bounds a
-  dead upstream is the timeout (10 s to connect, 30 s to read) times three
-  attempts, per fetch.
-  The breaker that stood here until 2026-11 opened for 300 s after three
-  failed fetches in a row under one source label. The recomputes are 14,400 s
-  apart, so its promise ("one dead upstream cannot slow the whole gather")
-  was not kept: by the next run the 300 s were long over, and a label fetched
-  once per run (FINRA, the EBP file, multpl's page, a FRED series: FRED is
-  one label per series) was asked again, retries included, however long the
-  upstream had been dead. In four months of production (615 recomputes,
-  2026-07-11 to 2026-11-10) it skipped nothing: of 11,048 source_health rows
-  33 are failures and no note says "circuit", nor does one of the 335,888
-  log lines since 2026-10-05. It could act only in the 300 s after a third
-  failure, which means inside one run, on a label fetched several times, and
-  there it did harm: EDGAR is five fetches under "sec_edgar", and after
-  three unreachable issuers the two reachable ones were not asked, against
-  that adapter's rule that an unreachable issuer does not sink the pull
-  (app/sources/edgar.py, A-26). The pull then failed and D3 was dropped,
-  where the scoring discounts a thin basket instead (2 of 5 issuers:
-  quality 0.4, tests/test_v373.py, H-01). sec_edgar failed 0 of 615 times,
-  so this has not happened. A defence the deployment's cadence cannot meet
-  is removed, not completed (AGENTS.md, "Delete before you add"; found by
-  the audit of 2026-11-11, whose findings the owner asked to have
-  implemented).
-  What it costs is time, and only where a label is asked more than once in
-  a run and its upstream fails: every fetch of it is then made. The slowest
-  failure is a read that stalls, 93 s a fetch (three attempts of 30 s, and
-  1 s and 2 s between them), so the worst case is the label asked most
-  often: against an EDGAR that hangs, every such run makes all five
-  fetches, 15 attempts and 465 s. The breaker let through three fetches on
-  the first such run (9 attempts, 279 s) and one on each later run (3
-  attempts, 93 s). It saved those seconds and no data: with no issuer
-  answering, the pull fails and D3 is dropped either way.
-  Nothing waits for them. The gather runs in the background while the API
-  serves the stored snapshot; its step records the failed pull and the next
-  source is fetched; the next run is 14,400 s away; and the same gather
-  gives its LPPLS fit 1,500 s by default (LPPLS_TIMEOUT_S). Ten of the 615
-  production runs spent more than 465 s in the gather's tracked steps (534
-  to 895 s, all in July 2026, 507 to 881 s of it the LPPLS fit), and each
-  stored its snapshot. Both sides are pinned in tests/test_http_client.py:
-  the two issuers the breaker cost, and the 465 s its absence costs.
-  The price chain's provider cooldown (app/sources/prices.py) and the model
-  governor's breaker (app/message_engine/governor.py) are other mechanisms
-  and stay.
+- There is no circuit breaker: every fetch asks its upstream. The one that
+  stood here opened for 300 s after three failed fetches in a row under one
+  source label. In 615 recomputes, scheduled 14,400 s apart (2026-07-11 to
+  11-10), it skipped nothing; within one run it could keep EDGAR, five
+  fetches under one label, from asking the issuers after three that failed,
+  and drop D3 although two would have answered. It was removed under
+  AGENTS.md, "Delete before you add". The cost is time: against an upstream
+  whose reads stall, every fetch makes its three attempts, 93 s (30 s reads,
+  1 s and 2 s between them), so EDGAR's five take 465 s a run, where the
+  breaker let 279 s through on the first such run and 93 s on each later one.
 """
 
 from __future__ import annotations
@@ -117,15 +83,7 @@ def _get_with_retry(url: str, headers: dict[str, str], params: dict[str, str] | 
 
 def fetch(source: str, url: str, *, headers: dict[str, str] | None = None,
           params: dict[str, str] | None = None) -> httpx.Response:
-    """GET with retry/backoff; a failure is logged under the source's label and raised.
-
-    Nothing stands before the GET, so an upstream that does not answer costs
-    every fetch of it its three attempts: 93 s when the reads stall. The
-    label asked most often in a run is EDGAR's, five fetches and 465 s where
-    the breaker let through 279 s and then 93 s. That is the price of asking
-    every issuer; tests/test_http_client.py pins it against the gather's own
-    limits, and the module docstring has the reasons.
-    """
+    """GET with retry/backoff; a failure is logged under the source's label and raised."""
     merged = {**DEFAULT_HEADERS, **(headers or {})}
     try:
         return _get_with_retry(url, merged, params)

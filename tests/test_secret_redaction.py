@@ -76,8 +76,8 @@ class TestTheGatherChokepointRedacts:
     ):
         """The D1 reproduction, as a regression test.
 
-        Drives the real _track with a real FRED call against a 400, and
-        asserts the note it would persist carries no key."""
+        Drives the real _track circuit-breaker with a real FRED call against a
+        400, and asserts the note it would persist carries no key."""
         import app.http_client as hc
         from app.config import get_settings
         from app.services import compute
