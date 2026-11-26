@@ -206,13 +206,17 @@ COVERAGE_DROP_THRESHOLD = _M.get_path("coverage", "drop_threshold")  # 1/3
 
 # The real 10-year yield's freshness SLA (README "Data sources & freshness
 # SLAs": Real 10-yr (S1), 3d), read from the registry row that documents it.
-# While FRED cannot serve the yield, S1 serves its last reading for that long
-# and is dropped after it.
+# While FRED cannot serve the yield, S1 serves its last reading while the real
+# yield it was computed from is at most that old, counted from the yield's own
+# observation date (FRED serves the latest observation it has, which can be
+# days older than the snapshot), and is dropped after it.
 #
 # That reading is a tier of the fallback chain (AGENTS.md rule 3), not the
 # neutral placeholder rule 4 forbids: the service measured it itself, it keeps
 # the day it was measured on, it is flagged fallback_used, and it ends with
-# the SLA. Without a stored reading nothing is filled in and S1 is dropped.
+# the SLA. Without a stored reading, or with one that does not carry its
+# yield's date (every row stored before that date was kept), nothing is
+# filled in and S1 is dropped.
 #
 # Why: on 2026-10-21 18:00, 22:00 and 10-22 02:00 UTC FRED answered the DFII10
 # request with a body that was not JSON. S1 was dropped and the median read
@@ -363,7 +367,8 @@ class RawInputs:
     margin_cached: dict[str, Any] | None = None
 
     # S1's last reading from its primary sources, read only when FRED did not
-    # serve the real yield: {"value", "sub_score", "data_source", "as_of"}
+    # serve the real yield: {"value", "sub_score", "data_source", "as_of",
+    # "real10y_as_of"} (last_primary_reading)
     s1_last: dict[str, Any] | None = None
 
     source_health: list[dict[str, Any]] = field(default_factory=list)
@@ -536,11 +541,13 @@ def _track_closes(raw: RawInputs, source: str, canonical: str) -> Any:
 
 
 def last_primary_reading(indicator_id: str) -> dict[str, Any] | None:
-    """The newest stored reading of an indicator that its own sources served.
+    """The newest stored reading of an indicator of Block S that its own
+    sources served, with the real yield's observation date its stored payload
+    carries (real10y_as_of, which S1 stores; None when that is no string).
 
     Not dropped and not a fallback: a carried reading is stored with
     fallback_used, so it is never carried again and its age keeps counting
-    from the last reading that was measured."""
+    from the yield of the last reading that was measured."""
     from app.models import IndicatorReading
 
     with session_scope() as session:
@@ -554,9 +561,12 @@ def last_primary_reading(indicator_id: str) -> dict[str, Any] | None:
         ).scalars().first()
         if row is None:
             return None
+        stored = ((row.snapshot.block_s or {}).get("indicators") or {}).get(indicator_id) or {}
+        real10y_as_of = stored.get("real10y_as_of")
         return {"value": row.value, "sub_score": row.sub_score,
                 "data_source": row.data_source,
-                "as_of": row.timestamp.date().isoformat()}
+                "as_of": row.timestamp.date().isoformat(),
+                "real10y_as_of": real10y_as_of if isinstance(real10y_as_of, str) else None}
 
 
 def gather_inputs() -> RawInputs:
@@ -976,9 +986,12 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
             w: s1_valuation.cape_percentile(raw.cape, raw.cape_history, w) for w in range(20, 41)
         }
         mc_in.s1_sub = res.sub_score
+        # real10y_as_of: the real yield's own observation date, stored so that
+        # a carried reading ages from it (see REAL10Y_SLA_DAYS).
         indicators["s1"] = IndicatorOutput("s1", raw.cape, res.sub_score, False,
                                            raw.cape_source, raw.cape_fallback,
-                                           as_of=raw.cape_as_of)
+                                           as_of=raw.cape_as_of,
+                                           extra={"real10y_as_of": raw.real10y_as_of})
     elif raw.cape is not None and raw.real10y_decimal is not None:
         # No percentile history: ECY-only degraded blend, pct pinned to 0.99
         # only if CAPE > 35 (documented conservative shim), else 0.5.
@@ -995,16 +1008,18 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
                                            raw.cape_fallback, as_of=raw.cape_as_of,
                                            note="no CAPE history; percentile shimmed (0.99 if "
                                                 "CAPE>35 else 0.5); quality 0.5",
-                                           quality=0.5)
+                                           quality=0.5,
+                                           extra={"real10y_as_of": raw.real10y_as_of})
     elif (raw.real10y_decimal is None and raw.s1_last is not None
-          and (_s1_last_age := _age_days(raw.s1_last["as_of"])) is not None
+          and (_s1_last_age := _age_days(raw.s1_last.get("real10y_as_of"))) is not None
           and 0 <= _s1_last_age <= REAL10Y_SLA_DAYS):
         # The real yield is unavailable: serve S1's last reading, with its own
-        # date, while it is inside the yield's SLA (see REAL10Y_SLA_DAYS). It
-        # counts with full quality, as D2's cached reading does: the table
-        # stores no quality, and all 612 S1 readings stored by 2026-11-10 are
-        # the full blend from multpl. The Monte Carlo uses the sub-score
-        # pinned for every draw, as for the ECY-only reading above: on the
+        # date, while the real yield it was computed from is inside the yield's
+        # SLA, counted from that yield's observation date and not from the day
+        # the reading was stored (see REAL10Y_SLA_DAYS). It counts with full
+        # quality, as D2's cached reading does; all 612 S1 readings stored by
+        # 2026-11-10 are the full blend from multpl. The Monte Carlo uses the
+        # sub-score pinned for every draw, as for the ECY-only reading above: on the
         # golden raw inputs (tests/conftest.py) the point score is the same
         # (53.30) and the median reads 53.43 against 53.41.
         sub = float(raw.s1_last["sub_score"])
@@ -1013,8 +1028,10 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         indicators["s1"] = IndicatorOutput(
             "s1", raw.s1_last["value"], sub, False, raw.s1_last["data_source"], True,
             note=f"real yield unavailable (FRED DFII10); serving the reading of "
-                 f"{raw.s1_last['as_of']}, for at most {REAL10Y_SLA_DAYS} days",
-            as_of=raw.s1_last["as_of"])
+                 f"{raw.s1_last['as_of']} (real yield of {raw.s1_last['real10y_as_of']}) "
+                 f"for at most {REAL10Y_SLA_DAYS} days after the yield's date",
+            as_of=raw.s1_last["as_of"],
+            extra={"real10y_as_of": raw.s1_last["real10y_as_of"]})
     else:
         indicators["s1"] = IndicatorOutput("s1", None, None, True, raw.cape_source, False,
                                            note="CAPE/real-yield unavailable; dropped, Block S renormalized")
