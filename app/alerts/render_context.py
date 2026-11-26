@@ -24,18 +24,6 @@ from app.alerts.dto import AlertInput
 from app.alerts.enums import ConditionState
 from app.alerts.rulespec import OPTIONAL_RUNTIME_FACT_IDS
 
-#: Numbers the renderer knows how to produce. `F_SCORE` deliberately does not
-#: exist: the median and the point score are different numbers implying
-#: different bands, so there is no field that could mean either.
-FACT_SOURCES: dict[str, str] = {
-    "F_HEADLINE_MEDIAN": "headline_median",
-    "F_POINT_SCORE": "point_score",
-    "F_IQR_LO": "iqr_lo",
-    "F_IQR_HI": "iqr_hi",
-    "F_BAND_EFFECTIVE": "effective_action_state",
-    "F_BAND_BASE": "base_action_band",
-    "F_BAND_SCORE": "score_action_band",
-}
 
 @dataclass(frozen=True)
 class MemberContext:
@@ -64,7 +52,6 @@ class MemberContext:
     #: both rendered values are numeric; enum changes retain the two values.
     fact_deltas: dict[str, dict[str, str | None]] = field(default_factory=dict)
     material_change_fact_id: str | None = None
-    escalation_of: str | None = None
     notes: tuple[str, ...] = ()
     labels: dict[str, str] = field(default_factory=dict)
     headline_code: str | None = None
@@ -88,9 +75,9 @@ class RenderContext:
         return self.members[self.headline_member_index]
 
     def context_hash(self) -> str:
-        # The primary-member index and priority both affect the model prompt
-        # and rendered body.  Omitting them made materially different contexts
-        # share one audit fingerprint.
+        # The primary-member index and priority both affect the rendered body.
+        # Omitting them made materially different contexts share one audit
+        # fingerprint.
         return sha256_of({
             "headline_member_index": self.headline_member_index,
             "members": [
@@ -344,7 +331,6 @@ def build_member_context(
     origin_phrase_set_version: str,
     origin_phrase_set_sha256: str,
     origin_rules_sha256: str,
-    escalation_of: str | None = None,
     # Keyword-only, so its position carries no meaning — but sitting between
     # two required parameters it read like a syntax error to more than one
     # reviewer, and it costs nothing to put the optional ones together.
@@ -420,7 +406,6 @@ def build_member_context(
         current_facts=current_facts,
         fact_deltas=deltas,
         material_change_fact_id=material_fact_id,
-        escalation_of=escalation_of,
         notes=tuple(notes),
         labels=labels,
         headline_code=headline_code,

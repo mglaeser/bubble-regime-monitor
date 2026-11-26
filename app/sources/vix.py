@@ -1,11 +1,9 @@
 """VIX term-structure adapter (V multiplier + fast-alarm inputs).
 
-Source order: CBOE delayed quotes (>= 20 min delay) -> FRED VIXCLS/VIX3M
-ratio. The CBOE pair is measured only while both indices are of one New York
-session (session_of_pair); a run before the open is scored with the last
-measured reading (app/services/compute.py:_v_reading). The vixcentral.com
-scrape that led the chain until 2026-09 is gone: the site moved to
-volchart.io and the page no longer carries the numbers.
+Source order: CBOE delayed quotes (>= 20 min delay) -> FRED VIXCLS/VXVCLS
+ratio (FRED's daily closes of VIX and VIX3M). The vixcentral.com scrape that
+led the chain until 2026-09 is gone: the site moved to volchart.io and the
+page no longer carries the numbers.
 """
 
 from __future__ import annotations
@@ -83,7 +81,11 @@ def term_structure_ratio(session: date | None = None) -> SourceResult:
         errors.append(f"cboe: {e}")
     try:
         vix = fred_latest("VIXCLS")
-        vix3m = fred_latest("VIX3M")
+        # FRED publishes CBOE's VIX3M as series VXVCLS (fred.stlouisfed.org/series/VXVCLS).
+        # It has no series "VIX3M": that id was answered 400 Bad Request on all 23 runs that
+        # reached this fallback (2026-11-20 02:00 to 11-23 18:00 UTC, CBOE answering 403),
+        # while VIXCLS succeeded on the same key every time.
+        vix3m = fred_latest("VXVCLS")
         # v3.7.6/X-01: VIX and VIX3M are two independent daily series — divide
         # them ONLY on an IDENTICAL observation date. Any mismatch (even 1 day)
         # means the term-structure ratio mixes two different sessions; reject
