@@ -175,37 +175,43 @@ class TestSourceChains:
         assert result.provenance.fallback_used is True
         assert fetched == ["multpl", "shillerdata"]
 
-    # The line of https://www.multpl.com/shiller-pe that states the value, as
-    # the page served it on 2026-11-14 (verbatim). It is the one place on that
-    # page where the words "Current Shiller PE Ratio" stand together.
-    MULTPL_LINE = ('<meta name="description" content="Shiller PE Ratio chart, historic, and current data. '
-                   'Current Shiller PE Ratio is 39.95, a change of -0.15 from previous market close." />')
+    # The two places of https://www.multpl.com/shiller-pe that state the value,
+    # as the page served them on 2026-11-14 (each verbatim, the lines between
+    # them left out): the description line and the element with the id "current".
+    MULTPL_PAGE = (
+        '<meta name="description" content="Shiller PE Ratio chart, historic, and current data. '
+        'Current Shiller PE Ratio is 39.95, a change of -0.15 from previous market close." />\n'
+        '<div id="current">\n<b>Current<span class="currentTitle">\nShiller PE Ratio</span>:</b>\n39.95\n\n\n\n\n\n'
+        '<span class="neg">\n\n-0.15\n(-0.37%)\n\n</span>\n\n<div id="timestamp">\n\n\n4:00 PM EST, Fri Nov 13\n\n</div>\n'
+        '</div>\n')
 
-    def test_the_current_cape_is_the_number_in_multpls_sentence(self):
+    def test_the_current_cape_is_the_own_text_of_multpls_current_element(self):
         from app.sources.cape import _current_from_multpl
 
-        assert _current_from_multpl(self.MULTPL_LINE) == 39.95
+        assert _current_from_multpl(self.MULTPL_PAGE) == 39.95
 
-    @pytest.mark.parametrize("page", [
-        'content="Current Shiller PE Ratio (CAPE 10) is 39.70, a change of -0.12"',
-        'content="Current Shiller PE Ratio as of Nov 10, 2026: 39.70"',
-        '<b>Current Shiller PE Ratio</b> <span class="h6">39.70</span>',
-        "Current Shiller PE Ratio - Mean: 17.33",
-    ], ids=["a-number-in-parentheses", "a-date-before-the-value", "a-heading-and-a-class", "another-figure"])
-    def test_a_reworded_page_is_a_failure_not_another_number(self, page):
-        """Behind the words "Current Shiller PE Ratio" each of these pages has
-        a number between 5 and 100 that is not the current CAPE: 10, 10, 6 and
-        17.33. Taking the first digits behind the words returned exactly
-        those, each as a healthy multpl reading."""
+    @pytest.mark.parametrize("page, reading", [
+        ("<!-- " + MULTPL_PAGE.replace("39.95", "17.33") + " -->" + MULTPL_PAGE, 39.95),
+        (MULTPL_PAGE.replace("39.95", "39,950.12"), None),
+        (MULTPL_PAGE.replace("39.95", "39.95abc"), None),
+    ], ids=["an-old-copy-in-a-comment", "a-larger-number", "letters-glued-to-the-number"])
+    def test_a_comment_is_not_read_and_a_text_that_is_not_one_number_is_no_reading(self, page, reading):
+        """Taking the first digits behind the words "Current Shiller PE Ratio"
+        in the page source returned 17.33, 39.0 and 39.95 on these pages, each
+        as a healthy multpl reading."""
         from app.sources.cape import _current_from_multpl
 
-        with pytest.raises(SourceError, match="could not parse current CAPE"):
-            _current_from_multpl(page)
+        if reading is None:
+            with pytest.raises(SourceError, match="could not parse current CAPE"):
+                _current_from_multpl(page)
+        else:
+            assert _current_from_multpl(page) == reading
 
-    def test_a_reworded_multpl_page_hands_over_to_shillers_spreadsheet(self, monkeypatch):
+    def test_a_multpl_page_without_the_element_hands_over_to_shillers_spreadsheet(self, monkeypatch):
         import app.sources.cape as cape
 
-        page = _Response(text='content="Current Shiller PE Ratio (CAPE 10) is 39.70"', content=b"xls")
+        # The first digits behind the words: 6.0, from the class name.
+        page = _Response(text='<b>Current Shiller PE Ratio</b> <span class="h6">39.70</span>', content=b"xls")
         monkeypatch.setattr(cape, "fetch", lambda source, url, **kwargs: page)
         monkeypatch.setattr(cape, "_history_from_shillerdata", lambda content: [38.0, 39.1])
         result = cape.current_cape()

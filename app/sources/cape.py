@@ -10,6 +10,7 @@ from __future__ import annotations
 import io
 import re
 
+import lxml.html
 import pandas as pd
 
 from app.http_client import fetch
@@ -20,28 +21,19 @@ MULTPL_TABLE_URL = "https://www.multpl.com/shiller-pe/table/by-month"
 SHILLERDATA_URL = "https://img1.wsimg.com/blobby/go/e5e77e0b-59d1-44d9-ab25-4763ac982e53/downloads/ie_data.xls"
 
 
-# multpl states the value in one sentence of the page, its description line
-# ("Current Shiller PE Ratio is 39.95, a change of -0.15 from previous market
-# close.", read on 2026-11-14 and kept in tests/test_sources.py). The number is
-# read where that sentence puts it and nowhere else. The pattern that stood
-# here took the first digits anywhere behind the words "Current Shiller PE
-# Ratio", and the range check below passes most numbers a page carries: on
-# "... Ratio (CAPE 10) is 39.70" and on "... Ratio as of Nov 10, 2026: 39.70"
-# it returned 10.0, on a heading followed by `class="h6"` 6.0, each as a
-# healthy multpl reading. Production has not met such a page: S1 came from
-# multpl on 612 of 612 scored snapshots, between 38.79 and 42.38. A page that
-# words the sentence differently now fails, and the chain goes on to
-# Shiller's spreadsheet, flagged as fallback.
-# (A second pattern stood before that one, `is\s*<b>?`: it needed a literal
-# "<b" behind "is" and does not match the sentence.)
-_MULTPL_CURRENT = re.compile(r"Current Shiller PE Ratio is\s+(\d+(?:\.\d+)?)")
-
-
 def _current_from_multpl(html: str) -> float:
-    m = _MULTPL_CURRENT.search(html)
-    if not m:
+    # multpl's page states the value in the element with the id "current": a
+    # label in <b>, the day's change in a <span>, the time in a <div>, and the
+    # value as the element's own text (the page of 2026-11-14; the element is
+    # kept in tests/test_sources.py). An HTML parser reads the page, so a
+    # comment is not text. The own text, its pieces joined by a space, has to
+    # be one number and nothing else, or there is no reading. The patterns that
+    # stood here took the first digits behind the words "Current Shiller PE
+    # Ratio" anywhere in the page source, a comment or a class name included.
+    own_text = " ".join(lxml.html.fromstring(html).xpath('//*[@id="current"]/text()')).strip()
+    if not re.fullmatch(r"[0-9]+(\.[0-9]+)?", own_text):
         raise SourceError("multpl: could not parse current CAPE")
-    cape = float(m.group(1))
+    cape = float(own_text)
     if not 5.0 < cape < 100.0:
         raise SourceError(f"multpl: implausible CAPE {cape}")
     return cape
