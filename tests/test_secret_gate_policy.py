@@ -28,6 +28,7 @@ Two lessons, one test file:
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -164,14 +165,26 @@ class TestGateStillDetects:
                                                                    tmp_path):
         # The wildcard exclusion would have let this through.
         planted = ROOT / "artifacts" / "verifier" / "_planted_probe.json"
+        # The directories this test has to make, deepest first, so that it can
+        # remove them again: nothing under artifacts/ is tracked, and with only
+        # the planted file unlinked the two directories stayed in the checkout.
+        made = [d for d in (planted.parent, planted.parent.parent) if not d.exists()]
         planted.parent.mkdir(parents=True, exist_ok=True)
         planted.write_text(
             '{"k": "sk-proj-PLANTEDsecretVALUE1234567890abcd"}\n')  # pragma: allowlist secret
         try:
-            assert self._run(planted) == 1, (
+            # Relative to the repository, as CI names every file (git ls-files):
+            # the baseline's exclusions are unanchored, so the checkout's own
+            # absolute path can match one. In a checkout below a directory whose
+            # name ends in "audit" the absolute path matched `audit/` and the
+            # hook exited 0 for this planted secret; the relative path exits 1
+            # there too.
+            assert self._run(planted.relative_to(ROOT)) == 1, (
                 "a new secret under artifacts/verifier/ must still block")
         finally:
             planted.unlink()
+            for directory in made:
+                directory.rmdir()
 
     def test_the_exact_ci_command_exits_zero(self):
         if shutil.which("git") is None:
@@ -318,6 +331,31 @@ class TestImageContextExcludesCredentials:
                 f"{ignore_file}: {path!r} "
                 f"{'entered' if should_exclude else 'was wrongly kept out of'} "
                 "the build context")
+
+    def test_git_add_all_never_stages_the_env_family(self, tmp_path):
+        """The same family, kept out of the repository. Asked of git itself, in
+        an empty repository that holds this `.gitignore` and nothing of the
+        host's own git configuration."""
+        git = shutil.which("git")
+        if git is None:
+            pytest.skip("no git executable found: this test asks git itself")
+        home = tmp_path / "home"
+        work = tmp_path / "work"
+        home.mkdir()
+        work.mkdir()
+        shutil.copy(ROOT / ".gitignore", work / ".gitignore")
+        cases = [*self.CASES, (".env.bak-20260101T000000Z", True)]
+        for path, _ in cases:
+            (work / path).parent.mkdir(parents=True, exist_ok=True)
+            (work / path).write_text("x\n", encoding="utf-8")
+        env = {"PATH": os.environ.get("PATH", os.defpath), "HOME": str(home),
+               "GIT_CONFIG_GLOBAL": str(home / ".gitconfig"),
+               "GIT_CONFIG_NOSYSTEM": "1", "GIT_ATTR_NOSYSTEM": "1"}
+        for command in (["init", "-q", "--template="], ["add", "-A"]):
+            subprocess.run([git, *command], cwd=work, env=env, check=True, capture_output=True)
+        staged = set(subprocess.run([git, "ls-files"], cwd=work, env=env, check=True,
+                                    capture_output=True, text=True).stdout.split())
+        assert staged == {".gitignore"} | {path for path, excluded in cases if not excluded}
 
     def test_the_two_ignore_files_cannot_drift(self):
         assert Path(".dockerignore").read_text() \
