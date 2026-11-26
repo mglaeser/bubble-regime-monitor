@@ -62,8 +62,8 @@ podman tag localhost/bubblegauge:<previous commit> localhost/bubblegauge:latest
 systemctl --user start bubblegauge.service
 ```
 
-The rollback holds while the release timer is stopped, and no longer: the
-release has no memory, so its next run - after
+The rollback holds until the release runs again: the release has no
+memory, so its next run - after
 `systemctl --user start bubblegauge-release.timer`, a `make deploy`, or a
 reboot (the timer is enabled and fires two minutes after boot) - finds a
 container that does not carry main's commit and releases main again. Start
@@ -124,6 +124,7 @@ install -D -m 644 deploy/systemd/bubblegauge-alert-watchdog.timer ~/.config/syst
 install -D -m 644 deploy/systemd/bubblegauge-alert-watchdog-failed.service ~/.config/systemd/user/bubblegauge-alert-watchdog-failed.service
 install -d -m 700 ~/.config/bubblegauge
 touch ~/.config/bubblegauge/imessage.env && chmod 600 ~/.config/bubblegauge/imessage.env
+touch .env && chmod 600 .env
 ```
 
 Two files are written by hand before anything is started. The host notices'
