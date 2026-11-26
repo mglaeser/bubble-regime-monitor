@@ -168,25 +168,9 @@ def _past_sla(indicator_id: str, as_of_iso: str | None, today: date) -> bool | N
     return _older_than(as_of_iso, sla, today, in_sessions=indicator_id in SESSION_AGED)
 
 
-# Red flag 3 reads FRED's daily HY OAS (BAMLH0A0HYM2) on every run, whichever
-# tier S5 is scored on, so its record carries that reading's own freshness: the
-# SLA of the registry row that documents the series, counted in NYSE sessions
-# like the other daily market readings.
-# The record used to take S5's state, and S5 is scored on the Fed's monthly
-# Excess Bond Premium (45 days from the month's end) whenever that file
-# arrives. Production, the 490 snapshots with the typed contract (2026-08-20 to
-# 2026-11-10): 128 said STALE, all from 2026-09-15 to 2026-10-06 while the Fed
-# had skipped one release, and on each of them the spread was 1 or 2 sessions
-# old. Over all 490 it was 1 session old on 267, 2 on 218 and 3 on 5 (the
-# Tuesday after Columbus Day, bond market closed, and one FRED outage), so
-# counted this way all 490 are FRESH. Counted in calendar days 101 would be
-# STALE: Thursday's spread on a Monday and Friday's on a Tuesday morning are 4
-# days old. The other way round a spread that stopped stayed FRESH for as long
-# as the EBP was.
-# The flag's value, its fireability and the override are the frozen rule's and
-# do not change: only data_state does. No rule, message or digest fact reads
-# rf3's data_state, so stored snapshots keep the label they were published with.
-# A registry without the row fails here, at import; the test names the key.
+# Red flag 3 reads FRED's daily HY OAS (BAMLH0A0HYM2), whichever tier S5 is
+# scored on, so its record carries that reading's own freshness: the SLA of the
+# registry row that documents the series, counted in NYSE sessions.
 HY_OAS_SLA_DAYS: int = next(
     spec.sla_days for spec in SOURCE_REGISTRY if spec.key == "fred_hyoas")
 
@@ -1192,9 +1176,7 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         # spread) but the FRED-truncated 3yr window makes its percentile
         # regime-limited — the weakest usable tier of the s5 chain.
         # fallback_used is True, as on the proxy tier above: the chain is EBP,
-        # then the proxy, then this tier. It said False, left from when HY OAS
-        # was the first tier. Production to 2026-11-10: the tier served 11
-        # snapshots, the last on 2026-07-15, before the EBP was read; none since.
+        # then the proxy, then this tier.
         indicators["s5"] = IndicatorOutput("s5", oas_t2, sub, False,
                                            "fred_BAMLH0A0HYM2", True, note=s5_note,
                                            as_of=raw.hy_oas_as_of, quality=0.3,
