@@ -64,6 +64,25 @@ def test_the_bounds_apply_before_the_periods_are_counted(history):
         "2026-07-13T22:00", "2026-07-14T22:00"]
 
 
+def test_the_last_instant_of_a_month_is_in_that_month(isolated_db):
+    """A snapshot at 23:59:59.9999 UTC on July 31 is July 31's and July's. On
+    SQLite 3.45.1 the date functions put 23:59:59.9995 and later into the
+    next day."""
+    from app.db import session_scope
+    from app.main import create_app
+    from app.models import Snapshot
+
+    with session_scope() as session:
+        session.add_all(
+            Snapshot(computed_at=at, service_version="t", median=50.0, iqr_lo=48.0, iqr_hi=52.0,
+                     band5=45.0, band95=55.0, point_score=50.0, action_band="trim")
+            for at in (datetime(2026, 7, 31, 23, 59, 59, 999900, tzinfo=UTC),
+                       datetime(2026, 8, 1, 6, 0, tzinfo=UTC)))
+    client = TestClient(create_app())
+    for granularity in ("daily", "monthly"):
+        assert _points(client, f"granularity={granularity}") == ["2026-07-31T23:59", "2026-08-01T06:00"]
+
+
 def test_a_history_row_names_the_versions_that_computed_it(isolated_db):
     """README, API: each history row carries the service and methodology
     version that computed it. A daily or monthly point is one kept snapshot and

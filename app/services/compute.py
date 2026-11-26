@@ -63,7 +63,7 @@ from app.indicators import (
 from app.logging_conf import get_logger
 from app.models import HyOasHistory, Snapshot, SourceHealth
 from app.redaction import sanitize
-from app.references import REGISTRY
+from app.references import REGISTRY, SOURCE_REGISTRY
 
 log = get_logger(__name__)
 
@@ -139,13 +139,14 @@ def _age_days(as_of_iso: str | None) -> int | None:
         return None
 
 
-def _past_sla(indicator_id: str, as_of_iso: str | None, today: date) -> bool | None:
-    """Is a reading dated `as_of_iso` past its indicator's freshness SLA on `today`?
+def _older_than(as_of_iso: str | None, limit: int, today: date, *,
+                in_sessions: bool) -> bool | None:
+    """Is a reading dated `as_of_iso` more than `limit` days old on `today`,
+    counted in NYSE sessions or in calendar days?
 
-    None when the date or the SLA is unknown. A reading dated after `today`
-    (clock skew, bad vintage) is past it (v3.7.3/O-06)."""
-    sla = FRESHNESS_SLA_DAYS.get(indicator_id)
-    if not as_of_iso or sla is None:
+    None when the date is unknown. A reading dated after `today` (clock skew,
+    bad vintage) counts as older (v3.7.3/O-06)."""
+    if not as_of_iso:
         return None
     try:
         as_of = date.fromisoformat(as_of_iso[:10])
@@ -153,9 +154,25 @@ def _past_sla(indicator_id: str, as_of_iso: str | None, today: date) -> bool | N
         return None
     if as_of > today:
         return True
-    if indicator_id in SESSION_AGED:
-        return trading_days_after(as_of, today) > sla
-    return (today - as_of).days > sla
+    age = trading_days_after(as_of, today) if in_sessions else (today - as_of).days
+    return age > limit
+
+
+def _past_sla(indicator_id: str, as_of_iso: str | None, today: date) -> bool | None:
+    """Is a reading dated `as_of_iso` past its indicator's freshness SLA on `today`?
+
+    None when the date or the SLA is unknown."""
+    sla = FRESHNESS_SLA_DAYS.get(indicator_id)
+    if sla is None:
+        return None
+    return _older_than(as_of_iso, sla, today, in_sessions=indicator_id in SESSION_AGED)
+
+
+# Red flag 3 reads FRED's daily HY OAS (BAMLH0A0HYM2), whichever tier S5 is
+# scored on, so its record carries that reading's own freshness: the SLA of the
+# registry row that documents the series, counted in NYSE sessions.
+HY_OAS_SLA_DAYS: int = next(
+    spec.sla_days for spec in SOURCE_REGISTRY if spec.key == "fred_hyoas")
 
 
 def _month_end_iso(yyyy_mm: str) -> str:
@@ -287,7 +304,7 @@ class RawInputs:
     bsadf_argmax: int | None = None   # 1-based index of the sup within the sequence
     bsadf_n: int | None = None
     bsadf_n_finite: int | None = None  # < bsadf_n means the history has holes
-    bsadf_cv_route: str | None = None  # "bsadf_cv" | "augment_join" | "unavailable"
+    bsadf_cv_route: str | None = None  # "bsadf_cv" | "unavailable": r/gsadf.R has one route
 
     hy_oas_bps: float | None = None
     hy_oas_history_bps: list[float] | None = None
@@ -889,13 +906,18 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
                      mc_seed: int | None = None,
                      gsadf_contested: bool | None = None,
                      as_of_date: str | None = None) -> SnapshotData:
-    """PURE scoring pipeline: raw inputs -> snapshot data. Never raises on
+    """Scoring pipeline: raw inputs -> snapshot data. Never raises on
     missing sources; drops indicators and renormalizes instead.
+
+    Not pure: the same raw inputs give a different snapshot on another day,
+    because the age of every reading (the freshness map and, through the
+    freshness SLAs, the coverage gate) and D2's 75-day branch are measured
+    against the wall clock.
 
     `as_of_date` (ISO) is the day the caller is evaluating on, used ONLY to
     decide whether a price feed's last month has ended. It is optional and
-    defaults to the newest bar's own month, so the function stays pure and
-    reproducible for fixtures and replay; production passes the real date
+    defaults to the newest bar's own month, so that this one decision is the
+    same whenever a fixture or a replay runs; production passes the real date
     because without it a completed month is not recognised until the first bar
     of the NEXT month arrives, which delays a month-end P1 by a day or more.
     """
@@ -978,7 +1000,8 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
     # Mapping: explosive p<0.05 non-contested -> 1.0; p<0.10 -> 0.5;
     # contested-or-stale-or-DATA-MISSING -> 0.25; tested-and-not-explosive -> 0.05.
     # asymmetric= is deliberately NOT bound to a setting: see app/config.py. It
-    # defaults False, so this call is byte-equivalent to the pre-branch one.
+    # is the frozen gsadf.contested_rule, "asymmetric" since v4.1, so this
+    # call passes True (the parameter's own default is False).
     s4_stat, s4_cv90, s4_cv95 = scored_s4_statistic(raw)
     # v4.1 contested rule, also an import-time constant.
     s4_asym = s4_gsadf.ASYMMETRIC_CONTESTED
@@ -1115,7 +1138,8 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
                                                "fed_ebp", sub,
                                                raw_value=ebp_t2_persisted, raw_unit="pp"))
     elif raw.baa_spread_history_bps and len(raw.baa_spread_history_bps) >= 24:
-        # PREFERRED: long-history percentile on the BAA-DGS10 proxy (monthly),
+        # SECOND TIER, taken only without the EBP above (quality 0.5):
+        # long-history percentile on the BAA-DGS10 proxy (monthly),
         # LSSZ t-2yr lag (24 months). HY OAS is FRED-truncated to 3yr, so its
         # own percentile is regime-limited; the Baa spread goes back to 1997.
         spread_t2 = s5_credit.t_minus_2_value(raw.baa_spread_history_bps, lag_obs=24)
@@ -1151,8 +1175,10 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         # FIDELITY quality 0.3 (v3.3.2): right construct family (a market credit
         # spread) but the FRED-truncated 3yr window makes its percentile
         # regime-limited — the weakest usable tier of the s5 chain.
+        # fallback_used is True, as on the proxy tier above: the chain is EBP,
+        # then the proxy, then this tier.
         indicators["s5"] = IndicatorOutput("s5", oas_t2, sub, False,
-                                           "fred_BAMLH0A0HYM2", False, note=s5_note,
+                                           "fred_BAMLH0A0HYM2", True, note=s5_note,
                                            as_of=raw.hy_oas_as_of, quality=0.3,
                                            extra=_s5_extra(
                                                "fred_BAMLH0A0HYM2", sub,
@@ -1585,7 +1611,10 @@ def persist_snapshot(data: SnapshotData, raw: RawInputs) -> int:
         hy_oas_bps=raw.hy_oas_bps,
         hy_oas_tight_bps=data.hy_oas_tight_bps,
         hy_oas_as_of=raw.hy_oas_as_of,
-        hy_oas_stale=_ind_stale("s5"),
+        # The spread's own age on the day the record is stamped with, not S5's
+        # state: see HY_OAS_SLA_DAYS.
+        hy_oas_stale=_older_than(raw.hy_oas_as_of, HY_OAS_SLA_DAYS, now.date(),
+                                 in_sessions=True),
         breadth_pct=raw.breadth_pct,
         breadth_as_of=raw.breadth_as_of,
         breadth_stale=_ind_stale("d1"),
