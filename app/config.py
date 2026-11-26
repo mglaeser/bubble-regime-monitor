@@ -120,8 +120,9 @@ class Settings(BaseSettings):
     deploy_note_path: str = "/app/deploy-note"
 
     # --- ALERT SYSTEM (docs/ALERT_SYSTEM.md) --------------------------------
-    # Two INDEPENDENT switches. Evidence capture may run with alerting fully
-    # disabled, and enabling alerts never implies capture. `live` is never
+    # Two switches, not symmetric. Evidence capture may run with alerting fully
+    # disabled; enabling alerts does not turn capture on, and with capture off
+    # no recompute is evaluated (`alert_evaluation_skipped`). `live` is never
     # reached automatically: it requires promoted rule + phrase artifacts and a
     # deliberate operator edit.
     #
