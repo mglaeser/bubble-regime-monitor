@@ -105,12 +105,59 @@ def test_score_band_follows_the_frozen_edges(median, expected):
     assert not state.data_degraded
 
 
-def test_override_moves_base_but_not_score_band():
+def test_the_decision_applies_the_override_on_the_flags_alone():
+    """aggregate.action_band_with_override decides de-risk on three fired flags
+    whatever median it is handed, so the decision does not lean on the Monte
+    Carlo's floor (next test). The pipeline never computes this pair, a median
+    of 30 beside a fired override; only such a pair shows that the decision
+    applies the rule itself. The line dropped here asserted a score band of
+    hold for that pair.
+    """
     state = derive_band_state(headline_median=30.0, red_flags=_three_flags(),
                               coverage_degraded=False)
-    assert state.score_action_band == BAND_HOLD      # the median alone still says hold
     assert state.base_action_band == BAND_DERISK     # the override wins the decision
     assert state.effective_action_state == BAND_DERISK
+
+
+def test_a_fired_override_holds_every_published_number_at_its_floor(isolated_db):
+    """The frozen rule (aggregate.apply_override, docs/frozen_pin_manifest.md):
+    with >= 3 of the 4 red flags, Score = max(Score_raw, 70). The Monte Carlo
+    applies it to every draw before it takes the median, so with a fired
+    override the published median, both ranges and the point score read the
+    floor, and score_action_band is de-risk like base_action_band.
+
+    No scoring line changes with this test: it passes on
+    app/engine/aggregate.py and app/engine/montecarlo.py as they stood before
+    it. What was wrong was the sentence that described score_action_band.
+    """
+    from dataclasses import asdict
+
+    from app.engine.aggregate import action_band, combine
+    from app.services.compute import compute_snapshot
+    from tests.conftest import make_golden_raw_inputs
+
+    raw = make_golden_raw_inputs()
+    raw.smh_2yr_return_pct = 200.0      # flag 2: a run-up of 168 points beyond the market
+    raw.hy_oas_bps = 400.0              # flag 3: 150 basis points above the three-year low
+    raw.breadth_pct = 44.0              # flag 4: under half, with the index at its high
+    data = compute_snapshot(raw, mc_samples=20_000, mc_seed=20260711, gsadf_contested=True)
+
+    assert data.override_fired and data.red_flags.count == 3
+    assert (data.median, data.iqr, data.band_5_95, data.point_score) == (
+        70.0, (70.0, 70.0), (70.0, 70.0), 70.0)
+    # Every band the snapshot carries reads de-risk: the display band and each
+    # word of the typed state.
+    typed_bands = {value for value in asdict(data.band_state).values() if isinstance(value, str)}
+    assert typed_bands | {data.action_band} == {BAND_DERISK}
+
+    # The rule is non-compensatory: three fired flags put the score above
+    # Score_raw, the composite of the two blocks, and override_fired says so.
+    # Score_raw alone would band as trim, so every de-risk above is the rule's
+    # doing. No band of Score_raw is published; a reader can recompute it from
+    # the two block values the snapshot serves.
+    composite = combine(data.s_block, data.d_block)
+    assert composite == pytest.approx(57.84, abs=0.01)
+    assert action_band(composite) == BAND_TRIM
 
 
 def test_coverage_suppression_is_typed_not_prose():
