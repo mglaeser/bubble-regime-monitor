@@ -467,8 +467,8 @@ def _track(raw: RawInputs, source: str, fn: Any) -> Any:
         # which is UNAUTHENTICATED — so an upstream 4xx used to hand the FRED
         # key to any anonymous caller. Reproduced before this line existed.
         # This covers the gather only. The texts of app.http_client's errors
-        # (fetch, require_success) name no part of the request's URL; the
-        # sanitize stays for what else a text can carry.
+        # (fetch, get_once, require_success) are never built from the
+        # request's URL; the sanitize stays for what else a text can carry.
         note = sanitize(exc, limit=400)
         raw.source_health.append({
             "source": source, "ok": False,

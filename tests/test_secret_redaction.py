@@ -18,9 +18,9 @@ enforcement.
 
 from __future__ import annotations
 
+import ast
 import logging
 import pathlib
-import types
 from unittest import mock
 
 import httpx
@@ -204,12 +204,8 @@ def _provider_error(hc, monkeypatch, provider: str, status: int) -> Exception:
     from app.sources import fred, prices
 
     client = _answering(status)
-    if provider == "fred":
-        monkeypatch.setattr(hc, "_client", client)     # the pooled client behind app.http_client.fetch
-    else:
-        # The price adapters open a client of their own; only their name
-        # `httpx` is replaced, httpx.Client itself is not.
-        monkeypatch.setattr(prices, "httpx", types.SimpleNamespace(Client=lambda **_kwargs: client))
+    monkeypatch.setattr(hc, "_client", client)                       # the pooled client behind fetch
+    monkeypatch.setattr(httpx, "Client", lambda **_kwargs: client)   # the client get_once opens
     call = {
         "fred": lambda: fred.observations("DTB3"),
         "alphavantage": lambda: prices.fetch_alphavantage("SPY"),
@@ -243,19 +239,26 @@ def test_an_http_error_names_its_source_and_its_status(keyed, monkeypatch, statu
 
 
 SECRET = "FAKEsecret0123456789"                 # pragma: allowlist secret
+ALPHAVANTAGE = "https://www.alphavantage.co/query"
 
 
 def _echoing(request: httpx.Request) -> httpx.Response:
-    """An upstream that echoes the secret: in the reason phrase, a header and
-    the body of its 403, and at /moved in a redirect to a Location httpx
-    cannot parse."""
+    """An upstream that echoes what it was sent: the secret in the reason
+    phrase, a header and the body of its 403, and at /moved in a redirect to
+    a Location httpx cannot parse. At Alpha Vantage's path it raises what
+    httpx raises for a status line that repeats the request target, in the
+    words httpx 0.28 gave on a loopback socket."""
     if request.url.path == "/moved":
         return httpx.Response(302, headers={"Location": f"https://example.test:{SECRET}/"})
+    if request.url.path == "/query":
+        raise httpx.RemoteProtocolError(
+            f"illegal status line: bytearray(b'HTTP/1.1 4OO {request.url.raw_path.decode()}')")
     return httpx.Response(403, headers={"X-Echo": SECRET}, text=SECRET,
                           extensions={"reason_phrase": f"Bad api_key={SECRET}".encode()})
 
 
-FORBIDDEN = ("probe: HTTP 403 Forbidden", {"status": 403, "error_class": "HTTPStatusError"})
+FORBIDDEN = ("probe: HTTP 403 Forbidden",
+             {"source": "probe", "status": 403, "error_class": "HTTPStatusError"})
 
 
 @pytest.mark.parametrize(("url", "params", "said"), [
@@ -267,28 +270,38 @@ FORBIDDEN = ("probe: HTTP 403 Forbidden", {"status": 403, "error_class": "HTTPSt
                  id="encoded-newline"),
     pytest.param("https://[::1]/data", {"api_key": SECRET}, FORBIDDEN, id="ipv6-host"),
     pytest.param("https://example.test/moved", {"api_key": SECRET},
-                 ("probe: RemoteProtocolError", {"error_class": "RemoteProtocolError"}),
+                 ("probe: RemoteProtocolError", {"source": "probe", "error_class": "RemoteProtocolError"}),
                  id="malformed-redirect"),
+    pytest.param(ALPHAVANTAGE, None, ("alphavantage SPY: RemoteProtocolError",
+                                      {"source": "alphavantage SPY", "error_class": "RemoteProtocolError"}),
+                 id="alphavantage-status-line"),
 ])
-def test_what_fetch_raises_and_logs_names_no_url(keyed, monkeypatch, url, params, said):
+def test_what_a_request_raises_and_logs_names_no_url(keyed, monkeypatch, url, params, said):
     """The error names the source and the status, or the type of what failed,
     and nothing is chained to it; the module's logger is replaced, so the test
-    sees what is handed to it."""
+    sees what is handed to it. The last case is Alpha Vantage's adapter, whose
+    request goes through get_once."""
+    from app.sources import prices
+
     log = mock.Mock()
     monkeypatch.setattr(keyed, "log", log)
-    monkeypatch.setattr(keyed, "_client", httpx.Client(      # redirects are followed, as by the pooled client
-        transport=httpx.MockTransport(_echoing), follow_redirects=True, timeout=5))
+    upstream = httpx.Client(transport=httpx.MockTransport(_echoing), follow_redirects=True, timeout=5)
+    monkeypatch.setattr(keyed, "_client", upstream)          # redirects are followed, as by the pooled client
+    monkeypatch.setattr(httpx, "Client", lambda **_kwargs: upstream)   # the client get_once opens
 
     with pytest.raises((httpx.HTTPStatusError, keyed.FetchError)) as caught:
-        keyed.fetch("probe", url, params=params)
+        if url == ALPHAVANTAGE:
+            prices.fetch_alphavantage("SPY")
+        else:
+            keyed.fetch("probe", url, params=params)
 
     text, fields = said
     assert str(caught.value) == text
     assert caught.value.__cause__ is None and caught.value.__context__ is None
-    assert log.mock_calls == [mock.call.warning("source_fetch_failed", source="probe", **fields)]
+    assert log.mock_calls == [mock.call.warning("source_fetch_failed", **fields)]
     parsed = httpx.URL(url)
     for written in (str(caught.value), repr(log.mock_calls)):
-        assert all(part not in written for part in (SECRET, parsed.host, parsed.path, "://", "\n"))
+        assert all(part not in written for part in (SECRET, AV_KEY, parsed.host, parsed.path, "://", "\n"))
 
 
 def test_no_module_calls_httpx_raise_for_status():
@@ -299,3 +312,35 @@ def test_no_module_calls_httpx_raise_for_status():
                if ".raise_for_status(" in path.read_text(encoding="utf-8")]
 
     assert callers == []
+
+
+#: httpx.Client, httpx.AsyncClient and the request functions of httpx._api.__all__.
+OPENS_A_REQUEST = {"Client", "AsyncClient", "delete", "get", "head", "options", "patch", "post", "put",
+                   "request", "stream"}
+
+
+def test_no_source_module_names_an_httpx_client_or_request_function():
+    """The text of httpx's own exceptions can hold the request URL, its query
+    included; app.http_client builds the texts of its errors (fetch,
+    get_once) without it. So no module under app/sources/ names one of
+    httpx's clients or module-level request functions: not imported from
+    httpx, and not as an attribute of the httpx module under any name it is
+    imported as."""
+    root = pathlib.Path(__file__).resolve().parents[1]
+    found = []
+    for path in sorted((root / "app" / "sources").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        imports = [node for node in ast.walk(tree) if isinstance(node, ast.Import | ast.ImportFrom)]
+        module = {"httpx"} | {alias.asname for node in imports for alias in node.names
+                              if alias.name == "httpx" and alias.asname}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] == "httpx":
+                names = [alias.name for alias in node.names if alias.name in OPENS_A_REQUEST | {"*"}]
+            elif (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+                  and node.value.id in module and node.attr in OPENS_A_REQUEST):
+                names = [node.attr]
+            else:
+                continue
+            found += [f"{path.relative_to(root)}:{node.lineno} httpx.{name}" for name in names]
+
+    assert found == []

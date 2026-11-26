@@ -61,8 +61,8 @@ class CircuitOpenError(RuntimeError):
 
 
 class FetchError(RuntimeError):
-    """Raised by fetch for a request that failed other than by an HTTP status:
-    its text is the source and the type name of what failed."""
+    """Raised by fetch and get_once for a request that failed other than by an
+    HTTP status: its text is the source and the type name of what failed."""
 
 
 @dataclass
@@ -134,6 +134,13 @@ def require_success(resp: httpx.Response, what: str) -> None:
                                 request=resp.request, response=resp)
 
 
+def _failure(source: str, failed: str) -> FetchError:
+    """Log `source_fetch_failed` and make the FetchError for a request that
+    failed other than by an HTTP status, from the type name of what failed."""
+    log.warning("source_fetch_failed", source=source, error_class=failed)
+    return FetchError(f"{source}: {failed}")
+
+
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=1, max=20),
@@ -171,7 +178,21 @@ def fetch(source: str, url: str, *, headers: dict[str, str] | None = None,
         brk.record_success()
         return resp
     brk.record_failure()
-    log.warning("source_fetch_failed", source=source, error_class=failed)
     # Raised outside the except clause, so the library's exception, whose text
     # can carry the URL, is neither its cause nor its context.
-    raise FetchError(f"{source}: {failed}") from None
+    raise _failure(source, failed) from None
+
+
+def get_once(source: str, url: str, *, params: dict[str, str] | None = None,
+             headers: dict[str, str] | None = None,
+             timeout: httpx.Timeout = DEFAULT_TIMEOUT) -> httpx.Response:
+    """One GET on a client of its own: one attempt, no circuit breaker, no
+    redirect followed and none of DEFAULT_HEADERS. The answer comes back
+    whatever its status, for the caller to judge; an Exception on the way
+    becomes a FetchError, logged and raised as in fetch."""
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            return client.get(url, params=params, headers=headers)
+    except Exception as exc:
+        failed = type(exc).__name__
+    raise _failure(source, failed) from None
