@@ -10,13 +10,15 @@ This is a single-maintainer, self-hosted research service. Report security issue
 
 - **All secrets live in `.env` on the host only.** `.env` is gitignored and has **never** been committed (verified: full-history scan for every known credential fragment returns zero hits).
 - **The admin API key fails closed.** The service refuses to authenticate (HTTP 503) while `ADMIN_API_KEY` is empty or equals the shipped placeholder `change-me-to-a-long-random-string` (`app/security.py`). Set a strong random value: `python -c "import secrets;print(secrets.token_urlsafe(32))"`.
-- **The scoring reads are public; the alert reads and the writes are keyed.** `POST /api/v1/admin/*` require `X-API-Key` (constant-time compare), and so does every alert read, `GET /api/v1/alerts/*`: operator-only, under `ADMIN_API_KEY` and its fail-closed guard (owner decision D3a). The other reads (`GET /api/v1/*`, `/`, `/healthz`) are public and rate-limited (60/min/IP).
+- **The scoring reads are public; the alert reads and the writes are keyed.** `POST /api/v1/admin/*` require `X-API-Key` (constant-time compare), and so does every alert read, `GET /api/v1/alerts/*`: operator-only, under `ADMIN_API_KEY` and its fail-closed guard (owner decision D3a). The other reads (`GET /api/v1/*` outside `/api/v1/admin/*` and `/api/v1/alerts/*`) are public and rate-limited (60/min/IP). The status page (`/`, `/status`), the probes (`/healthz`, `/readyz`) and the API documentation (`/docs`, `/redoc`, `/openapi.json`) are public and not rate-limited.
 
 ### Credential rotation (REQUIRED — audit B-06)
 
 Provider keys/tokens used during the original construction were disclosed in a development chat channel. **A secret shown to any third party is published, even if never committed.** Revoke the retired `ANTHROPIC_API_KEY`; rotate every still-active disclosed credential, then update `.env`:
 
 `FRED_API_KEY` · `TIINGO_API_KEY` · `TWELVE_DATA_API_KEY` · `ALPHAVANTAGE_API_KEY` · `POLYGON_API_KEY` · `ADMIN_API_KEY` · `SIPGATE_TOKEN_ID` + `SIPGATE_TOKEN`.
+
+`FRED_API_KEY` was disclosed a second way, so rotate it whatever became of the chat disclosure: on 2026-07-15 a FRED 504 wrote it into `source_health.note` (row 223), the unauthenticated `GET /readyz` returned that note from 18:11 to 22:25 UTC, and the row held it until migration 0027 passed the stored notes through the gather's redaction. Every copy of the database taken before that migration ran still holds it.
 
 `LLM_API_KEY` is the active inference credential. It is host-only configuration and must be rotated if it has been shared; unlike the legacy list above, this document has no evidence that its value was disclosed.
 

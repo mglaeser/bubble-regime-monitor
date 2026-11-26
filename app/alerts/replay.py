@@ -60,11 +60,19 @@ log = get_logger(__name__)
 #: be told apart from one produced by a different harness. 3: unknown_blocks
 #: and p1_bypasses_of_unknown went with the replanning block (owner decision
 #: D2f). 4: digest_items went with the weekly digest (owner decision D2a).
-REPLAY_SCHEMA_VERSION = 4
+#: 5: transient_one_snapshot_band_p1_busiest_24_months and
+#: band_excursion_covers_24_months were added.
+REPLAY_SCHEMA_VERSION = 5
 
 #: Rolling windows the load report uses.
 WINDOW_24H = timedelta(hours=24)
 WINDOW_168H = timedelta(hours=168)
+
+#: regime.band_to_derisk (config/alert_rules.v3.2.yaml): "Keep it only while
+#: replay shows <= 1 transient one-snapshot P1 per 24 months".
+TRANSIENT_DERISK_P1_CAP = 1
+#: Those 24 months, at 30.44 days a month.
+WINDOW_24_MONTHS = timedelta(days=24 * 30.44)
 
 _MANDATORY_EVENT_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 _MANDATORY_EVENT_FIELDS = frozenset({
@@ -175,10 +183,14 @@ class ReplaySummary:
 
     # -- governance metrics ----------------------------------------------
     transient_one_snapshot_band_p1: int = 0
+    #: The most of those entries that any one window of 24 months holds.
+    transient_one_snapshot_band_p1_busiest_24_months: int = 0
     #: De-risk slots whose neighbours were blind, so "transient" cannot be
     #: decided either way. Reported, never folded into the count above.
     indeterminate_band_excursions: int = 0
     band_excursion_months: float = 0.0
+    #: True when window_last is at least WINDOW_24_MONTHS after window_first.
+    band_excursion_covers_24_months: bool = False
     detection_times_slots: dict[str, int] = field(default_factory=dict)
     mandatory_event_total: int = 0
     mandatory_event_detected: int = 0
@@ -610,45 +622,21 @@ def run_replay(
 
 
 def _take_released_alerts_as_sent(session: Session, *, now: datetime) -> None:
-    """Advance the notification memory as a send does, at the release time.
+    """Take each planned alert released by `now` as sent at its release time,
+    through the step `outbox.mark_sent` takes for each member it sends. The
+    delivery row is left as it is, so nothing reaches SENT; a hold by budget,
+    a drop or a withdrawal before sending is not modelled."""
+    from app.alerts.models import AlertDelivery, AlertDeliveryMember
+    from app.alerts.outbox import mark_member_sent
 
-    Production starts a rule's cooldown and its next notification generation
-    when an alert is sent (`outbox.mark_sent`). A replay sends nothing, so
-    without this step no cooldown ever started and no reminder was ever due:
-    over production's 307 sidecars since the promotion of 2026-09-20 it
-    planned 24 first alerts and no reminder where production planned 19 and 2
-    (5 episodes suppressed by their cooldown). With it the replay plans those
-    21, each at the same slot, with the same kind, priority and rule (read-only
-    copy of 2026-11-10). The delivery row is not touched: nothing is SENT, and
-    a hold by budget, a drop or a withdrawal before sending is not modelled.
-    """
-    from app.alerts.models import (
-        AlertDelivery,
-        AlertDeliveryMember,
-        AlertInstanceNotificationState,
-    )
-
-    # No mode or profile in this statement: `session` is the replay's own
-    # database, which `run_replay` creates empty for the run and writes under
-    # DRYRUN only, so it holds no LIVE or SHADOW alert (tests/test_alert_replay.py
-    # ::test_a_replay_leaves_a_due_live_alert_and_its_cooldown_alone).
     for delivery, member in session.execute(
         select(AlertDelivery, AlertDeliveryMember)
-        .join(AlertDeliveryMember,
-              AlertDeliveryMember.delivery_id == AlertDelivery.delivery_id)
-        .where(AlertDelivery.not_before <= now,
-               AlertDeliveryMember.delivered.is_(False))
-        .order_by(AlertDelivery.not_before.asc(), AlertDelivery.delivery_id.asc())
+        .join(AlertDeliveryMember, AlertDeliveryMember.delivery_id == AlertDelivery.delivery_id)
+        .where(AlertDeliveryMember.delivered.is_(False))
+        .order_by(AlertDelivery.not_before)
     ).all():
-        # `delivered` is what `repository.load_reminders_sent` counts, so a
-        # rule's `max_reminders` holds per episode as it does in production.
-        member.delivered = True
-        state = session.get(AlertInstanceNotificationState, (
-            delivery.mode, delivery.live_profile, member.instance_fingerprint))
-        if state is not None:
-            state.last_sent_at = delivery.not_before
-            state.next_notification_generation = max(
-                state.next_notification_generation, member.notification_generation + 1)
+        if delivery.not_before is not None and delivery.not_before <= now:
+            mark_member_sent(session, delivery, member, now=delivery.not_before)
 
 
 def _collect_episodes(session: Session, summary: ReplaySummary,
@@ -757,6 +745,7 @@ def _collect_band_excursions(summary: ReplaySummary,
     """
     states = [r.effective_action_state for r in records]
     transient = 0
+    moments: list[datetime] = []
     indeterminate = 0
     for i in range(1, len(states) - 1):
         if states[i] != BAND_DERISK:
@@ -770,12 +759,17 @@ def _collect_band_excursions(summary: ReplaySummary,
             indeterminate += 1
         else:
             transient += 1
+            moments.append(_moment_of(records[i]))
     summary.transient_one_snapshot_band_p1 = transient
     summary.indeterminate_band_excursions = indeterminate
 
     if len(records) >= 2:
         span = _moment_of(records[-1]) - _moment_of(records[0])
         summary.band_excursion_months = round(span.days / 30.44, 2)
+        summary.band_excursion_covers_24_months = span >= WINDOW_24_MONTHS
+    # Both edges of a window count: entries exactly its length apart share it.
+    summary.transient_one_snapshot_band_p1_busiest_24_months = _max_in_window(
+        moments, WINDOW_24_MONTHS)
 
 
 def _activated_episodes(session: Session) -> list[ActivatedEpisode]:
@@ -1004,7 +998,14 @@ def _decide(summary: ReplaySummary) -> None:
                 f"{evaluable_events - summary.mandatory_event_detected} of "
                 f"{evaluable_events} evaluable event(s)"
             )
-    if summary.band_excursion_months < 24.0:
+    busiest = summary.transient_one_snapshot_band_p1_busiest_24_months
+    if busiest > TRANSIENT_DERISK_P1_CAP:
+        # A breach inside one window stands on a history of any length.
+        failures.append(
+            f"{busiest} transient one-snapshot de-risk entries inside one window of "
+            "24 months; regime.band_to_derisk is kept only while replay shows <= "
+            f"{TRANSIENT_DERISK_P1_CAP} per 24 months")
+    if not summary.band_excursion_covers_24_months:
         unmeasured.append(
             f"transient_derisk_p1_rate — the window spans "
             f"{summary.band_excursion_months} months; the target is stated per "
