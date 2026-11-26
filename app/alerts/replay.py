@@ -621,21 +621,24 @@ def run_replay(
 
 
 def _take_released_alerts_as_sent(session: Session, *, now: datetime) -> None:
-    """Take each planned alert released by `now` as sent at its release time,
-    through the step `outbox.mark_sent` takes for each member it sends. The
-    delivery row is left as it is, so nothing reaches SENT; a hold by budget,
-    a drop or a withdrawal before sending is not modelled."""
+    """Take each planned alert released by `now` as sent at its release time:
+    the members the dispatcher's `outbox.revalidate_members` keeps then, each
+    through the step `outbox.mark_sent` takes for a member it sends. The
+    delivery row is left as it is, so nothing reaches SENT; a hold by budget is
+    not modelled."""
     from app.alerts.models import AlertDelivery, AlertDeliveryMember
-    from app.alerts.outbox import mark_member_sent
+    from app.alerts.outbox import mark_member_sent, revalidate_members
 
-    for delivery, member in session.execute(
-        select(AlertDelivery, AlertDeliveryMember)
-        .join(AlertDeliveryMember, AlertDeliveryMember.delivery_id == AlertDelivery.delivery_id)
-        .where(AlertDeliveryMember.delivered.is_(False))
+    waiting = select(AlertDeliveryMember.delivery_id).where(
+        AlertDeliveryMember.dropped_at.is_(None), AlertDeliveryMember.delivered.is_(False))
+    for delivery in session.execute(
+        select(AlertDelivery).where(AlertDelivery.delivery_id.in_(waiting))
         .order_by(AlertDelivery.not_before)
-    ).all():
-        if delivery.not_before is not None and delivery.not_before <= now:
-            mark_member_sent(session, delivery, member, now=delivery.not_before)
+    ).scalars().all():
+        released = delivery.not_before
+        if released is not None and released <= now:
+            for member in revalidate_members(session, delivery, now=released):
+                mark_member_sent(session, delivery, member, now=released)
 
 
 def _collect_episodes(session: Session, summary: ReplaySummary,
