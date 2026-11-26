@@ -1,7 +1,7 @@
 """Seeded Monte Carlo over weights, anchors, and the structural/trigger split.
 
-Per draw (spec section 5.3), with N = MC_SAMPLES (default 100 000) and
-seed = MC_SEED (default 20260711):
+Per draw (spec section 5.3), with N = 100 000 and seed = 20260711 (the frozen
+artifact's monte_carlo.samples and monte_carlo.seed; neither is a setting):
 
 - Block weights ~ Dirichlet(base_weights * 50) (independently for S and D).
 - CAPE percentile window W ~ integers U[20, 40].
@@ -30,8 +30,13 @@ import numpy as np
 from app import methodology as _M
 from app.engine.aggregate import RESCALE_FLOOR, RedFlags, renormalize
 
-# Every score-effective constant is LOADED from the canonical frozen artifact
-# (F-01/L-07) — no hardcoded duplicates remain here.
+# The score-effective constants below are LOADED from the canonical frozen
+# artifact (F-01/L-07). One number of this module repeats an artifact value
+# without reading it: the scale 100 (aggregation.score_scale). The values of
+# RNG_ALGORITHM and PERCENTILE_METHOD are written out here as well
+# (monte_carlo.rng_algorithm, monte_carlo.percentile_method);
+# tests/test_frozen_methodology.py::test_engine_constants_are_the_artifact
+# holds them equal to the artifact.
 BASE_WEIGHTS_S: dict[str, float] = _M.as_dict("aggregation", "block_s_weights")
 BASE_WEIGHTS_D: dict[str, float] = _M.as_dict("aggregation", "block_d_weights")
 
@@ -58,6 +63,17 @@ _S3_LOW_SCALE = _M.get_path("indicators", "s3", "low_tier_scale_pp")
 _S1_CAPE_W = _M.get_path("indicators", "s1", "blend_cape_weight")
 _S1_ECY_W = _M.get_path("indicators", "s1", "blend_ecy_weight")
 _S1_BASE_WIN = _M.get_path("indicators", "s1", "cape_baseline_window_years")
+
+# The floor a fired override puts under every draw: the artifact's target score,
+# the constant aggregate.apply_override puts under the point score. Point score
+# and median are published side by side as one score, so both read the floor
+# from the artifact. A literal 70.0 here left the median at 70.0 beside a point
+# score of 80.0 when a copy of the artifact said 80; pinned by
+# test_the_monte_carlo_floors_at_the_artifacts_override_target in
+# tests/test_frozen_methodology.py. The override fired in 0 of the 615
+# production snapshots of 2026-07-11 .. 2026-11-10 (never more than one of the
+# four flags at a time), so no stored median was floored.
+_OVERRIDE_TARGET = _M.get_path("override", "target_score")
 
 
 @dataclass
@@ -237,7 +253,7 @@ def monte_carlo(
     scores = 100.0 * np.power(np.maximum(s_block, 0.0), a) * np.power(np.maximum(d_block, 0.0), 1.0 - a)
 
     if inputs.red_flags.override_fired:
-        scores = np.maximum(scores, 70.0)
+        scores = np.maximum(scores, _OVERRIDE_TARGET)
 
     q1 = float(np.percentile(scores, 25, method=PERCENTILE_METHOD))
     q3 = float(np.percentile(scores, 75, method=PERCENTILE_METHOD))

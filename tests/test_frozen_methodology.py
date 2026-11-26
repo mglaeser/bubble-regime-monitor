@@ -1,8 +1,10 @@
 """F-01 / L-07 — the canonical frozen_methodology.json is the CAUSAL runtime source.
 
 Three guarantees:
-  1. IDENTITY / COMPLETENESS — every score-effective runtime constant IS the value
-     loaded from the artifact (no hardcoded duplicate remains outside it).
+  1. IDENTITY / COMPLETENESS — every runtime constant the modules load IS the
+     artifact's value (the numeric literals that still repeat an artifact value
+     without reading it are counted below, KNOWN_COLLISIONS, save the values its
+     scan skips, _TRIVIAL_VALUES; wiring them is the operator's decision).
   2. SHA-256 GUARD — the file's exact bytes are pinned; any edit fails CI and must
      go through the v4 process (or a freeze-scope re-pin with identical values).
   3. MUTATION — changing a value in the artifact flows through the loader (the file
@@ -129,6 +131,7 @@ def test_engine_constants_are_the_artifact():
     assert mc.ALPHA_RANGE == M.as_tuple("monte_carlo", "alpha_range")
     assert mc.RNG_ALGORITHM == M.get_path("monte_carlo", "rng_algorithm")
     assert mc.PERCENTILE_METHOD == M.get_path("monte_carlo", "percentile_method")
+    assert mc._OVERRIDE_TARGET == M.get_path("override", "target_score")
 
 
 def test_indicator_constants_are_the_artifact():
@@ -181,8 +184,16 @@ def test_freshness_and_coverage_are_the_artifact():
 # artifact leaf, pinned as (module, value) -> exact occurrence count. The scan
 # below fails on ANY deviation: a NEW collision (the ATH-defect class) fails
 # immediately, and fixing/removing a ledgered one forces a reviewed ledger
-# update. Classifications (operator-reported 2026-07-23, none authorized for
-# wiring yet except the ATH entry, which is FIXED and therefore absent):
+# update. Classifications (operator-reported 2026-07-23). Two entries are wired
+# and therefore absent: the ATH fraction, and the Monte Carlo's override floor
+# (montecarlo.py 70.0 x1, override.target_score: now montecarlo._OVERRIDE_TARGET,
+# read from the artifact). The floor was wired because it sits inside the
+# published headline: the point score followed the artifact and the median did
+# not (test_the_monte_carlo_floors_at_the_artifacts_override_target). It is a
+# cleanup under docs/GOVERNANCE_FREEZE_RULE.md: no value, no artifact byte, no
+# golden and no seeded Monte Carlo output moved. The operator's merge of the
+# change that wired it is its wiring authorization, for that entry and no
+# other. None of the duplicates below is authorized yet:
 #
 # GENUINE DUPLICATES of artifact constants (same semantics, awaiting the
 # operator's wiring authorization; wiring any of them is behavior-identical):
@@ -193,7 +204,6 @@ def test_freshness_and_coverage_are_the_artifact():
 #   compute.py      20/41 x1 monte_carlo.anchor_ranges.cape_window_years_int (range(20,41))
 #   compute.py      35.0/0.99 + 0.5 (3 of the 5) indicators.s1.no_history_shim_* + blend weights
 #   compute.py      0.5 x1 / 0.3 x1  quality.s5_baa_dgs10 / quality.s5_hy_oas tier literals
-#   montecarlo.py   70.0 x1  override.target_score (np.maximum(scores, 70.0))
 #   aggregate.py    0.5 x2   aggregation.alpha_baseline (combine/deterministic_score defaults)
 #   d4_lppls.py     0.5 x1   quality.d4_partial (_quality shortened-scan tier)
 #
@@ -204,18 +214,20 @@ def test_freshness_and_coverage_are_the_artifact():
 #   compute.py 252.0: days-per-year display arithmetic
 #   montecarlo.py 5/25/75/95: percentile POINTS (reporting quantiles), not the
 #                        colliding d2/s3 anchors
-#   d2_margin.py 3.0 x5, 4.0/5.0 x2: rollover month-structure constants and
-#                        slice indices (rollover structure is an artifact GAP)
+#   d2_margin.py 3.0 x4, 4.0/5.0 x2: rollover month-structure constants and
+#                        slice indices (rollover structure is an artifact GAP).
+#                        3.0 is the two "fewer than three months" guards and
+#                        the two [-3:] slices; a third slice went with the
+#                        12-month-high test that decided nothing.
 #   d3_hyperscaler_fcf.py 0.5 x2: the (r-0.5)/0.5 ratio anchors (artifact GAP,
 #                        colliding with unrelated 0.5 leaves)
 KNOWN_COLLISIONS: dict[tuple[str, float], int] = {
     ("app/engine/aggregate.py", 0.5): 2,
     ("app/engine/montecarlo.py", 5.0): 1,
     ("app/engine/montecarlo.py", 25.0): 1,
-    ("app/engine/montecarlo.py", 70.0): 1,
     ("app/engine/montecarlo.py", 75.0): 1,
     ("app/engine/montecarlo.py", 95.0): 1,
-    ("app/indicators/d2_margin.py", 3.0): 5,
+    ("app/indicators/d2_margin.py", 3.0): 4,
     ("app/indicators/d2_margin.py", 4.0): 2,
     ("app/indicators/d2_margin.py", 5.0): 2,
     ("app/indicators/d3_hyperscaler_fcf.py", 0.5): 2,
@@ -300,12 +312,90 @@ def test_no_unregistered_scored_literal_collisions():
     )
 
 
-def test_config_mc_defaults_are_the_artifact():
-    from app.config import Settings
+# ---- The Monte Carlo runs the artifact's seed and sample count ---------------
 
-    s = Settings()
-    assert s.mc_samples == M.get_path("monte_carlo", "samples")
-    assert s.mc_seed == M.get_path("monte_carlo", "seed")
+def test_the_environment_cannot_move_the_monte_carlo(isolated_db, monkeypatch):
+    """AGENTS.md ground rule 6: the seed is pinned, and a snapshot records the
+    artifact's hash and version and nothing else about the Monte Carlo's run,
+    so no setting may change its seed or sample count. When both were
+    settings, under one hash (bfb3d9a5) and at the artifact's 100 000 draws,
+    MC_SEED=1 gave the golden inputs a median of 53.4515 for 53.4119 and
+    MC_SAMPLES=2000 gave 53.3795."""
+    from app.config import get_settings
+    from app.services.compute import compute_snapshot
+    from tests.conftest import make_golden_raw_inputs
+
+    def scored() -> tuple[float, tuple[float, float], tuple[float, float]]:
+        get_settings.cache_clear()
+        data = compute_snapshot(make_golden_raw_inputs())
+        return data.median, data.iqr, data.band_5_95
+
+    before = scored()
+    monkeypatch.setenv("MC_SEED", "1")
+    monkeypatch.setenv("MC_SAMPLES", "2000")
+    assert scored() == before
+
+
+def test_the_seed_and_the_sample_count_are_no_settings():
+    """Neither is a setting any more, and a host that still sets one is told
+    so (app/config.py RETIRED_ENV_KEYS: named at boot, in the alerts preflight
+    and in alert health). Dropped without a word, a value other than the
+    artifact's would move that host's score at the deploy that stops reading
+    it: on production's snapshots by about 0.02 for seed 1 and about 0.13 for
+    2 000 draws."""
+    from app.config import Settings, retired_env_keys
+
+    old = {"MC_SAMPLES", "MC_SEED"}
+    assert not {key.lower() for key in old} & set(Settings.model_fields)
+    named = dict(retired_env_keys({"mc_samples": "2000", "MC_SEED": "1"}))
+    assert set(named) == old
+    assert all("frozen_methodology.json" in why for why in named.values())
+
+
+def test_the_pipeline_runs_the_artifacts_seed_and_sample_count(monkeypatch):
+    """A caller that names neither runs the artifact's monte_carlo.samples and
+    monte_carlo.seed: 100 000 draws, seed 20260711. The recompute is that
+    caller (the next test)."""
+    from app.services import compute
+    from tests.conftest import make_golden_raw_inputs
+
+    # M is app.methodology, imported at the top of this module.
+    assert (compute.MC_SAMPLES, compute.MC_SEED) == (
+        M.get_path("monte_carlo", "samples"), M.get_path("monte_carlo", "seed")) == (100_000, 20260711)
+
+    ran: dict[str, int] = {}
+    monte_carlo = compute.monte_carlo
+    monkeypatch.setattr(compute, "monte_carlo",
+                        lambda inputs, **run: ran.update(run) or monte_carlo(inputs, **run))
+    compute.compute_snapshot(make_golden_raw_inputs())
+    assert ran == {"n": 100_000, "seed": 20260711}
+
+
+def test_the_recompute_passes_no_seed_and_no_sample_count(isolated_db, monkeypatch):
+    """compute_snapshot's mc_samples and mc_seed are for tests, and they do move
+    the median (mc_seed=1 gives the golden inputs 53.4515 for 53.4119). The
+    recompute (run_recompute: the scheduler's and the admin endpoint's path,
+    and the only one that stores a snapshot) passes neither, so a stored
+    snapshot ran the 100 000 draws and the seed 20260711 its methodology hash
+    covers. A recompute that passed either would fail here."""
+    from app.db import session_scope
+    from app.models import Snapshot
+    from app.services import compute
+    from tests.conftest import make_golden_raw_inputs
+
+    # The suite draws 20 000 (conftest); this test runs what production runs.
+    monkeypatch.setattr(compute, "MC_SAMPLES", M.get_path("monte_carlo", "samples"))
+    monkeypatch.setattr(compute, "gather_inputs", make_golden_raw_inputs)
+    ran: dict[str, int] = {}
+    monte_carlo = compute.monte_carlo
+    monkeypatch.setattr(compute, "monte_carlo",
+                        lambda inputs, **run: ran.update(run) or monte_carlo(inputs, **run))
+
+    snap_id = compute.run_recompute()
+
+    assert ran == {"n": 100_000, "seed": 20260711}
+    with session_scope() as session:
+        assert session.get(Snapshot, snap_id).methodology_sha256 == M.frozen_sha256()
 
 
 # ---- MUTATION: a changed artifact flows through to the engine ---------------
@@ -343,3 +433,48 @@ def test_mutation_changes_engine_score(tmp_path, monkeypatch):
         importlib.reload(agg)
         importlib.reload(mc)
     assert _score(mc) == baseline   # fully restored
+
+
+def test_the_monte_carlo_floors_at_the_artifacts_override_target(tmp_path, monkeypatch):
+    """A fired override floors the point score and every Monte Carlo draw at ONE
+    constant, override.target_score: point score and median are the two halves of
+    the published headline, and "a change to the artifact is the ONLY way to
+    change a frozen constant" (app/methodology.py). So a copy of the artifact that
+    says 80 must move both. With a literal 70.0 as the Monte Carlo's floor the
+    point score went to 80.0 and the median stayed at 70.0."""
+    from app.engine import aggregate as agg
+    from app.engine import montecarlo as mc
+    from tests.conftest import GOLDEN_SUB_D, GOLDEN_SUB_S
+
+    def _point_and_median() -> tuple[float, float]:
+        # Golden sub-scores (headline 52.43, every draw below the floor) and three
+        # of the four red flags: the override fires.
+        flags = agg.RedFlags(gsadf_explosive_noncontested=True, semi_runup_ge_150pp=True,
+                             hy_oas_widen_gt_100bps=True)
+        point = agg.deterministic_score(dict(GOLDEN_SUB_S), dict(GOLDEN_SUB_D), 1.0, flags,
+                                        mc.BASE_WEIGHTS_S, mc.BASE_WEIGHTS_D).score
+        s, d = GOLDEN_SUB_S, GOLDEN_SUB_D
+        inputs = mc.MonteCarloInputs(
+            s1_sub=s["s1"], s2_sub=s["s2"], s3_sub=s["s3"], s4_sub=s["s4"], s5_sub=s["s5"],
+            d1_sub=d["d1"], d2_sub=d["d2"], d3_sub=d["d3"], d4_sub=d["d4"], red_flags=flags)
+        return point, mc.monte_carlo(inputs, n=2000, seed=20260711).median
+
+    assert _point_and_median() == (70.0, 70.0)
+    try:
+        data = json.loads(M.FROZEN_PATH.read_bytes())
+        data["override"]["target_score"] = 80.0
+        f = tmp_path / "frozen.json"
+        f.write_text(json.dumps(data))
+        monkeypatch.setattr(M, "FROZEN_PATH", f)
+        for fn in (M.frozen_bytes, M.frozen_sha256, M.frozen_methodology):
+            fn.cache_clear()
+        importlib.reload(agg)
+        importlib.reload(mc)
+        assert _point_and_median() == (80.0, 80.0)
+    finally:
+        monkeypatch.undo()
+        for fn in (M.frozen_bytes, M.frozen_sha256, M.frozen_methodology):
+            fn.cache_clear()
+        importlib.reload(agg)
+        importlib.reload(mc)
+    assert _point_and_median() == (70.0, 70.0)   # the real artifact is back

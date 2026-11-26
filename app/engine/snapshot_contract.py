@@ -9,9 +9,19 @@ This module derives the typed decomposition from values the scoring layer has
 ALREADY computed, by *calling* the authoritative band functions in
 `app.engine.aggregate` — it never restates a threshold or a formula:
 
-    score_action_band     band implied by the MC headline median alone, before
-                          the non-compensatory override and before coverage
-                          suppression                    -> aggregate.action_band
+    score_action_band     band of the published Monte Carlo median, before
+                          coverage suppression           -> aggregate.action_band
+                          The override holds every draw at its floor before
+                          the median is taken (montecarlo.monte_carlo), so
+                          with a fired override this reads de-risk, as
+                          base_action_band does: the two are equal on every
+                          snapshot the pipeline computes (all 606 production
+                          snapshots that carry both, to 2026-11-10; the
+                          override had fired on none of the 615). The score
+                          before the override (Score_raw, the composite of
+                          the two blocks) stays readable from the two block
+                          values (aggregate.combine); no band of it is
+                          published.
     base_action_band      authoritative decision after the persisted override,
                           before coverage presentation suppression
                                                  -> aggregate.action_band_with_override
@@ -121,8 +131,11 @@ class RedFlagFact:
     `fireable` answers "could this flag have contributed to the override on this
     run?" — false when its input was unavailable (data) or when governance
     structurally blocks it (e.g. the GSADF flag while the statistic is
-    contested). `distance_to_threshold` is signed: negative means below the
-    firing threshold.
+    contested). `distance_to_threshold` is the reading minus the threshold, and
+    its sign does not mean the same for every flag: rf1 to rf3 fire above their
+    threshold (rf2 from it on), so a negative distance is their calm side; rf4
+    fires with breadth BELOW 50 % (and the index near its high), so a negative
+    distance is its firing side.
     """
 
     flag_id: str
