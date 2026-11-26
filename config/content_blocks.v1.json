@@ -1,5 +1,5 @@
 {
-  "content_version": 2,
+  "content_version": 3,
   "generated": "2026-08-29",
   "origin": "save-haven-monitor prose migration (shallow-frontend program, A1 ledger; verbatim extraction)",
   "blocks": {
@@ -1208,7 +1208,7 @@
       "kind": "map",
       "entries": {
         "plain": "Spending a fortune on data centers is only alarming if the revenue stops showing up.",
-        "fire": "Cloud revenue growth falls below 15% YoY while trailing free cash flow is negative; otherwise capped low.",
+        "fire": "A hyperscaler's total revenue growth falls below 15% YoY while its trailing free cash flow is negative; otherwise capped low.",
         "why": "Literature-grounded: railroads and fiber both had cash-flow troughs years before any peak — capex is only a bubble signal when it stops converting to revenue."
       },
       "source": "src/bubblegauge.tsx:206-209"
