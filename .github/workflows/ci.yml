@@ -26,7 +26,19 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # A NAMED RELEASE, in every job of this gate, never "ubuntu-latest". That label
+    # moves: between 2026-11-12 and 2026-11-21 it went from Ubuntu 24.04 to 26.04, and
+    # this gate turned red on an unchanged main. One test fails on the 26.04 image
+    # (20261116.88.1) and passes on the 24.04 image (20261101.360.1), same tree:
+    #   tests/test_host_outage_notifier.py::
+    #   test_a_podman_that_ignores_sigterm_still_cannot_block_the_alert
+    # (deploy/notify-outage.sh did not return within the test's thirty seconds).
+    # The suite executes the scripts under deploy/, which are written for this
+    # release's userland, so the release is part of what a green run proves. The gate
+    # changes when the repository does, not when a label does. Moving the pin is a
+    # change of its own: make that probe hold on the new release first.
+    # Pinned by tests/test_ci_runner.py.
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         python-version: ["3.12"]
@@ -73,7 +85,15 @@ jobs:
           # app/services/replay.py is gone (the holidays library replaced both).
           # 146 -> 145: the Twelve Data breadth sweep went (breadth is Polygon-only).
           # 145 -> 134: the unscored S4 and S5 shadows went (owner decision D4).
-          MYPY_CEILING: "116"
+          # 134 -> 133: the message engine's typed facts (D7, #145).
+          # 133 -> 119: the dormant LLM selector and the actionability reviews
+          # went (owner decision D2b, #152).
+          # 119 -> 116: one helper builds each red-flag fact (S12, #171).
+          # 116 -> 115: the gather's untyped local `_closes` went
+          # (app/services/compute.py, `_track_closes` replaced it).
+          # 115 -> 114: the Monte Carlo settings went from app/config.py, and
+          # the no-any-return of the helper that read their defaults with them.
+          MYPY_CEILING: "114"
           # The floor constrains REACH, not DEPTH: it proves mypy READ the tree.
           # It does NOT make a low count mean "little is wrong" -- an earlier
           # version of this comment claimed that, and it is false. Measured:
@@ -206,7 +226,7 @@ jobs:
     # actually fails closed, rather than trusting that it would — the failure
     # mode being guarded against is an admission check that silently starts
     # returning 0 and is never noticed because nothing ever exercises it.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       # v4.4.0
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -223,7 +243,7 @@ jobs:
           echo "Admission correctly refused (fail-closed)."
 
   image:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       # v4.4.0
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -231,3 +251,37 @@ jobs:
       # so docker build is the documented substitute (spec section 12).
       - name: Build image (validates the Containerfile incl. R/exuber)
         run: docker build -t bubblegauge -f Containerfile .
+      - name: The documented operator command runs in the image
+        # The README ("the CLI in the container") and docs/ALERT_SYSTEM.md
+        # ("Operating it") name `bubblegauge ...` as the operator's command.
+        # No environment, no network, no database: the command imports the app
+        # and prints its help. Without PYTHONPATH in the Containerfile it ends
+        # in "ModuleNotFoundError: No module named 'app'".
+        run: docker run --rm --network none bubblegauge bubblegauge alerts --help
+      - name: Run the tests of r/gsadf.R inside the image
+        # The only gate that executes r/gsadf.R, the script behind the scored
+        # S4 statistic. The test job has no R/exuber, so the eight tests of
+        # tests/test_s4_endpoint_statistic.py that call Rscript skip there:
+        # with a syntax error in the script that file is as green as without
+        # it (44 passed, 8 skipped). The image has R and exuber and, through
+        # `COPY . .`, the tests and the hash-checked dev lock. The dev tools
+        # go into a container that `--rm` discards; the image is unchanged.
+        # A skip cannot pass: loading exuber is the condition those tests skip
+        # on, it runs first and ends the script if it fails, and a summary
+        # that reports a skipped test fails the step. The refusal is an `if`:
+        # `set -e` never ends a script on a negated command, so `! grep` would
+        # hold only while it stayed the last line.
+        # `image` is a required check. A red R test here blocks every merge:
+        # the script, or the exuber the image was built with, no longer yields
+        # what the tests pin. That is repaired there, not by loosening this
+        # step.
+        run: |
+          docker run --rm bubblegauge bash -euo pipefail -c '
+            Rscript -e "library(exuber)"
+            pip install --quiet --no-cache-dir --require-hashes -r requirements-dev.lock
+            python -m pytest -p no:cacheprovider -q -rs tests/test_s4_endpoint_statistic.py | tee /tmp/r-tests.txt
+            if grep -q " skipped" /tmp/r-tests.txt; then
+              echo "::error::A test of r/gsadf.R was skipped inside the image."
+              exit 1
+            fi
+          '

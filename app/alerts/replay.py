@@ -636,6 +636,10 @@ def _take_released_alerts_as_sent(session: Session, *, now: datetime) -> None:
         AlertInstanceNotificationState,
     )
 
+    # No mode or profile in this statement: `session` is the replay's own
+    # database, which `run_replay` creates empty for the run and writes under
+    # DRYRUN only, so it holds no LIVE or SHADOW alert (tests/test_alert_replay.py
+    # ::test_a_replay_leaves_a_due_live_alert_and_its_cooldown_alone).
     for delivery, member in session.execute(
         select(AlertDelivery, AlertDeliveryMember)
         .join(AlertDeliveryMember,
