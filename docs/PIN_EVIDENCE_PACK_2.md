@@ -307,14 +307,6 @@ multiprocessing path) is validated. Any parallel execution model must
 reproduce, or explicitly justify divergence from, the G1 reference output on
 identical input bytes and seed.
 
-**2026-11, the criterion is met:** the seeded Pool path, which is the
-production path (`app/indicators/d4_lppls.py`), reproduces the G1 reference.
-On production's closes of 2026-11-09, at the production configuration (window
-750, 144 fits, `workers` 1) and with the same seed (20260711), 144 of 144 fits
-are bit-identical in tc, m, a, b and c. G1 itself cannot be the production
-path: `compute_nested_fits` returns each fit without w, O and D, which
-`compute_indicators` needs to qualify a window.
-
 ---
 
 ## Committed harnesses (runnable on the production host)

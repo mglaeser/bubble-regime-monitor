@@ -215,12 +215,9 @@ def assemble_decision_packages() -> dict[str, Any]:
     host's network/data (EDGAR PIT grid, ALFRED vintages, price seeds) are
     explicitly PENDING_HOST — never silently omitted.
 
-    PIN G (the LPPLS execution model) is resolved and no longer listed. Its
-    package asked for a benchmark of the single-process reference (G1) against
-    the multiprocessing path; the multiprocessing path is now seeded and
-    reproduces that reference bit for bit (144 of 144 fits on production's
-    closes of 2026-11-09), so no study of it is pending:
-    app/indicators/d4_lppls.py, tests/test_d4_reproducible.py."""
+    PIN G (the LPPLS execution model) is resolved and no longer listed: the
+    fit's worker is seeded (app/indicators/d4_lppls.py), so no benchmark of a
+    deterministic reference against the multiprocessing path is pending."""
     pending = {"status": "PENDING_HOST",
                "run_on": "production host (network + data access required)"}
     return {

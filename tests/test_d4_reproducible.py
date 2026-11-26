@@ -1,19 +1,15 @@
 """D4 is reproducible: the same closes give the same reading.
 
-AGENTS.md ground rule 6: "Reproducibility is pinned." README: a "transparent,
-reproducible" heuristic. The LPPLS fit draws every fit's starting point at
-random; drawn unseeded, a recompute of unchanged closes published another D4
-and another headline. In production (2026-07-11 to 2026-11-10) D4 differed in
-399 of the 407 consecutive snapshot pairs in which no other input had changed,
-the headline moved by up to 1.73 points on such a pair, and in 11 of the 16
-changes between the trim and de-risk bands D4 was the only input that had moved
-(one of them sent the priority-1 alert of 2026-09-30 22:01 UTC).
+AGENTS.md ground rule 6: "Reproducibility is pinned." The LPPLS fit draws every
+fit's starting point at random; drawn unseeded, a recompute of unchanged closes
+published another D4 and another headline.
 """
 
 from __future__ import annotations
 
 import math
 import random
+from pathlib import Path
 
 import pytest
 
@@ -33,12 +29,15 @@ def _closes(n: int) -> list[float]:
     return out
 
 
-def test_the_same_closes_give_the_same_d4_through_the_production_path():
-    # The real engine in the real subprocess, as a recompute runs it. The image
-    # and CI install lppls from the locks; an environment without it self-skips.
+def test_the_same_closes_give_the_same_d4_through_the_production_path(monkeypatch):
+    # The real engine in the real subprocess, as a recompute runs it; an
+    # environment without lppls self-skips.
     pytest.importorskip("lppls")
     from app.indicators.d4_lppls import MIN_CLOSES, compute_confidence_isolated
 
+    # The subprocess is `python -m app.indicators.d4_lppls` and finds `app` in
+    # its working directory: the repository root, wherever pytest was started.
+    monkeypatch.chdir(Path(__file__).resolve().parents[1])
     closes = _closes(MIN_CLOSES)
     first = compute_confidence_isolated(closes, timeout_s=600)
     second = compute_confidence_isolated(closes, timeout_s=600)
