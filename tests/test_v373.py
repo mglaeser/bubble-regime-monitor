@@ -2,12 +2,6 @@
 A-03 override-wins-band, B breadth increment/as_of, A-01 freshness state,
 H-01 hyperscaler quality, H-04 leap-safe TTM.
 
-The release's sixth patch, O-01, kept the directory of the per-snapshot
-parquet files absolute. Its test went with that export and its path helper
-(app/services/backfill.py): nothing read the files
-(tests/test_recompute_order.py,
-test_a_snapshot_is_written_to_the_database_and_nowhere_else).
-
 Methodology unchanged — these are safety/observability/hardening fixes; the
 golden fixture (52.43) is untouched."""
 

@@ -6,13 +6,6 @@ The specification these are written from:
   - app/engine/judgment.py: "never block the recompute";
   - AGENTS.md, "Delete before you add": dead code is "removed, not
     maintained".
-
-Beside the database every run also wrote one parquet file for its snapshot,
-15 of the row's columns. Nothing read them: no reader in app, scripts, deploy
-or docs, and no retention - 530 files in 92 date directories, 17 MB on the
-production host by 2026-11-11, the first of 2026-07-30, six more a day. The
-database is the record; `bubblegauge export snapshots --format parquet`
-(app/alerts/reports.py) writes a parquet file on request.
 """
 
 from __future__ import annotations

@@ -1682,15 +1682,6 @@ def run_recompute() -> int | None:
     """Full recompute: gather -> compute -> persist -> alert capture ->
     feed -> judgment note.
 
-    The database is the record of a run: no file is written for a snapshot.
-    The parquet file a run wrote per snapshot beside the database (15 of the
-    row's columns) went because nothing read it: no reader in app, scripts,
-    deploy or docs, no retention, 530 files and 17 MB on the production host
-    by 2026-11-11 (the owner's guideline in AGENTS.md, "Delete before you
-    add": dead code is removed, not maintained). The CLI's `bubblegauge
-    export snapshots` (app/alerts/reports.py) writes a parquet file on
-    request.
-
     Returns the snapshot id, or None if scoring was impossible (an entire
     block empty). Never raises upstream failures."""
     raw = gather_inputs()
