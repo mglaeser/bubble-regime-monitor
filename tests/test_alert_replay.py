@@ -661,6 +661,26 @@ def test_two_one_snapshot_derisk_entries_fail_the_gate(tmp_path, artifacts):
     assert not any("transient_derisk_p1_rate" in note for note in summary.not_measured)
 
 
+def test_over_the_cap_on_a_history_longer_than_24_months_is_not_measured(tmp_path, artifacts):
+    """Two entries 25 months apart in a history of 48, and the count does not say
+    when they occurred: one `not_measured` entry and no failure. `passed` reads
+    the failures alone."""
+    moments = (("2026-08-15T02", "trim"), ("2026-08-15T06", "de-risk"), ("2026-08-15T10", "trim"),
+               ("2028-09-15T06", "de-risk"), ("2028-09-15T10", "trim"), ("2030-08-15T02", "trim"))
+    history = [
+        make_input(identity=f"m{i}", computed_at=f"{moment}:00:00+00:00",
+                   effective=band, base=band, median=63.0 if band == "de-risk" else 52.0)
+        for i, (moment, band) in enumerate(moments)
+    ]
+    summary = _run(tmp_path, artifacts, name="long.db", stage=1, inputs=history)
+    assert (summary.transient_one_snapshot_band_p1, summary.band_excursion_months) == (2, 48.0)
+    assert summary.passed, summary.failures
+    assert [note for note in summary.not_measured if "transient_derisk_p1_rate" in note] == [
+        "transient_derisk_p1_rate — 2 transient one-snapshot de-risk entries were counted "
+        "over the whole history of 48.0 months; the target is stated per 24 months and the "
+        "count does not say when they occurred"]
+
+
 # ---------------------------------------------------------------------------
 # the committed gate artifact
 # ---------------------------------------------------------------------------

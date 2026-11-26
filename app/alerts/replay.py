@@ -964,12 +964,20 @@ def _decide(summary: ReplaySummary) -> None:
                 f"{evaluable_events} evaluable event(s)"
             )
     if summary.transient_one_snapshot_band_p1 > TRANSIENT_DERISK_P1_CAP:
-        # The count is over the whole history, which is never more lenient
-        # than the rule's 24 months.
-        failures.append(
-            f"{summary.transient_one_snapshot_band_p1} transient one-snapshot "
-            "de-risk entries in this history; regime.band_to_derisk is kept "
-            f"only while replay shows <= {TRANSIENT_DERISK_P1_CAP} per 24 months")
+        # A count above the cap fails on a history of at most 24 months, where
+        # every two entries share a 24-month window. On a longer one the count
+        # does not say when the entries occurred: not measured, not failed.
+        if summary.band_excursion_months <= 24.0:
+            failures.append(
+                f"{summary.transient_one_snapshot_band_p1} transient one-snapshot "
+                "de-risk entries in this history; regime.band_to_derisk is kept "
+                f"only while replay shows <= {TRANSIENT_DERISK_P1_CAP} per 24 months")
+        else:
+            unmeasured.append(
+                f"transient_derisk_p1_rate — {summary.transient_one_snapshot_band_p1} "
+                "transient one-snapshot de-risk entries were counted over the whole "
+                f"history of {summary.band_excursion_months} months; the target is "
+                "stated per 24 months and the count does not say when they occurred")
     elif summary.band_excursion_months < 24.0:
         unmeasured.append(
             f"transient_derisk_p1_rate — the window spans "
