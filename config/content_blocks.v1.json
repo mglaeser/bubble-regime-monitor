@@ -1179,7 +1179,7 @@
       "kind": "map",
       "entries": {
         "plain": "When lenders are most relaxed, trouble tends to arrive about two years later. So the reading is how loosely credit was priced two years ago; it does not follow where spreads stand at the moment.",
-        "fire": "Two years ago credit risk was priced unusually cheaply (a low excess bond premium, the Fed's measure).",
+        "fire": "Two years ago credit risk was priced unusually cheaply.",
         "why": "Literature-grounded on López-Salido-Stein-Zakrajšek's finding that hot credit at t−2 precedes contraction at t."
       },
       "source": "src/bubblegauge.tsx:194-197"

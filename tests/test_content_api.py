@@ -941,13 +941,10 @@ class TestBlockArtifact:
         import app.content_registry as reg
 
         # Round 18 (SOTA-A): gauge.reg.s5 was wrongly on this list — its
-        # "Today's spreads are near 25-year tights" was a frozen market fact.
-        # Since content_version 3 the block makes no market statement at all
-        # (S5 reads the excess bond premium of two years ago), so it needs no
-        # stamp and stays off the list; tests/test_content_deck_truth.py pins
-        # that. The rest were re-reviewed after that miss: each block's
-        # "today/now" refers to the live payload it rides (band state,
-        # coverage, fusion output).
+        # "Today's spreads are near 25-year tights" was a frozen market fact,
+        # not live-referential copy. The rest were
+        # re-reviewed after that miss: each block's "today/now" refers to the
+        # live payload it rides (band state, coverage, fusion output).
         LIVE_REFERENTIAL = {
             "gauge.band.oneliner", "gauge.coverage.tip",
             "gauge.epistemic.not_probability", "gauge.fusion.caveat",
