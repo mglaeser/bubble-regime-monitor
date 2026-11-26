@@ -237,7 +237,7 @@ Source: `compute.py`, `d4_lppls.py`.
 - d4 FLOOR: row stays in payload with `quality=0.0`; the value is EXCLUDED from the geometric mean (Block D renormalizes). `VALID_ZERO` (a genuine 0) ENTERS the aggregation.
 - s4 FLOOR: row stays in payload with `quality=0.0` and KEEPS 0.25 (`SUB_CONTESTED_OR_STALE`) in the geometric mean of Block S, labelled `imputation: missing_to_contested_floor` (AGENTS.md rule 4).
 - s5 chain: EBP (≥24 mo) → BAA-DGS10 proxy (≥24 mo) → HY-OAS 3yr → drop.
-- d2: within 75d SLA → YoY + rollover; else last-good cached (rollover unknown); else drop.
+- d2: a reference month at most 75 days old → YoY + rollover from the file, or, when the file cannot be read or lacks the month a year back, the stored reading of the latest month computed from it (rollover unknown); else drop.
 
 ## 12. Monte Carlo constants
 

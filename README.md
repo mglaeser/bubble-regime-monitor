@@ -108,7 +108,7 @@ Red-flag count 0 → override not fired. **Deterministic point score 52.43; MC m
 | Credit tightness (S5) | Fed Excess Bond Premium CSV (monthly, 1973+; the reading of 24 months back) | FRED `BAA` − `DGS10` (monthly, quality 0.5) → FRED `BAMLH0A0HYM2` (HY OAS, quality 0.3) → S5 is dropped and Block S renormalized | 45d |
 | HY OAS (red flag 3; S5's last tier) | FRED `BAMLH0A0HYM2` (**truncated to rolling 3 yr since Apr 2026** — own `hy_oas_history` table, seeded on first boot, appended daily) | persisted history | 3d |
 | Breadth (D1) | S&P 500 constituents (SSGA) + Polygon grouped-daily closes, 200-DMA on read | none: D1 is dropped and its block renormalized | 3d |
-| Margin (D2) | FINRA XLSX (3–4-week publication lag) | none — cache & tolerate staleness | 75d |
+| Margin (D2) | FINRA XLSX (3–4-week publication lag) | no second source: when the file cannot be read, D2's stored reading of the latest month computed from it while that month is at most 75 days old, flagged as a fallback; after that D2 is dropped and Block D renormalized | 75d |
 | Hyperscaler FCF (D3) | SEC EDGAR companyfacts (mandatory UA, ≤8 req/s self-cap) | none: an issuer without a reading is left out (quality n/5); with none left D3 is dropped and its block renormalized | 100d |
 | LPPLS (D4) | `lppls==0.6.24` (pinned; maintenance-inactive) | **drop + renormalize Block D** | 3d |
 | VIX curve (V) | CBOE delayed quotes | FRED `VIXCLS`/`VXVCLS` (FRED's series id for VIX3M) | 2d |
