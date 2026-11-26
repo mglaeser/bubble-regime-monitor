@@ -226,23 +226,15 @@ GOLD_SPOT_SOURCE = "twelvedata:XAU/USD"
 
 
 def to_contract(payload: dict[str, Any]) -> dict[str, Any]:
-    """A stored payload as its readers get it: the metric keys of METRIC_KEYS
-    and no others, and `gold_spot` only from the spot source.
-
-    The table keeps the 14 newest payloads, and the feed endpoint and the
-    status page read the newest one until the next build succeeds: from a
-    deploy to the next recompute, and for as long as the build fails. A payload
-    written before 2026-11 holds `ndx_close`, `silver_spot` (the SLV close)
-    and `gold_silver_ratio` (a mixed basis), and its `gold_spot` came from the
-    GLD fallback if the quote had failed then. Read through this function none
-    of that is published from the deploy on. The stored rows are not migrated
-    or rewritten, and a payload of today's build passes unchanged."""
+    """A stored payload as the feed endpoint reads it: the metric keys of
+    METRIC_KEYS and no others, and `gold_spot` only from the spot quote. A row
+    an older build stored can hold keys that have left the contract and, under
+    `gold_spot`, the GLD close it fell back to on a failed quote."""
     metrics = {k: v for k, v in (payload.get("metrics") or {}).items() if k in METRIC_KEYS}
     gold = metrics.get("gold_spot")
     if isinstance(gold, dict) and gold.get("source") != GOLD_SPOT_SOURCE:
         metrics["gold_spot"] = _unavailable(
-            "USD", GOLD_SPOT_SOURCE,
-            "source failed: the stored item is the ETF fallback of before 2026-11, not the quote")
+            "USD", GOLD_SPOT_SOURCE, "source failed: the stored item was not the quote")
     return {**payload, "metrics": metrics}
 
 
@@ -428,19 +420,8 @@ def build_feed(raw: Any, data: Any) -> dict[str, Any]:
                                      note=f"FRED H.10 fallback (fresh source failed: {err})")
         return _fb
 
-    # A spot key carries the spot quote or nothing (decision 1A as amended
-    # 2026-11, DASHBOARD_FEED_SPEC.md sections 1 and 2). Until then a failed
-    # quote fell back to the ETF's close, which is a price per fund share and
-    # not per ounce: on 2026-11-10 GLD closed at 369.36 beside a spot quote of
-    # 4033.09, a share being 0.0916 ounces. XAG/USD is not on the Twelve Data
-    # plan (HTTP 404 on 222 of 222 recomputes, 2026-10-05 to 11-10), so
-    # `silver_spot` was the SLV close on every payload and `gold_silver_ratio`
-    # divided dollars per ounce by dollars per share: 4033.09 / 46.48 = 86.77
-    # that day, and with both legs on ETF closes it would have read
-    # 369.36 / 46.48 = 7.95. Both keys left the contract, with `ndx_close`,
-    # which never carried a value (the service reads no raw index). The FX
-    # pairs keep their fallback: the Fed's H.10 rate is the same quantity as
-    # the quote.
+    # A spot key carries the spot quote or nothing (decision 1A as amended,
+    # DASHBOARD_FEED_SPEC.md): an ETF close is a price per fund share, not per ounce.
     m["gold_spot"] = _fresh_or("XAU/USD", "USD", lambda err: _unavailable(
         "USD", GOLD_SPOT_SOURCE, f"source failed: {err}"))
     m["usdjpy"] = _fresh_or("USD/JPY", "JPY-per-USD", _fred_fx_fallback("DEXJPUS", "JPY-per-USD"))

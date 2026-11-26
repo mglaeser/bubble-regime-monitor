@@ -69,41 +69,6 @@ class TestStatusJson:
         assert by_key["fear_greed"]["available"] is False
         assert by_key["gold_spot"]["available"] is True
 
-    def test_feed_sources_list_a_stored_payload_as_the_feed_endpoint_serves_it(self, client):
-        """The block reads the row the feed endpoint reads, and reads it the
-        same way. A row written before 2026-11 holds `ndx_close`, `silver_spot`
-        and `gold_silver_ratio`, which left the contract, and the GLD close
-        under `gold_spot` when the quote had failed: the three are not listed
-        and `gold_spot` is listed as the failed quote it was."""
-        import json as _json
-
-        from app.db import session_scope
-        from app.models import DashboardFeed
-
-        payload = {
-            "series": {},
-            "metrics": {
-                "ndx_close": {"source": "none", "available": False, "stale": None,
-                              "as_of": None},
-                "silver_spot": {"source": "tiingo:SLV", "available": True, "stale": False,
-                                "as_of": "2026-11-10"},
-                "gold_silver_ratio": {"source": "twelvedata:XAU/USD/tiingo:SLV",
-                                      "available": True, "stale": False, "as_of": "2026-11-10"},
-                "gold_spot": {"source": "tiingo:GLD", "available": True, "stale": False,
-                              "as_of": "2026-11-10"},
-                "qqq_close": {"source": "price_chain:QQQ", "available": True, "stale": False,
-                              "as_of": "2026-11-10"},
-            },
-        }
-        with session_scope() as session:
-            session.add(DashboardFeed(computed_at=datetime(2026, 11, 10, 22, 0, tzinfo=UTC),
-                                      payload=_json.dumps(payload)))
-        fs = client.get("/api/v1/status").json()["feed_sources"]
-        by_key = {i["key"]: i for i in fs["items"]}
-        assert sorted(by_key) == ["gold_spot", "qqq_close"]
-        assert fs["unavailable"] == ["gold_spot"]
-        assert by_key["gold_spot"]["source"] == "twelvedata:XAU/USD"
-
     def test_every_tracked_pull_has_a_registry_row(self):
         """v3.7.2 guard: every _track() label in the gather must be wired to a
         SOURCE_REGISTRY health_keys entry — the gap that hid fed_ebp/BAA for

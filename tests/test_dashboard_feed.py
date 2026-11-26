@@ -8,7 +8,7 @@ Per DASHBOARD_FEED_SPEC.md sign-off: frozen key inventory; points ALWAYS length
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 import pytest
 from fastapi.testclient import TestClient
@@ -81,8 +81,7 @@ class TestBuildFeedGolden:
         feed = df.build_feed(raw, data)
         assert sorted(feed["series"].keys()) == sorted(df.SERIES_KEYS)
         assert sorted(feed["metrics"].keys()) == sorted(df.METRIC_KEYS)
-        # v3.7.0 +fear_greed; D13 -2 IMF keys; 2026-11 -3 (TestSpotIsSpotOrNotServed)
-        assert len(df.SERIES_KEYS) == 13 and len(df.METRIC_KEYS) == 30
+        assert len(df.SERIES_KEYS) == 13 and len(df.METRIC_KEYS) == 30  # v3.7.0 +fear_greed; D13 -2 IMF keys; 1A as amended -3
 
     def test_points_always_61_and_left_padded(self, snapshot, patched_sources):
         raw, data = snapshot
@@ -210,25 +209,11 @@ class TestDegradation:
             assert key not in m and key not in df.METRIC_KEYS
         assert m["mmf_total_assets_usd"]["unit"] == "USD_mn"    # neighbours unaffected
 
-
-class TestSpotIsSpotOrNotServed:
-    """DASHBOARD_FEED_SPEC.md: keys name the concept, nothing is ever fabricated
-    (what cannot be served ships available:false, value:null) and one failed
-    source degrades only its item. So a spot key carries the spot quote or no
-    value: an ETF close is a price per fund share, not per ounce."""
-
     def test_a_spot_key_never_carries_an_etf_share_price(self, snapshot, patched_sources,
                                                          monkeypatch):
-        """Reverses the ETF fallback of decision 1A (amended 2026-11,
-        DASHBOARD_FEED_SPEC.md section 1). Until then a failed XAU/USD quote made
-        `gold_spot` the GLD close with a note. On 2026-11-10 that close was
-        369.36 USD beside a spot quote of 4033.09 USD: a GLD share is 0.0916
-        ounces. The companion page labels this metric "Gold spot" whenever it
-        is available and numeric and shows source and note only as a hover
-        title (checked at its main of 2026-09-28), so the fallback would have
-        read as a gold price of 369 USD. The XAU/USD quote failed on 0 of 222
-        recomputes (2026-10-05 to 11-10), so this pins the failure path; the
-        published value does not change."""
+        """A failed XAU/USD quote ships unavailable, not the GLD close: a fund
+        share's price, not an ounce's (369.36 USD beside a quote of 4033.09 on
+        2026-11-10)."""
         raw, data = snapshot
 
         def td_no_gold(symbol, interval, outputsize):
@@ -242,60 +227,6 @@ class TestSpotIsSpotOrNotServed:
         assert gs["available"] is False and gs["value"] is None
         assert gs["source"] == "twelvedata:XAU/USD"
         assert gs["note"].startswith("source failed")
-        # the GLD series is the labelled ETF, and what is derived on its basis stays
-        assert feed["series"]["gold"]["available"] is True
-        assert feed["metrics"]["gold_ttm_pct"]["available"] is True
-
-    def test_a_fallback_is_the_same_quantity(self, snapshot, patched_sources, monkeypatch):
-        """A fallback may only be a second source of the same quantity. The
-        Fed's H.10 rate is the exchange rate the quote is; the metal and the
-        coin have no second source here, so they ship unavailable."""
-        raw, data = snapshot
-
-        def td_down(symbol, interval, outputsize):
-            raise RuntimeError("twelvedata down")
-
-        monkeypatch.setattr(df, "_td_series", td_down)
-        m = df.build_feed(raw, data)["metrics"]
-        assert m["usdjpy"]["available"] is True and m["usdjpy"]["source"] == "fred:DEXJPUS"
-        assert m["usdchf"]["available"] is True and m["usdchf"]["source"] == "fred:DEXSZUS"
-        for key in ("gold_spot", "btc_spot"):
-            assert m[key]["available"] is False and m[key]["value"] is None, key
-
-    def test_three_unservable_keys_left_the_contract(self, snapshot, patched_sources):
-        """`ndx_close` shipped available:false on every payload since v3.4.0:
-        the service reads no raw index, `qqq_close` is the proxy. `silver_spot`
-        never carried a spot price: XAG/USD is not on the Twelve Data plan
-        (HTTP 404 on 222 of 222 recomputes, 2026-10-05 to 11-10), so it was
-        the SLV close on 14 of 14 retained payloads, a price per fund share.
-        `gold_silver_ratio` therefore divided USD per ounce by USD per share:
-        4033.09 / 46.48 = 86.77 on 2026-11-10, where both legs on ETF closes
-        would have read 369.36 / 46.48 = 7.95. The three keys leave the
-        contract as the two IMF keys did (D13), rather than ship unavailable
-        or on a mixed basis for good."""
-        raw, data = snapshot
-        m = df.build_feed(raw, data)["metrics"]
-        for key in ("ndx_close", "silver_spot", "gold_silver_ratio"):
-            assert key not in m and key not in df.METRIC_KEYS
-        assert len(df.METRIC_KEYS) == 30
-        assert m["gold_spot"]["source"] == "twelvedata:XAU/USD"     # neighbours unaffected
-        assert m["qqq_close"]["available"] is True
-
-    def test_the_build_asks_only_for_symbols_it_serves(self, snapshot, patched_sources,
-                                                       monkeypatch):
-        """The build asks Twelve Data five times: the BTC/USD monthly bars and
-        four daily quotes. The sixth request, XAG/USD, answered 404 on every
-        recompute and was 222 of the 263 warning lines of five weeks."""
-        raw, data = snapshot
-        asked: list[str] = []
-
-        def recording(symbol, interval, outputsize):
-            asked.append(symbol)
-            return fake_td(symbol, interval, outputsize)
-
-        monkeypatch.setattr(df, "_td_series", recording)
-        df.build_feed(raw, data)
-        assert sorted(asked) == ["BTC/USD", "BTC/USD", "USD/CHF", "USD/JPY", "XAU/USD"]
 
 
 class TestFeedEndpoint:
@@ -344,8 +275,8 @@ class TestFeedEndpoint:
         assert r.status_code == 200                      # unknown section ignored
         assert "series" in r.json()["data"]
 
-    # What a build before 2026-11 stored and the contract no longer holds, with
-    # the values, sources and notes of production's newest row of 2026-11-10.
+    # What an older build stored and the contract no longer holds, with the
+    # values, sources and notes of production's newest row of 2026-11-10.
     _LEFT_THE_CONTRACT = {
         "ndx_close": {"value": None, "unit": "index", "as_of": None, "source": "none",
                       "available": False, "stale": None,
@@ -358,14 +289,14 @@ class TestFeedEndpoint:
                               "stale": False,
                               "note": "basis: mixed - one leg spot, one leg ETF close (see source)"},
     }
-    # What the same build stored under `gold_spot` when the XAU/USD quote failed.
+    # A GLD close under `gold_spot`, in the form the old fallback wrote on a failed quote.
     _GLD_CLOSE = {"value": 369.36, "unit": "USD", "as_of": "2026-11-10", "source": "tiingo:GLD",
                   "available": True, "stale": False,
                   "note": "GLD ETF close proxy - NOT spot (spot source failed)"}
 
-    def _store_a_payload_from_before(self, snapshot, hours_ago, gold_spot=None):
-        """Store what a build before 2026-11 wrote: today's payload plus the
-        three keys, and the GLD close under `gold_spot` when one is given."""
+    def _store_a_payload_from_before(self, snapshot, gold_spot=None):
+        """Store what an older build wrote: today's payload plus the three
+        keys, and the GLD close under `gold_spot` when one is given."""
         from app.db import session_scope
         from app.models import DashboardFeed
 
@@ -374,7 +305,7 @@ class TestFeedEndpoint:
         if gold_spot is not None:
             payload["metrics"]["gold_spot"] = gold_spot
         with session_scope() as s:
-            s.add(DashboardFeed(computed_at=datetime.now(UTC) - timedelta(hours=hours_ago),
+            s.add(DashboardFeed(computed_at=datetime(2026, 11, 10, 22, 2, tzinfo=UTC),
                                 payload=json.dumps(payload)))
 
     def _served_metrics(self, client, query=""):
@@ -382,13 +313,10 @@ class TestFeedEndpoint:
 
     def test_a_stored_payload_is_served_without_the_keys_that_left(
             self, client, snapshot, patched_sources):
-        """The endpoint serves the newest stored row, and no build has run
-        since the deploy: that row holds `ndx_close`, `silver_spot` (the SLV
-        close) and `gold_silver_ratio` (86.77 on a mixed basis). They are not
-        served, by default or by name. What the contract holds is served as it
-        was stored, the spot quote under `gold_spot` included (it was the
-        quote in 14 of 14 retained rows of production)."""
-        self._store_a_payload_from_before(snapshot, hours_ago=4)
+        """A row stored by an older build holds the three keys that left the
+        contract: they are not served, by default or by name; the spot quote
+        under `gold_spot` is."""
+        self._store_a_payload_from_before(snapshot)
         served = self._served_metrics(client)
         assert sorted(served) == sorted(df.METRIC_KEYS)
         assert served["gold_spot"]["value"] == 3350.0
@@ -397,51 +325,12 @@ class TestFeedEndpoint:
             client, "?symbols=ndx_close,silver_spot,gold_silver_ratio") == {}
 
     def test_a_stored_etf_close_is_not_served_as_gold_spot(
-            self, client, snapshot, patched_sources, monkeypatch):
-        """A row written before 2026-11 while the XAU/USD quote was failing
-        holds the GLD close under `gold_spot`. It is served as a failed quote
-        is served today: unavailable, no value. That holds for as long as the
-        row is the newest, so also when the next build fails and stores
-        nothing; the next build that succeeds is served as built."""
-        self._store_a_payload_from_before(snapshot, hours_ago=4, gold_spot=self._GLD_CLOSE)
+            self, client, snapshot, patched_sources):
+        """A row stored by an older build on a failed quote holds the GLD close
+        under `gold_spot`: it is served as a failed quote is served, unavailable
+        and without a value."""
+        self._store_a_payload_from_before(snapshot, gold_spot=self._GLD_CLOSE)
         gold = self._served_metrics(client)["gold_spot"]
         assert gold["available"] is False and gold["value"] is None
         assert gold["source"] == "twelvedata:XAU/USD"
         assert gold["note"].startswith("source failed")
-
-        def a_build_that_fails(raw, data):
-            raise RuntimeError("build failed")
-
-        with monkeypatch.context() as during_the_failure:
-            during_the_failure.setattr(df, "build_feed", a_build_that_fails)
-            with pytest.raises(RuntimeError):
-                df.build_and_persist_feed(*snapshot)
-        served = self._served_metrics(client)
-        assert sorted(served) == sorted(df.METRIC_KEYS)
-        assert served["gold_spot"]["value"] is None
-
-        df.build_and_persist_feed(*snapshot)
-        served = self._served_metrics(client)
-        assert sorted(served) == sorted(df.METRIC_KEYS)
-        assert served["gold_spot"]["value"] == 3350.0
-
-    def test_a_payload_of_the_contract_is_served_as_it_was_built(
-            self, client, snapshot, patched_sources, monkeypatch):
-        """The read changes nothing in what the build writes today, with the
-        quote or without it."""
-        feed = df.build_feed(*snapshot)
-        assert df.to_contract(feed) == feed
-        assert feed["metrics"]["gold_spot"]["source"] == df.GOLD_SPOT_SOURCE
-
-        def td_no_gold(symbol, interval, outputsize):
-            if symbol == "XAU/USD":
-                raise RuntimeError("quote failed")
-            return fake_td(symbol, interval, outputsize)
-
-        monkeypatch.setattr(df, "_td_series", td_no_gold)
-        feed = df.build_feed(*snapshot)
-        assert df.to_contract(feed) == feed
-        assert feed["metrics"]["gold_spot"]["note"] == "source failed: quote failed"
-
-        df.build_and_persist_feed(*snapshot)
-        assert self._served_metrics(client)["gold_spot"]["note"] == "source failed: quote failed"

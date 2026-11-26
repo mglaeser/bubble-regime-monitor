@@ -95,8 +95,8 @@ jobs:
           # 115 -> 114: the Monte Carlo settings went from app/config.py, and
           # the no-any-return of the helper that read their defaults with them.
           # 114 -> 113: the dashboard feed's ETF fallback for a failed spot quote
-          # went (a spot key carries the spot quote or nothing), and with it the
-          # fallback's untyped closure.
+          # went (a spot key carries the spot quote or nothing), and with it a
+          # function without a return type.
           MYPY_CEILING: "113"
           # The floor constrains REACH, not DEPTH: it proves mypy READ the tree.
           # It does NOT make a low count mean "little is wrong" -- an earlier

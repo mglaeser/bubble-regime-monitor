@@ -32,7 +32,6 @@ from app.references import (
     SCORE_EXAMPLE,
     SOURCE_REGISTRY,
 )
-from app.services.dashboard_feed import to_contract
 
 SEVERITY_RANK = {"error": 0, "warn": 1, "info": 2}
 
@@ -92,8 +91,7 @@ def _feed_sources_block() -> dict[str, Any] | None:
     The feed builds AFTER the score persists with its own per-item degradation,
     so its sources never pass through the gather's source_health tracking and
     were invisible on this page (the CNN Fear & Greed gap). This block simply
-    REFLECTS the latest persisted feed payload, read as the feed endpoint reads
-    it (`to_contract`) — no new upstream pull."""
+    REFLECTS the latest persisted feed payload — no new upstream pull."""
     import json
 
     with session_scope() as session:
@@ -103,7 +101,7 @@ def _feed_sources_block() -> dict[str, Any] | None:
         if row is None:
             return None
         computed_at = _iso(row.computed_at)
-        payload = to_contract(json.loads(row.payload))
+        payload = json.loads(row.payload)
     items = []
     for section in ("series", "metrics"):
         for key, it in (payload.get(section) or {}).items():
