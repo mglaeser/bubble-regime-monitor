@@ -106,7 +106,7 @@ The ladder below is statistic-agnostic; `gsadf.statistic` selects what `stat` is
 |---|---|---|
 | Explosive & non-contested (`stat > cv95`) | `1.0` | `s4_gsadf.py` |
 | `stat > cv90` | `0.5` | `s4_gsadf.py` |
-| Contested REJECTION / data-missing / degenerate CV / unknown rule (a stale reading is not floored: it keeps its measurement and loses its weight in the coverage gate) | `SUB_CONTESTED_OR_STALE = 0.25` | `s4_gsadf.py` |
+| Contested REJECTION / stale / data-missing / degenerate CV / unknown rule | `SUB_CONTESTED_OR_STALE = 0.25` | `s4_gsadf.py` |
 | Contested NON-rejection (`stat <= cv90`) under `contested_rule = "asymmetric"` | `SUB_NULL = 0.05` | `s4_gsadf.py` |
 | Tested-and-not-explosive | `0.05` | `s4_gsadf.py` |
 | COMPUTED gate | finite `stat`, finite `cv90 < cv95`, else FLOOR (0.25, quality 0.0) | `s4_gsadf.py`/`compute.py` (G-04) |
@@ -166,7 +166,7 @@ The ladder below is statistic-agnostic; `gsadf.statistic` selects what `stat` is
 | Flat | `0.95 <= ratio <= 1.0` | `1.05` | `v_vix.py` |
 | Backwardation | `ratio > 1.0` | `1.15` | `v_vix.py` |
 
-Applied as `D = min(D_raw * V, 1.0)`. Neutral fallback when the ratio is missing: `v_state = "contango"`, `V = 1.0`. Ratio divides only on an IDENTICAL VIX/VIX3M observation date (v3.7.6/X-01).
+Applied as `D = min(D_raw * V, 1.0)`. No usable ratio (none fetched, or a non-finite or non-positive one): `V = 1.0`, the neutral multiplier, and `v_state = "unknown"`. Ratio divides only on an IDENTICAL VIX/VIX3M observation date (v3.7.6/X-01).
 
 ## 6. Red-flag keys and thresholds
 
@@ -212,7 +212,7 @@ A dropped OR stale indicator = fully lost weight. `stale is None` (unknown date)
 |---|---|---|---|---|---|---|---|---|---|
 | 35 | 3 | 3 | 35 | 45 | 3 | 75 | 100 | 3 | 2 |
 
-s5 = 45 and ages from the reference **month-END** (v3.7.6/C-04). Source: `compute.py`.
+s2, s3, d1 and d4 count NYSE sessions since `as_of` (`compute.py:SESSION_AGED`); the others count calendar days. s5 = 45 and ages from the reference **month-END** (v3.7.6/C-04). Source: `compute.py`.
 
 ## 10. Quality values (fidelity to construct, not fallback position)
 
@@ -240,13 +240,13 @@ Source: `compute.py`, `d4_lppls.py`.
 
 | Constant | Value | Source |
 |---|---|---|
-| Sample count `N` | `100_000` | `montecarlo.py`; `config.py:mc_samples` |
-| Seed | `20260711` | `montecarlo.py`; `config.py:mc_seed` |
+| Sample count `N` | `100_000` | `montecarlo.py`; `app/services/compute.py:MC_SAMPLES` |
+| Seed | `20260711` | `montecarlo.py`; `app/services/compute.py:MC_SEED` |
 | RNG | `numpy.random.default_rng(seed)` (PCG64) | `montecarlo.py` |
 | Dirichlet concentration | `DIRICHLET_CONCENTRATION = 50.0`; weights ~ `Dirichlet(base * 50)` | `montecarlo.py` |
 | Alpha | `alpha ~ U(0.40, 0.60)` (`ALPHA_RANGE`), `beta = 1 - alpha` | `montecarlo.py:ALPHA_RANGE` |
 | Headline / IQR / band | `np.median` / `np.percentile[25,75]` / `np.percentile[5,95]` | `montecarlo.py` |
-| Override in MC | `np.maximum(scores, 70.0)` when override fires | `montecarlo.py` |
+| Override in MC | `np.maximum(scores, _OVERRIDE_TARGET)` when override fires; `_OVERRIDE_TARGET` is the artifact's `override.target_score` (`70.0`), the Target of section 7 | `montecarlo.py` |
 
 MC anchor ranges: CAPE window integers `U[20,40]`; concentration `lo U(16,20)`, `hi U(38,44)`; breadth `lo U(30,40)`, `hi U(85,95)`, floor 0.05; s3 `Beta(32,8)`/`Beta(21,19)`/low-tier deterministic. Quantile convention: numpy default (linear interpolation).
 
@@ -258,7 +258,7 @@ MC anchor ranges: CAPE window integers `U[20,40]`; concentration `lo U(16,20)`, 
 | MC CV replications | `MC_NREP = 2000` | `r/gsadf.R` |
 | MC CV seed | `MC_SEED = 20260711` | `r/gsadf.R` |
 | CV cache key | `mc_cv_n{n}_nrep{nrep}_seed{seed}.rds` (G-01) | `r/gsadf.R` |
-| Series fed | last 360 completed monthly log prices (QQQ proxy for NDX); the month in progress is not in the fit | `compute.py:_s4_months` |
+| Series fed | last 360 completed monthly log prices of the long history (QQQ proxy for NDX); the month in progress is not in the fit | `compute.py` |
 | Timeout / contested default | `gsadf_timeout_s = 1800` / `gsadf_contested = True` | `config.py` |
 
 Note: `1.49` is a SADF critical value and must NEVER be hard-coded; the simulated GSADF 95% CV is ~1.9–2.1 depending on T.

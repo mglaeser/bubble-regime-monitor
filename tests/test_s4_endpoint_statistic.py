@@ -23,8 +23,10 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 
 import pytest
+import yaml
 
 from app import methodology as M
 from app.services.compute import compute_snapshot, scored_s4_statistic
@@ -77,13 +79,39 @@ def _raw_diverging():
 
 
 def _require_r():
-    """Skip where R/exuber is absent — which includes CI's unit job (CI installs
-    R only for the image build). Runs on a developer host and in the container."""
+    """Skip where R/exuber is absent (CI's test job). CI's image job runs this
+    file inside the built image, where a skip fails the step."""
     import shutil
     import subprocess
     if shutil.which("Rscript") is None or subprocess.run(
             ["Rscript", "-e", "library(exuber)"], capture_output=True).returncode != 0:
-        pytest.skip("R/exuber not available (CI unit job installs R only for the image build)")
+        pytest.skip("R/exuber not available (CI's image job runs this file inside the built image)")
+
+
+def test_the_image_job_runs_this_file():
+    """The eight tests of this file that call `_require_r()` are the only tests
+    that execute r/gsadf.R, and they skip where R/exuber is absent, which is
+    CI's test job: with a syntax error in the script this file is as green
+    there as without it (44 passed, 8 skipped). The gate that runs them is one
+    step of CI's `image` job, after the build: it runs this file inside the
+    built image, loads exuber first (the condition `_require_r` skips on) and
+    fails when the summary reports a skipped test.
+
+    The step's script is taken from the parsed workflow, so a comment that
+    names this file cannot stand in for the command."""
+    workflow = yaml.safe_load(
+        (Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml")
+        .read_text(encoding="utf-8"))
+    scripts = [step.get("run", "") for step in workflow["jobs"]["image"]["steps"]]
+    (build,) = [i for i, script in enumerate(scripts) if "docker build" in script]
+    runs_this_file = [i for i, script in enumerate(scripts)
+                      if "pytest" in script and "tests/test_s4_endpoint_statistic.py" in script]
+    assert len(runs_this_file) == 1, f"steps of the image job that run this file: {runs_this_file}"
+    (position,) = runs_this_file
+    script = scripts[position]
+    assert position > build and script.startswith("docker run "), script
+    assert 0 <= script.find('Rscript -e "library(exuber)"') < script.find("pytest"), script
+    assert 'grep -q " skipped"' in script and "exit 1" in script, script
 
 
 def _clean_series():
@@ -297,44 +325,12 @@ class TestTheContestedRuleIsAFrozenConstant:
         extra = compute_snapshot(_raw_diverging()).indicators["s4"].extra
         assert extra["s4_statistic"]["contested_rule"] == "asymmetric"
 
-
-class TestStalenessIsAnsweredInTheCoverageGate:
-    """A stale S4 keeps its measurement and loses its weight in the coverage
-    gate, like every other indicator. The mapping had a `stale` argument that
-    capped the sub-score at 0.25, and the registry declared it; no caller ever
-    passed it, and none of the 615 production readings (2026-07-11 ..
-    2026-11-10) was past the 35-day SLA."""
-
-    def test_the_s4_mapping_takes_no_staleness_argument(self):
-        import inspect
-
-        from app.references import REGISTRY
-        assert "stale" not in inspect.signature(s4_gsadf_module().sub_score).parameters
-        # the registry no longer declares the leg, and says what happens instead
-        how = REGISTRY["s4"].how
-        assert "-or-stale" not in how
-        assert "loses its weight in the coverage gate" in how
-
-    def test_a_stale_s4_keeps_its_measurement_and_loses_its_coverage_weight(self):
-        from datetime import UTC, datetime, timedelta
-
-        from app.references import REGISTRY
-
-        def _snapshot(days_old: int):
-            raw = make_golden_raw_inputs()
-            # a non-rejection: 1.04 against the live endpoint CVs of T=332
-            raw.bsadf_stat, raw.bsadf_cv90, raw.bsadf_cv95 = 1.04, 1.1393, 1.378
-            raw.gsadf_as_of = (datetime.now(UTC).date() - timedelta(days=days_old)).isoformat()
-            return compute_snapshot(raw, mc_samples=2000)
-
-        fresh, stale = _snapshot(0), _snapshot(100)
-        s4 = stale.indicators["s4"]
-        assert (s4.stale, s4.state, s4.value) == (True, "COMPUTED", 1.04)
-        assert s4.sub_score == fresh.indicators["s4"].sub_score == s4_gsadf_module().SUB_NULL
-        assert stale.point_score == fresh.point_score
-        assert fresh.indicators["s4"].stale is False
-        assert (fresh.coverage["S"]["coverage"] - stale.coverage["S"]["coverage"]
-                == pytest.approx(REGISTRY["s4"].weight))
+    def test_staleness_still_caps_regardless(self):
+        # Staleness is DATA AGE, not a size property, so the asymmetry must not
+        # apply to it.
+        from app.indicators.s4_gsadf import sub_score
+        assert sub_score(END_1986, END_CV90, END_CV95, contested=True,
+                         stale=True, asymmetric=True) == 0.25
 
 
 class TestFailClosed:
@@ -637,9 +633,9 @@ class TestTheRScriptReturnsTheEndpointNotTheSup:
     endpoint with the wrong CV row — mutations no Python test can see, because R
     is the thing producing the numbers.
 
-    SKIPS where R/exuber is absent, which includes CI's unit job (CI installs R
-    only for the image build). It runs on a developer host and inside the
-    container, which is where the R contract can actually be exercised.
+    SKIPS where R/exuber is absent, which is CI's test job. CI's image job runs
+    this file inside the built image, where a skip fails the step: that is the
+    gate in which the R contract is exercised.
     """
 
     NREP, SEED = 40, 20260711

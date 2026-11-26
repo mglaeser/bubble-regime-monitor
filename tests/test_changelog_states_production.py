@@ -16,7 +16,7 @@ Production, the stored snapshots (615, 2026-07-11 .. 2026-11-10):
     did not move s4; +0.10 on the median is the other inputs.
   - the 38 snapshots of 2026-08-19 .. 2026-08-26: medians 49.65 .. 53.12.
   - s4 under 3.9.0: 0.25 on 428 snapshots, 0.05 on 43. The first 0.05 is id
-    567, 2026-11-02 22:01 UTC; the entry's 2026-11 paragraph is about those.
+    567, 2026-11-02 22:01 UTC; the README's changelog entry on completed months is about those.
   - replay of the 471 snapshots of 3.9.0 from their stored sub-scores (the
     recomputed point score equals the stored one on all 471): s4 at 0.05
     against 0.25 changes the point score by -1.32 .. -1.98, mean -1.54.
