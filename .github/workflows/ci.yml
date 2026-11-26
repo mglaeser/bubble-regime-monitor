@@ -10,9 +10,10 @@ name: ci
 # same defect class as a decorative gate — it reads as control and is not.)
 #
 # ENFORCEMENT (this note is a claim about the repository, so it is kept true):
-# a ruleset on `main` marks `test (3.12)` and `image` REQUIRED, with no bypass
-# actors, and a direct push to main is rejected. That closes the open item this
-# note used to describe.
+# a ruleset on `main` marks `test (3.12)`, `image` and `independent-verify`
+# (the review panel's verdict, .github/workflows/independent-verify.yml)
+# REQUIRED, with no bypass actors, and a direct push to main is rejected. That
+# closes the open item this note used to describe.
 
 on:
   push:
