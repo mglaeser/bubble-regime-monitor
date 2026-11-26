@@ -717,7 +717,7 @@ class TestTheUnits:
     def test_the_install_block_enables_every_timer(self):
         timers = sorted(p.name for p in (ROOT / "deploy/systemd").glob("*.timer"))
         # nothing but these lines make a host release or watch by itself: a
-        # timer that is installed and not enabled never fires
+        # timer that is installed and not enabled is not started at boot
         enables = [step.split() for step in _install_steps() if step.startswith("systemctl --user enable ")]
         assert all(enable[:4] == ["systemctl", "--user", "enable", "--now"] for enable in enables)
         assert sorted(timer for enable in enables for timer in enable[4:]) == timers

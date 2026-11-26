@@ -62,13 +62,6 @@ podman tag localhost/bubblegauge:<previous commit> localhost/bubblegauge:latest
 systemctl --user start bubblegauge.service
 ```
 
-The rollback holds until the release runs again: the release has no
-memory, so its next run - after
-`systemctl --user start bubblegauge-release.timer`, a `make deploy`, or a
-reboot (the timer is enabled and fires two minutes after boot) - finds a
-container that does not carry main's commit and releases main again. Start
-the timer when main carries the fix or the revert.
-
 A previous image that does not come up has found a schema it does not know
 (the journal names the revision): the schema has moved, and the way is
 forward - restore `:latest` to main's image, start the service, fix the
