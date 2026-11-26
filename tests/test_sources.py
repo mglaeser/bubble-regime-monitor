@@ -252,7 +252,7 @@ class TestSourceChains:
             return _Response(content=b"xls")
 
         monkeypatch.setattr(cape, "fetch", fake_fetch)
-        monkeypatch.setattr(cape, "_history_from_shillerdata", lambda content: [30.0, 31.5])
+        monkeypatch.setattr(cape, "_current_from_shillerdata", lambda content: (31.5, None))
         result = cape.current_cape()
         assert result.value == 31.5
         assert result.provenance.fallback_used is True
@@ -312,7 +312,7 @@ class TestSourceChains:
         # The first digits behind the words: 6.0, from the class name.
         page = _Response(text='<b>Current Shiller PE Ratio</b> <span class="h6">39.70</span>', content=b"xls")
         monkeypatch.setattr(cape, "fetch", lambda source, url, **kwargs: page)
-        monkeypatch.setattr(cape, "_history_from_shillerdata", lambda content: [38.0, 39.1])
+        monkeypatch.setattr(cape, "_current_from_shillerdata", lambda content: (39.1, None))
         result = cape.current_cape()
         assert result.value == 39.1
         assert result.provenance.source == "shillerdata_ie_data"

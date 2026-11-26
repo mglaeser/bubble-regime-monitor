@@ -12,6 +12,7 @@ import io
 import math
 import re
 from datetime import UTC, date, datetime
+from typing import Any
 
 import lxml.html
 import pandas as pd
@@ -88,24 +89,49 @@ def _history_from_shillerdata(content: bytes) -> list[float]:
     return [float(v) for v in series.tolist()]
 
 
-def _as_of_from_shillerdata(content: bytes) -> str | None:
-    """Returns an ISO date in exactly one case: the spreadsheet parses and the
-    Date of its last row with a CAPE, the row the current value is taken from,
-    is a number YYYY.MM whose month, round(100 x its fraction), is 1 to 12 and
-    whose year lies from 1871, the sheet's first, to the run's: 2026.1 is
-    October, 2026.01 January. The date is that month's last day. Everything
-    else is None, every exception of the reader included."""
+def _month_of(stamp: Any, today: date) -> tuple[int, int] | None:
+    """(year, month) of a Date cell, YYYY.MM as a number that loses its
+    trailing zero (2026.1 is October, 2026.01 January), from 1871 to the run's
+    month; anything else is None."""
     try:
-        df = pd.read_excel(io.BytesIO(content), sheet_name="Data", header=7)
-        cape_col = next(c for c in df.columns if "CAPE" in str(c).upper())
-        stamp = df.at[pd.to_numeric(df[cape_col], errors="coerce").last_valid_index(), "Date"]
         year = math.floor(stamp)
         month = int(round((stamp - year) * 100))
-        if not (1 <= month <= 12 and 1871 <= year <= datetime.now(UTC).year):
-            return None
-        return date(year, month, calendar.monthrange(year, month)[1]).isoformat()
-    except Exception:
+    except Exception:                       # not a finite number
         return None
+    return (year, month) if 1 <= month <= 12 and (1871, 1) <= (year, month) <= (today.year, today.month) else None
+
+
+def _current_from_shillerdata(content: bytes) -> tuple[float, str | None]:
+    """The current CAPE and its date. The last row with a CAPE is the latest
+    month, priced at one close; the rows above it are completed months.
+
+    The latest row is the reading, dated by its close, in exactly one case: its
+    Date has a month (`_month_of`) and the P cell below it is exactly "<month>
+    price is <month> <day><st|nd|rd|th> close" ("Nov price is Nov 12th close"),
+    both months its own (first three letters, any case), the day one of it.
+    Otherwise the row above is the reading, dated its month's last day if its
+    Date has a month before the run's, else undated. Without the Date, P and
+    CAPE columns or two rows with a CAPE, a SourceError."""
+    df = pd.read_excel(io.BytesIO(content), sheet_name="Data", header=7)
+    cape_col = next((c for c in df.columns if "CAPE" in str(c).upper()), None)
+    if cape_col is None or not {"Date", "P"} <= set(df.columns):
+        raise SourceError("shillerdata: no Date, P or CAPE column")
+    cape = pd.to_numeric(df[cape_col], errors="coerce").dropna()
+    if len(cape) < 2:
+        raise SourceError("shillerdata: fewer than two rows with a CAPE")
+    latest, above = cape.index[-1], cape.index[-2]
+    today = datetime.now(UTC).date()
+    month = _month_of(df.at[latest, "Date"], today)
+    note = df["P"].get(latest + 1)
+    close = re.fullmatch(r"([A-Za-z]+) price is ([A-Za-z]+) ([0-9]{1,2})(st|nd|rd|th) close",
+                         note) if isinstance(note, str) else None
+    if (month and close and close[1][:3].lower() == close[2][:3].lower() == calendar.month_abbr[month[1]].lower()
+            and 1 <= int(close[3]) <= calendar.monthrange(*month)[1]):
+        return float(cape[latest]), date(*month, int(close[3])).isoformat()
+    month = _month_of(df.at[above, "Date"], today)
+    if month and month < (today.year, today.month):
+        return float(cape[above]), date(*month, calendar.monthrange(*month)[1]).isoformat()
+    return float(cape[above]), None
 
 
 def current_cape() -> SourceResult:
@@ -117,10 +143,8 @@ def current_cape() -> SourceResult:
     except Exception as e:
         errors.append(f"multpl: {e}")
     try:
-        content = fetch("shillerdata", SHILLERDATA_URL).content
-        return SourceResult(_history_from_shillerdata(content)[-1],
-                            Provenance(source="shillerdata_ie_data", fallback_used=True,
-                                       as_of=_as_of_from_shillerdata(content)))
+        value, as_of = _current_from_shillerdata(fetch("shillerdata", SHILLERDATA_URL).content)
+        return SourceResult(value, Provenance(source="shillerdata_ie_data", fallback_used=True, as_of=as_of))
     except Exception as e:
         errors.append(f"shillerdata: {e}")
     raise SourceError("CAPE: all sources failed: " + "; ".join(errors))
