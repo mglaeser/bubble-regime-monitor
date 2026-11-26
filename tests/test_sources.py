@@ -186,40 +186,37 @@ class _Response:
         return self._payload
 
 
+def _cboe_answers(monkeypatch) -> list[str]:
+    """CBOE answers with quotes of two sessions, a VIX of the morning (21.06)
+    and the VIX3M of the last close (20.85); returns the sources asked."""
+    import app.sources.vix as vix
+
+    asked: list[str] = []
+
+    def fetch(source, url, **kwargs):
+        asked.append(source)
+        return _Response(payload={"data": {"current_price": 21.06 if source == "cboe_vix" else 20.85}})
+
+    monkeypatch.setattr(vix, "fetch", fetch)
+    return asked
+
+
 class TestSourceChains:
-    """README "Data sources": the VIX curve comes from CBOE delayed quotes with
-    FRED as the fallback, CAPE from multpl with Shiller's ie_data.xls as the
-    fallback. vixcentral.com (now a redirect to volchart.io) and GuruFocus
-    (403) left the chains on 2026-09-27."""
+    """README "Data sources": the VIX curve is FRED's two daily closes of one
+    date, CAPE comes from multpl with Shiller's ie_data.xls as the fallback.
+    vixcentral.com (now a redirect to volchart.io) and GuruFocus (403) left
+    the chains on 2026-09-27."""
 
-    def test_the_vix_curve_is_read_from_cboe_first(self, monkeypatch):
-        import app.sources.vix as vix
-
-        prices = {vix.CBOE_VIX_URL: 18.0, vix.CBOE_VIX3M_URL: 20.0}
-        fetched: list[str] = []
-
-        def fake_fetch(source, url, **kwargs):
-            fetched.append(url)
-            return _Response(payload={"data": {"current_price": prices[url]}})
-
-        monkeypatch.setattr(vix, "fetch", fake_fetch)
-        result = vix.term_structure_ratio()
-        assert result.value == pytest.approx(18.0 / 20.0)
-        assert result.provenance.source == "cboe_delayed"
-        assert result.provenance.fallback_used is False
-        assert fetched == [vix.CBOE_VIX_URL, vix.CBOE_VIX3M_URL]
-
-    def test_the_vix_curve_falls_back_to_freds_vixcls_and_vxvcls(self, monkeypatch):
+    def test_the_vix_curve_is_freds_vixcls_and_vxvcls_of_one_date(self, monkeypatch):
         """FRED publishes the CBOE 3-month VIX as series VXVCLS
         (fred.stlouisfed.org/series/VXVCLS) and has no series VIX3M: a request
         for that id is answered 400 Bad Request. The fake FRED below knows only
-        the two real ids and answers any other id the same way."""
+        the two real ids and answers any other id the same way. CBOE answers
+        and is not asked."""
         import app.sources.fred as fred
         import app.sources.vix as vix
 
-        def cboe_down(source, url, **kwargs):
-            raise SourceError(f"{source}: 403 Forbidden")
-
+        cboe_asked = _cboe_answers(monkeypatch)
         closes = {"VIXCLS": 26.0, "VXVCLS": 24.0}
         asked: list[str] = []
 
@@ -231,14 +228,39 @@ class TestSourceChains:
             return _Response(payload={"observations": [
                 {"date": "2026-11-20", "value": str(closes[series_id])}]})
 
-        monkeypatch.setattr(vix, "fetch", cboe_down)
         monkeypatch.setattr(fred, "fetch", fake_fred)
         result = vix.term_structure_ratio()
-        assert asked == ["VIXCLS", "VXVCLS"]
-        assert result.value == pytest.approx(26.0 / 24.0)
+        assert (result.value, result.provenance.as_of) == (pytest.approx(26.0 / 24.0), "2026-11-20")
+        assert (asked, cboe_asked) == (["VIXCLS", "VXVCLS"], [])
         assert result.provenance.source == "fred_vix_ratio"
-        assert result.provenance.fallback_used is True
-        assert result.provenance.as_of == "2026-11-20"
+        assert result.provenance.fallback_used is False
+
+    @pytest.mark.parametrize("closes", [
+        {"VIXCLS": ("2026-11-09", 19.92)},                                         # no VIX3M close
+        {"VIXCLS": (None, 19.92), "VXVCLS": (None, 20.85)},                        # no date
+        {"VIXCLS": ("11/09/2026", 19.92), "VXVCLS": ("11/09/2026", 20.85)},        # not an ISO date
+        {"VIXCLS": ("2026-11-09", float("nan")), "VXVCLS": ("2026-11-09", 20.85)},  # no number
+        {"VIXCLS": ("2026-11-09", 0.0), "VXVCLS": ("2026-11-09", 20.85)},           # not positive
+    ])
+    def test_without_freds_two_closes_of_one_date_there_is_no_ratio(self, monkeypatch, closes):
+        """The one case that gives a ratio is two closes of one date whose ratio is
+        a finite positive number; anything else is a SourceError, and CBOE,
+        answering, is not asked."""
+        import app.sources.vix as vix
+        from app.sources import Provenance, SourceResult
+
+        cboe_asked = _cboe_answers(monkeypatch)
+
+        def fred_latest(series_id):
+            if series_id not in closes:
+                raise SourceError(f"fred:{series_id}: 400 Bad Request")
+            day, value = closes[series_id]
+            return SourceResult(value, Provenance(source=f"fred_{series_id}", as_of=day))
+
+        monkeypatch.setattr(vix, "fred_latest", fred_latest)
+        with pytest.raises(SourceError):
+            vix.term_structure_ratio()
+        assert cboe_asked == []
 
     def test_shillerdata_follows_multpl_for_the_current_cape(self, monkeypatch):
         import app.sources.cape as cape

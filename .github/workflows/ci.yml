@@ -94,7 +94,9 @@ jobs:
           # (app/services/compute.py, `_track_closes` replaced it).
           # 115 -> 114: the Monte Carlo settings went from app/config.py, and
           # the no-any-return of the helper that read their defaults with them.
-          MYPY_CEILING: "114"
+          # 114 -> 110: the ratio's CBOE branch went (app/sources/vix.py, whose
+          # `vix` and `vix3m` held floats there and SourceResults below it).
+          MYPY_CEILING: "110"
           # The floor constrains REACH, not DEPTH: it proves mypy READ the tree.
           # It does NOT make a low count mean "little is wrong" -- an earlier
           # version of this comment claimed that, and it is false. Measured:

@@ -109,7 +109,7 @@ Red-flag count 0 → override not fired. **Deterministic point score 52.43; MC m
 | Margin (D2) | FINRA XLSX (3–4-week publication lag) | none — cache & tolerate staleness | 75d |
 | Hyperscaler FCF (D3) | SEC EDGAR companyfacts (mandatory UA, ≤8 req/s self-cap) | total-revenue gate proxy | 100d |
 | LPPLS (D4) | `lppls==0.6.24` (pinned; maintenance-inactive) | **drop + renormalize Block D** | 3d |
-| VIX curve (V) | CBOE delayed quotes | FRED `VIXCLS`/`VXVCLS` (FRED's series id for VIX3M) | 2d |
+| VIX curve (V) | FRED `VIXCLS`/`VXVCLS` (FRED's series id for VIX3M), the daily closes of one date | none: without the pair V is 1.0 and the state `unknown` | 2d |
 
 The 3d SLA of S2, S3, D1 and D4 counts NYSE sessions since the reading's date, so a weekend or an exchange holiday does not age a daily reading; every other SLA counts calendar days. `age_days` is always the calendar age. A daily feed that really stops is stale once more than three sessions have passed: two calendar days later than a calendar count reports it when a weekend lies in between, three when an exchange holiday does too, never earlier.
 
