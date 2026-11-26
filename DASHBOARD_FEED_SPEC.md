@@ -4,7 +4,7 @@
 **Sign-off basis: dashboard-side approval of proposal v0 with decisions 1A · 2A · 3A · 4B · 5A and three key-naming requests — all honored below.**
 
 > **CAPTURE STATUS — COMPLETE. Capture #2 (production host, `computed_at 2026-07-15T23:29:51+00:00`, commit a897198) confirms the full contract:**
-> all 12 series populated (61/61 points each), all 34 metrics present, per-item degradation and every labeled fallback behaving as specified. §5 below carries the real capture-#2 `metrics` block and a real full series verbatim; **[`docs/dashboard-feed-capture2.json`](docs/dashboard-feed-capture2.json) is that capture in full, a record of 2026-07-15: 12 series and 34 metrics as served that day, with keys that have left the contract since (section 2), without `fear_greed` (section 7) and with a `meta.disclaimer` the service no longer sends. The contract is sections 2 to 4 and the live endpoint** (`GET https://bubblegauge.klee.me/api/v1/dashboard/feed`).
+> all 12 series populated (61/61 points each), all 34 metrics present, per-item degradation and every labeled fallback behaving as specified. §5 below carries the real capture-#2 `metrics` block and a real full series verbatim; **[`docs/dashboard-feed-capture2.json`](docs/dashboard-feed-capture2.json) is that capture in full, a record of 2026-07-15, not the current inventory. The contract is sections 2 to 4 and the live endpoint** (`GET https://bubblegauge.klee.me/api/v1/dashboard/feed`).
 >
 > Capture #1 (same day, one recompute earlier) exposed two issues, both resolved and regression-tested:
 > 1. All six Tiingo series failed (`only 61 rows`) — a ≥100-row guard meant for GSADF's long-history calibration; the feed now passes `min_rows=24`. Capture #2 shows all six populated.
@@ -169,7 +169,7 @@ Envelope (real): `"meta": {"computed_at": "2026-07-15T23:29:51.060987+00:00", "s
 
 **Full-payload artifact:** [`docs/dashboard-feed-capture2.json`](docs/dashboard-feed-capture2.json) (committed; captured from the live endpoint at the timestamp above, validated 12 series x 61 points + 34 metrics) is the full payload of that capture: a record of 2026-07-15, not the current inventory.
 
-Provider date conventions visible in the real bytes (both intentional): Tiingo monthly bars are dated at month **end** — the in-progress month carries the forward end-of-month date (`2026-07-31`) — while Twelve Data 1-month bars are dated at month **start** (`2026-07-01`); `anchor_partial` marks the open month. While a month runs the six Tiingo series and `gold_ttm_pct` carry that forward date as `as_of`, so their `stale` can turn true from the eighth day after the month ends and not before; the `btc` series has the same monthly resolution through its 35-day SLA.
+Provider date conventions visible in the real bytes (both intentional): Tiingo monthly bars are dated at month **end** — the in-progress month carries the forward end-of-month date (`2026-07-31`) — while Twelve Data 1-month bars are dated at month **start** (`2026-07-01`); `anchor_partial` marks the open month. While a month runs the Tiingo series and `gold_ttm_pct` carry that forward date as `as_of`, so their `stale` can turn true from the eighth day after the month ends and not before; the `btc` series has the same monthly resolution through its 35-day SLA.
 
 ## 5-legacy · The pre-capture representative sketch (superseded by the real bytes above)
 

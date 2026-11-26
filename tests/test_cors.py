@@ -56,11 +56,7 @@ def test_the_retired_klee_me_origins_are_absent(isolated_db):
 
 def test_the_feed_documents_name_the_allowed_origins_and_no_other(isolated_db):
     """The dashboard feed is what a browser on another origin reads, and its
-    contract (DASHBOARD_FEED_SPEC.md section 3) says which origins may. The
-    spec named `https://crash.klee.me` beside the live origin, and the two feed
-    modules named it as the dashboard's host, after it had left the allowlist
-    (the test above). A contract that still lists a retired origin reads as a
-    reason to put it back."""
+    contract (DASHBOARD_FEED_SPEC.md section 3) says which origins may."""
     import app.routers.dashboard as route
     import app.services.dashboard_feed as feed
 
