@@ -96,8 +96,7 @@ def _unknown_flags(snap: Snapshot) -> list[str]:
     "",
     summary="Headline regime score",
     description=(
-        "The Monte Carlo MEDIAN of the 0-100 regime heuristic (headline_median: the whole points "
-        "it has reached, so it never names a band line the score is under) with IQR and 5-95 band, "
+        "The Monte Carlo MEDIAN of the 0-100 regime heuristic with IQR and 5-95 band, "
         "both blocks with per-indicator objects, red flags, action band, trend states, "
         "fast alarm, and the judgment call. The headline is NOT a probability."
     ),
