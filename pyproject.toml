@@ -5,6 +5,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bubblegauge"
+# The distribution's version. No code reads it; the service's version is
+# `service_version` in app/config.py. It is not kept equal on purpose: the
+# image copies this file before it installs the lock, so every edit here
+# rebuilds the image's package layer.
 version = "3.0.0"
 description = "Self-hosted AI bubble regime monitor. Three-leg composite (valuation, credit, breadth, GSADF, LPPLS) with Monte Carlo bands, Faber trend trigger, and API. Research, not advice."
 requires-python = ">=3.12"
