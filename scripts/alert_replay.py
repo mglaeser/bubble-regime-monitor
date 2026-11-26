@@ -6,17 +6,13 @@ an entry point with a stable name and a stable default output path rather than
 a remembered flag combination.
 
     python -m scripts.alert_replay --state-db /tmp/replay.db
-    python -m scripts.alert_replay --state-db /tmp/replay-2025.db --from 2025-01-01
-    python -m scripts.alert_replay --state-db /tmp/replay-out.db --out docs/…json
-
-`--state-db` must name a path that does not exist: a replay creates its state
-database and deletes nothing, so a file that is there is refused.
+    python -m scripts.alert_replay --state-db /tmp/replay.db --from 2025-01-01
+    python -m scripts.alert_replay --state-db /tmp/replay.db --out docs/…json
 
 Exit codes are the gate:
 
     0   the replay ran and every check passed
-    1   the replay ran and a check FAILED, the artifacts are invalid, or the
-        state path exists
+    1   the replay ran and a check FAILED, or the artifacts are invalid
 
 Nothing here can send: `app.alerts.replay` imports no provider and runs in
 `dryrun` mode, whose state lives in its own namespace.
@@ -38,8 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Replay captured alert sidecars into an isolated database",
     )
     parser.add_argument("--state-db", required=True,
-                        help="path for the ISOLATED replay database (a new path; "
-                             "a file that exists is refused)")
+                        help="path for the ISOLATED replay database (recreated each run)")
     parser.add_argument("--from", dest="from_moment", help="ISO-8601 window start")
     parser.add_argument("--to", dest="to_moment", help="ISO-8601 window end")
     parser.add_argument("--source-db", help="source DB URL (default: the app's)")
