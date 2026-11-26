@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import calendar
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
@@ -188,7 +188,7 @@ class _Response:
 
 class TestSourceChains:
     """README "Data sources": the VIX curve comes from CBOE delayed quotes with
-    FRED as the fallback, CAPE from multpl with Shiller's ie_data.xls as the
+    FRED as the fallback, CAPE from Shiller's ie_data.xls with multpl as the
     fallback. vixcentral.com (now a redirect to volchart.io) and GuruFocus
     (403) left the chains on 2026-09-27."""
 
@@ -240,23 +240,90 @@ class TestSourceChains:
         assert result.provenance.fallback_used is True
         assert result.provenance.as_of == "2026-11-20"
 
-    def test_shillerdata_follows_multpl_for_the_current_cape(self, monkeypatch):
+    # The two downloads of https://shillerdata.com/ as the page served them on
+    # 2026-11-26, each trimmed to the file's name and the anchor's href and text.
+    SHILLER_PAGE = (
+        '<p><span>ie_data</span> (xls)</p><a href="//img1.wsimg.com/blobby/go/'
+        'e5e77e0b-59d1-44d9-ab25-4763ac982e53/downloads/249997aa-1eef-4237-93ec-2d319f7881ab/'
+        'ie_data.xls?ver=1794837439406">Download</a>\n'
+        '<p><span>Fig3-1 (1)</span> (xls)</p><a href="//img1.wsimg.com/blobby/go/'
+        'e5e77e0b-59d1-44d9-ab25-4763ac982e53/downloads/5da0722d-b541-4461-b21c-47e457ea1fb8/'
+        'Fig3-1%20(1).xls?ver=1794837439406">Download</a>\n')
+    SHILLER_FILE = ("https://img1.wsimg.com/blobby/go/e5e77e0b-59d1-44d9-ab25-4763ac982e53/downloads/"
+                    "249997aa-1eef-4237-93ec-2d319f7881ab/ie_data.xls?ver=1794837439406")
+
+    @pytest.mark.parametrize("page", [SHILLER_PAGE, SHILLER_PAGE + SHILLER_PAGE.replace('="//', '="https://')],
+                             ids=["the-page-of-2026-11-26", "the-same-link-twice-once-with-its-scheme"])
+    def test_the_file_is_the_one_link_to_ie_data_xls_on_shillers_page(self, page):
+        from app.sources.cape import _file_url_from_shillerdata
+
+        assert _file_url_from_shillerdata(page) == self.SHILLER_FILE
+
+    @pytest.mark.parametrize("page", [
+        "",
+        SHILLER_PAGE.split("\n")[1],
+        SHILLER_PAGE + SHILLER_PAGE.replace("249997aa", "349997aa"),
+        SHILLER_PAGE.replace('="//img1.wsimg.com/', '="//img1.wsimg.com.example.org/'),
+        SHILLER_PAGE.replace('="//', '="http://'),
+    ], ids=["an-empty-page", "only-the-other-file", "two-different-links", "another-host", "plain-http"])
+    def test_anything_but_one_https_link_to_ie_data_xls_on_the_file_host_is_a_source_error(self, page):
+        from app.sources.cape import _file_url_from_shillerdata
+
+        with pytest.raises(SourceError):
+            _file_url_from_shillerdata(page)
+
+    def _serve(self, monkeypatch, months: list[tuple[float | None, float]], down: str | None = None) -> None:
+        """Shiller's page, the file it links (as in ie_data.xls: the sheet "Data", seven lines
+        above the column headings, a Date and a CAPE cell per month) and multpl's page answer;
+        `down` and any other URL raise."""
+        import io
+
+        import pandas as pd
+
         import app.sources.cape as cape
 
-        fetched: list[str] = []
+        workbook = io.BytesIO()
+        rows = [["Robert J. Shiller"]] + [[None]] * 6 + [["Date", "CAPE"]] + [list(m) for m in months]
+        pd.DataFrame(rows).to_excel(workbook, sheet_name="Data", header=False, index=False)
+        answers = {"https://shillerdata.com/": _Response(text=self.SHILLER_PAGE),
+                   self.SHILLER_FILE: _Response(content=workbook.getvalue()),
+                   "https://www.multpl.com/shiller-pe": _Response(text=self.MULTPL_PAGE)}
 
         def fake_fetch(source, url, **kwargs):
-            fetched.append(source)
-            if source == "multpl":
-                raise SourceError("multpl down")
-            return _Response(content=b"xls")
+            if url == down or url not in answers:
+                raise SourceError(f"{source}: down")
+            return answers[url]
 
         monkeypatch.setattr(cape, "fetch", fake_fetch)
-        monkeypatch.setattr(cape, "_history_from_shillerdata", lambda content: [30.0, 31.5])
-        result = cape.current_cape()
-        assert result.value == 31.5
-        assert result.provenance.fallback_used is True
-        assert fetched == ["multpl", "shillerdata"]
+
+    @pytest.mark.parametrize("down, last, today, reading", [
+        (None, 2026.11, date(2026, 11, 26), (39.37, "shillerdata_ie_data", False)),
+        (None, 2026.11, date(2026, 12, 5), (39.37, "shillerdata_ie_data", False)),
+        (None, 2026.1, date(2026, 10, 26), (39.37, "shillerdata_ie_data", False)),
+        (None, 2026.12, date(2027, 1, 5), (39.37, "shillerdata_ie_data", False)),
+        (None, 2024.09, date(2026, 11, 26), (39.95, "multpl", True)),
+        (None, 2026.12, date(2026, 11, 26), (39.95, "multpl", True)),
+        (None, 2026.104, date(2026, 10, 26), (39.95, "multpl", True)),
+        ("https://shillerdata.com/", 2026.11, date(2026, 11, 26), (39.95, "multpl", True)),
+        (SHILLER_FILE, 2026.11, date(2026, 11, 26), (39.95, "multpl", True)),
+    ], ids=["this-month", "last-month", "2026.1-is-october", "december-in-january", "a-file-ending-2024.09",
+            "next-month", "not-yyyy.mm", "shillers-page-fails", "shillers-file-fails"])
+    def test_the_current_cape_comes_from_shillers_file_first_then_multpl(self, monkeypatch, down, last, today,
+                                                                         reading):
+        import app.sources.cape as cape
+
+        self._serve(monkeypatch, [(None, 30.0), (last, 39.37)], down)
+        result = cape.current_cape(today)
+        assert (result.value, result.provenance.source, result.provenance.fallback_used) == reading
+
+    def test_the_history_is_the_file_shillers_page_links(self, monkeypatch):
+        import app.sources.cape as cape
+
+        months = [(None, 30.0)] * 237 + [(2026.09, 40.27), (2026.1, 40.12), (2026.11, 39.37)]  # file of 2026-11-26
+        self._serve(monkeypatch, months)
+        result = cape.monthly_cape_history()
+        assert (result.value, result.provenance.source, result.provenance.fallback_used) == \
+            ([value for _, value in months], "shillerdata_ie_data", False)
 
     # The two places of https://www.multpl.com/shiller-pe that state the value,
     # as the page served them on 2026-11-14 (each verbatim, the lines between
@@ -295,28 +362,17 @@ class TestSourceChains:
         MULTPL_PAGE.replace("39.95", "") + MULTPL_PAGE.replace("39.95", "17.33"),
         MULTPL_PAGE + MULTPL_PAGE.replace("39.95", ""),
         '<?xml version="1.0" encoding="utf-8"?>\n' + MULTPL_PAGE,
+        '<b>Current Shiller PE Ratio</b> <span class="h6">39.70</span>',
     ], ids=["an-empty-page", "two-elements-the-second-holds-a-number",
-            "two-elements-the-first-holds-a-number", "an-xml-declaration-in-a-str"])
+            "two-elements-the-first-holds-a-number", "an-xml-declaration-in-a-str", "no-element-with-the-id"])
     def test_anything_but_one_element_with_one_number_is_a_source_error(self, page):
-        # lxml raises errors of its own on the first and on the last page
+        # lxml raises errors of its own on the first and on the fourth page
         # (ParserError, ValueError); on the two in between, one of the two
         # elements that carry the id holds a number.
         from app.sources.cape import _current_from_multpl
 
         with pytest.raises(SourceError):
             _current_from_multpl(page)
-
-    def test_a_multpl_page_without_the_element_hands_over_to_shillers_spreadsheet(self, monkeypatch):
-        import app.sources.cape as cape
-
-        # The first digits behind the words: 6.0, from the class name.
-        page = _Response(text='<b>Current Shiller PE Ratio</b> <span class="h6">39.70</span>', content=b"xls")
-        monkeypatch.setattr(cape, "fetch", lambda source, url, **kwargs: page)
-        monkeypatch.setattr(cape, "_history_from_shillerdata", lambda content: [38.0, 39.1])
-        result = cape.current_cape()
-        assert result.value == 39.1
-        assert result.provenance.source == "shillerdata_ie_data"
-        assert result.provenance.fallback_used is True
 
     def test_the_multpl_monthly_table_needs_no_beautifulsoup(self, monkeypatch):
         import sys
