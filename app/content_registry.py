@@ -606,18 +606,11 @@ def _save_haven_slots() -> list[DynamicSlot]:
     return slots
 
 
-#: Nothing writes a slot: every slot serves its placeholder, and no module of
-#: the content API reaches a model (tests/test_content_api.py::TestDynamicContent
-#: ::test_no_model_writes_a_slot). Until 2026-11 an allowlist of 39
-#: "model-writable" slots stood here, with a prompt per member in
-#: config/dynamic_prompts.v1.json, for a generation stage that was never built:
-#: nothing read the library, 41 of the 46 facts its prompts declared had no
-#: producer in app/, and its rules named the content validator that the owner's
-#: ruling of 2026-09-25 removed. Both went by the rule the owner set for the
-#: message library's nine unwired entries on 2026-10-01 (docs/MESSAGE_ENGINE.md,
-#: decision 24): an entry returns, with typed facts, when a caller is wired.
-#: Whoever wires a model to a slot says first which slots it may write; a
-#: statistic is computed, never model-written.
+#: The allowlist of 39 "model-writable" slots, which app/ used only for the served
+#: `writer` field, and their prompts in config/dynamic_prompts.v1.json, read only by
+#: their own tests, went by the rule the owner set on 2026-10-01 for the message
+#: library's unwired entries (docs/MESSAGE_ENGINE.md, decision 24); no model writes
+#: a slot: dynamic_slots_payload serves each placeholder.
 DYNAMIC_SLOTS: tuple[DynamicSlot, ...] = (
     DynamicSlot(
         slug="headline_note",

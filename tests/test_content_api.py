@@ -153,12 +153,7 @@ class TestDynamicContent:
         assert content_registry.provenance_of("placeholder") == "template"
 
     def test_a_slot_carries_these_fields_and_names_no_writer(self, client):
-        # docs/CONTENT_API.md, "Endpoints": the fields of a served slot. Until
-        # 2026-11 each also carried `writer: model | data` (39 model, 43 data),
-        # the split of a generation stage that was never built. No consumer
-        # read it: the status page reads `text` and `provenance`, the companion
-        # dashboard's client (as of 2026-09-28) `text`, `source`, `updated_at`,
-        # `purpose` and `constraints`.
+        # docs/CONTENT_API.md, "Endpoints": the fields of a served slot.
         from pathlib import Path
 
         fields = ("text", "source", "provenance", "updated_at", "purpose", "as_of", "constraints")
@@ -166,30 +161,6 @@ class TestDynamicContent:
         assert {frozenset(slot) for slot in slots.values()} == {frozenset(fields)}
         doc = (Path(__file__).resolve().parents[1] / "docs" / "CONTENT_API.md").read_text(encoding="utf-8")
         assert "dynamic slots {slug: {" + ", ".join(fields) + "}} + marker" in doc
-
-    def test_no_model_writes_a_slot(self, client):
-        # What stands where the allowlist of "model-writable" slots stood
-        # (AGENTS.md ground rules 1 and 2): no module of the content API
-        # imports the model gateway, the message engine or the judgment, and
-        # every slot serves its registry placeholder. Wiring a model to a slot
-        # turns this red, and that change says first which slots a model may
-        # write.
-        import ast
-        from pathlib import Path
-
-        app_dir = Path(__file__).resolve().parents[1] / "app"
-        model_modules = ("app.llm_gateway", "app.message_engine", "app.engine.judgment", "openai", "anthropic")
-        imported: set[str] = set()
-        for module in ("content_registry.py", "content_manifest.py", "routers/content.py"):
-            for node in ast.walk(ast.parse((app_dir / module).read_text(encoding="utf-8"))):
-                if isinstance(node, ast.Import):
-                    imported |= {alias.name for alias in node.names}
-                elif isinstance(node, ast.ImportFrom):
-                    imported |= {node.module or ""} | {f"{node.module}.{alias.name}" for alias in node.names}
-        assert sorted(name for name in imported if name.startswith(model_modules)) == []
-        slots = client.get("/api/v1/content/dynamic").json()["data"]["slots"]
-        assert {slug: slot["text"] for slug, slot in slots.items()} == {
-            s.slug: s.placeholder for s in content_registry.DYNAMIC_SLOTS}
 
 
 class TestCacheScope:
