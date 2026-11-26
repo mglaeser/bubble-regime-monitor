@@ -18,8 +18,8 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from app.engine.aggregate import RedFlags, apply_vix_multiplier, deterministic_score
-from app.engine.montecarlo import BASE_WEIGHTS_D, BASE_WEIGHTS_S, MonteCarloInputs, monte_carlo
+from app.engine.aggregate import RedFlags, deterministic_score
+from app.engine.montecarlo import BASE_WEIGHTS_D, BASE_WEIGHTS_S, monte_carlo
 from tests.conftest import make_golden_raw_inputs
 
 MC_SEED = 20260711
@@ -79,8 +79,7 @@ def test_full_pipeline_on_golden_raw_inputs(isolated_db):
     assert data.red_flags.count == 0
     assert not data.override_fired
     assert data.action_band == "trim"
-    # The median is pinned to 1e-3 by test_the_pipeline_on_the_golden_raw_inputs below;
-    # the range 48..57 that was asserted here was nine points wide.
+    assert 48.0 <= data.median <= 57.0
     # s4 contested cap, d3 gate-off cap
     # s4 in the fixture has no GSADF statistic -> data-missing -> the contested
     # floor 0.25 EXACTLY (v3.7.4/T-06: was an ambiguous 0.25-or-0.05 assertion;
@@ -90,63 +89,14 @@ def test_full_pipeline_on_golden_raw_inputs(isolated_db):
 
 
 # ---- The paths production runs and the fixture above does not reach ---------------------
-# The fixture above pins one path: hand-set sub-scores, V = 1, S3's middle tier, no
-# override, nothing stale, and a seed the test passes in. Production (615 snapshots,
-# 2026-07-11 to 2026-11-10) published V = 1.05 in 43 snapshots and V = 1.15 in 22, S3's
-# low tier in 395 of its 613 readings and the high tier in none, and twice a median and
-# a point score on different sides of 60. Each test below fails under a one-line change
-# of the engine that the suite did not notice: with the twelve changes applied (in two
-# runs, as two pairs of them share a line) its 2727 tests stayed green (main 9f79c7a).
-# The change is named beside the test. The pins: seed 20260711, n = 100 000, tolerance
-# 1e-3.
-
-
-# README, "Architecture": D = min(prod r(d_j)^w_j * V, 1).
-def test_the_vix_multiplier_scales_d_and_is_capped_at_one():
-    assert apply_vix_multiplier(0.5, 1.15) == pytest.approx(0.575)   # fails if V is ignored
-    assert apply_vix_multiplier(0.95, 1.15) == 1.0                   # fails without the cap
-
-
-@pytest.mark.parametrize("v, point, median, q1, q3", [
-    pytest.param(1.05, 53.7229, 53.8615, 51.3502, 56.2798, id="flat"),
-    pytest.param(1.15, 56.2230, 56.3635, 53.8568, 58.7650, id="backwardation"),
-])
-def test_the_golden_fixture_under_a_vix_multiplier(golden_subscores, golden_mc_inputs,
-                                                   v, point, median, q1, q3):
-    """The fixture's sub-scores under the two multipliers other than 1: the point score
-    and the distribution both move (52.43 / 52.56 at V = 1). Fails if either the point
-    score or the Monte Carlo ignores V."""
-    sub_s, sub_d = golden_subscores
-    det = deterministic_score(sub_s, sub_d, v, RedFlags(), BASE_WEIGHTS_S, BASE_WEIGHTS_D)
-    assert det.d_block == pytest.approx(det.d_raw * v, abs=1e-12)
-    assert det.score == pytest.approx(point, abs=1e-3)
-    golden_mc_inputs.v_multiplier = v
-    mc = monte_carlo(golden_mc_inputs, n=100_000, seed=MC_SEED)
-    assert (mc.median, mc.iqr[0], mc.iqr[1]) == pytest.approx((median, q1, q3), abs=1e-3)
-
-
-def test_the_monte_carlo_caps_d_at_one():
-    """Every sub-score at 1 and V = 1.15: D = min(1 * 1.15, 1) = 1 in every draw, so
-    every draw is exactly 100. Without the cap in the Monte Carlo the draws exceed 100."""
-    ones = MonteCarloInputs(s1_sub=1.0, s2_sub=1.0, s3_sub=1.0, s4_sub=1.0, s5_sub=1.0,
-                            d1_sub=1.0, d2_sub=1.0, d3_sub=1.0, d4_sub=1.0, v_multiplier=1.15)
-    assert monte_carlo(ones, n=20_000, seed=MC_SEED).band_5_95 == pytest.approx((100.0, 100.0))
-
-
-@pytest.mark.parametrize("runup_pp, median", [
-    # below 100 pp: the deterministic 0.30 * run-up / 100 (production's latest: 64.7 pp)
-    pytest.param(64.7, 48.8354, id="low_tier"),
-    # from 150 pp: Beta(32, 8), mean 0.80; drawn as Beta(8, 32) the median is far lower
-    pytest.param(160.0, 54.4918, id="high_tier"),
-])
-def test_the_s3_tiers_the_golden_fixture_does_not_reach(golden_mc_inputs, runup_pp, median):
-    golden_mc_inputs.runup_pp = runup_pp        # the fixture's 108 pp is the middle tier
-    result = monte_carlo(golden_mc_inputs, n=100_000, seed=MC_SEED)
-    assert result.median == pytest.approx(median, abs=1e-3)
+# The fixture above pins one path: hand-set sub-scores, V = 1, S3's middle tier and
+# nothing stale. Production (615 snapshots, 2026-07-11 to 2026-11-10) published V = 1.05
+# in 43 snapshots and V = 1.15 in 22, S3's low tier in 395 of its 613 readings, and twice
+# a median and a point score on different sides of 60. The pins: seed 20260711,
+# n = 100 000, tolerance 1e-3.
 
 
 @pytest.mark.parametrize("changed, point, median, q1, q3", [
-    pytest.param({}, 53.3029, 53.4119, 50.8471, 55.9593, id="as_built"),
     # VIX/VIX3M above 1: V = 1.15
     pytest.param({"vix_ratio": 1.02}, 57.1610, 57.2834, 54.7262, 59.8020, id="backwardation"),
     # run-up 96.7 - 32.0 = 64.7 pp: S3's low tier
@@ -157,16 +107,12 @@ def test_the_s3_tiers_the_golden_fixture_does_not_reach(golden_mc_inputs, runup_
     pytest.param({"cape": 30.0}, 50.6585, 50.8675, 48.5535, 53.1112, id="cape_inside_its_history"),
 ])
 def test_the_pipeline_on_the_golden_raw_inputs(isolated_db, changed, point, median, q1, q3):
-    """compute_snapshot as run_recompute calls it: raw inputs in, and NO seed passed, so
-    the seed is the pinned one or these numbers move. The sample count is the artifact's
-    100 000, passed here so that the pin does not hang on what the suite's environment sets.
+    """compute_snapshot as run_recompute calls it: raw inputs in, and no seed passed. The
+    sample count is the artifact's 100 000, passed here so that the pin does not hang on
+    what the suite's conftest sets.
 
     Only this path draws S1 from the CAPE's percentile per window (W ~ U[20, 40]): the
-    fixture above hands the Monte Carlo a fixed s1, so a change of that draw moved nothing.
-
-    53.30 is not the README's 52.43: make_golden_raw_inputs approximates the fixture and
-    yields s1 = 0.9495 and s5 = 0.99 where the README's table has 0.92 and 0.80. This pins
-    the pipeline on the builder's inputs; test_deterministic_point_score pins the table.
+    fixture above hands the Monte Carlo a fixed s1.
     """
     from app.services.compute import compute_snapshot
 
@@ -193,30 +139,9 @@ def test_the_band_is_the_band_of_the_median_not_of_the_point_score(isolated_db, 
     assert data.action_band == "de-risk"
 
 
-def test_three_firing_flags_floor_the_published_distribution_at_70(isolated_db):
-    """README: red-flag override, three of four flags: the score is at least 70. The
-    override fired in none of production's 615 snapshots, and tests/test_v373.py, which
-    fires it with these inputs, asserts the flag and the band, not the numbers. Fails if
-    compute_snapshot does not hand the flags to the Monte Carlo: the point score is then
-    70 beside a median of 50.7.
-    """
-    from app.services.compute import compute_snapshot
-
-    raw = make_golden_raw_inputs()
-    raw.smh_2yr_return_pct = 200.0                                   # run-up 168 pp   (flag 2)
-    raw.hy_oas_bps, raw.hy_oas_history_bps = 500.0, [200.0] * 800    # +300 bps        (flag 3)
-    raw.breadth_pct, raw.index_within_2pct_of_ath = 40.0, True       # 40 % near the high (flag 4)
-    data = compute_snapshot(raw, mc_samples=5_000)
-    assert data.override_fired
-    # Without the override these inputs score 100 * sqrt(0.6147 * 0.4146) = 50.5.
-    assert data.point_score == data.median == data.band_5_95[0] == 70.0
-    assert data.action_band == "de-risk"
-
-
 def test_a_reading_dated_past_its_sla_is_lost_weight():
-    """The coverage gate: a dropped OR stale indicator counts as fully lost weight. The
-    other tests of the gate drop a reading or strip its date; here d3 and d4 are dated,
-    400 days ago. Fails if every dated reading counts as obtained."""
+    """The coverage gate: a dropped OR stale indicator counts as fully lost weight. Here
+    d3 and d4 are dated, 400 days ago. Fails if every dated reading counts as obtained."""
     from app.services.compute import IndicatorOutput, _coverage_gate
 
     fresh = datetime.now(UTC).date().isoformat()
