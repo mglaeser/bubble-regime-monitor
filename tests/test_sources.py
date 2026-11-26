@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import calendar
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -93,6 +94,88 @@ class TestStaleness:
         assert data.freshness.get("d1") == "0d"
         payload = data.indicators["s1"].payload()
         assert payload["stale"] is False and payload["age_days"] == 0
+
+
+def _finra_xlsx(month_cells: list, heading: str = "Year-Month", third: tuple[str, list] | None = None) -> bytes:
+    """A margin-statistics file: the heading row, then one row per month cell.
+    `third` adds a column behind the debit column: its heading and its cells."""
+    import io
+
+    import pandas as pd
+
+    rows = [[heading, "Debit Balances in Customers' Securities Margin Accounts"]]
+    rows += [[cell, 900_000.0 + i] for i, cell in enumerate(month_cells)]
+    if third:
+        rows = [row + [cell] for row, cell in zip(rows, [third[0], *third[1]], strict=True)]
+    buf = io.BytesIO()
+    pd.DataFrame(rows).to_excel(buf, header=False, index=False)
+    return buf.getvalue()
+
+
+class TestFinraMonths:
+    """app/sources/finra.py: the months are the one column headed "Year-Month",
+    every cell the text "YYYY-MM". Otherwise the pull fails."""
+
+    MONTHS = [(y, m) for y in range(1997, 2027) for m in range(1, 13)][:-3]      # 1997-01 .. 2026-09
+
+    def test_the_files_months_are_read_without_a_guess(self):
+        """Without a format pandas guesses one and takes the day a cell lacks
+        from today: it warned on 2026-10-31, September being the newest month.
+        A test cannot set that clock, so on the unchanged code this is red only
+        on a day the newest month lacks."""
+        import warnings
+
+        from app.sources.finra import parse_debit_balances
+
+        content = _finra_xlsx([f"{y}-{m:02d}" for y, m in reversed(self.MONTHS)])
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            _, labels, as_of = parse_debit_balances(content)
+        assert labels == [f"{y}-{m:02d}" for y, m in self.MONTHS] and as_of == "2026-09-30"
+
+    @pytest.mark.parametrize("spell", [
+        lambda y, m: f"{calendar.month_abbr[m]}-{y % 100:02d}",
+        lambda y, m: y * 100 + m,
+        lambda y, m: f"{y}-{m:02d}-01",
+    ], ids=["Sep-26", "202609-a-number", "2026-09-01"])
+    def test_a_month_in_another_spelling_is_a_failure_not_a_guess(self, spell):
+        """Guessed, "Sep-26" came back as 36 months ending 1999-12 and the
+        numbers as the one month 1970-01, each a healthy pull. The full date
+        was read right and fails as well: the file's cells carry no day."""
+        from app.sources.finra import parse_debit_balances
+
+        with pytest.raises(SourceError, match="no parseable date column"):
+            parse_debit_balances(_finra_xlsx([spell(y, m) for y, m in reversed(self.MONTHS)]))
+
+    @pytest.mark.parametrize("newest", ["2026-9", "Sep-26", "2026-13", None, "0000-09"],
+                             ids=["unpadded", "another-spelling", "month-13", "empty", "year-0000"])
+    def test_one_cell_that_is_no_month_fails_the_pull(self, newest):
+        """The newest row's cell is the only one that is not "YYYY-MM" with a
+        year from 1000 and a month 01 to 12. The pull fails: the column is not
+        read without that row, and "2026-9" is not read as September."""
+        from app.sources.finra import parse_debit_balances
+
+        cells = [newest] + [f"{y}-{m:02d}" for y, m in reversed(self.MONTHS[:-1])]
+        with pytest.raises(SourceError, match="no parseable date column"):
+            parse_debit_balances(_finra_xlsx(cells))
+
+    @pytest.mark.parametrize(("newest", "heading", "other_heading"), [
+        ("2026-9", "Year-Month", "Posted"),
+        ("2026-09", "Year-Month", "Year-Month"),
+        ("2026-09", "Month", "Posted"),
+    ], ids=["headed-column-malformed", "two-headed-columns", "no-headed-column"])
+    def test_no_other_column_stands_in_for_the_month_column(self, newest, heading, other_heading):
+        """Only the one column headed "Year-Month" is read for the months.
+        Beside it stands a column of valid months of the following year. It
+        does not stand in when the headed column has a cell that is no month;
+        under the same heading there is no single month column; and without
+        the heading neither column is read. The pull fails each time."""
+        from app.sources.finra import parse_debit_balances
+
+        cells = [newest] + [f"{y}-{m:02d}" for y, m in reversed(self.MONTHS[:-1])]
+        other = [f"{y + 1}-{m:02d}" for y, m in reversed(self.MONTHS)]
+        with pytest.raises(SourceError, match="no parseable date column"):
+            parse_debit_balances(_finra_xlsx(cells, heading, third=(other_heading, other)))
 
 
 class _Response:
