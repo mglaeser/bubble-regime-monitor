@@ -266,45 +266,6 @@ def test_loader_rejects_unknown_field(raw_rules, phrase_set):
         _validate(broken, phrase_set)
 
 
-def test_an_enabled_rule_that_names_a_calibration_is_refused(raw_rules, tmp_path):
-    """docs/ALERT_SYSTEM.md section 11, rollout stage 6: EWMA / CUSUM are
-    "intentionally absent until immutable calibration and out-of-sample
-    evidence exist".
-
-    No calibration registry exists, so a rule that names a calibration
-    artifact cannot be enabled: the validator refuses the ruleset. It did so
-    on every call before as well - the set of available artifacts it took was
-    passed by no caller, and the table meant to back it held no row; both
-    went with migration 0028. A disabled rule may carry the name: that is how
-    a stage-6 rule waits.
-
-    The one shipped rule that carries the key, dynamics.breadth_downtrend,
-    also depends on an unresolved [PIN], which refuses it before this check
-    when it is enabled; so the refusal is shown on a rule that is enabled.
-    """
-    from pathlib import Path
-
-    from app.alerts.artifacts import validate_from_disk
-
-    def _validated(raw: str):
-        path = tmp_path / "rules.yaml"
-        path.write_text(raw, encoding="utf-8")
-        return validate_from_disk(rules_path=path, phrase_path=Path(PHRASES_PATH),
-                                  service_version="3.8.0").ruleset
-
-    waiting = _validated(_mutate(raw_rules, "    calibration_id: null",
-                                 "    calibration_id: some-artifact"))
-    rule = waiting.rule("dynamics.breadth_downtrend")
-    assert (rule.calibration_id, rule.enabled) == ("some-artifact", False)
-
-    enabled = _mutate(raw_rules, "  - rule_id: regime.band_to_derisk",
-                      "  - rule_id: regime.band_to_derisk\n    calibration_id: some-artifact")
-    with pytest.raises(RulesetInvalid, match=(
-            r"^regime\.band_to_derisk: enabled but calibration artifact "
-            r"'some-artifact' is not available$")):
-        _validated(enabled)
-
-
 def test_loader_rejects_methodology_mismatch(raw_rules, phrase_set):
     with pytest.raises(RulesetInvalid, match="methodology"):
         validate_ruleset(

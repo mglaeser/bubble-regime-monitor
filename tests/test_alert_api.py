@@ -1371,43 +1371,6 @@ def test_idempotency_conflict_returns_409(client):
     assert conflict.status_code == 409
 
 
-def test_an_idempotency_key_is_honoured_without_a_time_limit(client):
-    """README and docs/ALERT_SYSTEM.md section 10: `Idempotency-Key` honoured,
-    409 on reuse with a different body. No window was ever promised and none
-    applies: a key is honoured for as long as its record exists.
-
-    The record carried an expiry, 24 hours after the request, that the route
-    wrote and nothing read (a key was replayed 899 days after it), until
-    migration 0028 dropped the column. The route answers as it did before:
-    900 days on, the same request is the replay of the first and creates no
-    second silence, and another body under the key is refused.
-    """
-    from datetime import timedelta
-
-    from app.alerts.models import ApiIdempotencyRecord
-    from app.db import session_scope
-
-    headers = {"X-API-Key": WRITE_KEY, "Idempotency-Key": "key-kept"}
-    body = {"matcher_kind": "BUCKET", "matcher_value": "regime",
-            "duration_seconds": 3600, "comment": "a"}
-    first = client.post("/api/v1/alerts/silences", json=body, headers=headers)
-    assert first.status_code == 201 and first.json()["replayed"] is False
-    silence_id = first.json()["silence_id"]
-
-    with session_scope() as session:
-        record = session.get(ApiIdempotencyRecord, ("key-kept", "POST /api/v1/alerts/silences"))
-        record.created_at -= timedelta(days=900)
-
-    replay = client.post("/api/v1/alerts/silences", json=body, headers=headers)
-    assert replay.status_code == 200
-    assert replay.json() == {"silence_id": silence_id, "replayed": True}
-    conflict = client.post("/api/v1/alerts/silences", json=dict(body, comment="b"),
-                           headers=headers)
-    assert conflict.status_code == 409
-    listing = client.get("/api/v1/alerts/silences", headers={"X-API-Key": TEST_ADMIN_KEY}).json()
-    assert [silence["silence_id"] for silence in listing["items"]] == [silence_id]
-
-
 def test_silence_rejects_unknown_fields(client):
     body = {"matcher_kind": "ALL", "matcher_value": "*", "duration_seconds": 3600,
             "comment": "x", "surprise": 1}

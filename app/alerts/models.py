@@ -123,13 +123,6 @@ class AlertRulesetRegistry(Base):
     )
 
 
-# No calibration registry: the statistical monitors of rollout stage 6
-# (EWMA / CUSUM) are not built. The table 0008 created for their artifacts
-# had no writer and no reader and held 0 rows in production (read-only copy,
-# 2026-11-11); migration 0028 dropped it. A rule that names a calibration
-# artifact cannot be enabled (registry.validate_ruleset).
-
-
 # ===========================================================================
 # A.4-A.5a  inputs and evaluations
 # ===========================================================================
@@ -623,12 +616,8 @@ class AlertSilence(Base):
 class ApiIdempotencyRecord(Base):
     """Same key + different request body -> 409, never a silent re-execution.
 
-    A key is honoured for as long as its record exists. The expiry this table
-    carried (24 hours after the request) and the status code beside it were
-    written by the silence route and read by nothing: a key was replayed 899
-    days after its expiry, retention left the record, and production held 0
-    records (read-only copy, 2026-11-11). Migration 0028 dropped both columns;
-    the documents promise "Idempotency-Key honoured" and no window.
+    A key is honoured for as long as its record exists; migration 0028 dropped
+    the expiry and the status code, which nothing read.
     """
 
     __tablename__ = "api_idempotency_record"

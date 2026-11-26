@@ -1381,18 +1381,11 @@ def test_0027_redacts_a_stored_note_that_carries_a_provider_key(tmp_path):
 def test_the_unread_alert_schema_drop_round_trips(tmp_path):
     """0028 drops the alert schema that nothing reads.
 
-    alert_calibration_registry (0008) has no writer and no reader in app or
-    scripts and held 0 rows in production (read-only copy, 2026-11-11).
-    api_idempotency_record.expires_at and .status_code had one writer, the
-    silence route, and no reader: a key was replayed 899 days after its
-    "expiry", and production held 0 records.
-
-    An idempotency record keeps the five columns the route reads - its key is
-    honoured as before - and nothing else in the schema moves. The downgrade
-    restores the 0027 schema byte for byte and gives every record back what
-    the one writer wrote: status 201 and an expiry 24 hours after created_at,
-    in the storage form, to the microsecond (the second record sits on the
-    last microsecond of a February).
+    An idempotency record keeps its other five columns, and nothing else in
+    the schema moves. The downgrade restores the 0027 schema byte for byte
+    and gives every record back what the one writer wrote: status 201 and an
+    expiry 24 hours after created_at, in the storage form, to the microsecond
+    (the second record sits on the last microsecond of a February).
     """
     db = str(tmp_path / "unread-alert-schema.db")
     route = "POST /api/v1/alerts/silences"
@@ -1477,10 +1470,9 @@ def test_the_unread_alert_schema_drop_round_trips(tmp_path):
 
 def test_the_calibration_drop_refuses_a_table_that_holds_rows(tmp_path):
     """Fail closed on data, as 0020 and 0024: 0028 drops
-    alert_calibration_registry only when it is empty - production held no
-    row, and no code ever wrote one - and otherwise refuses: the upgrade
-    rolls back, and the database stays at 0027 with its schema and the
-    artifact row."""
+    alert_calibration_registry only when it is empty and otherwise refuses:
+    the upgrade rolls back, and the database stays at 0027 with its schema
+    and the artifact row."""
     db = str(tmp_path / "calibration-kept.db")
     artifact = hashlib.sha256(b"a calibration artifact").hexdigest()
 

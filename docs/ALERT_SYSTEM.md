@@ -466,7 +466,7 @@ GET  /api/v1/alerts/renders/{id}     with its message text, no-store
 GET  /api/v1/alerts/ruleset
 GET  /api/v1/alerts/health
 GET  /api/v1/alerts/silences
-POST   /api/v1/alerts/silences        Idempotency-Key honoured, without an expiry; 409 on reuse with a different body
+POST   /api/v1/alerts/silences        Idempotency-Key honoured; 409 on reuse with a different body
 DELETE /api/v1/alerts/silences/{id}
 POST /api/v1/admin/alerts/evaluate    one sidecar, shadow by default
 POST /api/v1/admin/alerts/promote
@@ -519,7 +519,7 @@ refuses to use it in production.
 | 3 | deterministic P1/P2 delivery and weekly digest | planner, outbox, renderer, typed sender, dispatcher and reminders are implemented; the weekly digest is deleted (owner decision D2a, 2026-10-03, section 11c); **this is the committed active stage** (operator decision 2026-08-27, section 11b), and its replay evidence passes |
 | 4 | legacy daily-digest cutover | deleted with its switch (owner decision D2c, 2026-10-02): the daily digest is the message engine's product and is not retired. The gate's CLI never checked the switch - `alerts cutover apply` recorded the operator's intent and printed "set DAILY_SMS_ENABLED=false in the deployment environment", its one importer was that CLI, and the production database holds no cutover event (read-only, 2026-10-02) - and the `DAILY_SMS_ENABLED` alias, the cutover's one purpose, is gone (unset on the production host). The digest's transports decide; `/api/v1/alerts/health` names a digest without one |
 | 5 | constellations and bundled P2 | evaluators, dominance and atomic multi-member bundling are implemented and stage-gated |
-| 6 | EWMA / CUSUM | intentionally absent until immutable calibration and out-of-sample evidence exist; the empty registry table and the validator parameter nothing passed are deleted (migration 0028): no code wrote or read `alert_calibration_registry`, production held 0 rows (read-only, 2026-11-11), and an enabled rule that names a calibration artifact is refused as before |
+| 6 | EWMA / CUSUM | intentionally absent until immutable calibration and out-of-sample evidence exist |
 | 7 | P3 enrichment and LLM A/B review | the dormant code-only selector and the actionability evidence trail are deleted (owner decision D2b, 2026-10-02): the dispatcher never called the selector, and neither table ever held a row. P3 itself is API and log only since the weekly digest went (owner decision D2a, 2026-10-03) |
 
 Stage-5 bundling is exercised by the

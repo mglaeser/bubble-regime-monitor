@@ -65,12 +65,6 @@ def _check_idempotency(session: Any, key: str | None, route: str,
 
     Same key + different body is a 409, never a silent re-execution against
     different parameters.
-
-    A key is honoured for as long as its record exists. The record carried a
-    24-hour expiry that this module wrote and nothing read - a key was
-    replayed 899 days after it, and retention left the record - so it limited
-    nothing; the constant and the column went with migration 0028
-    (tests/test_alert_api.py::test_an_idempotency_key_is_honoured_without_a_time_limit).
     """
     if not key:
         return False, None
