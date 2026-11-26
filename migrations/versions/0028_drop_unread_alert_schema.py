@@ -83,11 +83,18 @@ _RECORD_0027 = sa.text(
     "VALUES (:idempotency_key, :route, :request_sha256, :response_ref, 201, "
     ":created_at, :expires_at)")
 
+#: The downgrade reads the records back a batch at a time (LIMIT and OFFSET
+#: over rowid), never the whole table at once.
+_BATCH = 1000
+_RECORDS_0028 = sa.text(
+    "SELECT idempotency_key, route, request_sha256, response_ref, created_at "
+    "FROM _api_idempotency_record_0028 ORDER BY rowid LIMIT :size OFFSET :done")
+
 
 def _a_day_later(created_at: str) -> str:
     """created_at + 24 hours in SQLAlchemy's storage form, to the microsecond."""
     moment = datetime.fromisoformat(created_at) + timedelta(hours=24)
-    return moment.strftime("%Y-%m-%d %H:%M:%S.%f")
+    return moment.isoformat(sep=" ", timespec="microseconds")
 
 
 def upgrade() -> None:
@@ -109,12 +116,13 @@ def upgrade() -> None:
 def downgrade() -> None:
     for statement in _CALIBRATION_REGISTRY_0008:
         op.execute(statement)
-    bind = op.get_bind()
-    records = bind.execute(sa.text(
-        "SELECT idempotency_key, route, request_sha256, response_ref, created_at "
-        "FROM api_idempotency_record")).mappings().all()
-    op.drop_table("api_idempotency_record")
+    op.rename_table("api_idempotency_record", "_api_idempotency_record_0028")
     for statement in _IDEMPOTENCY_RECORD_0008:
         op.execute(statement)
-    for record in records:
-        bind.execute(_RECORD_0027, {**record, "expires_at": _a_day_later(record["created_at"])})
+    bind = op.get_bind()
+    done = 0
+    while batch := bind.execute(_RECORDS_0028, {"size": _BATCH, "done": done}).mappings().all():
+        bind.execute(_RECORD_0027, [
+            {**record, "expires_at": _a_day_later(record["created_at"])} for record in batch])
+        done += len(batch)
+    op.drop_table("_api_idempotency_record_0028")

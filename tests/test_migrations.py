@@ -1385,7 +1385,9 @@ def test_the_unread_alert_schema_drop_round_trips(tmp_path):
     the schema moves. The downgrade restores the 0027 schema byte for byte
     and gives every record back what the one writer wrote: status 201 and an
     expiry 24 hours after created_at, in the storage form, to the microsecond
-    (the second record sits on the last microsecond of a February).
+    (the second record sits on the last microsecond of a February, the third
+    in the year 999). The downgrade copies the records in batches, and there
+    are more of them than two batches hold.
     """
     db = str(tmp_path / "unread-alert-schema.db")
     route = "POST /api/v1/alerts/silences"
@@ -1395,6 +1397,8 @@ def test_the_unread_alert_schema_drop_round_trips(tmp_path):
          201, "2026-09-22 09:15:02.123456", "2026-09-23 09:15:02.123456"),
         ("key-b", route, hashlib.sha256(b"body b").hexdigest(), "01M0SILENCEB00000000000000",
          201, "2026-02-28 23:59:59.999999", "2026-03-01 23:59:59.999999"),
+        ("key-c", route, hashlib.sha256(b"body c").hexdigest(), "01M0SILENCEC00000000000000",
+         201, "0999-03-01 12:00:00.000000", "0999-03-02 12:00:00.000000"),
     ]
     kept = "idempotency_key, route, request_sha256, response_ref, created_at"
     dropped = ("status_code", "expires_at")
@@ -1415,10 +1419,15 @@ def test_the_unread_alert_schema_drop_round_trips(tmp_path):
 
     def _cycle():
         from alembic import command
+        from alembic.script import ScriptDirectory
 
         from app.db_migrate import _alembic_config
 
         cfg = _alembic_config()
+        batch = ScriptDirectory.from_config(cfg).get_revision("0028").module._BATCH
+        records.extend((f"key-d-{i:05d}", route, hashlib.sha256(b"%d" % i).hexdigest(), f"ref-{i}",
+                        201, "2026-09-22 09:15:02.123456", "2026-09-23 09:15:02.123456")
+                       for i in range(2 * batch + 1))
         command.upgrade(cfg, "0027")
         connection = sqlite3.connect(db)
         connection.executemany(
