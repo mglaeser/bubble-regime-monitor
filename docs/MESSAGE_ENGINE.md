@@ -484,9 +484,11 @@ a deliberate refactor rather than a review-round patch.
 ## Decision 13 — the engine owns its transactions
 
 `compose()` takes no session. Every `message_engine_attempts` write is made
-by the governor on a short transaction of its own: `reserve()` writes the
-IN_FLIGHT claim under `BEGIN IMMEDIATE`, evaluates every gate with that row
-excluded, commits on ASK and returns the claim's id; `resolve()` closes the
+by the governor on a short transaction of its own: `reserve()` opens a
+`BEGIN IMMEDIATE` transaction (after the two refusals that need no database:
+the engine off, a P1), evaluates the governor's rules in it and, only on ASK,
+writes the IN_FLIGHT claim, then commits and returns the claim's id;
+`resolve()` closes the
 claim by id, only while it is still in flight, so a reaped claim's strike is
 never erased by a late reply; `record_fallback()` records the evergreen text
 as NOT_ASKED, or as the FALLBACK_USED marker when the compose is exhausted —
