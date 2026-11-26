@@ -247,7 +247,7 @@ Source: `compute.py`, `d4_lppls.py`.
 | Dirichlet concentration | `DIRICHLET_CONCENTRATION = 50.0`; weights ~ `Dirichlet(base * 50)` | `montecarlo.py` |
 | Alpha | `alpha ~ U(0.40, 0.60)` (`ALPHA_RANGE`), `beta = 1 - alpha` | `montecarlo.py:ALPHA_RANGE` |
 | Headline / IQR / band | `np.median` / `np.percentile[25,75]` / `np.percentile[5,95]` | `montecarlo.py` |
-| Override in MC | `np.maximum(scores, 70.0)` when override fires | `montecarlo.py` |
+| Override in MC | `np.maximum(scores, _OVERRIDE_TARGET)` when override fires; `_OVERRIDE_TARGET` is the artifact's `override.target_score` (`70.0`), the Target of section 7 | `montecarlo.py` |
 
 MC anchor ranges: CAPE window integers `U[20,40]`; concentration `lo U(16,20)`, `hi U(38,44)`; breadth `lo U(30,40)`, `hi U(85,95)`, floor 0.05; s3 `Beta(32,8)`/`Beta(21,19)`/low-tier deterministic. Quantile convention: numpy default (linear interpolation).
 

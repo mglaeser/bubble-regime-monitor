@@ -75,19 +75,12 @@ FRESHNESS_SLA_DAYS: dict[str, int] = _M.as_dict("freshness_sla_days")
 
 # The readings a daily market feed delivers once per NYSE session, the ones with
 # the 3-day SLA: their SLA counts NYSE sessions since as_of, not calendar days.
-# The numbers stay the artifact's.
-# Counted in calendar days, Friday's breadth was 4 days old on every Tuesday
-# until the 14:00 UTC run (Monday's was stored at 13:00 UTC on Tuesday), d1's
-# 0.35 of block D was lost and the coverage gate read a weekend as an outage:
-# 47 of the 53 bands withheld from 2026-07-11 to 2026-11-10 (the other 6 were
-# dropped indicators), and 8 of the 9 "Coverage unterdrueckt die Stufe"
-# messages. In sessions the same reading is 2 old, one short of the SLA; with no
-# weekend or exchange holiday between as_of and today both counts agree.
-# The consequence: a daily feed that really stops is stale once more than three
-# sessions have passed. That is the same day as before when its last reading is
-# a Monday's, two calendar days later when a weekend lies in between, three when
-# an exchange holiday does too, and never earlier. A dropped indicator loses its
-# weight at once, as before.
+# Counted in calendar days, Friday's breadth is 4 days old on every Tuesday
+# until Monday's is stored (13:00 UTC), and the coverage gate reads a weekend
+# as an outage. The cost: a daily feed that really stops is stale once more
+# than three sessions have passed, two calendar days later across a weekend,
+# three across an exchange holiday too, never earlier. The numbers stay the
+# artifact's.
 SESSION_AGED: frozenset[str] = frozenset({"s2", "s3", "d1", "d4"})
 
 # v3.7.7/§2.3: the s5 t-2 lookup is a POSITIONAL index, not calendar-anchored.
@@ -146,10 +139,6 @@ def _age_days(as_of_iso: str | None) -> int | None:
         return None
 
 
-# `date` here and `datetime`/`UTC` in `IndicatorOutput.stale` are this module's
-# own imports (`from datetime import UTC, date, datetime, timedelta` at its top,
-# the names `_age_days` above uses); tests/test_freshness_sessions.py runs both
-# on the real clock.
 def _past_sla(indicator_id: str, as_of_iso: str | None, today: date) -> bool | None:
     """Is a reading dated `as_of_iso` past its indicator's freshness SLA on `today`?
 
