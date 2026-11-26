@@ -805,9 +805,13 @@ Stage 1's gate is *deterministic replay; no PII; no scoring regression*.
 
 ```bash
 python -m scripts.alert_replay --state-db /tmp/replay.db          # committed stage
-python -m scripts.alert_replay --state-db /tmp/replay.db --stage 3 --out report.json
-python -m app.alerts.cli dryrun --state-db /tmp/replay.db --from 2026-01-01
+python -m scripts.alert_replay --state-db /tmp/replay-stage3.db --stage 3 --out report.json
+python -m app.alerts.cli dryrun --state-db /tmp/replay-2026.db --from 2026-01-01
 ```
+
+`--state-db` must name a path that does not exist yet. A replay creates its
+state database there and replaces nothing: a file that is already there - the
+app's own database included - is left as it is, and the run ends with exit 1.
 
 Exit 0 means every check the run could make held; exit 1 means one failed, or
 the artifacts are invalid.

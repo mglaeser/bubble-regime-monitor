@@ -161,18 +161,47 @@ def test_replay_writes_to_its_own_database_and_never_the_app_one(
             assert count == 0, f"replay wrote {model.__name__} rows into production"
 
 
-def test_replay_state_database_is_recreated_not_appended(tmp_path, artifacts):
-    """Re-running into the same path must not accumulate — that is what makes
-    a second run comparable to the first rather than a superset of it."""
+def test_a_replay_refuses_a_state_path_that_exists_and_leaves_it(tmp_path, artifacts):
+    """A replay creates its state database and replaces nothing: a path that
+    exists is refused and left byte for byte. So a second run into the same
+    path cannot accumulate into the first."""
     state = tmp_path / "shared.db"
     config = ReplayConfig(source_db_url="sqlite:///unused",
                           state_db_path=state, evaluate_at_stage=3)
     first = run_replay(config=config, ruleset=artifacts.ruleset,
                        phrase_set=artifacts.phrase_set, inputs=_history())
-    second = run_replay(config=config, ruleset=artifacts.ruleset,
-                        phrase_set=artifacts.phrase_set, inputs=_history())
-    assert first.episodes_opened == second.episodes_opened
-    assert first.to_json() == second.to_json()
+    assert first.evaluations_committed > 0
+    written = state.read_bytes()
+    with pytest.raises(FileExistsError):
+        run_replay(config=config, ruleset=artifacts.ruleset,
+                   phrase_set=artifacts.phrase_set, inputs=_history())
+    assert state.read_bytes() == written
+
+
+def test_the_cli_refuses_the_apps_own_database_as_state(isolated_db, capsys):
+    """`--state-db` given the app's own database, which is also the default
+    source: the command refuses it and the file is left byte for byte."""
+    from app.alerts import cli
+    from app.alerts.models import AlertInputSnapshot
+    from app.db import session_scope
+
+    now = datetime(2026, 8, 15, 10, 0, tzinfo=UTC)
+    record = make_input(identity="s1", computed_at=now.isoformat())
+    with session_scope() as session:
+        session.add(AlertInputSnapshot(
+            input_identity=record.input_identity, snapshot_id=None, origin="RECOMPUTE",
+            built_at=now, computed_at=now,
+            alert_input_schema_version=record.schema_version,
+            methodology_version=None, methodology_sha256=None, reconstructed=False,
+            evaluation_eligibility="EVALUABLE", ineligibility_reasons=[],
+            payload=json.dumps(record.model_dump(mode="json")), payload_sha256="x"))
+    before = isolated_db.read_bytes()
+
+    code = cli.main(["dryrun", "--state-db", str(isolated_db)])
+
+    assert '"error_code": "REPLAY_STATE_NOT_CREATED"' in capsys.readouterr().out
+    assert code == 1
+    assert isolated_db.read_bytes() == before
 
 
 def test_replay_module_cannot_reach_a_provider_or_a_transport():

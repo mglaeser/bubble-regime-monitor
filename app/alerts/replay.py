@@ -12,7 +12,8 @@ here rather than a matter of care:
   **It cannot touch production state.** Everything is applied into an ISOLATED
   database. The source database is opened read-only and only sidecars are read
   out of it; no episode, evaluation, delivery or state row in production is
-  created, updated or deleted by a replay.
+  created, updated or deleted by a replay. The isolated database is created at
+  a path that must not exist yet: a file already there is left as it is.
 
   **It is deterministic.** Given the same sidecars and the same artifacts, two
   replays produce byte-identical summaries. That requires care: `now` is
@@ -246,8 +247,9 @@ def _isolated_session_factory(state_db_path: Path):
     from app.models import Base
 
     state_db_path.parent.mkdir(parents=True, exist_ok=True)
-    if state_db_path.exists():
-        state_db_path.unlink()
+    # Created here, exclusively: a path that exists raises FileExistsError and
+    # is left as it is, whatever it is. A replay deletes no file it is given.
+    state_db_path.touch(exist_ok=False)
     engine = create_engine(f"sqlite:///{state_db_path}", future=True,
                            connect_args={"check_same_thread": False})
 
