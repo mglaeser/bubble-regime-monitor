@@ -978,10 +978,9 @@ class TestBlockArtifact:
         reg._clear_artifact_cache()
         # The version rises with every change of served text, so a client sees
         # that the content changed. 3: the deck statements the service
-        # contradicted are corrected. 4: the version table has a row for each
-        # release that moved the score, and the red-flag header says what the
-        # override needs while the GSADF flag is contested (both in
-        # tests/test_content_deck_truth.py).
+        # contradicted are corrected (tests/test_content_deck_truth.py).
+        # 4: gauge.changelog gains rows for 3.3.0, 3.3.2 and 3.9.0, and
+        # gauge.redflag.header a sentence on the contested GSADF flag.
         assert reg.content_version() == 4
         payload = reg.dashboard_payload()
         assert payload["content_version"] == 4
