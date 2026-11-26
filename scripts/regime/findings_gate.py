@@ -12,12 +12,14 @@ Two modes, deliberately separate:
   --strict      exit non-zero while any STOP-SHIP or BLOCKER is open, or any
                 PASS record carries no standing control. The end state.
 
-Both exit 1 on a ledger that cannot be read; any other argument exits 2.
+Both exit 1 on a ledger that cannot be read. The gate takes one of three
+argument lists - none, `--strict` or `--selftest` - and any other list,
+`--help` included, prints its usage line to stderr and exits 2.
 
 `--admission` ("the deploy gate": exit 1 while production_eligible is false)
-is removed. deploy/release.sh, which releases every merge to main, does not
-call it; its callers were the CI job deploy-admission-proof, green when the
-mode refused, and tests that required the refusal.
+is removed. deploy/release.sh, which releases main, does not call it; its
+callers were the CI job deploy-admission-proof, green when the mode refused,
+and tests that required the refusal.
 
 THE ONE RULE THE MANDATE STATES ABSOLUTELY: `production_eligible` may only ever
 be COMPUTED. It was previously a hard-coded literal in two files, both now
@@ -27,7 +29,6 @@ can assert it — the only way to make it true is to close the findings.
 
 from __future__ import annotations
 
-import argparse
 import json
 import re
 import sys
@@ -36,6 +37,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 FINDINGS_PATH = ROOT / "audit" / "03-findings.json"
+USAGE = "usage: python -m scripts.regime.findings_gate [--strict | --selftest]"
 
 # Ordered worst-first. `band` and `escalated_band` carry free text in the
 # ledger — e.g. "STOP-SHIP (A-01+A-39 both fail)" — so a bare equality test
@@ -271,16 +273,14 @@ def selftest() -> int:
 
 
 def main(argv: list[str]) -> int:
-    # argparse refuses any argument but these two with exit 2. A caller that
-    # still passes the removed `--admission` (see the module docstring) fails
-    # there; it never gets the report's exit 0 to take for an admission.
-    parser = argparse.ArgumentParser(prog="findings_gate", allow_abbrev=False)
-    parser.add_argument("--selftest", action="store_true", help="check the gate's own logic and exit")
-    parser.add_argument("--strict", action="store_true",
-                        help="exit 1 while a blocking finding is open or a PASS names no control")
-    args = parser.parse_args(argv)
-    if args.selftest:
+    # The list is compared whole: a caller that still passes the removed
+    # `--admission`, alone or beside any other argument, gets exit 2 and never
+    # the report's exit 0 to take for an admission.
+    if argv == ["--selftest"]:
         return selftest()
+    if argv not in ([], ["--strict"]):
+        print(USAGE, file=sys.stderr)
+        return 2
     try:
         # The path is read here, when the gate runs, not bound when the module
         # loads: a test that points FINDINGS_PATH at its own ledger is judged
@@ -297,7 +297,7 @@ def main(argv: list[str]) -> int:
 
     print(_render(t, eligible, why))
 
-    if args.strict:
+    if argv == ["--strict"]:
         problems = []
         blocking = sum(t["open_by_band"][b] for b in BLOCKING_BANDS) + len(t["unbanded_open"])
         if blocking:

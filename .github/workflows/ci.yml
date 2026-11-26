@@ -213,16 +213,15 @@ jobs:
           python -m scripts.regime.authz_coverage --selftest
           python -m scripts.regime.authz_coverage
       - name: Regime — findings ledger (report only)
-        # The tally of the 2026-07-14 audit ledger (audit/03-findings.json):
-        # 119 records, 80 open, 4 STOP-SHIP and 11 BLOCKER-1 among them. It is
-        # reported and blocks nothing; the step fails only on a ledger that
-        # cannot be read.
+        # The tally of the 2026-07 audit's findings ledger
+        # (audit/03-findings.json), reported: it blocks nothing. The step fails
+        # when the selftest fails or the ledger cannot be read.
         run: python -m scripts.regime.findings_gate --selftest && python -m scripts.regime.findings_gate
 
   # The job deploy-admission-proof stood here. It ran `findings_gate
   # --admission` and was green when that refused. It gated nothing:
-  # deploy/release.sh, which releases every merge to main, does not call the
-  # mode (scripts/regime/findings_gate.py).
+  # deploy/release.sh, which releases main, does not call the mode
+  # (scripts/regime/findings_gate.py).
 
   image:
     runs-on: ubuntu-24.04

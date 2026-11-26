@@ -170,12 +170,18 @@ class TestFindingsGateComputesRatherThanAsserts:
     def test_an_unknown_argument_is_refused(self, capsys):
         # A caller that still passes the removed `--admission` must fail: it
         # must not get the report's exit 0 and take it for an admission.
-        with pytest.raises(SystemExit) as refused:
-            findings_gate.main(["--admission"])
-        assert refused.value.code == 2
+        assert findings_gate.main(["--admission"]) == 2
         captured = capsys.readouterr()
-        assert "--admission" in captured.err
+        assert captured.err == findings_gate.USAGE + "\n"
         assert captured.out == "", "a refused call must not print the tally"
+
+    @pytest.mark.parametrize("argv", [["--help", "--admission"], ["-h"], ["--help"], ["--admission", "--help"],
+                                      ["--strict", "--admission"], ["--stric"], ["--strict", "--strict"],
+                                      ["--selftest", "--strict"]])
+    def test_any_other_argument_list_is_refused(self, argv, capsys):
+        # argparse's help action exited 0 before it refused `--admission`
+        assert findings_gate.main(argv) == 2
+        assert capsys.readouterr() == ("", findings_gate.USAGE + "\n")
 
     def test_an_unreadable_ledger_refuses_rather_than_admits(self, tmp_path, monkeypatch, capsys):
         bad = tmp_path / "03-findings.json"
