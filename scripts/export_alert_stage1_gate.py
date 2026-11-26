@@ -38,20 +38,15 @@ PHRASES = ROOT / "config" / "alert_phrases.v3.5.json"
 EVENTS = ROOT / "config" / "alert_mandatory_events.v3.2.json"
 
 #: Replayed at stage 1, which the gate is named for, and at stage 3, the
-#: committed stage and the one that delivers. Stage 3 is what makes the
-#: artifact useful at all: at stage 1 almost nothing is gated on, so a
-#: stage-1-only artifact would be nearly blind to evaluator regressions.
+#: committed stage. Stage 3 is what makes the artifact useful at all: at
+#: stage 1 almost nothing is gated on, so a stage-1-only artifact would be
+#: nearly blind to evaluator regressions.
 #:
 #: Stage 4 is not replayed. It was the legacy daily-digest cutover, deleted
-#: with its switch (owner decision D2c, 2026-10-02), and no rule is gated on
-#: it: the same 29 of the 90 shipped rules are active at stage 3 and at stage
-#: 4. Its run repeated the stage-3 run in every field but `evaluated_at_stage`
-#: and the note of a forward-looking replay, 95 of the artifact's 284 lines.
-#: Over production's 307 inputs since the promotion of 2026-09-20 the two
-#: replays plan the same 22 alerts, and their summaries differ in those two
-#: fields and the hash of the re-stamped ruleset, which a run here does not
-#: carry (read-only copy of 2026-11-10). Pinned by tests/test_alert_replay.py::
-#: test_the_gate_replays_stage_1_and_the_committed_stage_and_no_deleted_stage.
+#: with its switch (owner decision D2c, 2026-10-02), and its run repeated the
+#: stage-3 run in every field but `evaluated_at_stage` and the note of a
+#: forward-looking replay. tests/test_alert_replay.py fails if a rule is
+#: active at one of stages 3 and 4 and not the other.
 STAGES = (1, 3)
 
 #: Bare content digests are still not written into a per-run summary: an

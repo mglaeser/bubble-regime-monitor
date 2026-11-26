@@ -159,14 +159,10 @@ class ReplaySummary:
     deliveries_sent: int = 0
     deliveries_by_kind: dict[str, int] = field(default_factory=dict)
     held_quiet: int = 0
-    #: An upper bound on what production holds. A replay never drains its
-    #: queue, so a queued row reserves budget from its planning to the end of
-    #: the run; in production a sent row leaves the count as its window
-    #: passes. Over production's 307 inputs since the promotion of 2026-09-20
-    #: this reads 6 where the same replay counts at most 2 non-P1 alerts in
-    #: any 24 h and 5 in any 168 h (caps 5 and 8), and production held none
-    #: for budget (read-only copy of 2026-11-10). No verdict reads it:
-    #: `_decide` judges the two maxima.
+    #: A replay marks no delivery SENT, so no planned row leaves the budget
+    #: count the way a sent row does in production, when its window passes:
+    #: this can count holds production would not make. `_decide`, which makes
+    #: the verdict, does not read it.
     held_budget: int = 0
     held_grouping: int = 0
     cancelled_superseded: int = 0

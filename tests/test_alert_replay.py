@@ -1019,30 +1019,25 @@ def test_the_committed_stage_is_not_one_whose_replay_failed():
         "or lower the stage — do not ship a stage its own replay refuses.")
 
 
-def test_the_gate_replays_stage_1_and_the_committed_stage_and_no_deleted_stage(artifacts):
+def test_the_gate_replays_stage_1_and_the_committed_stage_and_no_deleted_stage():
     """The gate replays stage 1 and stage 3, and no stage 4.
 
     Stage 4 was the legacy daily-digest cutover, deleted with its switch (owner
-    decision D2c, 2026-10-02; the rollout table in docs/ALERT_SYSTEM.md). The
-    gate went on replaying it "because that is where the cutover goes", and a
-    test here asserted that the run existed. The run measured nothing of its
-    own: it equalled the stage-3 run in every field but `evaluated_at_stage`
-    (3, 4) and the forward-looking note, 95 of the artifact's 284 lines.
-
-    The reason is pinned with it. A stage reaches the evaluator only through
-    `active_rules(stage)`, and the same rules are active at stage 3 and at
-    stage 4: 29 of the 90 shipped ones (43 name both stages in
-    `enabled_in_stages`, 47 neither). A rule active at one and not the other
-    would make a stage-4 replay evidence of its own, and this fails then.
+    decision D2c, 2026-10-02; the rollout table in docs/ALERT_SYSTEM.md). A rule
+    active at one of stages 3 and 4 and not the other would make a stage-4
+    replay evidence of its own, and this fails then. The paths are the
+    script's own, so the test reads the file the script writes.
     """
-    from scripts.export_alert_stage1_gate import STAGES
+    from scripts import export_alert_stage1_gate as gate
 
-    payload = json.loads(Path("docs/alert-stage1-gate.json").read_text(encoding="utf-8"))
+    payload = json.loads(gate.ARTIFACT.read_text(encoding="utf-8"))
     assert sorted(payload["runs"]) == ["stage_1", "stage_3"]
-    assert STAGES == (1, 3)
+    assert gate.STAGES == (1, 3)
 
-    at_stage_3 = [rule.rule_id for rule in artifacts.ruleset.active_rules(3)]
-    at_stage_4 = [rule.rule_id for rule in artifacts.ruleset.active_rules(4)]
+    ruleset = validate_from_disk(rules_path=gate.RULES, phrase_path=gate.PHRASES,
+                                 service_version="3.8.0").ruleset
+    at_stage_3 = [rule.rule_id for rule in ruleset.active_rules(3)]
+    at_stage_4 = [rule.rule_id for rule in ruleset.active_rules(4)]
     assert at_stage_3 and at_stage_3 == at_stage_4
 
 
