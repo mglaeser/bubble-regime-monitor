@@ -1593,3 +1593,23 @@ def test_an_input_that_committed_in_the_mode_of_the_rerun_is_done(
     _row("COMMITTED", committed_in)
     with session_scope() as session:
         assert len(_unfinished_evaluations(session, ambient_mode=ambient)) == selected
+
+
+def test_a_newer_watchdog_input_does_not_hide_the_recomputes_evaluation(isolated_db):
+    """The selection is the newest RECOMPUTE's, whatever other input is newer."""
+    from app.alerts.dto import ALERT_INPUT_SCHEMA_VERSION
+    from app.alerts.input_builder import serialize
+    from app.alerts.models import AlertInputSnapshot
+    from app.jobs.alert_recovery import _unfinished_evaluations
+
+    evaluation_id = _row("TIMED_OUT", "live")
+    later = NOW + timedelta(hours=1)
+    payload, digest = serialize(make_input(identity="w1"))
+    with session_scope() as session:
+        session.add(AlertInputSnapshot(
+            input_identity="w1", origin="WATCHDOG", built_at=later, computed_at=later,
+            alert_input_schema_version=ALERT_INPUT_SCHEMA_VERSION,
+            evaluation_eligibility="EVALUABLE", ineligibility_reasons=[],
+            payload=payload, payload_sha256=digest))
+    with session_scope() as session:
+        assert _unfinished_evaluations(session, ambient_mode="live") == [evaluation_id]
