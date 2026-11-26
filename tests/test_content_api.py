@@ -606,7 +606,7 @@ class TestBlockArtifact:
             unknown_rows = [r for r in blocks[table]["items"] if r.get("band") == "unknown"]
             for row in unknown_rows:
                 text = row.get("template", "").lower()
-                for verb in ("de-risk now", "trim now", "hold —", "hold -"):
+                for verb in ("de-risk", "trim", "hold —", "hold -"):
                     assert verb not in text, f"{table} unknown row carries action copy"
         reg._clear_artifact_cache()
 
@@ -985,9 +985,11 @@ class TestBlockArtifact:
         reg._clear_artifact_cache()
         # 3: the deck's gauge.reg.d3 names total revenue as what fires the gate.
         # 4: four deck statements the service contradicted are corrected.
-        assert reg.content_version() == 4
+        # 5: the de-risk and trim rows of gauge.verdict.lead and the trim one-liner are reworded.
+        # 6: gauge.changelog gains three rows (3.3.0, 3.3.2, 3.9.0) and gauge.redflag.header a sentence.
+        assert reg.content_version() == 6
         payload = reg.dashboard_payload()
-        assert payload["content_version"] == 4
+        assert payload["content_version"] == 6
         assert len(payload["blocks"]) >= 211
         reg._clear_artifact_cache()
 

@@ -105,9 +105,9 @@
       },
       "cancelled_superseded": 0,
       "deliveries_by_kind": {
-        "INITIAL": 13
+        "INITIAL": 10
       },
-      "deliveries_planned": 13,
+      "deliveries_planned": 10,
       "deliveries_sent": 0,
       "detection_times_slots": {
         "cov-band-to-derisk": 8,
@@ -153,9 +153,9 @@
       "evaluations_failed": 0,
       "evaluations_timed_out": 0,
       "failures": [],
-      "held_budget": 2,
+      "held_budget": 1,
       "held_grouping": 0,
-      "held_quiet": 3,
+      "held_quiet": 1,
       "indeterminate_band_excursions": 1,
       "inputs_evaluable": 20,
       "inputs_not_evaluable": 0,
@@ -165,9 +165,9 @@
       "mandatory_event_detected": 5,
       "mandatory_event_not_evaluable": 0,
       "mandatory_event_total": 5,
-      "max_non_p1_168h": 8,
-      "max_non_p1_24h": 5,
-      "mean_non_p1_per_168h": 8.0,
+      "max_non_p1_168h": 6,
+      "max_non_p1_24h": 3,
+      "mean_non_p1_per_168h": 6.0,
       "mode": "dryrun",
       "not_measured": [
         "non_p1_volume_168h_cap — the window spans 76.0h and the cap is stated per 168h; staying under it here proves nothing about a full period",
@@ -176,12 +176,13 @@
       ],
       "notes": [],
       "notification_planning_ran": true,
-      "p1_total": 5,
+      "p1_total": 4,
       "passed": true,
       "schema_version": 5,
       "suppressions_by_reason": {
+        "COOLDOWN": 4,
         "DATA_QUALITY_GUARD": 5,
-        "SUPERSEDED": 4
+        "SUPERSEDED": 3
       },
       "transient_one_snapshot_band_p1": 1,
       "transient_one_snapshot_band_p1_busiest_24_months": 1,
@@ -199,9 +200,9 @@
       },
       "cancelled_superseded": 0,
       "deliveries_by_kind": {
-        "INITIAL": 13
+        "INITIAL": 10
       },
-      "deliveries_planned": 13,
+      "deliveries_planned": 10,
       "deliveries_sent": 0,
       "detection_times_slots": {
         "cov-band-to-derisk": 8,
@@ -247,9 +248,9 @@
       "evaluations_failed": 0,
       "evaluations_timed_out": 0,
       "failures": [],
-      "held_budget": 2,
+      "held_budget": 1,
       "held_grouping": 0,
-      "held_quiet": 3,
+      "held_quiet": 1,
       "indeterminate_band_excursions": 1,
       "inputs_evaluable": 20,
       "inputs_not_evaluable": 0,
@@ -259,9 +260,9 @@
       "mandatory_event_detected": 5,
       "mandatory_event_not_evaluable": 0,
       "mandatory_event_total": 5,
-      "max_non_p1_168h": 8,
-      "max_non_p1_24h": 5,
-      "mean_non_p1_per_168h": 8.0,
+      "max_non_p1_168h": 6,
+      "max_non_p1_24h": 3,
+      "mean_non_p1_per_168h": 6.0,
       "mode": "dryrun",
       "not_measured": [
         "non_p1_volume_168h_cap — the window spans 76.0h and the cap is stated per 168h; staying under it here proves nothing about a full period",
@@ -272,12 +273,13 @@
         "forward-looking replay: rules gated at stage 4, committed ruleset is at stage 3; production gating is unchanged"
       ],
       "notification_planning_ran": true,
-      "p1_total": 5,
+      "p1_total": 4,
       "passed": true,
       "schema_version": 5,
       "suppressions_by_reason": {
+        "COOLDOWN": 4,
         "DATA_QUALITY_GUARD": 5,
-        "SUPERSEDED": 4
+        "SUPERSEDED": 3
       },
       "transient_one_snapshot_band_p1": 1,
       "transient_one_snapshot_band_p1_busiest_24_months": 1,
