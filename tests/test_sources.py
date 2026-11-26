@@ -483,6 +483,22 @@ def test_only_a_list_of_observations_can_be_no_data_and_no_exception_is_chained(
     assert (caught.value.__cause__, caught.value.__context__) == (None, None)
 
 
+def test_a_bare_nan_passes_in_a_field_the_reader_does_not_read_and_is_refused_as_a_value(monkeypatch):
+    """Python's JSON decoder reads a bare NaN; the reader judges only the fields it reads."""
+    from app.sources import fred
+
+    def answer(body: bytes) -> None:
+        monkeypatch.setattr(fred, "fetch", lambda *_args, **_kwargs: httpx.Response(
+            200, content=body, headers={"content-type": "application/json"}))
+
+    answer(b'{"count": NaN, "observations": [{"date": "2026-11-10", "value": "4.1"}]}')
+    assert fred.observations("DGS10") == [("2026-11-10", 4.1)]
+
+    answer(b'{"count": 1, "observations": [{"date": "2026-11-10", "value": NaN}]}')
+    with pytest.raises(SourceError, match="with a body that is not FRED's observations JSON"):
+        fred.observations("DGS10")
+
+
 def test_freds_newest_first_answer_to_a_limit_is_read_oldest_first(monkeypatch):
     from app.sources import fred
 

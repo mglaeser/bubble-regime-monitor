@@ -24,16 +24,14 @@ BASE = "https://api.stlouisfed.org/fred/series/observations"
 def observations(series_id: str, limit: int | None = None) -> list[tuple[str, float]]:
     """All non-missing (date, value) pairs, oldest first.
 
-    The answer fetch() returns gives pairs in one case only: its body is a
-    JSON object whose "observations" is a list of objects, each with a
-    "date" that is a date written YYYY-MM-DD and a "value" that is missing
-    (".", null or absent) or a string float() reads as a finite number; the
-    dates of the values are distinct and in the order asked for (newest
-    first with a limit, else oldest first); and at least one value is not
-    missing. Such a list without a value is SourceError "no non-missing
-    observations"; any other body is SourceError naming the answer's
-    status, content type and size, with no exception of the reading chained
-    to it."""
+    The answer fetch() returns is SourceError when Python's JSON decoder rejects its body or
+    what it decodes is not FRED's observations; a field this reader does not read is not judged.
+    FRED's observations: a mapping whose "observations" is a list of objects, each with a
+    "date" that is a date written YYYY-MM-DD and a "value" that is missing (".", null or
+    absent) or a string float() reads as a finite number, the dates of the values distinct
+    and in the order asked for (newest first with a limit, else oldest first). Such a list
+    without a value is SourceError "no non-missing observations"; every other refusal names
+    the answer's status, content type and size, with no exception of the reading chained to it."""
     settings = get_settings()
     params = {
         "series_id": series_id,
