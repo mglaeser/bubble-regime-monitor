@@ -8,7 +8,9 @@ once the second tier, answers 403 since 2026-09.
 from __future__ import annotations
 
 import io
+import math
 import re
+from datetime import UTC, date, datetime
 from urllib.parse import urljoin, urlsplit
 
 import lxml.html
@@ -83,17 +85,41 @@ def _file_url_from_shillerdata(html: str) -> str:
     return link.geturl()
 
 
-def _shillerdata_history() -> list[float]:
-    """The CAPE column of the ie_data.xls that Shiller's page links."""
+def _shillerdata_file() -> bytes:
+    """The ie_data.xls that Shiller's page links."""
     page = fetch("shillerdata", SHILLERDATA_PAGE_URL).text
-    return _history_from_shillerdata(fetch("shillerdata", _file_url_from_shillerdata(page)).content)
+    return fetch("shillerdata", _file_url_from_shillerdata(page)).content
 
 
-def current_cape() -> SourceResult:
-    """Current CAPE: the last value in the CAPE column of Shiller's file, multpl's page as the fallback."""
+def _check_shillers_month(content: bytes, today: date) -> None:
+    """Passes in exactly one case: the Date cell of the row that holds the
+    file's last CAPE value, read as a number YYYY.MM (Shiller's: 2026.1 is
+    October, 2026.01 January), names the month of `today` or the month
+    before. Everything else is SourceError, every exception of the parser
+    included."""
+    try:
+        df = pd.read_excel(io.BytesIO(content), sheet_name="Data", header=7)
+        cape = pd.to_numeric(df[next(c for c in df.columns if "CAPE" in str(c).upper())], errors="coerce")
+        stamp = float(df["Date"][cape.notna()].iloc[-1])
+        year = math.floor(stamp)
+        hundredths = (stamp - year) * 100
+    except Exception as exc:
+        raise SourceError(f"shillerdata: no month for the last CAPE ({type(exc).__name__})") from exc
+    month = round(hundredths)
+    last_month = (today.year, today.month - 1) if today.month > 1 else (today.year - 1, 12)
+    if abs(hundredths - month) > 1e-6 or (year, month) not in {(today.year, today.month), last_month}:
+        raise SourceError(f"shillerdata: the last CAPE is of {stamp}, not of this month or the last")
+
+
+def current_cape(today: date | None = None) -> SourceResult:
+    """Current CAPE: the last value in the CAPE column of Shiller's file while
+    its row is of this month or the last (of `today`, by default the UTC date);
+    multpl's page is the fallback."""
     errors: list[str] = []
     try:
-        return SourceResult(_shillerdata_history()[-1], Provenance(source="shillerdata_ie_data"))
+        content = _shillerdata_file()
+        _check_shillers_month(content, today or datetime.now(UTC).date())
+        return SourceResult(_history_from_shillerdata(content)[-1], Provenance(source="shillerdata_ie_data"))
     except Exception as e:
         errors.append(f"shillerdata: {e}")
     try:
@@ -109,7 +135,8 @@ def monthly_cape_history() -> SourceResult:
     multpl monthly table fallback)."""
     errors: list[str] = []
     try:
-        history = _shillerdata_history()
+        # No month gate here: a file that ends early still holds every month up to its end.
+        history = _history_from_shillerdata(_shillerdata_file())
         if len(history) < 240:
             raise SourceError("shillerdata: too little history")
         return SourceResult(history, Provenance(source="shillerdata_ie_data"))

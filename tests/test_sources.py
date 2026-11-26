@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import calendar
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
@@ -272,9 +272,10 @@ class TestSourceChains:
         with pytest.raises(SourceError):
             _file_url_from_shillerdata(page)
 
-    def _serve(self, monkeypatch, capes: list[float], down: str | None = None) -> None:
-        """Shiller's page, the file it links (as in ie_data.xls: the sheet "Data", seven
-        lines above the column headings) and multpl's page answer; `down` and any other URL raise."""
+    def _serve(self, monkeypatch, months: list[tuple[float | None, float]], down: str | None = None) -> None:
+        """Shiller's page, the file it links (as in ie_data.xls: the sheet "Data", seven lines
+        above the column headings, a Date and a CAPE cell per month) and multpl's page answer;
+        `down` and any other URL raise."""
         import io
 
         import pandas as pd
@@ -282,7 +283,7 @@ class TestSourceChains:
         import app.sources.cape as cape
 
         workbook = io.BytesIO()
-        rows = [["Robert J. Shiller"]] + [[None]] * 6 + [["Date", "CAPE"]] + [[None, v] for v in capes]
+        rows = [["Robert J. Shiller"]] + [[None]] * 6 + [["Date", "CAPE"]] + [list(m) for m in months]
         pd.DataFrame(rows).to_excel(workbook, sheet_name="Data", header=False, index=False)
         answers = {"https://shillerdata.com/": _Response(text=self.SHILLER_PAGE),
                    self.SHILLER_FILE: _Response(content=workbook.getvalue()),
@@ -295,26 +296,34 @@ class TestSourceChains:
 
         monkeypatch.setattr(cape, "fetch", fake_fetch)
 
-    @pytest.mark.parametrize("down, reading", [
-        (None, (39.37, "shillerdata_ie_data", False)),
-        ("https://shillerdata.com/", (39.95, "multpl", True)),
-        (SHILLER_FILE, (39.95, "multpl", True)),
-    ], ids=["all-answer", "shillers-page-fails", "shillers-file-fails"])
-    def test_the_current_cape_comes_from_shillers_file_first_then_multpl(self, monkeypatch, down, reading):
+    @pytest.mark.parametrize("down, last, today, reading", [
+        (None, 2026.11, date(2026, 11, 26), (39.37, "shillerdata_ie_data", False)),
+        (None, 2026.11, date(2026, 12, 5), (39.37, "shillerdata_ie_data", False)),
+        (None, 2026.1, date(2026, 10, 26), (39.37, "shillerdata_ie_data", False)),
+        (None, 2026.12, date(2027, 1, 5), (39.37, "shillerdata_ie_data", False)),
+        (None, 2024.09, date(2026, 11, 26), (39.95, "multpl", True)),
+        (None, 2026.12, date(2026, 11, 26), (39.95, "multpl", True)),
+        (None, 2026.104, date(2026, 10, 26), (39.95, "multpl", True)),
+        ("https://shillerdata.com/", 2026.11, date(2026, 11, 26), (39.95, "multpl", True)),
+        (SHILLER_FILE, 2026.11, date(2026, 11, 26), (39.95, "multpl", True)),
+    ], ids=["this-month", "last-month", "2026.1-is-october", "december-in-january", "a-file-ending-2024.09",
+            "next-month", "not-yyyy.mm", "shillers-page-fails", "shillers-file-fails"])
+    def test_the_current_cape_comes_from_shillers_file_first_then_multpl(self, monkeypatch, down, last, today,
+                                                                         reading):
         import app.sources.cape as cape
 
-        self._serve(monkeypatch, [30.0, 39.37], down)
-        result = cape.current_cape()
+        self._serve(monkeypatch, [(None, 30.0), (last, 39.37)], down)
+        result = cape.current_cape(today)
         assert (result.value, result.provenance.source, result.provenance.fallback_used) == reading
 
     def test_the_history_is_the_file_shillers_page_links(self, monkeypatch):
         import app.sources.cape as cape
 
-        capes = [30.0] * 237 + [40.27, 40.12, 39.37]        # 2026.09 to 2026.11 in the file of 2026-11-26
-        self._serve(monkeypatch, capes)
+        months = [(None, 30.0)] * 237 + [(2026.09, 40.27), (2026.1, 40.12), (2026.11, 39.37)]  # file of 2026-11-26
+        self._serve(monkeypatch, months)
         result = cape.monthly_cape_history()
         assert (result.value, result.provenance.source, result.provenance.fallback_used) == \
-            (capes, "shillerdata_ie_data", False)
+            ([value for _, value in months], "shillerdata_ie_data", False)
 
     # The two places of https://www.multpl.com/shiller-pe that state the value,
     # as the page served them on 2026-11-14 (each verbatim, the lines between
