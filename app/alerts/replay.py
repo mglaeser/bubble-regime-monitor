@@ -59,7 +59,8 @@ log = get_logger(__name__)
 #: be told apart from one produced by a different harness. 3: unknown_blocks
 #: and p1_bypasses_of_unknown went with the replanning block (owner decision
 #: D2f). 4: digest_items went with the weekly digest (owner decision D2a).
-#: 5: transient_one_snapshot_band_p1_busiest_24_months was added.
+#: 5: transient_one_snapshot_band_p1_busiest_24_months and
+#: band_excursion_covers_24_months were added.
 REPLAY_SCHEMA_VERSION = 5
 
 #: Rolling windows the load report uses.
@@ -69,6 +70,8 @@ WINDOW_168H = timedelta(hours=168)
 #: regime.band_to_derisk (config/alert_rules.v3.2.yaml): "Keep it only while
 #: replay shows <= 1 transient one-snapshot P1 per 24 months".
 TRANSIENT_DERISK_P1_CAP = 1
+#: Those 24 months, at 30.44 days a month.
+WINDOW_24_MONTHS = timedelta(days=24 * 30.44)
 
 _MANDATORY_EVENT_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 _MANDATORY_EVENT_FIELDS = frozenset({
@@ -185,6 +188,8 @@ class ReplaySummary:
     #: decided either way. Reported, never folded into the count above.
     indeterminate_band_excursions: int = 0
     band_excursion_months: float = 0.0
+    #: True when window_last is at least WINDOW_24_MONTHS after window_first.
+    band_excursion_covers_24_months: bool = False
     detection_times_slots: dict[str, int] = field(default_factory=dict)
     mandatory_event_total: int = 0
     mandatory_event_detected: int = 0
@@ -740,9 +745,10 @@ def _collect_band_excursions(summary: ReplaySummary,
     if len(records) >= 2:
         span = _moment_of(records[-1]) - _moment_of(records[0])
         summary.band_excursion_months = round(span.days / 30.44, 2)
-    # 24 of those months; both edges count: entries exactly that far apart share a window.
+        summary.band_excursion_covers_24_months = span >= WINDOW_24_MONTHS
+    # Both edges of a window count: entries exactly its length apart share it.
     summary.transient_one_snapshot_band_p1_busiest_24_months = _max_in_window(
-        moments, timedelta(days=24 * 30.44))
+        moments, WINDOW_24_MONTHS)
 
 
 def _activated_episodes(session: Session) -> list[ActivatedEpisode]:
@@ -978,7 +984,7 @@ def _decide(summary: ReplaySummary) -> None:
             f"{busiest} transient one-snapshot de-risk entries inside one window of "
             "24 months; regime.band_to_derisk is kept only while replay shows <= "
             f"{TRANSIENT_DERISK_P1_CAP} per 24 months")
-    if summary.band_excursion_months < 24.0:
+    if not summary.band_excursion_covers_24_months:
         unmeasured.append(
             f"transient_derisk_p1_rate — the window spans "
             f"{summary.band_excursion_months} months; the target is stated per "

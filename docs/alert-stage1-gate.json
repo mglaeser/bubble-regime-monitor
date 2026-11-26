@@ -31,6 +31,7 @@
   "runs": {
     "stage_1": {
       "active_stage": 3,
+      "band_excursion_covers_24_months": false,
       "band_excursion_months": 0.1,
       "budget_limits": {},
       "cancelled_superseded": 0,
@@ -95,6 +96,7 @@
     },
     "stage_3": {
       "active_stage": 3,
+      "band_excursion_covers_24_months": false,
       "band_excursion_months": 0.1,
       "budget_limits": {
         "cap_168h": 8,
@@ -188,6 +190,7 @@
     },
     "stage_4": {
       "active_stage": 3,
+      "band_excursion_covers_24_months": false,
       "band_excursion_months": 0.1,
       "budget_limits": {
         "cap_168h": 8,

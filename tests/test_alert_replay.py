@@ -682,6 +682,23 @@ def test_the_gate_judges_the_busiest_24_months_of_one_snapshot_derisk_entries(
             summary.transient_one_snapshot_band_p1_busiest_24_months) == (2, busiest)
 
 
+@pytest.mark.parametrize(("span", "covered"), [
+    pytest.param(_24_MONTHS, True, id="exactly 24 months"),
+    pytest.param(_24_MONTHS - timedelta(seconds=1), False, id="24 months less one second"),
+    pytest.param(timedelta(days=730, hours=16), True, id="730 days and 16 hours"),
+])
+def test_a_history_of_one_whole_window_measures_the_keep_condition(tmp_path, artifacts, span, covered):
+    """A history whose last snapshot is at least 24 months of 30.44 days after its
+    first measures the keep condition, and one second less does not. Each of
+    these histories is stored as 23.98 months, its whole days divided by 30.44."""
+    history = [make_input(identity=f"c{i}", computed_at=moment.isoformat())
+               for i, moment in enumerate((_FIRST_ENTRY, _FIRST_ENTRY + span))]
+    summary = _run(tmp_path, artifacts, name="span.db", stage=1, inputs=history)
+    listed = [note for note in summary.not_measured if "transient_derisk_p1_rate" in note]
+    assert bool(listed) is not covered, listed
+    assert (summary.band_excursion_months, summary.band_excursion_covers_24_months) == (23.98, covered)
+
+
 # ---------------------------------------------------------------------------
 # the committed gate artifact
 # ---------------------------------------------------------------------------

@@ -883,7 +883,9 @@ weekly digest. It was 0 in every run, and no other number moved.
 Replay-summary schema `4 -> 5` adds
 `transient_one_snapshot_band_p1_busiest_24_months`: the largest number of
 transient one-snapshot entries into de-risk inside any one window of 24 months
-of 30.44 days, both edges of the window included. The verdict fails when it is
+of 30.44 days, both edges of the window included, and
+`band_excursion_covers_24_months`: whether `window_last` is at least one such
+window after `window_first`. The verdict fails when that largest number is
 above the cap of `regime.band_to_derisk`'s keep condition, one per 24 months.
 
 `tests/fixtures/alert_replay_history.json` declares the **arc** — twenty
