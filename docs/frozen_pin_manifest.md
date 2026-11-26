@@ -6,12 +6,10 @@
 > the engine loads at import (`app/methodology.py`). The test file
 > `tests/test_frozen_methodology.py` pins the artifact's bytes and holds the
 > engine's constants to it. The page itself is kept by hand; the engine never
-> reads it, and a test checks this note only
-> (`tests/test_docs_state_the_code.py`), not the tables: where the page and
-> the artifact differ, the artifact is right. The service version is not a pin
-> and is not listed here (`app/config.py` has it). The golden fixture's
-> deterministic point score is **52.43**, its seeded Monte Carlo median (the
-> headline) **52.56**, IQR **(50, 55)**.
+> reads it: where the page and the artifact differ, the artifact is right. The
+> service version is not a pin and is not listed here (`app/config.py` has it).
+> The golden fixture's deterministic point score is **52.43**, its seeded Monte
+> Carlo median (the headline) **52.56**, IQR **(50, 55)**.
 >
 > Provisional / deferred items are labelled inline. In particular the S5 lag
 > convention is **`provisional_positional`** (defects C-01 / C-02 / C-03 deferred
@@ -225,7 +223,7 @@ s2, s3, d1 and d4 count NYSE sessions since `as_of` (`compute.py:SESSION_AGED`);
 | s1 full / s1 ECY-only shim | `1.0` / `0.5` |
 | s4 COMPUTED / FLOOR | `1.0` / `0.0` (sub-score still 0.25) |
 | s5 EBP / BAA-DGS10 / HY-OAS | `1.0` / `0.5` / `0.3` |
-| d1 breadth | `min(1.0, breadth_n / breadth_universe)` (the current constituent list's size, 503 to 505 in production from July to November 2026; not a fixed 503) |
+| d1 breadth | `min(1.0, breadth_n / breadth_universe)` (the current constituent list's size, not a fixed 503) |
 | d3 hyperscaler | `usable / 5` |
 | d4 VALID(_ZERO) full / partial / FLOOR | `1.0` / `0.5` / `0.0` |
 | default | `1.0` |

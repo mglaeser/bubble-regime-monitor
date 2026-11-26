@@ -895,7 +895,7 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
     Not pure: the same raw inputs give a different snapshot on another day,
     because the age of every reading (the freshness map and, through the
     freshness SLAs, the coverage gate) and D2's 75-day branch are measured
-    against the wall clock (`_age_days`).
+    against the wall clock.
 
     `as_of_date` (ISO) is the day the caller is evaluating on, used ONLY to
     decide whether a price feed's last month has ended. It is optional and
@@ -1121,8 +1121,7 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
                                                "fed_ebp", sub,
                                                raw_value=ebp_t2_persisted, raw_unit="pp"))
     elif raw.baa_spread_history_bps and len(raw.baa_spread_history_bps) >= 24:
-        # SECOND TIER, taken only without the EBP above (quality 0.5; 3 of the
-        # 615 production snapshots to 2026-11-10, against 601 on the EBP):
+        # SECOND TIER, taken only without the EBP above (quality 0.5):
         # long-history percentile on the BAA-DGS10 proxy (monthly),
         # LSSZ t-2yr lag (24 months). HY OAS is FRED-truncated to 3yr, so its
         # own percentile is regime-limited; the Baa spread goes back to 1997.

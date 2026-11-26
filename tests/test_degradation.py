@@ -119,8 +119,7 @@ def test_entire_block_down_raises_cleanly(isolated_db):
     raw.lppls_confidence = None
     with pytest.raises(RuntimeError):
         # run_recompute catches this and returns None: a failed run, reported
-        # by the failure alarm. No route answers 500 (the refresh route had
-        # answered 202 before the run began).
+        # by the failure alarm.
         _compute(raw)
 
 

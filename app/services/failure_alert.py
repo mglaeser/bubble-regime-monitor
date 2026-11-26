@@ -38,9 +38,7 @@ outage's all-clear. No release rolls back on its own (docs/AUTO_DEPLOY.md):
 a rollback is the operator's, by hand.
 
 It never raises: every path returns a status dict, because the caller is a
-scheduler job or the manual refresh's thread, where a raise is only logged
-and the report it carried is lost. (The scheduler runs its jobs on a pool of
-ten threads, APScheduler's default, not on one.)
+scheduler job or the manual refresh's thread.
 """
 
 from __future__ import annotations

@@ -3,9 +3,8 @@
 URL: https://data.sec.gov/api/xbrl/companyfacts/CIK{zero-padded-10}.json
 A descriptive User-Agent ("Name email") is MANDATORY — generic strings cause
 403s. SEC caps at 10 req/s per IP; this service self-caps at 8 req/s with a
->= 100 ms inter-request delay. There is no long back-off: a 429 or a 5xx is
-asked again twice, after 1 s and after 2 s, and a 403 is not asked again
-(app/http_client.py; tests/test_docs_state_the_code.py runs it).
+>= 100 ms inter-request delay. A 429 or a 5xx is asked again twice, after 1 s
+and after 2 s, and a 403 is not asked again (app/http_client.py).
 
 TTM methodology: cash-flow facts in 10-Qs are YEAR-TO-DATE durations (Q2 is
 a 6-month figure) and quarterly XBRL frames are frequently absent for them,

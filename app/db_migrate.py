@@ -11,8 +11,9 @@ the project accumulated before migrations were authoritative:
       we detect the unstamped-but-populated case and `stamp head` instead,
       since a create_all DB has the current models' tables and columns. The
       migration chain builds the same schema with two differences, both
-      frozen in tests/test_migrations.py: it leaves 42 pre-alert columns
-      nullable that the models declare NOT NULL, and it has one index more.
+      frozen in tests/test_migrations.py: it leaves pre-alert columns nullable
+      that the models declare NOT NULL (KNOWN_NOTNULL_DIVERGENCES), and it
+      builds an index the models do not have (KNOWN_MIGRATION_ONLY_INDEXES).
 
 Used at app boot (main.lifespan): every release migrates the database as its
 new image boots, under the code that fits it (docs/AUTO_DEPLOY.md);

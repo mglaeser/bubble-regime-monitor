@@ -292,9 +292,8 @@ class MessageEngineAttempt(Base):
 
     Deliberately NOT app/alerts/models.py:AlertRender: that table's
     `gsm7_septets` is NOT NULL under CHECK (0..160) and septets() raises on
-    emoji, so an iMessage body of 350 code points
-    (MESSAGE_ENGINE_IMESSAGE_MAX_CHARS) carrying emoji cannot even compute the
-    column. See docs/MESSAGE_ENGINE.md, decision 3.
+    emoji, so an iMessage body carrying emoji cannot even compute the column.
+    See docs/MESSAGE_ENGINE.md, decision 3.
     """
 
     __tablename__ = "message_engine_attempts"

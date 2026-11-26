@@ -1,11 +1,9 @@
 """POST /api/v1/admin/refresh — manual recompute; requires X-API-Key.
 
 The recompute runs in a BACKGROUND thread and this endpoint returns 202
-immediately: a recompute takes one to six minutes (the sources, the GSADF
-test on cached critical values, the LPPLS fit and the model's note; 1.4 to
-5.7 minutes from the slot's :00 on the 222 scheduled runs of 2026-10-05 to
-2026-11-10, median 2.7), and a synchronous handler invited hung curls and
-accidental concurrent recomputes. A single-flight lock guarantees at
+immediately: a full gather takes many minutes (R GSADF simulation, LPPLS
+fits), and a synchronous handler invited hung curls and accidental
+concurrent recomputes. A single-flight lock guarantees at
 most one recompute at a time (shared with the scheduler); a request while
 one is running reports `already_running` instead of stacking another.
 """

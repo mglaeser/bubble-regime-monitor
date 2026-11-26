@@ -135,10 +135,7 @@ class RedFlagFact:
     its sign does not mean the same for every flag: rf1 to rf3 fire above their
     threshold (rf2 from it on), so a negative distance is their calm side; rf4
     fires with breadth BELOW 50 % (and the index near its high), so a negative
-    distance is its firing side. Production, the 490 snapshots with this
-    contract (2026-08-20 to 2026-11-10): rf4 ACTIVE on 176, its distance
-    negative on all 176; rf1 to rf3 never fired, their distances negative on
-    all 490.
+    distance is its firing side.
     """
 
     flag_id: str
