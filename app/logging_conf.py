@@ -17,6 +17,23 @@ def configure_logging(level: str = "INFO") -> None:
     # a failed release. One line closes all four providers on
     # both the success and the failure path.
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    # The root logger above is every library's in this process: the boot
+    # migration leaves it alone (app.db_migrate), where Alembic's own setup
+    # used to replace it with alembic.ini's WARN at every boot. Two libraries
+    # write a line per event and are held here.
+    # APScheduler writes two INFO lines for every run of every job, and the
+    # alert dispatcher runs every 20 s: 8,640 lines a day for that job alone.
+    # Its warnings and errors stay (a run that was missed or skipped, a job
+    # that raised; the production journal of 2026-10-05 to 2026-11-10 holds
+    # none).
+    logging.getLogger("apscheduler").setLevel(logging.WARNING)
+    # slowapi writes one WARNING per refused request (executed: 80 requests
+    # over the limit, 80 lines). The 429 is the answer. The production journal
+    # of 2026-10-05 to 2026-11-10 holds no such line either: Alembic's setup
+    # at boot disabled this logger (executed with the real server before this
+    # change: 80 refusals, 0 lines).
+    # Its errors stay (a limit it could not load or apply).
+    logging.getLogger("slowapi").setLevel(logging.ERROR)
     structlog.configure(
         processors=[
             structlog.contextvars.merge_contextvars,
