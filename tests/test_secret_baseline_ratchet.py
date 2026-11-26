@@ -17,9 +17,10 @@ commit id. This file proves the arrangement actually holds:
   * the reference cannot be moved by branch or merge-base movement;
   * both baseline tests read the one reference and neither carries its own.
 
-The mutations are applied to the REAL accepted baseline rather than to a
-hand-written fixture. A hand-written one would drift from the shape the gate
-actually produces, and then these tests would be about a document nobody ships.
+The mutations of the checks against the pinned reference are applied to the
+REAL accepted baseline rather than to a hand-written fixture. A hand-written one
+would drift from the shape the gate actually produces, and then these tests
+would be about a document nobody ships.
 """
 
 from __future__ import annotations
@@ -44,6 +45,26 @@ def accepted():
     if raw is None:
         pytest.skip("accepted baseline reference unavailable in this checkout")
     return {"bytes": raw, "doc": json.loads(raw)}
+
+
+_FIXTURE = "tests/test_fixture.py"
+
+
+@pytest.fixture
+def one_record(tmp_path, monkeypatch):
+    """A baseline of one record, written to and read from tmp_path, with
+    `ACCEPTED_ENTRIES` naming exactly that record: the check accepts the pair
+    as it stands. Built here, so the mutations below do not depend on what the
+    committed baseline holds; an approved empty one passes the real-file test."""
+    record = {"filename": _FIXTURE, "hashed_secret": "1" * 40,  # pragma: allowlist secret
+              "is_verified": False, "line_number": 7, "type": "Secret Keyword"}
+    path = tmp_path / ".secrets.baseline"
+    path.write_text(json.dumps({"results": {_FIXTURE: [record]}}), encoding="utf-8")
+    monkeypatch.setattr(ref, "ACCEPTED_ENTRIES",
+                        {_FIXTURE: [{"type": record["type"], "hashed_secret": record["hashed_secret"]}]})
+    document = json.loads(path.read_text(encoding="utf-8"))
+    ref.assert_accepted_entries(document)
+    return document
 
 
 def _rewrite(document: dict) -> bytes:
@@ -142,6 +163,61 @@ class TestRemovalIsNotSilentlyEquivalent:
         with pytest.raises(AssertionError):
             ref.assert_identical_to_reference(_rewrite(swapped),
                                               accepted["bytes"])
+
+
+# -------------------------------------------------------------- entries ------
+
+
+class TestTheAcceptedEntriesRedden:
+    """The committed baseline holds exactly the secrets of `ref.ACCEPTED_ENTRIES`
+    as detect-secrets identifies them: by file, hash and type. Every
+    mutation below is applied to a baseline of one record that the check
+    accepts as it stands (`one_record`), through the function the real-file
+    test calls (tests/test_secret_gate_policy.py::TestBaselineShape::
+    test_the_baseline_holds_exactly_the_accepted_entries)."""
+
+    def test_one_added_entry_reddens(self, one_record):
+        """The case that matters: someone adds an entry and says nothing."""
+        # A different hash under the same file: one more entry, nothing else.
+        extra = dict(one_record["results"][_FIXTURE][0], line_number=8,
+                     hashed_secret="0" * 40)  # pragma: allowlist secret
+        one_record["results"][_FIXTURE].append(extra)
+        with pytest.raises(AssertionError, match="are not the accepted"):
+            ref.assert_accepted_entries(one_record)
+
+    def test_a_removed_entry_reddens_too(self, one_record):
+        """A removed entry has to leave the literal in the same change. The
+        growth check let a shrink pass in silence, which is how the room for 15
+        additions opened (19 entries -> 5 -> 4 while the reference stayed at
+        19)."""
+        del one_record["results"][_FIXTURE]
+        with pytest.raises(AssertionError, match="are not the accepted"):
+            ref.assert_accepted_entries(one_record)
+
+    def test_an_entry_exchanged_inside_one_file_reddens(self, one_record):
+        """A fixture leaves a file, another secret enters the same file, and
+        its record is regenerated. The file holds as many entries as before and
+        the scan passes, because the baseline now holds the new secret's hash.
+        A count per file cannot tell the two baselines apart. The literal names
+        each entry by its hash, so the exchange is refused."""
+        one_record["results"][_FIXTURE][0]["hashed_secret"] = "3" * 40  # pragma: allowlist secret
+        with pytest.raises(AssertionError, match="are not the accepted"):
+            ref.assert_accepted_entries(one_record)
+
+    def test_a_record_given_another_filename_reddens(self, one_record):
+        """detect-secrets takes a record's own `filename` over the key it is
+        listed under, so changing only that field makes it another secret."""
+        one_record["results"][_FIXTURE][0]["filename"] = "app/elsewhere.py"
+        with pytest.raises(AssertionError, match="are not the accepted"):
+            ref.assert_accepted_entries(one_record)
+
+    def test_what_detect_secrets_does_not_count_passes(self, one_record):
+        """The comparison is detect-secrets' own: the record written twice, on
+        another line and marked verified is the same secret to it, as it is to
+        the scan, so the baseline still passes."""
+        record = dict(one_record["results"][_FIXTURE][0], line_number=99, is_verified=True)
+        one_record["results"][_FIXTURE] = [record, dict(record)]
+        ref.assert_accepted_entries(one_record)
 
 
 # -------------------------------------------------- filters and exclusions ----
