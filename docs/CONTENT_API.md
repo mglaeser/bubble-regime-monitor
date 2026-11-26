@@ -41,17 +41,23 @@ carried static content in the file. Classification of every text node:
 | 303 | `GROUND_BADGE` grounding-taxonomy→severity map | block `taxonomy.grounding` |
 | 377–379 | Footer `· Research, not advice.` tag | block `advice_tag` |
 
-### DYNAMIC — live-data-customized slots (placeholders in this PR)
+### DYNAMIC — slots for live-data-customized text (placeholders; no generator exists)
 
-Served by `GET /api/v1/content/dynamic` with **hard, regex-checkable
-contracts**. Placeholders satisfy their own contracts; a later stage replaces
-them with generated text under the same contracts.
+`GET /api/v1/content/dynamic` serves 82 slots. Each carries its `purpose` and
+a **hard, regex-checkable contract** (`constraints.max_len`,
+`constraints.regex`); the registry is `DYNAMIC_SLOTS` in
+`app/content_registry.py`, and the endpoint is its listing. Three are notes
+on this service's own state (`headline_note` and `audit_note` for the status
+page, `dashboard_regime_note` for the companion dashboard); the other 79 are
+the companion dashboard's own texts and values (`_save_haven_slots()`).
 
-| Slot | Purpose | max_len | Regex |
-|---|---|---|---|
-| `headline_note` | One-line interpretation of the current score/band for the status page | 200 | `^[\x20-\x7E]{1,200}$` |
-| `audit_note` | One-line summary of the current science-audit state | 160 | `^[\x20-\x7E]{1,160}$` |
-| `dashboard_regime_note` | Context line for the companion dashboard relating current regime metrics | 240 | `^[\x20-\x7E]{1,240}$` |
+Every slot is a placeholder today (`source: "placeholder"`,
+`provenance: "template"`, `updated_at: null`), and each placeholder satisfies
+its own contract. 44 say that a note is pending. 38 carry the companion
+dashboard's editorial value of July 2026, dated on the wire
+(`as_of: "2026-07"`). Nothing in this service writes a slot: the stage that
+would generate them was planned and is not built. The status page draws two of
+them, `headline_note` and `audit_note`.
 
 Already-dynamic, already-API-served (no change): `snapshot.judgment_call`,
 `service.recompute_schedule`, the worked `/score` example, docs links inside
@@ -90,8 +96,6 @@ copy asserts calendar recency ("today", "right now", "this cycle"): the claim
 is frozen at authoring time and clients must be able to date it. Blocks whose
 "now" is live-referential (copy riding the live payload it explains) carry no
 stamp; the reviewed allowlist lives in `test_dated_editorial_carries_as_of`.
-```
-```
 
 - Standard `{data, meta}` envelope, `require_read_access` + 60/min rate limit —
   the `/api/v1/status` pattern. `Cache-Control: public, max-age=300` / `max-age=60`
@@ -101,8 +105,9 @@ stamp; the reviewed allowlist lives in `test_dated_editorial_carries_as_of`.
   the schedule string is derived from `app/engine/recompute_slots.py`
   (`schedule_display()`), which also replaces the literal in
   `app/services/status.py`.
-- `source` on a dynamic slot is `placeholder` in this PR; the generation stage
-  will serve `generated` / `fallback` under the identical shape.
+- `source` on a dynamic slot is `placeholder` for every slot; `generated` and
+  `fallback` are the values a generator would serve under the identical shape,
+  and no generator exists.
 
 ## 3 · Decisions & trade-offs
 
