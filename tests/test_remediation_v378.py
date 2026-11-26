@@ -50,14 +50,26 @@ def test_vix_state_rejects_invalid_ratio():
     assert v_vix.state(1.20) == v_vix.BACKWARDATION
 
 
-def test_vix_invalid_ratio_degrades_to_neutral(isolated_db):
+@pytest.mark.parametrize("ratio", [None, float("nan")])
+def test_a_run_without_a_usable_ratio_has_the_neutral_multiplier_and_no_state(isolated_db, ratio):
+    """No ratio fetched, or one v_vix.state refuses: V is the frozen neutral
+    multiplier 1.0, so the run scores as a contango run does, and the state is
+    "unknown" wherever the snapshot states it. The registry's v3.7.8 entry
+    promises "never a mislabelled 'contango'" (app/references.py); the stored
+    state said "contango" beside fast_alarm's "unknown"."""
     from app.services.compute import compute_snapshot
     from tests.conftest import make_golden_raw_inputs
 
     raw = make_golden_raw_inputs()
-    raw.vix_ratio = float("nan")            # invalid -> neutral 1.0, never mislabelled
+    raw.vix_ratio = ratio
     data = compute_snapshot(raw, mc_samples=2_000, mc_seed=1)
-    assert data.v_multiplier == 1.0 and data.v_state == "contango"
+    assert data.v_multiplier == 1.0
+    assert data.v_state == "unknown"
+    assert data.fast_alarm["term_structure"] == "unknown"
+
+    contango = compute_snapshot(make_golden_raw_inputs(), mc_samples=2_000, mc_seed=1)
+    assert (contango.v_state, contango.v_multiplier) == ("contango", 1.0)
+    assert (data.point_score, data.median) == (contango.point_score, contango.median)
 
 
 # ---- §21 M-01: RNG + percentile method pinned (no draw change) ---------------
@@ -97,21 +109,10 @@ def test_g06_s4_floor_labelled_imputation(isolated_db):
 
 
 # ---- §24: unknown-red-flag observability (no red_flag_count change) ----------
-
-def test_s24_unknown_red_flags_listed(isolated_db):
-    from app.services.compute import compute_snapshot
-    from tests.conftest import make_golden_raw_inputs
-
-    raw = make_golden_raw_inputs()   # all inputs present EXCEPT a computed GSADF
-    data = compute_snapshot(raw, mc_samples=2_000, mc_seed=1)
-    # GSADF was not computed -> its red flag input is unknown; the others are known.
-    assert "gsadf_explosive_noncontested" in data.unknown_red_flags
-    assert "breadth_lt_50_near_ath" not in data.unknown_red_flags
-
-    raw2 = make_golden_raw_inputs()
-    raw2.breadth_pct = None
-    data2 = compute_snapshot(raw2, mc_samples=2_000, mc_seed=1)
-    assert "breadth_lt_50_near_ath" in data2.unknown_red_flags
+# Pinned on the field as served, through the pipeline and the API:
+# tests/test_api_contract.py::test_the_api_lists_as_unknown_exactly_the_flags_the_contract_calls_unknown.
+# Its first two cases are the two asserted here until the API read the typed
+# contract (no GSADF statistic: flag 1 and not flag 4; no breadth: flag 4).
 
 
 # ---- §2/§3: breadth metadata + identification bounds ------------------------

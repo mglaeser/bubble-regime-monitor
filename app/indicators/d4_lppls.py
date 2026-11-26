@@ -5,9 +5,12 @@ WHAT/HOW/WHY/references/caveats: see app.references.REGISTRY["d4"]; summary:
     lppls PyPI 0.6.24 (PINNED). v3.3.2 SINGLE-ENDPOINT DENSE SCAN: one fitting
     endpoint t2 = today, start times t1 shrinking from dt=750 down to dt=30
     trading days in steps of 5 (~144 windows); filters m in (0,1), w in [4,25].
-    confidence = fraction of start-time windows whose calibration passes the
-    filters AT THIS ENDPOINT (Sornette et al. 2015; Demirer et al. 2019) —
-    the library's per-endpoint pos_conf, reported as the scalar directly.
+    confidence = the library's per-endpoint pos_conf, reported as the scalar
+    directly: of the start-time windows whose fit is a positive bubble
+    (b < 0), the fraction whose calibration passes the filters AT THIS
+    ENDPOINT, not a share of all fitted windows (the confidence indicator
+    of Sornette et al. 2015 and Demirer et al. 2019, as the library
+    computes it).
     Three dt-band fractions (short 30-63 / medium 63-252 / long 252-750) are
     partitioned from the SAME fits (Demirer 2019 multi-scale structure at zero
     extra cost) and surfaced as payload diagnostics — never headline inputs.
@@ -62,10 +65,10 @@ FILTER_CONDITIONS: dict[str, float] = _M.as_dict("indicators", "d4", "filter_con
 # times shrink the window from LPPLS_WINDOW_MAX down to LPPLS_SMALLEST_WINDOW
 # in LPPLS_INNER_INCREMENT-day steps -> ~144 start-time windows at ONE endpoint
 # (the library grid yields dt in {34, 39, ..., 749} for a 750-close window).
-# Atom N2800 budget: ~144 fits x max_searches=15 projects ~650-850 s (measured
-# against the v3.2 calibration of 675k point-searches ~ 64 s on a dev core,
-# Atom ~8x slower) — inside the 1500 s subprocess timeout with margin. Raise
-# max_searches only after a timed host run.
+# Budget: the ~144 fits x max_searches=15 take 16 to 37 s on the deploy host
+# (222 fits in the service log, 2026-10-05 to 2026-11-10; median 19 s), far
+# inside LPPLS_TIMEOUT_S (default 1500 s). Raise max_searches only after a
+# timed host run.
 LPPLS_WORKERS = _M.get_path("indicators", "d4", "workers")
 LPPLS_WINDOW_MAX = _M.get_path("indicators", "d4", "window_max")          # 750 trading days
 LPPLS_SMALLEST_WINDOW = _M.get_path("indicators", "d4", "smallest_window")      # 30
