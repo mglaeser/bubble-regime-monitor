@@ -76,7 +76,7 @@ FRESHNESS_SLA_DAYS: dict[str, int] = _M.as_dict("freshness_sla_days")
 # The readings a daily market feed delivers once per NYSE session, the ones with
 # the 3-day SLA: their SLA counts NYSE sessions since as_of, not calendar days.
 # Counted in calendar days, Friday's breadth is 4 days old on every Tuesday
-# until Monday's is stored (13:00 UTC), and the coverage gate reads a weekend
+# until Monday's is stored, and the coverage gate reads a weekend
 # as an outage. The cost: a daily feed that really stops is stale once more
 # than three sessions have passed, two calendar days later across a weekend,
 # three across an exchange holiday too, never earlier. The numbers stay the

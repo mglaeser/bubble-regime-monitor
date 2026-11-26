@@ -30,10 +30,17 @@
 /.github/               @mglaeser
 /scripts/               @mglaeser
 
-# The audit ledger and the constitution: the evidence a reader would use to
-# check any of the above. B-35 extends the gate/gated separation to these.
-/governance/            @mglaeser
+# The audit ledger and the constitution (AGENTS.md): the evidence a reader
+# would use to check any of the above. B-35 extends the gate/gated separation
+# to these. `/governance/` stood here with no directory behind it: its files
+# left the repository on 2026-08-17.
 /audit/                 @mglaeser
+/AGENTS.md              @mglaeser
+
+# The two files the gates compare against: the pinned depth of the type check
+# and what the secret scan accepts.
+/.mypy-config.pinned    @mglaeser
+/.secrets.baseline      @mglaeser
 
 # The alert system's decision surfaces: the rules and phrases are the thing
 # that decides whether a human gets woken up.
