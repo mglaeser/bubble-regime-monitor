@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from app import methodology as _M
 from app.alerts.calendars import is_trading_day, trading_days_after
@@ -1629,23 +1629,12 @@ def persist_snapshot(data: SnapshotData, raw: RawInputs) -> int:
     settings = get_settings()
     now = datetime.now(UTC)
 
-    # judgment call (degrades gracefully; never blocks the recompute)
     with session_scope() as session:
         last = session.execute(
             select(Snapshot).order_by(Snapshot.computed_at.desc(), Snapshot.id.desc()).limit(1)
         ).scalars().first()
         last_text = last.judgment_call if last else None
         prev_snapshot_id = last.id if last else None
-
-    s_scores = {k: v.sub_score for k, v in data.indicators.items() if k.startswith("s")}
-    d_scores = {k: v.sub_score for k, v in data.indicators.items() if k.startswith("d")}
-    call = judgment.generate(
-        data.median, data.iqr, data.action_band, s_scores, d_scores, data.v_multiplier,
-        data.red_flags.as_dict(), data.override_fired,
-        data.trend_states.get("SPY", {}).get("faber_10mo", "unknown"),
-        data.trend_states.get("QQQ", {}).get("faber_10mo", "unknown"),
-        data.fast_alarm, last_successful=last_text,
-    )
 
     # ---- typed alert contract (Stage 0). NON-SCORING, post-hoc, pure. -------
     # Built here (not in compute_snapshot) so `observed_at` is the SAME instant
@@ -1722,9 +1711,11 @@ def persist_snapshot(data: SnapshotData, raw: RawInputs) -> int:
             block_d=block_d_payload,
             trend_states=data.trend_states,
             fast_alarm=data.fast_alarm,
-            judgment_call=call.text,
-            judgment_stale=call.stale,
-            judgment_error=call.error_class,
+            # Until write_judgment replaces it, GET /api/v1/score and the
+            # status page serve this as what it is: the previous note, stale.
+            judgment_call=last_text,
+            judgment_stale=True,
+            judgment_error=None,
             data_freshness={**data.freshness, "_coverage": data.coverage,
                             "_ath_provenance": data.ath_provenance},
             # RM-1: stamp the methodology actually in force in THIS process —
@@ -1763,8 +1754,33 @@ def persist_snapshot(data: SnapshotData, raw: RawInputs) -> int:
     return snap_id
 
 
+def write_judgment(snap_id: int, data: SnapshotData) -> None:
+    """Ask the gateway for the note and write it onto the committed snapshot.
+
+    The model call sits inside no transaction. On a failed call the row gets
+    the previous snapshot's note as it stands then (none for the first
+    snapshot), stale, and the error class (app.engine.judgment)."""
+    s_scores = {k: v.sub_score for k, v in data.indicators.items() if k.startswith("s")}
+    d_scores = {k: v.sub_score for k, v in data.indicators.items() if k.startswith("d")}
+    call = judgment.generate(
+        data.median, data.iqr, data.action_band, s_scores, d_scores, data.v_multiplier,
+        data.red_flags.as_dict(), data.override_fired,
+        data.trend_states.get("SPY", {}).get("faber_10mo", "unknown"),
+        data.trend_states.get("QQQ", {}).get("faber_10mo", "unknown"),
+        data.fast_alarm,
+    )
+    with session_scope() as session:
+        text = call.text
+        if call.stale:  # the call failed: the fallback is read now, when it is used
+            prev = session.get_one(Snapshot, snap_id).prev_snapshot_id
+            text = session.scalar(select(Snapshot.judgment_call).where(Snapshot.id == prev))
+        session.execute(update(Snapshot).where(Snapshot.id == snap_id).values(
+            judgment_call=text, judgment_stale=call.stale, judgment_error=call.error_class))
+
+
 def run_recompute() -> int | None:
-    """Full recompute: gather -> compute -> persist -> Parquet export.
+    """Full recompute: gather -> compute -> persist -> alert capture ->
+    Parquet export -> feed -> judgment note.
 
     Returns the snapshot id, or None if scoring was impossible (an entire
     block empty). Never raises upstream failures."""
@@ -1777,6 +1793,18 @@ def run_recompute() -> int | None:
         log.error("recompute_impossible", error=str(exc))
         return None
     snap_id = persist_snapshot(data, raw)
+    # Alert system: directly after the snapshot commits, before anything that
+    # waits on a disk or a network. The capture is the one step of a run that
+    # nothing makes up for: a snapshot without its sidecar is a hole in the
+    # replay record (app/services/alert_integration.py). Its own transaction
+    # and its own exception boundary: it cannot delay, alter or roll back the
+    # snapshot.
+    try:
+        from app.services.alert_integration import on_snapshot_committed
+
+        on_snapshot_committed(snap_id)
+    except Exception as exc:
+        log.warning("alert_hook_failed", error=str(exc)[:300])
     try:
         from app.services.backfill import export_parquet
 
@@ -1791,15 +1819,11 @@ def run_recompute() -> int | None:
         build_and_persist_feed(raw, data)
     except Exception as exc:
         log.warning("dashboard_feed_failed", error=str(exc)[:300])
-    # Alert system: strictly AFTER the snapshot commits, in its own transaction
-    # and its own exception boundary. It cannot delay, alter or roll back the
-    # snapshot — the whole system is off by default and does nothing here until
-    # an operator enables capture.
+    # The judgment note last: the one model call of the run, onto the committed
+    # snapshot. Nothing above waits for it.
     try:
-        from app.services.alert_integration import on_snapshot_committed
-
-        on_snapshot_committed(snap_id)
+        write_judgment(snap_id, data)
     except Exception as exc:
-        log.warning("alert_hook_failed", error=str(exc)[:300])
+        log.warning("judgment_write_failed", error=sanitize(exc, limit=300))
     log.info("recompute_done", snapshot_id=snap_id, median=data.median, band=data.action_band)
     return snap_id

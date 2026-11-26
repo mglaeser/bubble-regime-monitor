@@ -863,8 +863,8 @@ stage.
 
 ### The committed evidence
 
-`docs/alert-stage1-gate.json` is a replay of a synthetic history at stages 1,
-3, and 4. CI regenerates it and fails on any difference:
+`docs/alert-stage1-gate.json` is a replay of a synthetic history at stages 1
+and 3. CI regenerates it and fails on any difference:
 
 ```bash
 python -m scripts.export_alert_stage1_gate           # write
@@ -927,6 +927,13 @@ two new episodes are the arc's second `tripwire.rf4_all_clear` and second
 `legs.faber_spy_back_in`, each 20 h after the first and inside its 48 h
 cooldown, so neither plans a message and `COOLDOWN` goes `4 -> 6`. No verdict
 moved.
+
+The stage-4 run left the file; the runs of stages 1 and 3, the bound hashes,
+the history and the catalogue kept their bytes. Stage 4 was the legacy
+daily-digest cutover, deleted with its switch (owner decision D2c, section
+11), and its run repeated the stage-3 run in every field but
+`evaluated_at_stage` and the note of a forward-looking replay. `--stage 4`
+remains a stage the command line can replay, like any other.
 
 `tests/fixtures/alert_replay_history.json` declares the **arc** — twenty
 recompute slots through hold → trim → de-risk → recovery, with two blind slots
