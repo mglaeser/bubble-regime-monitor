@@ -483,11 +483,6 @@ REGISTRY: dict[str, Methodology] = {
             "General buildout-analogy literature (railroad/telecom capital-cycle studies)",
         ],
         caveats=[
-            # What the gate's growth leg reads (app/sources/edgar.py), and which
-            # way that leans: with capex above OCF the gate is off at 22 % growth
-            # and fires at 11 %, so the slower-growing group is the easier bar
-            # (tests/test_d3_gate_words.py). The daily digest's model reads this
-            # caveat whole (app/message_engine/context.py).
             "The gate reads the group's total revenue growth between its last two fiscal years, "
             "not the growth of its cloud segment, which EDGAR companyfacts does not carry. A group "
             "usually grows more slowly than its cloud segment, so this gate trips more easily than "

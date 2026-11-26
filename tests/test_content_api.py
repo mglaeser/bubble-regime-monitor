@@ -973,9 +973,7 @@ class TestBlockArtifact:
         import app.content_registry as reg
 
         reg._clear_artifact_cache()
-        # The version rises with a change of served text, so a client sees
-        # that the content changed (1 -> 2 was #136). 3: gauge.reg.d3 names
-        # total revenue as what fires the gate (tests/test_d3_gate_words.py).
+        # 3: the deck's gauge.reg.d3 names total revenue as what fires the gate.
         assert reg.content_version() == 3
         payload = reg.dashboard_payload()
         assert payload["content_version"] == 3

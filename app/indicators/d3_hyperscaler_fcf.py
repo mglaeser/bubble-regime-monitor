@@ -41,13 +41,7 @@ CIKS: dict[str, str] = {
 class HyperscalerReading:
     ticker: str
     capex_ocf_ttm: float
-    # The group's total revenue growth between its last two fiscal years, in
-    # percent: the only growth the EDGAR adapter reads. None => unknown (the
-    # payload has no two fiscal years of revenue). There is no "proxy used"
-    # flag: total revenue stands in for nothing. The flag that was here
-    # (revenue_proxy_used) was True whenever a growth figure existed, and no
-    # code read it.
-    revenue_yoy_pct: float | None
+    revenue_yoy_pct: float | None  # the group's total revenue growth over its last two fiscal years, in percent; None => unknown
     ttm_fcf: float
 
 

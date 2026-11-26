@@ -279,7 +279,7 @@ def build_alert_input(snapshot: Snapshot, *, built_at: datetime,
     gate = d3.get("gate_fired")
     # `as_of` IS the filing period, and it is the confirmation key this rule
     # needs. For the EDGAR adapter it is the END of the filed XBRL duration fact
-    # (app/sources/edgar.py ttm() -> f.end, surfaced by hyperscaler_readings), taken as
+    # (app/sources/edgar.py ttm() -> f.end, surfaced at edgar.py:171), taken as
     # the max across the hyperscaler cohort. The moment we READ it is a
     # different field, `Provenance.fetched_at`. So it is stable across
     # recomputes and advances only when an issuer files a later period —

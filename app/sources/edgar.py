@@ -167,13 +167,6 @@ def hyperscaler_readings() -> SourceResult:
         ))
     if not readings:
         raise SourceError("EDGAR: no hyperscaler facts retrievable")
-    # The note names what the gate's growth leg read. Its predecessor,
-    # "total-revenue growth used as conservative gate proxy", ended D3's stored
-    # note in 615 of 615 production snapshots (2026-07-11 to 2026-11-10). No
-    # segment figure was ever read for total revenue to stand in for, and a
-    # group's growth is the easier bar for the gate, not the conservative one
-    # (REGISTRY["d3"].caveats; tests/test_d3_gate_words.py). No code reads a
-    # note's text; stored snapshots keep the note they were published with.
     note = "gate growth: total revenue, last two fiscal years" if growth_read else None
     return SourceResult(readings, Provenance(source="sec_edgar", note=note,
                                              as_of=latest_as_of.isoformat() if latest_as_of else None))
