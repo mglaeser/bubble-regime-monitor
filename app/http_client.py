@@ -18,6 +18,7 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass, field
+from http import HTTPStatus
 
 import httpx
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
@@ -108,23 +109,45 @@ def _is_retryable(exc: BaseException) -> bool:
     return False
 
 
+def _request_text(url: httpx.URL | str, status: int | None = None) -> str:
+    """The text for a request's URL and status in this module's failure log and status error.
+
+    Of the URL it names the scheme, the host and the path, and nothing else:
+    no userinfo, no port, no query, no fragment. A URL that httpx cannot
+    parse, or that has no scheme or no host, is not named. A status is its
+    number and the standard library's phrase for that number, not the
+    upstream's reason phrase (the number alone where the library has none).
+    """
+    try:
+        parsed = httpx.URL(url)
+        where = f"{parsed.scheme}://{parsed.host}{parsed.path}" if parsed.is_absolute_url else ""
+    except Exception:   # httpx.InvalidURL, or whatever else the parser raises
+        where = ""
+    if status is None:
+        return where
+    try:
+        said = f"HTTP {status} {HTTPStatus(status).phrase}"
+    except ValueError:
+        said = f"HTTP {status}"
+    return f"{said} for {where}" if where else said
+
+
 def require_success(resp: httpx.Response, what: str) -> None:
-    """Raise httpx.HTTPStatusError for a non-2xx answer, WITHOUT the query string.
+    """Raise httpx.HTTPStatusError for a non-2xx answer, with a text made here.
 
     httpx's own Response.raise_for_status writes the full request URL into
     the error text, and FRED, Alpha Vantage and Polygon carry their API key in
-    the query string: every caller that logged or stored that text logged or
-    stored the key. So the text is born without the query: the caller's own
-    label (`what`: the source and the series or symbol, which the query used
-    to name), the status, the reason and the URL up to its path. The type,
-    the request and the response are httpx's.
+    the query string. This text is the caller's label (`what`, such as
+    `fred:DTB3`) and `_request_text` of the status and of the URL this
+    process asked for: after a followed redirect, the URL that answered is
+    the upstream's and is not named. The type, the request and the response
+    are httpx's.
     """
     if resp.is_success:
         return
-    where = resp.request.url.copy_with(query=None)
-    raise httpx.HTTPStatusError(
-        " ".join(f"{what}: HTTP {resp.status_code} {resp.reason_phrase} for {where}".split()),
-        request=resp.request, response=resp)
+    asked = (resp.history[0] if resp.history else resp).request.url
+    raise httpx.HTTPStatusError(f"{what}: {_request_text(asked, resp.status_code)}",
+                                request=resp.request, response=resp)
 
 
 @retry(
@@ -150,7 +173,7 @@ def fetch(source: str, url: str, *, headers: dict[str, str] | None = None,
         resp = _get_with_retry(source, url, merged, params)
     except Exception:
         brk.record_failure()
-        log.warning("source_fetch_failed", source=source, url=url)
+        log.warning("source_fetch_failed", source=source, url=_request_text(url))
         raise
     brk.record_success()
     return resp

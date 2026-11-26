@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 import pathlib
 import types
+from unittest import mock
 
 import httpx
 import pytest
@@ -193,9 +194,8 @@ def keyed(isolated_db, monkeypatch):
         monkeypatch.setenv(name, key)
     get_settings.cache_clear()
     monkeypatch.setattr(hc._get_with_retry.retry, "wait", tenacity.wait_none())
-    hc._breakers.clear()
+    monkeypatch.setattr(hc, "_breakers", {})
     yield hc
-    hc._breakers.clear()
     get_settings.cache_clear()
 
 
@@ -238,12 +238,53 @@ def test_an_http_error_names_no_query_string(keyed, monkeypatch, provider, key, 
     pytest.param(403, "fred:DTB3: HTTP 403 Forbidden for https://api.stlouisfed.org/fred/series/observations",
                  id="403"),
     pytest.param(520, "fred:DTB3: HTTP 520 for https://api.stlouisfed.org/fred/series/observations",
-                 id="520"),   # 520 has no reason phrase
+                 id="520"),   # the standard library has no phrase for 520
 ])
 def test_an_http_error_names_its_source_its_status_and_the_url_up_to_its_path(
     keyed, monkeypatch, status, text,
 ):
     assert str(_provider_error(keyed, monkeypatch, "fred", status)) == text
+
+
+SECRET = "FAKEsecret0123456789"                 # pragma: allowlist secret
+
+
+def _echoing(request: httpx.Request) -> httpx.Response:
+    """An upstream that echoes the secret: in a redirect's target, and in the
+    reason phrase, a header and the body of its 403."""
+    if request.url.path == "/moved":
+        return httpx.Response(302, headers={"Location": f"https://example.test/echo/{SECRET}"})
+    return httpx.Response(403, headers={"X-Echo": SECRET}, text=SECRET,
+                          extensions={"reason_phrase": f"Bad api_key={SECRET}".encode()})
+
+
+@pytest.mark.parametrize(("url", "params", "named"), [
+    pytest.param(f"https://user:{SECRET}@example.test/data#{SECRET}", None,  # pragma: allowlist secret
+                 "https://example.test/data", id="userinfo-and-fragment"),
+    pytest.param("https://example.test/data", {"api_key": SECRET}, "https://example.test/data",
+                 id="reason-phrase"),
+    pytest.param(f"https://example.test/data?api_key={SECRET}", None, "https://example.test/data",
+                 id="inline-query"),
+    pytest.param("https://example.test/moved", {"api_key": SECRET}, "https://example.test/moved",
+                 id="redirect"),
+    pytest.param(f"https://example.test:port/data?api_key={SECRET}", None, "", id="unparseable"),
+])
+def test_the_secret_reaches_neither_the_error_nor_the_failure_log(
+    keyed, monkeypatch, url, params, named,
+):
+    """`named` is all of the URL the failure log may hold. The module's
+    logger is replaced, so the test sees what is handed to it."""
+    log = mock.Mock()
+    monkeypatch.setattr(keyed, "log", log)
+    monkeypatch.setattr(keyed, "_client", httpx.Client(      # redirects are followed, as by the pooled client
+        transport=httpx.MockTransport(_echoing), follow_redirects=True, timeout=5))
+
+    with pytest.raises((httpx.HTTPStatusError, httpx.InvalidURL)) as caught:
+        keyed.fetch("probe", url, params=params)
+
+    assert SECRET not in str(caught.value)
+    assert SECRET not in repr(log.mock_calls)
+    assert log.mock_calls == [mock.call.warning("source_fetch_failed", source="probe", url=named)]
 
 
 def test_no_module_calls_httpx_raise_for_status():
