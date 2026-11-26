@@ -1,5 +1,5 @@
 {
-  "content_version": 5,
+  "content_version": 6,
   "generated": "2026-08-29",
   "origin": "save-haven-monitor prose migration (shallow-frontend program, A1 ledger; verbatim extraction)",
   "blocks": {
@@ -1101,7 +1101,7 @@
     },
     "gauge.redflag.header": {
       "kind": "text",
-      "text": "What would have to happen — each flag has a specific threshold (encoded in its name). If at least 3 of 4 fire, the score is floored at 70 regardless of everything else (a deliberate non-compensatory override).",
+      "text": "What would have to happen — each flag has a specific threshold (encoded in its name). If at least 3 of 4 fire, the score is floored at 70 regardless of everything else (a deliberate non-compensatory override). While the GSADF flag is contested (the standing setting) it cannot fire, so all three others must fire together.",
       "source": "src/bubblegauge.tsx:161"
     },
     "gauge.falsify.header": {
@@ -1273,6 +1273,24 @@
           "v": "3.1.0",
           "score": null,
           "note": "price-layer restructure (provider chain + source hardening). Methodology unchanged."
+        },
+        {
+          "key": "v3_3_0",
+          "v": "3.3.0",
+          "score": 45,
+          "note": "AGGREGATION CHANGE (2026-07-14): each sub-score is rescaled to the range 0.10 to 1 before the geometric mean, so a single zero no longer silences its block. The score went from 33 to 45 and the band from hold to trim between two runs nine hours apart. NOT market deterioration."
+        },
+        {
+          "key": "v3_3_2",
+          "v": "3.3.2",
+          "score": 52,
+          "note": "LPPLS METHOD CHANGE (2026-07-15): one endpoint, scanned densely. D4 readings before and after are not comparable. Deployed together with 3.3.1, which moved S5 to the excess bond premium. The score went from 49 to 52 between two runs four hours apart: about 1 point from D4, about 2 from S5. NOT market deterioration."
+        },
+        {
+          "key": "v3_9_0",
+          "v": "3.9.0",
+          "score": null,
+          "note": "S4 reads the test at the last month of its sample, and a contested non-rejection scores 0.05 instead of 0.25 (2026-08-23). No step at release (51.4 to 51.5). When the statistic is no longer above its 90% critical value the score drops by 1.3 to 2.0 points: the policy, not the market."
         }
       ],
       "source": "src/bubblegauge.tsx:231-237"

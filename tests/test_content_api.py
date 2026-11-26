@@ -986,9 +986,10 @@ class TestBlockArtifact:
         # 3: the deck's gauge.reg.d3 names total revenue as what fires the gate.
         # 4: four deck statements the service contradicted are corrected.
         # 5: the de-risk and trim rows of gauge.verdict.lead and the trim one-liner are reworded.
-        assert reg.content_version() == 5
+        # 6: gauge.changelog gains three rows (3.3.0, 3.3.2, 3.9.0) and gauge.redflag.header a sentence.
+        assert reg.content_version() == 6
         payload = reg.dashboard_payload()
-        assert payload["content_version"] == 5
+        assert payload["content_version"] == 6
         assert len(payload["blocks"]) >= 211
         reg._clear_artifact_cache()
 
