@@ -179,8 +179,8 @@ def _index(calls: list[str], prefix: str) -> int:
     return next(i for i, c in enumerate(calls) if c.startswith(prefix))
 
 
-# What a release calls, from the build to the health probe: a tick that
-# releases nothing makes none of these calls.
+# What a release calls, from the build to the health probe: a tick that makes
+# none of these calls releases nothing.
 _RELEASING = ("podman build", "podman run", "podman tag", "systemctl --user restart", "curl")
 
 
@@ -406,11 +406,10 @@ def test_the_five_newest_commit_tags_stay(release):
 
 class TestAFetchThatFails:
     """docs/AUTO_DEPLOY.md, "The contract": a fetch that fails releases
-    nothing, and the tick ends without a failure in one case only: the marker
-    is a regular file the release can read, and its modification time is not
-    in the future and less than an hour old. Every other case fails the unit,
-    which OnFailure= reports. The release reads the clock through `date`,
-    which answers $NOW where a test sets it."""
+    nothing, and what the release reads from its record of the last good
+    fetch, compared with the clock, decides whether the tick fails the unit.
+    The release reads the clock through `date`, which answers $NOW where a
+    test sets it."""
 
     NOW = 1_764_000_000
 
@@ -418,34 +417,59 @@ class TestAFetchThatFails:
     def _origin_refuses(release) -> None:
         _git("remote", "set-url", "origin", str(release.checkout.parent / "gone.git"), cwd=release.checkout)
 
-    @pytest.mark.parametrize(("kind", "age", "code"), [
-        pytest.param("file", 3599, 0, id="59m59s-old"),
-        pytest.param(None, None, 1, id="missing"),
-        pytest.param("directory", 60, 1, id="unreadable"),    # its time is fresh; no file to read, as root too
-        pytest.param("file", -1, 1, id="in-the-future"),
-        pytest.param("file", 3600, 1, id="an-hour-old"),
+    @pytest.mark.parametrize(("kind", "content", "code"), [
+        pytest.param("file", f"{NOW - 3599}\n", 0, id="3599-s-old"),
+        pytest.param("link", f"{NOW - 600}\n", 0, id="a-link-to-a-10-min-old-record"),
+        pytest.param(None, None, 1, id="no-record"),
+        pytest.param("directory", None, 1, id="a-directory"),
+        pytest.param("unreadable", f"{NOW - 60}\n", 1, id="unreadable",
+                     marks=pytest.mark.skipif(os.geteuid() == 0, reason="root reads a file of mode 000")),
+        pytest.param("file", "", 1, id="empty"),
+        pytest.param("file", f"0{NOW - 60:o}\n", 1, id="a-leading-zero"),     # in octal, as bash reads a leading 0: a minute old
+        pytest.param("file", f"+{NOW - 60}\n", 1, id="a-sign"),
+        pytest.param("file", f"{NOW - 60}\nx\n", 1, id="trailing-text"),
+        pytest.param("file", f"{NOW + 1}\n", 1, id="in-the-future"),
+        pytest.param("file", f"{NOW - 3600}\n", 1, id="3600-s-old"),
+        pytest.param("link", f"{NOW - 7200}\n", 1, id="a-link-to-a-2-h-old-record"),
     ])
-    def test_a_failed_fetch_ends_quietly_only_after_a_good_fetch_within_the_hour(self, release, kind, age, code):
-        fetched = release.kept / "fetched"
-        if kind is not None:
-            fetched.mkdir() if kind == "directory" else fetched.touch()
-            os.utime(fetched, (self.NOW - age, self.NOW - age))
+    def test_a_failed_fetch_ends_quietly_only_on_a_record_from_the_last_hour(self, release, kind, content, code):
+        record = release.kept / "fetched"
+        if kind == "directory":
+            record.mkdir()
+        elif kind is not None:
+            target = release.kept.parent / "elsewhere" if kind == "link" else record
+            target.write_text(content)
+            if kind == "link":              # the link's own time is fresh: what it leads to decides
+                record.symlink_to(target)
+                os.utime(record, (self.NOW - 60, self.NOW - 60), follow_symlinks=False)
+            if kind == "unreadable":
+                record.chmod(0)
         self._origin_refuses(release)
         result, calls = release(running=release.main(), env={"NOW": str(self.NOW)})
         assert result == code
         assert ("the next tick tries again" if code == 0 else "merges do not deploy") in release.output
         assert not any(c.startswith(_RELEASING) for c in calls), calls
 
+    def test_a_good_fetch_that_cannot_be_recorded_fails_the_unit(self, release):
+        """A directory in the record's place: the unit fails, says why, and
+        releases nothing."""
+        (release.kept / "fetched").mkdir()
+        old = release.main()
+        release.advance()
+        code, calls = release(running=old, env={"NOW": str(self.NOW)})
+        assert code == 1 and "its time cannot be recorded" in release.output
+        assert not any(c.startswith(_RELEASING) for c in calls), calls
+
     def test_a_fetch_that_fails_does_not_count_as_a_good_one(self, release):
         """The hour runs from the last fetch that SUCCEEDED: a tick that fails
         every five minutes must not keep the report away for good."""
         target = release.advance()
-        assert release(running=target)[0] == 0                 # a good fetch touches the marker
+        record = release.kept / "fetched"
+        assert release(running=target, env={"NOW": str(self.NOW - 1800)})[0] == 0
+        assert record.read_text() == f"{self.NOW - 1800}\n"                 # a good fetch writes its time
         self._origin_refuses(release)
-        fetched = release.kept / "fetched"
-        os.utime(fetched, (self.NOW - 1800, self.NOW - 1800))
         assert release(running=target, env={"NOW": str(self.NOW)})[0] == 0
-        assert fetched.stat().st_mtime == self.NOW - 1800
+        assert record.read_text() == f"{self.NOW - 1800}\n"
 
     def test_a_fetch_that_fails_releases_nothing_from_the_last_known_head(self, release):
         """What origin's head is, is not known on such a tick: a commit fetched
@@ -453,9 +477,9 @@ class TestAFetchThatFails:
         reaches origin."""
         old = release.main()
         release.advance()
-        assert release(running=old, env={"BUILD_FAILS": "1"})[0] != 0     # fetched, not released
+        assert release(running=old, env={"BUILD_FAILS": "1", "NOW": str(self.NOW)})[0] != 0    # fetched, not released
         self._origin_refuses(release)
-        code, calls = release(running=old)
+        code, calls = release(running=old, env={"NOW": str(self.NOW)})
         assert code == 0 and not any(c.startswith(_RELEASING) for c in calls), calls
 
 
@@ -642,7 +666,7 @@ class TestTheUnits:
         # removed when the unit ends, success or failure, with the smoke boot's
         # database in it: nothing of a run outlives it (#148 round 2)
         assert not any(line.startswith("RuntimeDirectoryPreserve=") for line in unit["[Service]"])
-        # the one thing that outlives a run: the time of the last good fetch
+        # the state directory outlives a run, for the record of the last good fetch
         assert "StateDirectory=bubblegauge-release" in unit["[Service]"]
         assert "OnFailure=bubblegauge-notify-failed@%N.service" in unit["[Unit]"]
         # the copy installed by hand, run in the checkout - never the checkout's file

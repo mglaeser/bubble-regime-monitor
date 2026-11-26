@@ -8,9 +8,9 @@
 # unit and removes it when the unit ends, success or failure, whatever podman
 # wrote into it (executed on the host, #148 round 2) - so not preserved.
 # The state directory (for a user unit ~/.local/state/bubblegauge-release,
-# handed to the script as $STATE_DIRECTORY) outlives the run and holds one
-# empty file, `fetched`, whose modification time is that of the last fetch
-# from origin that succeeded (deploy/release.sh, at the fetch).
+# handed to the script as $STATE_DIRECTORY) outlives the run, for the record
+# of the last fetch from origin that succeeded (deploy/release.sh, at the
+# fetch).
 # ExecStart is the copy of deploy/release.sh installed by hand, not the
 # checkout's file, which every release fast-forwards: what runs on the host
 # changes only by hand (docs/AUTO_DEPLOY.md, #147 round 6).

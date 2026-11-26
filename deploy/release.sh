@@ -16,10 +16,10 @@
 # restart the service - the new image migrates the database as it boots, one
 # transaction - and wait for /healthz. A release that fails exits non-zero -
 # the unit's OnFailure= reports it - and is tried again at the next tick. A
-# fetch that fails ends the tick without a failure in one case only: a fetch
-# that succeeded within the last hour is on record (see the fetch). Nothing
-# rolls back: after the switch the service is systemd's, and a release main
-# cannot run is fixed forward (docs/AUTO_DEPLOY.md, "The release timer").
+# fetch that fails ends the tick without a failure in the one case stated at
+# the fetch. Nothing rolls back: after the switch the service is systemd's,
+# and a release main cannot run is fixed forward (docs/AUTO_DEPLOY.md, "The
+# release timer").
 set -Eeuo pipefail
 
 IMAGE=localhost/bubblegauge
@@ -62,28 +62,31 @@ last() {
 # tag named like the branch nor a local ref stands in for it (#143 round 27).
 #
 # A fetch that fails releases nothing: what origin's head is, is not known, so
-# nothing is released from the last known head either. The tick then ends
-# with exit 0 in one case only: `fetched`, an empty file in the unit's
-# StateDirectory= touched after every fetch that succeeded and never after
-# one that failed, is a regular file this script can read, and its
-# modification time is not after now and less than an hour before it. Every
-# other case fails the unit, and OnFailure= reports it: no such file (a host
-# where no fetch has succeeded yet), one that cannot be read, a time in the
-# future (the clock was set back), an hour or more (a revoked deploy key, a
-# changed host key). On the host, 2026-10-05 to 11-10, 18 ticks failed here
-# with main unmoved and the service up, none more than 27 minutes after a
-# good fetch. git keeps no time of its last good fetch: a refused one empties
-# FETCH_HEAD.
+# nothing is released from the last known head either, and the tick ends with
+# exit 0 in one case only: what the script reads from `fetched`, in the unit's
+# StateDirectory=, is 1 to 18 digits, the first not 0 (so bash's 64-bit
+# arithmetic reads them as the decimal number written), not after now and
+# less than 3600 before it, both in whole seconds of the host's clock. Every
+# other case fails the unit: no such file (a host where no fetch has succeeded
+# yet), one that cannot be read or holds anything else, a time in the future
+# (the clock was set back), an hour or more (a revoked deploy key, a changed
+# host key). On the host, 2026-10-05 to 11-10, 18 ticks failed here with main
+# unmoved and the service up, none more than 27 minutes after a good fetch.
+# git keeps no time of its last good fetch: a refused one empties FETCH_HEAD,
+# so the script writes it itself, below.
 if ! git fetch --quiet --prune --no-tags origin "+refs/heads/$BRANCH:$REMOTE"; then
   now="$(date +%s)"
-  fetched="$(stat -c %Y "$STATE_DIRECTORY/fetched" 2>/dev/null)" || fetched=""
-  [[ -f "$STATE_DIRECTORY/fetched" && -r "$STATE_DIRECTORY/fetched" && "$fetched" =~ ^[0-9]+$ ]] \
-    && (( fetched <= now && now - fetched < 3600 )) \
+  fetched="$(cat "$STATE_DIRECTORY/fetched")" || fetched=""
+  [[ "$fetched" =~ ^[[:digit:]]{1,18}$ && "$fetched" != 0* ]] && (( fetched <= now && now - fetched < 3600 )) \
     || die "the fetch failed, and no fetch from origin is on record within the last hour: merges do not deploy; $SERVICE is untouched"
   printf '==> the fetch failed: nothing is released, and the next tick tries again\n' >&2
   exit 0
 fi
-touch "$STATE_DIRECTORY/fetched"
+# After every fetch that succeeded, never after one that failed: its time,
+# moved over the record (-T: a directory in its place fails the move instead
+# of taking the file in). A time that cannot be recorded fails the unit.
+date +%s > "$STATE_DIRECTORY/fetched.new" && mv -fT "$STATE_DIRECTORY/fetched.new" "$STATE_DIRECTORY/fetched" \
+  || die "the fetch succeeded, and its time cannot be recorded in $STATE_DIRECTORY/fetched: merges do not deploy; $SERVICE is untouched"
 TARGET="$(git rev-parse "$REMOTE")"
 # The one comparison. A container that runs main's commit and does not answer
 # is the unit's: podman's health check kills it after five failed checks in a
