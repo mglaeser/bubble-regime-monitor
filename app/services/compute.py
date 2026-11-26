@@ -1757,11 +1757,9 @@ def persist_snapshot(data: SnapshotData, raw: RawInputs) -> int:
 def write_judgment(snap_id: int, data: SnapshotData) -> None:
     """Ask the gateway for the note and write it onto the committed snapshot.
 
-    The model call sits between two short transactions, inside neither. On a
-    failed call the row keeps the carried text, stale, and gets the error
-    class (app.engine.judgment)."""
-    with session_scope() as session:
-        carried = session.get_one(Snapshot, snap_id).judgment_call
+    The model call sits inside no transaction. On a failed call the row gets
+    the previous snapshot's note as it stands then (none for the first
+    snapshot), stale, and the error class (app.engine.judgment)."""
     s_scores = {k: v.sub_score for k, v in data.indicators.items() if k.startswith("s")}
     d_scores = {k: v.sub_score for k, v in data.indicators.items() if k.startswith("d")}
     call = judgment.generate(
@@ -1769,11 +1767,15 @@ def write_judgment(snap_id: int, data: SnapshotData) -> None:
         data.red_flags.as_dict(), data.override_fired,
         data.trend_states.get("SPY", {}).get("faber_10mo", "unknown"),
         data.trend_states.get("QQQ", {}).get("faber_10mo", "unknown"),
-        data.fast_alarm, last_successful=carried,
+        data.fast_alarm,
     )
     with session_scope() as session:
+        text = call.text
+        if call.stale:  # the call failed: the fallback is read now, when it is used
+            prev = session.get_one(Snapshot, snap_id).prev_snapshot_id
+            text = session.scalar(select(Snapshot.judgment_call).where(Snapshot.id == prev))
         session.execute(update(Snapshot).where(Snapshot.id == snap_id).values(
-            judgment_call=call.text, judgment_stale=call.stale, judgment_error=call.error_class))
+            judgment_call=text, judgment_stale=call.stale, judgment_error=call.error_class))
 
 
 def run_recompute() -> int | None:

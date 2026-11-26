@@ -126,3 +126,19 @@ def test_a_failed_model_call_keeps_the_previous_note_and_names_the_error(recompu
     second = recompute.run()
     assert second == first + 1
     assert recompute.note(second) == ("A plain note.", True, "TimeoutError")
+
+
+def test_a_note_the_previous_snapshot_gets_while_the_model_is_asked_is_the_fallback(recompute):
+    def _fails(prompt: str) -> str:
+        raise TimeoutError("the gateway did not answer")
+
+    recompute.completion = _fails
+    first = recompute.run()
+
+    def _previous_note_lands_then_fails(prompt: str) -> str:
+        with session_scope() as session:
+            session.get_one(Snapshot, first).judgment_call = "A plain note."
+        raise TimeoutError("the gateway did not answer")
+
+    recompute.completion = _previous_note_lands_then_fails
+    assert recompute.note(recompute.run()) == ("A plain note.", True, "TimeoutError")
