@@ -205,6 +205,10 @@ def get_history(
             "action_band": s.action_band,
             "override_fired": s.override_fired,
             "red_flag_count": s.red_flag_count,
+            # The versions that computed this row, as stored with it
+            # (meta.service_version is the answering service's).
+            "service_version": s.service_version,
+            "methodology_version": s.methodology_version,
         }
         for s in rows
     ]
