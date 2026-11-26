@@ -189,6 +189,16 @@ def _month_end_of(as_of: Any) -> str | None:
         return None
 
 
+def _ended_month(as_of: Any, today: date) -> bool:
+    """Is `as_of` a calendar date written YYYY-MM-DD (date.fromisoformat reads
+    it and isoformat writes it back unchanged) whose month has ended by `today`?"""
+    try:
+        return (date.fromisoformat(as_of).isoformat() == as_of
+                and date.fromisoformat(_month_end_iso(as_of[:7])) <= today)
+    except (TypeError, ValueError):
+        return False
+
+
 def _month_gaps(months: list[str]) -> list[str]:
     """Calendar months missing from a sorted YYYY-MM list between its first and
     last entry (empty when contiguous)."""
@@ -549,31 +559,29 @@ def last_finra_reading() -> dict[str, Any] | None:
 
     The month is the stored payload's own as_of (block_d.indicators.d2);
     indicator_readings stores no reference month. It is readable when it is
-    a calendar date written YYYY-MM-DD (SQLite's date() returns it unchanged)
-    of a month that has ended by today. A row without a readable month is
-    never chosen, so it cannot hide another; of two rows of the same month
-    the newer is chosen. compute_snapshot then serves the reading or drops
-    D2 by the month's age."""
+    a calendar date written YYYY-MM-DD of a month that has ended by today
+    (_ended_month: Python decides, not SQLite's date functions). The rows come
+    in the order of the month's text, the newer first within a month, and the
+    first readable one is chosen, so a row without a readable month cannot
+    hide another. compute_snapshot then serves the reading or drops D2 by the
+    month's age."""
     from app.models import IndicatorReading
 
     as_of = func.json_extract(Snapshot.block_d, "$.indicators.d2.as_of")
-    month_end = func.date(as_of, "start of month", "+1 month", "-1 day")
-    today = datetime.now(UTC).date().isoformat()
+    today = datetime.now(UTC).date()
     with session_scope() as session:
-        found = session.execute(
+        rows = session.execute(
             select(IndicatorReading.value, IndicatorReading.sub_score, as_of)
             .join(Snapshot, IndicatorReading.snapshot_id == Snapshot.id)
             .where(IndicatorReading.indicator_id == "d2",
                    IndicatorReading.dropped.is_(False),
                    IndicatorReading.fallback_used.is_(False),
-                   IndicatorReading.sub_score.is_not(None),
-                   func.date(as_of) == as_of,
-                   month_end <= today)
-            .order_by(month_end.desc(), IndicatorReading.timestamp.desc()).limit(1)
-        ).first()
-    if found is None:
-        return None
-    return {"value": found[0], "sub_score": found[1], "as_of": found[2]}
+                   IndicatorReading.sub_score.is_not(None))
+            .order_by(func.substr(as_of, 1, 7).desc(), IndicatorReading.timestamp.desc()))
+        for value, sub_score, month in rows:
+            if _ended_month(month, today):
+                return {"value": value, "sub_score": sub_score, "as_of": month}
+    return None
 
 
 def gather_inputs() -> RawInputs:

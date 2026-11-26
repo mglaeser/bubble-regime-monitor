@@ -127,9 +127,10 @@ def test_the_latest_readable_month_is_served_whatever_is_stored_after_it(isolate
     raw = _live(AUGUST)
     compute.persist_snapshot(_snapshot(raw), raw)
     # Newer rows the live path stores: an older month, a month not over yet, a
-    # timestamp, no date, an empty one, and, newest of all, no month.
-    for hour, as_of in enumerate(("2026-07-31", "2026-12-31", "2026-09-30 12:00", "garbage",
-                                  "", None), start=3):
+    # day that does not exist, a timestamp, no date, an empty one, and, newest
+    # of all, no month.
+    for hour, as_of in enumerate(("2026-07-31", "2026-12-31", "2026-09-31", "2026-09-30 12:00",
+                                  "garbage", "", None), start=2):
         clock(_after(30).replace(hour=hour))
         raw = _live(as_of)
         compute.persist_snapshot(_snapshot(raw), raw)
