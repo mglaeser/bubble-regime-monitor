@@ -89,6 +89,15 @@ class TestMypyDepthPin:
         loosened = "[tool.mypy]\nstrict = 1.0\n"
         assert mypy_pin.problems(self._tree(tmp_path, loosened, pinned="[tool.mypy]\nstrict = true\n"))
 
+    def test_a_file_the_toml_library_refuses_fails_the_pin(self, tmp_path, capsys):
+        # A bare CR is no line end in TOML, and text mode reads it as one.
+        # Measured with mypy 2.3.1: it prints the parse error and checks
+        # without the table, so without `strict`.
+        (tmp_path / "pyproject.toml").write_bytes(b"[tool.mypy]\rstrict = true\r")
+        (tmp_path / ".mypy-config.pinned").write_bytes(b"[tool.mypy]\nstrict = true\n")
+        assert mypy_pin.main(tmp_path) == 1
+        assert "BLOCK" in capsys.readouterr().err
+
     def test_the_type_check_step_runs_the_pin_and_names_the_config_file(self):
         # A mypy.ini outranks pyproject.toml when mypy looks for its
         # configuration, so the step names the file the pin compares. The pin

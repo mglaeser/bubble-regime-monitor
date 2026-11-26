@@ -20,14 +20,22 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def table(text: str) -> dict[str, Any] | None:
-    """The `[tool.mypy]` table of a TOML document, sub-tables included."""
-    return tomllib.loads(text).get("tool", {}).get("mypy")
+def table(path: Path) -> dict[str, Any] | None:
+    """The `[tool.mypy]` table of a TOML file, sub-tables included. The file is
+    opened in binary and read by `tomllib.load`, as mypy 2.3.1 reads
+    pyproject.toml: the pin decodes no text and translates no line end itself."""
+    with path.open("rb") as file:
+        return tomllib.load(file).get("tool", {}).get("mypy")
 
 
 def problems(root: Path = ROOT) -> list[str]:
-    actual = table((root / "pyproject.toml").read_text(encoding="utf-8"))
-    pinned = table((root / ".mypy-config.pinned").read_text(encoding="utf-8"))
+    tables = []
+    for name in ("pyproject.toml", ".mypy-config.pinned"):
+        try:
+            tables.append(table(root / name))
+        except tomllib.TOMLDecodeError as refusal:
+            return [f"{name} is not TOML as tomllib reads it: {refusal}"]
+    actual, pinned = tables
     # The two are compared as printed below, so the order of the keys and the
     # type of each value count, in every sub-table. Measured with mypy 2.3.1:
     # the later of two spellings of one option wins (`ignore_errors`,
