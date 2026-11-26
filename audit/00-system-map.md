@@ -15,15 +15,15 @@
 
 ## Product
 
-`bubblegauge` (`app/`) is a **single-tenant, self-hosted FastAPI research service** that publishes a 0–100 "AI-bubble regime" heuristic for US equities. It is explicitly *research, not advice* (`app/references.py:DISCLAIMER`, surfaced on every response). It has **no user accounts, no login, no per-user data, no multi-tenancy**. Reads are public (`READ_ENDPOINTS_PUBLIC=true`); a single `ADMIN_API_KEY` gates the two write/side-effect endpoints (`POST /api/v1/admin/refresh`, `POST /api/v1/admin/send-sms`).
+`bubblegauge` (`app/`) is a **single-tenant, self-hosted FastAPI research service** that publishes a 0–100 "AI-bubble regime" heuristic for US equities. It is explicitly *research, not advice* (`app/references.py:DISCLAIMER`, surfaced on every response). It has **no user accounts, no login, no per-user data, no multi-tenancy**. The read API (`GET /api/v1/score`, `/indicators`, `/legs`, `/meta`, `/replay`, `/content`, `/dashboard`, `/status`) is public while `READ_ENDPOINTS_PUBLIC=true`; `ADMIN_API_KEY` gates every admin route (`/api/v1/admin/*`) and every alert read (`GET /api/v1/alerts/*`), and a second key, `ALERTS_WRITE_API_KEY`, gates the silence writes (`POST` and `DELETE` under `/api/v1/alerts/silences`); the guards are in `app/security.py`.
 
 ## Runtime / deployment
 
 | Item | Value |
 |---|---|
-| Host | bare-metal **Intel Atom N2800** (x86-64-v1, no AVX/SSE4.2 — drives the `numpy<2.3`, no-`pyarrow` pins), hostname referred to as `greenbox` |
+| Host | one x86-64-v3 machine (an **AMD EPYC**); the service targets Python 3.12 only (README, "Heavy computations"). At the audit the host was an Intel Atom N2800 (x86-64-v1); the `numpy<2.3` / `pandas<3.0` pins stay for the golden fixture, not for a CPU (`pyproject.toml`). |
 | Container | **rootless Podman**, `container_name: bubblegauge`, Python 3.12-slim base (`Containerfile`) |
-| Reverse proxy | **Nginx Proxy Manager**, public origin `bubblegauge.klee.me`; browser dashboards at `ai-bubble.fyi` and `crash.klee.me` are the CORS allow-origins (`app/main.py`) |
+| Reverse proxy | **Nginx Proxy Manager**, public origin `bubblegauge.klee.me`; the browser dashboard at `ai-bubble.fyi` is the one CORS allow-origin (`app/main.py`) |
 | Process model | uvicorn (single instance) + **APScheduler** in-process: recompute every 4h (02/06/10/14/18/22 UTC), optional daily digest carried by **exactly one** transport — iMessage (imessage-proxy) or sipgate SMS — selected by `Settings.daily_digest_transport`. iMessage wins when both switches are on, and there is deliberately no fallback: a silent downgrade would hide the proxy being down. |
 | Scaling / rollout | single instance; **no canary, no progressive delivery — blast radius of any change is 100%** |
 | Heavy compute | R **`exuber` 1.1.0** subprocess for GSADF (`r/gsadf.R`); Python **`lppls==0.6.24`** subprocess for LPPLS (`app/indicators/d4_lppls.py`) — both subprocess-isolated with timeouts (SIGILL/hang protection) |
@@ -35,8 +35,8 @@
 | Provider | **Operator-configured OpenAI-compatible hosted gateway** over the existing `httpx` dependency; endpoint/key/route are host-only settings. | `app/llm_gateway.py`, `app/config.py` |
 | Model route | `LLM_MODEL`, blank by default and set only on the deploy host. The requested route is sent to the gateway, but it is **not proof of the underlying serving model**. | `app/config.py`, `app/llm_gateway.py` |
 | Fallback | Exactly one configured route and one streamed Responses request, sent once more to that route when it fails transiently and the call's deadline leaves time (2026-10-04). There is **no app-side model substitution or fallback list**; any provider/model failover is gateway-controlled and opaque here. | `app/llm_gateway.py`, `app/engine/judgment.py` |
-| Inference config | Responses API, `stream=true`, configurable `max_output_tokens` (default ceiling 8000); no tools, temperature, effort, or provider-specific thinking fields. | `app/llm_gateway.py` |
-| **What the model does** | At runtime, generates a **≤300-char plain-language "judgment call"** and, with the message engine on, the **daily digest** from computed readings and the repository's references (a deterministic template with the engine off; lengths per channel: `SMS_MAX_LEN`, `MESSAGE_ENGINE_IMESSAGE_MAX_CHARS`). | `judgment.py:PROMPT_TEMPLATE`, `message_engine/composer.py` |
+| Inference config | Responses API, `stream=true`, configurable `max_output_tokens` (default ceiling 8000), and `reasoning` (`effort`, with `summary: auto`) where the caller names an effort: the message engine's compose of the daily digest asks for `max` (docs/MESSAGE_ENGINE.md decision 28), the judgment and the deploy note name none. No tools, no temperature. | `app/llm_gateway.py`, `app/message_engine/composer.py` |
+| **What the model does** | At runtime it writes three things: a **≤300-char plain-language "judgment call"**; with the message engine on, the **daily digest** from computed readings and the repository's references (a deterministic template with the engine off; lengths per channel: `SMS_MAX_LEN`, `MESSAGE_ENGINE_IMESSAGE_MAX_CHARS`); and after a release, the **area codes of the deploy note** (at most three from a closed list; the note renders their fixed phrases, and no word the model writes reaches the message). | `judgment.py:PROMPT_TEMPLATE`, `message_engine/composer.py`, `services/deploy_note.py` |
 | **Tools the model can call** | **NONE.** No function-calling, tool schema, or agent loop. The request payload structurally omits tool fields. Digest sinks remain code-driven. | `llm_gateway.py`, `judgment.py`, `services/digest.py` |
 | Fine-tuning / custom model | **None in this repository.** The opaque gateway route may change its underlying provider/model without this app observing it. | — |
 | Embeddings / vector store / RAG | **None.** No retrieval corpus, no vector DB, no memory store. | repo-wide search |
@@ -48,7 +48,7 @@
 
 | Store | Location | Contents |
 |---|---|---|
-| Primary DB | **SQLite** `/data/bubble.db` (`DB_URL`), Alembic migrations 0001→0004 | `snapshot` (score history), `daily_close` (Polygon breadth), `breadth_symbol_cache` (Twelve Data), series caches, `hy_oas_history`, source-health/provenance rows |
+| Primary DB | **SQLite** `/data/bubble.db` (`DB_URL`), Alembic migrations (`migrations/versions/`, authoritative) | `snapshots` and `indicator_readings` (score history), `daily_close` (Polygon breadth), `price_series_cache`, `hy_oas_history`, `source_health` / `provider_health`, `falsification_outcomes`, `dashboard_feed`, `message_engine_attempts`, the alert tables (`alert_*`, `api_idempotency_record`); the models are `app/models.py` and `app/alerts/models.py` |
 | Filesystem | `data/snapshots/` | optional Parquet exports (disabled without pyarrow) |
 | Caches | none external (no Redis/Memcached) | — |
 | Vector store | **none** | — |
@@ -57,7 +57,7 @@ No personal data of third parties is stored. The PII in the system is **two of t
 
 ## External egress paths (all outbound HTTPS)
 
-Hosted LLM gateway (HTTPS endpoint from `LLM_API_BASE_URL`) · FRED (`fredgraph.csv` + api) · Tiingo · Twelve Data · Alpha Vantage · **Polygon/Massive** (grouped-daily breadth) · **SSGA** (SPDR holdings XLSX → S&P 500 constituents) · SEC EDGAR · FINRA (margin debt) · multpl / shillerdata (CAPE) · CBOE (VIX) · **sipgate** (SMS) · **imessage-proxy** (`POST {IMESSAGE_API_BASE_URL}/api/messages`, Bearer `IMESSAGE_API_KEY`).
+Hosted LLM gateway (HTTPS endpoint from `LLM_API_BASE_URL`) · FRED (the series API alone, `app/sources/fred.py`) · Tiingo · Twelve Data · Alpha Vantage · **Polygon/Massive** (grouped-daily breadth) · **SSGA** (SPDR holdings XLSX → S&P 500 constituents) · Slickcharts (the fallback for S2's top-10 weight, `app/sources/ssga.py`) · SEC EDGAR · FINRA (margin debt) · multpl / shillerdata (CAPE) · federalreserve.gov (the Excess Bond Premium for S5, `app/sources/fed_ebp.py`) · CBOE (VIX) · CNN (Fear & Greed, non-scoring, `app/sources/fear_greed.py`) · **sipgate** (SMS) · **imessage-proxy** (`POST {IMESSAGE_API_BASE_URL}/api/messages`, Bearer `IMESSAGE_API_KEY`).
 
 **Egress is not allowlisted at the platform** (no egress firewall / network policy). Two destinations come from operator configuration: iMessage and the LLM gateway. Both now enforce HTTPS before opening a socket. The LLM client additionally rejects credentials/query/fragment in the base, validates the auth-header name, disables environment proxies and redirects, and bounds streamed input/output. A wrong but valid HTTPS host remains an operator-controlled disclosure risk; an egress allowlist is still the defence-in-depth gap (A-11/B-22).
 
@@ -65,13 +65,13 @@ Hosted LLM gateway (HTTPS endpoint from `LLM_API_BASE_URL`) · FRED (`fredgraph.
 
 All credentials are **long-lived static API keys/tokens** held in the host `.env` (gitignored — confirmed never committed to any git object, see B-06 evidence). There is **no vault, no rotation, no short-lived workload identity**:
 
-`LLM_API_KEY` · `FRED_API_KEY` · `TIINGO_API_KEY` · `TWELVE_DATA_API_KEY` · `ALPHAVANTAGE_API_KEY` · `POLYGON_API_KEY` · `ADMIN_API_KEY` · `SIPGATE_TOKEN_ID` + `SIPGATE_TOKEN` · `IMESSAGE_API_KEY` (scoped `messages:send`, `imp_` prefix — the only credential here that **expires**, 90 days by default, surfacing as a 401 indistinguishable from a wrong key).
+`LLM_API_KEY` · `FRED_API_KEY` · `TIINGO_API_KEY` · `TWELVE_DATA_API_KEY` · `ALPHAVANTAGE_API_KEY` · `POLYGON_API_KEY` · `ADMIN_API_KEY` · `ALERTS_WRITE_API_KEY` · `SIPGATE_TOKEN_ID` + `SIPGATE_TOKEN` · `IMESSAGE_API_KEY` (scoped `messages:send`, `imp_` prefix — the only credential here that **expires**, 90 days by default, surfacing as a 401 indistinguishable from a wrong key).
 
 > **Exposure (B-06, STOP-SHIP, historical):** the retired `ANTHROPIC_API_KEY` and the original data/admin/SMS credentials were pasted into a development chat channel and must be revoked/rotated. The active `LLM_API_KEY` post-dates that evidence; nothing here asserts its value was disclosed. All active credentials remain long-lived host `.env` values without vault/rotation automation.
 
 > **Container exposure (deploy prerequisite):** historical builds used `COPY . .` without a Docker/Podman ignore policy, so existing host images or build cache may contain `.env` and runtime `data/`. The synchronized ignore policies prevent recurrence only. Deploy the fixed build, purge old bubblegauge images/cache, and rotate every credential that may have entered a historical build.
 
-## The merge / deploy gate — *the artifact this operating model lives or dies on*
+## The merge / deploy gate at the audited commit (July 2026) — *the artifact this operating model lives or dies on*
 
 The mandate (Phase 0) requires: "record the policy bundle that gates merges, where it lives, and which identities can write to it."
 
