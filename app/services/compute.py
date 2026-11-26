@@ -164,6 +164,14 @@ def _month_end_iso(yyyy_mm: str) -> str:
     return f"{y:04d}-{m:02d}-{calendar.monthrange(y, m)[1]:02d}"
 
 
+def _month_end_of(as_of: Any) -> str | None:
+    """ISO date of the last day of `as_of`'s month when date.fromisoformat reads it; else None."""
+    try:
+        return _month_end_iso(date.fromisoformat(as_of).isoformat()[:7])
+    except (TypeError, ValueError):
+        return None
+
+
 def _month_gaps(months: list[str]) -> list[str]:
     """Calendar months missing from a sorted YYYY-MM list between its first and
     last entry (empty when contiguous)."""
@@ -520,7 +528,7 @@ def last_finra_reading() -> dict[str, Any] | None:
     A cached reading is stored with fallback_used, so it is never read back:
     the reading served is the last one the file gave, and its age keeps
     counting from that file's reference month. Without the filter each cached
-    row cited the cached row before it.
+    row after the first cited the cached row before it.
 
     The month is the stored payload's own as_of (block_d.indicators.d2);
     indicator_readings has no date column. A row without it yields as_of
@@ -1272,21 +1280,25 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
                    "multiplier": d2_margin.multiplier(rolled),
                    "release_period": raw.margin_as_of})
     elif (raw.margin_cached is not None
-          and (cached_age := _age_days(raw.margin_cached.get("as_of"))) is not None
+          and (cached_as_of := _month_end_of(raw.margin_cached.get("as_of"))) is not None
+          and (cached_age := _age_days(cached_as_of)) is not None
           and 0 <= cached_age <= FRESHNESS_SLA_DAYS["d2"]):
         # FINRA's file could not be read, or it lacks the month a year back:
         # serve the last reading computed from the file, dated by its own
         # reference month, while that month is inside the SLA (the same test
         # as IndicatorOutput.stale). It is a tier of the fallback chain
         # (AGENTS.md rule 3), not a placeholder (rule 4): the service computed
-        # it from the file, it keeps its date, and it ends with the SLA.
+        # it from the file, it keeps its month, and it ends with the SLA.
         # Its date is the reading's, not the failed fetch's: with as_of None
         # the coverage gate cannot count it as fresh, and Block D coverage
         # reads 0.87 instead of 1.0 although the month is weeks old.
+        # The date is the last day of the reading's month, whatever day the
+        # stored row carries: rows stored while the reader dated a month by
+        # its first day (production: 2026-05-01, 2026-06-01) would otherwise
+        # leave the SLA about a month early.
         sub = float(raw.margin_cached["sub_score"])
         sub_d["d2"] = sub
         mc_in.d2_sub = sub
-        cached_as_of = raw.margin_cached["as_of"]
         indicators["d2"] = IndicatorOutput(
             "d2", raw.margin_cached.get("value"), sub, False, "finra_xlsx (cached)", True,
             note=f"margin statistics unavailable; serving the reading of reference month "
@@ -1301,10 +1313,7 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
     else:
         # Margin debt older than its SLA is not scored, from the file or from a
         # stored reading: D2 is dropped and Block D renormalized, the rule the
-        # gate above applies to the file. Production, 2026-07-16 (the month
-        # was then dated by its first day): the file's month read 76 days old,
-        # the gate refused its YoY, and the sub-score stored from that same
-        # month was scored for two more recomputes.
+        # gate above applies to the file.
         # The numeric move: none while the file gives a reading. On the day a
         # stored reading passes the SLA the headline steps as when any
         # indicator is dropped: replayed on the stored series (605 snapshots,

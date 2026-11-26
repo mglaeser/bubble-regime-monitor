@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
@@ -13,13 +13,13 @@ from tests.conftest import make_golden_raw_inputs
 
 SLA_DAYS = methodology.get_path("freshness_sla_days", "d2")
 NOW = datetime(2026, 11, 10, 2, 0, tzinfo=UTC)
+AUGUST = "2026-08-31"   # a month as FINRA's reader dates it, by its last day
 
 
 @pytest.fixture(autouse=True)
 def clock(monkeypatch):
-    """compute's datetime.now() returns NOW, or the moment a test sets, and
-    every date these tests compute is counted from NOW: none moves while a
-    test runs."""
+    """compute's datetime.now() returns NOW, or the moment a test sets; no date
+    these tests use comes from the wall clock."""
     def _set(moment: datetime) -> None:
         class _Clock(datetime):
             @classmethod
@@ -33,6 +33,11 @@ def clock(monkeypatch):
 
 def _day(days_ago: int) -> str:
     return (NOW.date() - timedelta(days=days_ago)).isoformat()
+
+
+def _after(days: int) -> datetime:
+    """The moment `days` days after AUGUST, at NOW's hour."""
+    return datetime.combine(date.fromisoformat(AUGUST) + timedelta(days=days), NOW.timetz())
 
 
 def _snapshot(raw):
@@ -62,10 +67,10 @@ def _without_the_file(last: dict | None):
 
 
 def test_a_failed_file_fetch_does_not_move_the_headline():
-    live = _snapshot(_live(_day(40)))
+    live = _snapshot(_live(AUGUST))
     d2 = live.indicators["d2"]
     carried = _snapshot(_without_the_file(
-        {"value": d2.value, "sub_score": d2.sub_score, "as_of": _day(40)}))
+        {"value": d2.value, "sub_score": d2.sub_score, "as_of": AUGUST}))
 
     assert carried.point_score == pytest.approx(live.point_score, abs=1e-9)
     assert carried.median == pytest.approx(live.median, abs=1e-9)
@@ -75,32 +80,40 @@ def test_a_failed_file_fetch_does_not_move_the_headline():
     got = carried.indicators["d2"]
     assert got.dropped is False and got.fallback_used is True
     assert got.sub_score == pytest.approx(d2.sub_score)
-    assert got.as_of == _day(40) and got.age_days == 40 and got.stale is False
-    assert _day(40) in (got.note or "")
+    assert got.as_of == AUGUST and got.age_days == 71 and got.stale is False
+    assert AUGUST in (got.note or "")
     # A cached reading asserts no rollover, either way.
     assert "rollover: unknown" in (got.note or "")
     assert got.payload()["rollover_assertable"] is False
     assert got.payload()["multiplier"] is None
-    assert got.payload()["release_period"] == _day(40)
+    assert got.payload()["release_period"] == AUGUST
 
 
-def test_the_reading_is_served_for_the_sla_and_dropped_after_it():
+def test_the_reading_is_served_for_the_sla_and_dropped_after_it(clock):
+    """The 75 days count from the last day of the reading's month, whatever day
+    the stored row carries: rows stored while the reader dated a month by its
+    first day carry that day (production: 2026-05-01, 2026-06-01)."""
     last = {"value": 53.7, "sub_score": 0.49}
-    at_the_sla = _snapshot(_without_the_file({**last, "as_of": _day(SLA_DAYS)}))
-    assert at_the_sla.indicators["d2"].dropped is False
-    assert at_the_sla.indicators["d2"].sub_score == pytest.approx(0.49)
-    assert at_the_sla.indicators["d2"].stale is False
+    for days, served in ((SLA_DAYS, True), (SLA_DAYS + 1, False)):
+        clock(_after(days))
+        for as_of in (AUGUST, "2026-08-01"):   # the month's last day; a legacy row's first
+            d2 = _snapshot(_without_the_file({**last, "as_of": as_of})).indicators["d2"]
+            assert d2.dropped is not served
+            assert (d2.sub_score, d2.as_of, d2.stale) == ((0.49, AUGUST, False) if served
+                                                         else (None, None, None))
 
-    for as_of in (_day(SLA_DAYS + 1), _day(-1), None):   # too old; dated tomorrow; undated
+    clock(NOW)
+    for as_of in (_day(-1), None):   # a month not over yet; undated
         past = _snapshot(_without_the_file({**last, "as_of": as_of}))
         assert past.indicators["d2"].dropped is True
         assert past.indicators["d2"].sub_score is None
 
 
-def test_a_file_older_than_the_sla_is_not_scored_through_the_stored_reading():
+def test_a_file_older_than_the_sla_is_not_scored_through_the_stored_reading(clock):
     """The same month the gate refuses to compute is not served from the store."""
-    raw = _live(_day(SLA_DAYS + 1))
-    raw.margin_cached = {"value": 53.7, "sub_score": 0.49, "as_of": _day(SLA_DAYS + 1)}
+    clock(_after(SLA_DAYS + 1))
+    raw = _live(AUGUST)
+    raw.margin_cached = {"value": 53.7, "sub_score": 0.49, "as_of": AUGUST}
     d2 = _snapshot(raw).indicators["d2"]
     assert d2.dropped is True and d2.sub_score is None
     assert "older than" in (d2.note or "")
@@ -111,26 +124,26 @@ def test_a_cached_reading_is_never_read_back(isolated_db, clock):
     gave, with its month, and the store still answers with that reading."""
     assert compute.last_finra_reading() is None
 
-    raw = _live(_day(40))
+    raw = _live(AUGUST)
     live = _snapshot(raw)
     compute.persist_snapshot(live, raw)
     first = compute.last_finra_reading()
     assert first == {"value": pytest.approx(live.indicators["d2"].value),
                      "sub_score": pytest.approx(live.indicators["d2"].sub_score),
-                     "as_of": _day(40)}
+                     "as_of": AUGUST}
 
     for hour in (6, 10, 14):   # the later recomputes of NOW's day: each row is newer
         clock(NOW.replace(hour=hour))
         raw = _without_the_file(compute.last_finra_reading())
         data = _snapshot(raw)
-        assert data.indicators["d2"].as_of == _day(40)
+        assert data.indicators["d2"].as_of == AUGUST
         assert data.indicators["d2"].fallback_used is True
-        assert _day(40) in (data.indicators["d2"].note or "")
+        assert AUGUST in (data.indicators["d2"].note or "")
         compute.persist_snapshot(data, raw)
         assert compute.last_finra_reading() == first
 
     # A row stored as a fallback is skipped whatever it carries. Production
-    # holds two that carry another date than the file's reading (2026-07-16).
+    # holds two, from 2026-07-16.
     clock(NOW.replace(hour=18))
     raw = _without_the_file({"value": 1.0, "sub_score": 0.01, "as_of": _day(10)})
     other = _snapshot(raw)
