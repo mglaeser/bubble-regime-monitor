@@ -4,16 +4,22 @@
 `audit/03-findings.json` is a 119-record ledger. Left as prose it decays into a
 document nobody reads; this turns it into a state machine CI can fail on.
 
-Three modes, deliberately separate:
+Two modes, deliberately separate:
 
   (default)     report the tally, exit 0 — the repair lane. Honest while the
                 findings are still being worked: a gate that can never pass is
                 a gate someone deletes under pressure.
-  --admission   exit non-zero while production_eligible is false. This is the
-                deploy gate. Fail-CLOSED: any error computing the answer is a
-                refusal, never an admission.
   --strict      exit non-zero while any STOP-SHIP or BLOCKER is open, or any
                 PASS record carries no standing control. The end state.
+
+Both exit 1 on a ledger that cannot be read. The gate takes one of three
+argument lists - none, `--strict` or `--selftest` - and any other list,
+`--help` included, prints its usage line to stderr and exits 2.
+
+`--admission` ("the deploy gate": exit 1 while production_eligible is false)
+is removed. deploy/release.sh, which releases main, does not call it; its
+callers were the CI job deploy-admission-proof, green when the mode refused,
+and tests that required the refusal.
 
 THE ONE RULE THE MANDATE STATES ABSOLUTELY: `production_eligible` may only ever
 be COMPUTED. It was previously a hard-coded literal in two files, both now
@@ -31,6 +37,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 FINDINGS_PATH = ROOT / "audit" / "03-findings.json"
+USAGE = "usage: python -m scripts.regime.findings_gate [--strict | --selftest]"
 
 # Ordered worst-first. `band` and `escalated_band` carry free text in the
 # ledger — e.g. "STOP-SHIP (A-01+A-39 both fail)" — so a bare equality test
@@ -96,15 +103,14 @@ def is_open(record: dict) -> bool:
     fell out of the tally entirely: not counted open, not counted PASS, not
     counted NOT-APPLICABLE, not counted anywhere. Rewriting the ledger's 80
     open verdicts to plausible synonyms ("FAILED", "PARTIALLY") therefore
-    reported `open findings 0`, computed production_eligible TRUE and granted
-    deploy admission.
+    reported `open findings 0` and computed production_eligible TRUE.
 
     normalize_band already refuses to let a typo shrink the count. This is the
     same defence on the sibling field, which is where it was missing."""
     return normalize_verdict(record.get("verdict")) not in CLOSED_VERDICTS
 
 
-def load_findings(path: Path = FINDINGS_PATH) -> list[dict]:
+def load_findings(path: Path) -> list[dict]:
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, list):
         raise ValueError(f"{path} must hold a JSON list of records, found {type(data).__name__}")
@@ -235,8 +241,9 @@ def selftest() -> int:
            "an unreadable verdict must block: unknown state is not harmless")
 
     # The regression this gate exists to refuse: rewriting every open verdict to
-    # a plausible synonym previously reported `open findings 0` and granted
-    # deploy admission. Two records, one FAIL and one PARTIAL, both misspelt.
+    # a plausible synonym previously reported `open findings 0` and computed
+    # production_eligible true. Two records, one FAIL and one PARTIAL, both
+    # misspelt.
     forged = tally([{"id": "X-7", "verdict": "FAILED", "band": "STOP-SHIP"},
                     {"id": "X-8", "verdict": "PARTIALLY", "band": "BLOCKER-1"}])
     expect(forged["open_total"] == 2, "misspelt verdicts stay counted, not dropped")
@@ -266,29 +273,31 @@ def selftest() -> int:
 
 
 def main(argv: list[str]) -> int:
-    if "--selftest" in argv:
+    # The list is compared whole: a caller that still passes the removed
+    # `--admission`, alone or beside any other argument, gets exit 2 and never
+    # the report's exit 0 to take for an admission.
+    if argv == ["--selftest"]:
         return selftest()
+    if argv not in ([], ["--strict"]):
+        print(USAGE, file=sys.stderr)
+        return 2
     try:
-        records = load_findings()
+        # The path is read here, when the gate runs, not bound when the module
+        # loads: a test that points FINDINGS_PATH at its own ledger is judged
+        # on that ledger.
+        records = load_findings(FINDINGS_PATH)
         t = tally(records)
         eligible, why = production_eligible(t)
     except Exception as exc:                                   # noqa: BLE001
-        # FAIL-CLOSED. Every mode. An unreadable ledger is a refusal to admit,
-        # never an admission — the failure mode this whole file guards against
-        # is a gate that opens because something went wrong.
+        # FAIL-CLOSED, in both modes: a ledger that cannot be read exits 1,
+        # never 0. The failure this guards against is a gate that passes
+        # because something went wrong.
         print(f"REFUSE findings gate: cannot evaluate the ledger — {exc}", file=sys.stderr)
         return 1
 
-    if "--admission" in argv:
-        if not eligible:
-            print(f"REFUSE deploy admission: production_eligible is false — {why}", file=sys.stderr)
-            return 1
-        print("Deploy admission granted: production_eligible is true (computed).")
-        return 0
-
     print(_render(t, eligible, why))
 
-    if "--strict" in argv:
+    if argv == ["--strict"]:
         problems = []
         blocking = sum(t["open_by_band"][b] for b in BLOCKING_BANDS) + len(t["unbanded_open"])
         if blocking:

@@ -12,8 +12,8 @@ import pytest
 
 # The two bootstraps do NOT agree today, and the divergence is real rather than
 # cosmetic: every column below is NOT NULL under create_all and NULLABLE under
-# Alembic. Production boots from Alembic, so a production database permits nulls
-# the models declare impossible.
+# Alembic. A database built by the migration chain permits nulls the models
+# declare impossible.
 #
 # They are WAIVED, not fixed, and the difference matters. Migrations 0001-0004
 # are already applied to the live database; rewriting them would not change it,
@@ -458,7 +458,7 @@ def test_admin_atomicity_migration_upgrade_downgrade_upgrade(tmp_path):
     # Bump this in the same PR that adds a migration — that is the point of
     # pinning it rather than reading `head`, which would pass vacuously.
     assert connection.execute(
-        "select version_num from alembic_version").fetchone() == ("0026",)
+        "select version_num from alembic_version").fetchone() == ("0028",)
     connection.close()
 
 
@@ -551,7 +551,7 @@ def test_the_evidence_stamp_drop_round_trips_and_keeps_the_immutability_trigger(
             connection.execute(
                 "update alert_ruleset_registry set canonical_yaml = 'changed'")
         assert connection.execute(
-            "select version_num from alembic_version").fetchone() == ("0026",)
+            "select version_num from alembic_version").fetchone() == ("0028",)
     finally:
         connection.close()
 
@@ -822,7 +822,7 @@ def test_the_inheritance_drop_resets_inherited_state_and_round_trips(tmp_path):
         command.upgrade(cfg, "head")
 
     _run_with_db(db, _cycle)
-    assert _read("select version_num from alembic_version") == [("0026",)]
+    assert _read("select version_num from alembic_version") == [("0028",)]
 
 
 def _delivery_and_memory_shape(db: str) -> dict[str, object]:
@@ -972,7 +972,7 @@ def test_the_manual_retry_drop_round_trips_and_keeps_the_delivery_triggers(tmp_p
         command.upgrade(cfg, "head")
 
     _run_with_db(db, _cycle)
-    assert _read("select version_num from alembic_version") == [("0026",)]
+    assert _read("select version_num from alembic_version") == [("0028",)]
 
 
 def _sqlite_master(db: str) -> set[tuple]:
@@ -1292,6 +1292,234 @@ def test_the_instance_reminder_count_drop_round_trips_from_the_deliveries(tmp_pa
     assert _read("select version_num from alembic_version") == [("0026",)]
 
 
+#: A fake FRED key in the shape of the real one: 32 hexadecimal characters.
+_FAKE_FRED_KEY = "9f8e7d6c5b4a39281706f5e4d3c2b1a0"  # pragma: allowlist secret
+
+#: The note of production's source_health row 223 (fred_baa_dgs10, 2026-07-15
+#: 18:11:59), the text of a FRED 504 with the API key in its URL, here with
+#: the fake key ...
+_LEAKED_NOTE = (
+    "Server error '504 Gateway Time-out' for url 'https://api.stlouisfed.org/fred/series/"
+    f"observations?series_id=BAA&api_key={_FAKE_FRED_KEY}&file_type=json&sort_order=asc'\n"
+    "For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/504")
+#: ... and as the gather stores such a note today (app/services/compute.py _track).
+_LEAKED_NOTE_AS_THE_GATHER_STORES_IT = (
+    "Server error '504 Gateway Time-out' for url 'https://api.stlouisfed.org/fred/series/"
+    "observations?series_id=BAA&api_key=[redacted]&file_type=json&sort_order=asc' "
+    "For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/504")
+
+_INSERT_SOURCE_HEALTH = (
+    "insert into source_health (source, ok, latency_ms, http_status, checked_at, note) "
+    "values (?, ?, 1.0, NULL, ?, ?)")
+
+
+def test_0027_redacts_a_stored_note_that_carries_a_provider_key(tmp_path):
+    """SourceHealth.note must stay free of raw provider error text: the
+    unauthenticated GET /readyz serves it. The gather has redacted what it
+    stores since 2026-08-17 (app/services/compute.py _track); the rows stored
+    before that were left as they were, and one of production's is the text
+    of a FRED 504 with the API key in its URL. The first row below is that
+    note with a fake key.
+
+    0027 leaves it as the gather stores such a note today. A note the gather
+    already redacted, a note without a credential and a row without a note
+    are not touched."""
+    from app.redaction import sanitize
+
+    db = str(tmp_path / "stored-notes.db")
+    already_redacted = (
+        "Server error '500 Internal Server Error' for url 'https://api.stlouisfed.org/fred/series/"
+        "observations?series_id=BAA&api_key=[redacted]&file_type=json&sort_order=asc' "
+        "For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500")
+    stored = [  # source, ok, checked_at, note
+        ("fred_baa_dgs10", 0, "2026-07-15 18:11:59.086967", _LEAKED_NOTE),
+        ("fred_baa_dgs10", 0, "2026-09-01 06:01:02.000000", already_redacted),
+        ("fred_DFII10", 0, "2026-10-21 18:00:01.000000", "Expecting value: line 1 column 1 (char 0)"),
+        ("price_QQQ", 1, "2026-10-21 18:00:02.000000", None),
+    ]
+
+    def _rows() -> list[tuple]:
+        connection = sqlite3.connect(db)
+        try:
+            return connection.execute(
+                "select id, source, ok, latency_ms, http_status, checked_at, note "
+                "from source_health order by id").fetchall()
+        finally:
+            connection.close()
+
+    def _cycle():
+        from alembic import command
+
+        from app.db_migrate import _alembic_config
+
+        cfg = _alembic_config()
+        command.upgrade(cfg, "0026")
+        connection = sqlite3.connect(db)
+        connection.executemany(_INSERT_SOURCE_HEALTH, stored)
+        connection.commit()
+        connection.close()
+        before = _rows()
+        assert [row[1:3] + row[5:] for row in before] == stored
+
+        command.upgrade(cfg, "0027")
+
+        after = _rows()
+        assert len(after) == len(before) == 4
+        changed = [(old, new) for old, new in zip(before, after, strict=True) if old != new]
+        assert len(changed) == 1, "only the note that carried a key is rewritten"
+        old, new = changed[0]
+        assert old[-1] == _LEAKED_NOTE and new[:-1] == old[:-1], "and nothing of its row but the note"
+        assert new[-1] == _LEAKED_NOTE_AS_THE_GATHER_STORES_IT == sanitize(_LEAKED_NOTE, limit=400)
+        assert _FAKE_FRED_KEY not in new[-1]
+
+    _run_with_db(db, _cycle)
+    connection = sqlite3.connect(db)
+    assert connection.execute("select version_num from alembic_version").fetchall() == [("0027",)]
+    connection.close()
+
+
+def test_the_unread_alert_schema_drop_round_trips(tmp_path):
+    """0028 drops the alert schema that nothing reads.
+
+    An idempotency record keeps its other five columns, and nothing else in
+    the schema moves. The downgrade restores the 0027 schema byte for byte
+    and gives every record back what the one writer wrote: status 201 and an
+    expiry 24 hours after created_at, in the storage form, to the microsecond
+    (the second record sits on the last microsecond of a February, the third
+    in the year 999). The downgrade copies the records in batches, and there
+    are more of them than two batches hold.
+    """
+    db = str(tmp_path / "unread-alert-schema.db")
+    route = "POST /api/v1/alerts/silences"
+    # key, route, request_sha256, response_ref, status_code, created_at, expires_at
+    records = [
+        ("key-a", route, hashlib.sha256(b"body a").hexdigest(), "01M0SILENCEA00000000000000",
+         201, "2026-09-22 09:15:02.123456", "2026-09-23 09:15:02.123456"),
+        ("key-b", route, hashlib.sha256(b"body b").hexdigest(), "01M0SILENCEB00000000000000",
+         201, "2026-02-28 23:59:59.999999", "2026-03-01 23:59:59.999999"),
+        ("key-c", route, hashlib.sha256(b"body c").hexdigest(), "01M0SILENCEC00000000000000",
+         201, "0999-03-01 12:00:00.000000", "0999-03-02 12:00:00.000000"),
+    ]
+    kept = "idempotency_key, route, request_sha256, response_ref, created_at"
+    dropped = ("status_code", "expires_at")
+
+    def _read(sql: str) -> list[tuple]:
+        connection = sqlite3.connect(db)
+        try:
+            return connection.execute(sql).fetchall()
+        finally:
+            connection.close()
+
+    def _rows(columns: str) -> list[tuple]:
+        return _read(f"select {columns} from api_idempotency_record "  # noqa: S608
+                     "order by idempotency_key")
+
+    def _columns() -> dict[str, tuple]:
+        return _schema(db)["columns"]["api_idempotency_record"]
+
+    def _cycle():
+        from alembic import command
+        from alembic.script import ScriptDirectory
+
+        from app.db_migrate import _alembic_config
+
+        cfg = _alembic_config()
+        batch = ScriptDirectory.from_config(cfg).get_revision("0028").module._BATCH
+        records.extend((f"key-d-{i:05d}", route, hashlib.sha256(b"%d" % i).hexdigest(), f"ref-{i}",
+                        201, "2026-09-22 09:15:02.123456", "2026-09-23 09:15:02.123456")
+                       for i in range(2 * batch + 1))
+        command.upgrade(cfg, "0027")
+        connection = sqlite3.connect(db)
+        connection.executemany(
+            "insert into api_idempotency_record (idempotency_key, route, request_sha256, "
+            "response_ref, status_code, created_at, expires_at) values (?, ?, ?, ?, ?, ?, ?)",
+            records)
+        connection.commit()
+        connection.close()
+        before, columns = _sqlite_master(db), _columns()
+        calibration = {row for row in before if row[2] == "alert_calibration_registry"}
+        assert {row[:2] for row in calibration} == {
+            ("table", "alert_calibration_registry"),
+            ("index", "ix_alert_calibration_registry_metric"),
+            ("index", "sqlite_autoindex_alert_calibration_registry_1"),
+            ("index", "sqlite_autoindex_alert_calibration_registry_2"),
+        }
+        (expiry_index,) = {row for row in before
+                           if row[1] == "ix_api_idempotency_record_expires_at"}
+        (old_table,) = {row for row in before if row[:2] == ("table", "api_idempotency_record")}
+
+        command.upgrade(cfg, "0028")
+        after = _sqlite_master(db)
+        (new_table,) = {row for row in after if row[:2] == ("table", "api_idempotency_record")}
+        assert after - {new_table} == before - calibration - {expiry_index, old_table}, (
+            "nothing else in the schema moves")
+        # Type, NOT NULL, default and primary-key position of the five that stay.
+        assert _columns() == {name: spec for name, spec in columns.items()
+                              if name not in dropped}
+        assert list(_columns()) == [name.strip() for name in kept.split(",")]
+        assert _rows(kept) == [row[:4] + (row[5],) for row in records]
+        assert _read("pragma foreign_key_check") == []
+        assert _read("pragma integrity_check") == [("ok",)]
+
+        command.downgrade(cfg, "0027")
+        assert _sqlite_master(db) == before
+        restored = _rows(kept + ", " + ", ".join(dropped))
+        assert restored == [row[:4] + (row[5], row[4], row[6]) for row in records]
+        for *_, created_at, status_code, expires_at in restored:
+            assert status_code == 201
+            assert datetime.fromisoformat(expires_at) == (
+                datetime.fromisoformat(created_at) + timedelta(hours=24))
+
+        command.upgrade(cfg, "0028")
+        assert _sqlite_master(db) == after
+
+    _run_with_db(db, _cycle)
+    assert _read("select version_num from alembic_version") == [("0028",)]
+
+
+def test_the_calibration_drop_refuses_a_table_that_holds_rows(tmp_path):
+    """Fail closed on data, as 0020 and 0024: 0028 drops
+    alert_calibration_registry only when it is empty and otherwise refuses:
+    the upgrade rolls back, and the database stays at 0027 with its schema
+    and the artifact row."""
+    db = str(tmp_path / "calibration-kept.db")
+    artifact = hashlib.sha256(b"a calibration artifact").hexdigest()
+
+    def _seed_and_refuse():
+        from alembic import command
+
+        from app.db_migrate import _alembic_config
+
+        cfg = _alembic_config()
+        command.upgrade(cfg, "0027")
+        connection = sqlite3.connect(db)
+        connection.execute(
+            "insert into alert_calibration_registry (calibration_id, artifact_sha256, "
+            "canonical_json, metric, validated_at, code_revision) values "
+            "('ewma-breadth-1', ?, '{}', 'breadth_pct', '2026-10-01 00:00:00.000000', "
+            "'0000000')", (artifact,))
+        connection.commit()
+        connection.close()
+        before = _sqlite_master(db)
+
+        with pytest.raises(RuntimeError,
+                           match="0028 refuses to drop alert_calibration_registry"):
+            command.upgrade(cfg, "0028")
+
+        assert _sqlite_master(db) == before
+        connection = sqlite3.connect(db)
+        try:
+            assert connection.execute(
+                "select version_num from alembic_version").fetchone() == ("0027",)
+            assert connection.execute(
+                "select calibration_id, artifact_sha256 from alert_calibration_registry"
+            ).fetchall() == [("ewma-breadth-1", artifact)]
+        finally:
+            connection.close()
+
+    _run_with_db(db, _seed_and_refuse)
+
+
 def test_the_weekly_digest_storage_is_dropped_and_restored_exactly(tmp_path):
     """Owner decision D2a: the weekly digest is deleted, and 0024 drops what it
     stored - the alert_digest_item table with its indexes, the DIGEST branch
@@ -1363,7 +1591,7 @@ def test_the_weekly_digest_storage_is_dropped_and_restored_exactly(tmp_path):
         command.upgrade(cfg, "head")
 
     _run_with_db(db, _cycle)
-    assert _read("select version_num from alembic_version") == [("0026",)]
+    assert _read("select version_num from alembic_version") == [("0028",)]
 
 
 def test_the_weekly_digest_migration_refuses_to_drop_its_items(tmp_path):
