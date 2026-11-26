@@ -16,9 +16,9 @@ Moskowitz, Ooi & Pedersen (2012, JFE) and Huang, Li, Wang & Zhou (2020, JFE).
 
 Leg 3 — Fast Alarm: (a) VIX term-structure state; (b) Variance Risk Premium
 VRP = VIX^2 - RealizedVariance_21d(SPY), annualized, flag if VRP <= 0;
-(c) CBOE SKEW level. CAVEAT (verbatim): Bilello's analysis shows SKEW in its
-top 5% (>~131) has had ~zero forward predictive value -> LABEL: COINCIDENT
-CONTEXT ONLY.
+(c) CBOE SKEW level. CAVEAT: app.references.LEG_CAVEATS["skew"] (no forward
+predictive value in the top 5% of the cited sample, above ~131; that level
+is no extreme in 2026) -> LABEL: COINCIDENT CONTEXT ONLY.
 REFERENCE: Bollerslev & Todorov (2011), Journal of Finance 66(6): 2165-2211.
 
 Standing caveat: Cederburg, O'Doherty, Wang & Yan (2020, JFE 138(1): 95-117)
