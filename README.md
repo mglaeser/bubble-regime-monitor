@@ -100,7 +100,7 @@ Red-flag count 0 → override not fired. **Deterministic point score 52.43; MC m
 
 | Indicator | Primary source | Fallback chain | SLA |
 |-----------|---------------|----------------|-----|
-| CAPE (S1) | multpl scrape | shillerdata `ie_data.xls` | 35d |
+| CAPE (S1) | Shiller's `ie_data.xls`, at the link on shillerdata.com | multpl scrape | 35d |
 | Real 10-yr (S1) | FRED `DFII10` | none (FRED core) | 3d |
 | Concentration (S2) | SSGA SPY holdings XLSX (top-10 **holdings** sum, not a sector weight) | Slickcharts (the JPMAM guide is a cross-check by hand, not a tier) | 3d |
 | Semis run-up (S3) | Tiingo `SMH`/`SPY` | Twelve Data -> Alpha Vantage -> cache; SOXX substitute for SMH | 3d |
@@ -109,7 +109,7 @@ Red-flag count 0 → override not fired. **Deterministic point score 52.43; MC m
 | HY OAS (red flag 3; S5's last tier) | FRED `BAMLH0A0HYM2` (**truncated to rolling 3 yr since Apr 2026** — own `hy_oas_history` table, seeded on first boot, appended daily) | persisted history | 3d |
 | Breadth (D1) | S&P 500 constituents (SSGA) + Polygon grouped-daily closes, 200-DMA on read | none: D1 is dropped and its block renormalized | 3d |
 | Margin (D2) | FINRA XLSX (3–4-week publication lag) | none — cache & tolerate staleness | 75d |
-| Hyperscaler FCF (D3) | SEC EDGAR companyfacts (mandatory UA, ≤8 req/s self-cap) | total-revenue gate proxy | 100d |
+| Hyperscaler FCF (D3) | SEC EDGAR companyfacts (mandatory UA, ≤8 req/s self-cap) | none: an issuer without a reading is left out (quality n/5); with none left D3 is dropped and its block renormalized | 100d |
 | LPPLS (D4) | `lppls==0.6.24` (pinned; maintenance-inactive) | **drop + renormalize Block D** | 3d |
 | VIX curve (V) | CBOE delayed quotes | FRED `VIXCLS`/`VXVCLS` (FRED's series id for VIX3M) | 2d |
 
