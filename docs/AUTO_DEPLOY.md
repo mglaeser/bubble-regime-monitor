@@ -68,14 +68,7 @@ forward - restore `:latest` to main's image, start the service, fix the
 commit.
 A merge reaches production within one tick plus the release, about six
 minutes: merge outside the stretch from :50 before to :35 after the recompute
-slots (02/06/10/14/18/22 UTC). A restart while a run gathers and computes (25
-to 105 s after the slot in production) loses that slot: the scheduler's jobs
-live in memory and nothing catches up at boot. The next number comes with the
-next slot, and one missed slot is reported by nothing (the outage alert needs
-two). Once the snapshot is committed - the alert capture follows it directly -
-a restart costs that run only its dashboard feed and its judgment note: the
-snapshot then carries the previous note, marked stale
-(`tests/test_recompute_order.py`).
+slots (02/06/10/14/18/22 UTC).
 
 ### The deploy note
 
@@ -127,6 +120,7 @@ loginctl enable-linger "$USER"         # keep the user's units running without a
 ```bash
 systemctl --user list-timers bubblegauge-release.timer   # next check
 journalctl --user -u bubblegauge-release.service -n 50   # last releases
+journalctl --user -u bubblegauge.service -n 100          # the service: its JSON lines, uvicorn's start and stop, the traceback of a failed boot or request
 systemctl --user start bubblegauge-release.service       # release now
 systemctl --user status bubblegauge.service              # the container
 systemctl --user restart bubblegauge.service             # apply a changed .env: the release moves code only

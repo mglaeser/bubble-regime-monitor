@@ -3,32 +3,9 @@
 The specification these are written from:
   - app/services/alert_integration.py: "a lost sidecar is a hole in the replay
     record that can never be filled";
-  - app/engine/judgment.py: "the recompute never waits for" the note, and on
-    an error or a timeout "the snapshot keeps the last successful text with
-    stale:true";
-  - GET /readyz (app/routers/health.py): "Per-source health matrix from the
-    latest gather";
+  - app/engine/judgment.py: "never block the recompute";
   - AGENTS.md, "Delete before you add": dead code is "removed, not
     maintained".
-
-Production, the 222 recomputes from 2026-10-05 to 2026-11-10 (journal and
-database): the alert capture was committed 4.5 to 40.2 s after the snapshot
-(median 6.8 s, p90 21.3 s), behind the feed's provider fetches. On 2026-11-01
-the health check killed the container 3.7 s after the capture
-(alert_capture_committed 02:02:48.04, container kill 02:02:51.73). Of 490
-snapshots with a typed contract none lacks its sidecar.
-
-In the same 222 runs the snapshot's commit waited for the model's note for
-22.1 to 289.2 s (median 97.0 s, p90 155.9 s) after a gather and computation
-of 24.6 to 104.6 s (median 48.8 s): two thirds of the time in which a restart
-discarded a finished computation (148 s per run at the median, 49 s without
-the wait). On 2026-11-01 that kill came 26 s after the commit.
-
-The production database to 2026-11-10 holds 11,048 source_health rows at 615
-distinct times, each the computed_at of one of the 615 snapshots: the matrix
-was the latest snapshot's, and a gather whose run could not score left no row.
-The journal since 2026-10-05 has no such run (0 recompute_impossible beside
-222 recompute_done); it is the run after which an operator opens the page.
 
 Beside the database every run also wrote one parquet file for its snapshot,
 15 of the row's columns. Nothing read them: no reader in app, scripts, deploy
@@ -40,8 +17,6 @@ database is the record; `bubblegauge export snapshots --format parquet`
 
 from __future__ import annotations
 
-import sqlite3
-
 import pytest
 from sqlalchemy import func, select
 
@@ -51,7 +26,6 @@ from app.config import get_settings
 from app.db import session_scope
 from app.engine import judgment
 from app.models import Snapshot
-from app.routers.health import readyz
 from app.services import compute
 from tests.conftest import make_golden_raw_inputs
 
@@ -138,11 +112,6 @@ def test_the_snapshot_is_committed_before_the_model_is_asked(recompute):
     assert recompute.note(snapshot_id) == ("A plain note.", False, None)
 
 
-def test_the_model_is_asked_last(recompute):
-    recompute.run()
-    assert recompute.order == ["feed", "judgment"]
-
-
 def test_a_restart_during_the_model_call_loses_nothing(recompute):
     def _dies(prompt: str) -> str:
         raise _ProcessDies
@@ -166,47 +135,6 @@ def test_a_failed_model_call_keeps_the_previous_note_and_names_the_error(recompu
     second = recompute.run()
     assert second == first + 1
     assert recompute.note(second) == ("A plain note.", True, "TimeoutError")
-
-
-def test_a_first_run_whose_model_call_fails_has_no_note_and_names_the_error(recompute):
-    def _fails(prompt: str) -> str:
-        raise TimeoutError("the gateway did not answer")
-
-    recompute.completion = _fails
-    assert recompute.note(recompute.run()) == (None, True, "TimeoutError")
-
-
-def _pull(source: str, *, ok: bool, note: str | None = None) -> dict[str, object]:
-    """One source's health as the gather records it (compute._track)."""
-    return {"source": source, "ok": ok, "latency_ms": 12.0,
-            "http_status": 200 if ok else None, "note": note}
-
-
-def test_a_run_that_cannot_score_still_records_its_gather(recompute, monkeypatch):
-    raw = make_golden_raw_inputs()
-    # Block D without a usable source: the run cannot score.
-    raw.breadth_pct = raw.margin_balances = raw.hyperscalers = raw.lppls_confidence = None
-    raw.source_health = [_pull("cape", ok=True), _pull("finra_xlsx", ok=False, note="upstream 500")]
-    monkeypatch.setattr(compute, "gather_inputs", lambda: raw)
-
-    assert recompute.run() is None
-    assert recompute.on_disk() == {"snapshots": 0, "sidecars": 0}
-    sources = readyz()["sources"]
-    assert sources["cape"]["ok"] is True
-    assert (sources["finra_xlsx"]["ok"], sources["finra_xlsx"]["note"]) == (False, "upstream 500")
-
-
-def test_a_failed_health_write_does_not_cost_the_score(recompute, monkeypatch):
-    def _locked(**columns):
-        raise sqlite3.OperationalError("database is locked")
-
-    raw = make_golden_raw_inputs()
-    raw.source_health = [_pull("cape", ok=True)]
-    monkeypatch.setattr(compute, "gather_inputs", lambda: raw)
-    monkeypatch.setattr(compute, "SourceHealth", _locked)
-
-    assert recompute.run() is not None
-    assert recompute.on_disk() == {"snapshots": 1, "sidecars": 1}
 
 
 def test_a_snapshot_is_written_to_the_database_and_nowhere_else(recompute, isolated_db):

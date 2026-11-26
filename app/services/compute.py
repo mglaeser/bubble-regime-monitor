@@ -24,7 +24,7 @@ from typing import Any
 from sqlalchemy import select, update
 
 from app import methodology as _M
-from app.alerts.calendars import is_trading_day
+from app.alerts.calendars import is_trading_day, trading_days_after
 from app.config import get_settings
 from app.db import session_scope
 from app.engine import judgment, legs
@@ -72,6 +72,16 @@ log = get_logger(__name__)
 # Freshness SLAs (days): loaded from the frozen artifact. s5=45 because the S5
 # primary (Fed EBP) is monthly; a stale indicator is excluded from coverage.
 FRESHNESS_SLA_DAYS: dict[str, int] = _M.as_dict("freshness_sla_days")
+
+# The readings a daily market feed delivers once per NYSE session, the ones with
+# the 3-day SLA: their SLA counts NYSE sessions since as_of, not calendar days.
+# Counted in calendar days, Friday's breadth is 4 days old on every Tuesday
+# until Monday's is stored (13:00 UTC), and the coverage gate reads a weekend
+# as an outage. The cost: a daily feed that really stops is stale once more
+# than three sessions have passed, two calendar days later across a weekend,
+# three across an exchange holiday too, never earlier. The numbers stay the
+# artifact's.
+SESSION_AGED: frozenset[str] = frozenset({"s2", "s3", "d1", "d4"})
 
 # v3.7.7/§2.3: the s5 t-2 lookup is a POSITIONAL index, not calendar-anchored.
 # Until the S5 v4 (C-01/C-02/C-03) lands, every computed s5 path carries this
@@ -127,6 +137,25 @@ def _age_days(as_of_iso: str | None) -> int | None:
         return (datetime.now(UTC).date() - date.fromisoformat(as_of_iso[:10])).days
     except ValueError:
         return None
+
+
+def _past_sla(indicator_id: str, as_of_iso: str | None, today: date) -> bool | None:
+    """Is a reading dated `as_of_iso` past its indicator's freshness SLA on `today`?
+
+    None when the date or the SLA is unknown. A reading dated after `today`
+    (clock skew, bad vintage) is past it (v3.7.3/O-06)."""
+    sla = FRESHNESS_SLA_DAYS.get(indicator_id)
+    if not as_of_iso or sla is None:
+        return None
+    try:
+        as_of = date.fromisoformat(as_of_iso[:10])
+    except ValueError:
+        return None
+    if as_of > today:
+        return True
+    if indicator_id in SESSION_AGED:
+        return trading_days_after(as_of, today) > sla
+    return (today - as_of).days > sla
 
 
 def _month_end_iso(yyyy_mm: str) -> str:
@@ -348,13 +377,9 @@ class IndicatorOutput:
     @property
     def stale(self) -> bool | None:
         """True past the indicator's freshness SLA (or dated in the future);
-        None when age is unknown. A negative age (as_of in the future =
-        clock skew / bad vintage) is treated as stale/suspect (v3.7.3/O-06)."""
-        age = self.age_days
-        sla = FRESHNESS_SLA_DAYS.get(self.id)
-        if age is None or sla is None:
-            return None
-        return age > sla or age < 0
+        None when age is unknown. The SLA of a daily market reading counts
+        NYSE sessions, every other one calendar days (`SESSION_AGED`)."""
+        return _past_sla(self.id, self.as_of, datetime.now(UTC).date())
 
     def payload(self) -> dict[str, Any]:
         meta = REGISTRY[self.id]
@@ -1503,13 +1528,7 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
 
 
 def persist_snapshot(data: SnapshotData, raw: RawInputs) -> int:
-    """Write snapshot + indicator_readings; return snapshot id.
-
-    No network call sits between the computation and its commit. The row
-    carries the previous snapshot's judgment note, marked stale, until
-    `write_judgment` replaces it (run_recompute's last step). Production, 222
-    runs to 2026-11-10: the commit used to wait 22 to 289 s for the model
-    (median 97 s), two thirds of the time in which a restart lost the slot."""
+    """Write snapshot + indicator_readings + source_health; return snapshot id."""
     from app.models import IndicatorReading
 
     settings = get_settings()
@@ -1595,9 +1614,7 @@ def persist_snapshot(data: SnapshotData, raw: RawInputs) -> int:
             trend_states=data.trend_states,
             fast_alarm=data.fast_alarm,
             # Until write_judgment replaces it, GET /api/v1/score and the
-            # status page serve this as what it is: the previous note, stale
-            # (about 100 s at the median, every four hours). The alert input
-            # (app/alerts/input_builder.py) reads none of the three columns.
+            # status page serve this as what it is: the previous note, stale.
             judgment_call=last_text,
             judgment_stale=True,
             judgment_error=None,
@@ -1631,25 +1648,12 @@ def persist_snapshot(data: SnapshotData, raw: RawInputs) -> int:
                 data_source=ind.data_source, fallback_used=ind.fallback_used,
                 dropped=ind.dropped, note=ind.note, timestamp=now,
             ))
+        for h in raw.source_health:
+            session.add(SourceHealth(source=h["source"], ok=h["ok"], latency_ms=h["latency_ms"],
+                                     http_status=h["http_status"], checked_at=now, note=h["note"]))
         session.flush()
         snap_id = snap.id
     return snap_id
-
-
-def persist_source_health(raw: RawInputs) -> None:
-    """Write the gather's per-source health, whatever becomes of the run.
-
-    GET /readyz and the status page show the newest row per source and call it
-    the latest gather's. Written with the snapshot, in its transaction, it was
-    the latest snapshot's (production to 2026-11-10: 11,048 rows at 615 times,
-    each a snapshot's computed_at): a gather whose run could not score left no
-    row, and both pages kept showing the run before it."""
-    now = datetime.now(UTC)
-    with session_scope() as session:
-        session.add_all(
-            SourceHealth(source=h["source"], ok=h["ok"], latency_ms=h["latency_ms"],
-                         http_status=h["http_status"], checked_at=now, note=h["note"])
-            for h in raw.source_health)
 
 
 def write_judgment(snap_id: int, data: SnapshotData) -> None:
@@ -1675,8 +1679,8 @@ def write_judgment(snap_id: int, data: SnapshotData) -> None:
 
 
 def run_recompute() -> int | None:
-    """Full recompute: gather -> source health -> compute -> persist -> alert
-    capture -> feed -> judgment note.
+    """Full recompute: gather -> compute -> persist -> alert capture ->
+    feed -> judgment note.
 
     The database is the record of a run: no file is written for a snapshot.
     The parquet file a run wrote per snapshot beside the database (15 of the
@@ -1691,12 +1695,6 @@ def run_recompute() -> int | None:
     block empty). Never raises upstream failures."""
     raw = gather_inputs()
     try:
-        persist_source_health(raw)
-    except Exception as exc:
-        # The health rows must not cost the score: "database is locked" has
-        # occurred (2026-11-01 06:15, on the alert dispatcher's heartbeat).
-        log.warning("source_health_write_failed", error=sanitize(exc, limit=300))
-    try:
         # The real evaluation date: without it a completed month is invisible
         # until the next month's first bar lands.
         data = compute_snapshot(raw, as_of_date=datetime.now(UTC).date().isoformat())
@@ -1707,12 +1705,9 @@ def run_recompute() -> int | None:
     # Alert system: directly after the snapshot commits, before anything that
     # waits on a disk or a network. The capture is the one step of a run that
     # nothing makes up for: a snapshot without its sidecar is a hole in the
-    # replay record (app/services/alert_integration.py), and
-    # app/alerts/recovery.py reports such a gap and never fills it. Its own
-    # transaction and its own exception boundary: it cannot delay, alter or
-    # roll back the snapshot. Production, 222 runs to 2026-11-10: behind the
-    # feed the capture followed the commit by 4.5 to 40 s (median 6.8 s), and
-    # on 2026-11-01 the container was killed 3.7 s after it.
+    # replay record (app/services/alert_integration.py). Its own transaction
+    # and its own exception boundary: it cannot delay, alter or roll back the
+    # snapshot.
     try:
         from app.services.alert_integration import on_snapshot_committed
 
@@ -1728,8 +1723,7 @@ def run_recompute() -> int | None:
     except Exception as exc:
         log.warning("dashboard_feed_failed", error=str(exc)[:300])
     # The judgment note last: the one model call of the run, onto the committed
-    # snapshot. Nothing above waits for it (22 to 289 s in production, up to
-    # the gateway's 900 s deadline).
+    # snapshot. Nothing above waits for it.
     try:
         write_judgment(snap_id, data)
     except Exception as exc:
