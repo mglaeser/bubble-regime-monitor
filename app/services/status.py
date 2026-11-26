@@ -18,7 +18,6 @@ from typing import Any
 
 from sqlalchemy import select
 
-from app.alerts.watchdog import evaluate_outage
 from app.config import get_settings
 from app.db import session_scope
 from app.engine.recompute_slots import schedule_display
@@ -167,9 +166,7 @@ def _indicators_block(live: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _science_audit(snap: Snapshot | None, sources: list[dict[str, Any]],
-                   providers: list[dict[str, Any]], live: dict[str, dict[str, Any]],
-                   last_run: dict[str, Any] | None, now: datetime,
-                   feed: dict[str, Any] | None, running: bool) -> dict[str, Any]:
+                   providers: list[dict[str, Any]], live: dict[str, dict[str, Any]]) -> dict[str, Any]:
     """Severity-ranked flags: static known issues + live degradations."""
     flags: list[dict[str, Any]] = [dict(k) for k in KNOWN_ISSUES]
 
@@ -202,66 +199,22 @@ def _science_audit(snap: Snapshot | None, sources: list[dict[str, Any]],
                 "detail": f"{p['consecutive_failures']} consecutive failures; retrying after "
                           f"{p['cooldown_until']}.", "ref": "sources.prices"})
 
-    # The number's own age. A recompute that fails leaves the last snapshot
-    # in place, and every surface keeps serving it: production held one for
-    # 60 h (from 2026-07-27), 24 h (08-01), 344 h (08-06 to 08-20) and 16 h
-    # (08-28) while this audit listed no flag for it. The failed run's error
-    # text stays where it is (recompute.last); the flag carries none of it.
-    if last_run and last_run.get("error"):
-        flags.append({"id": "recompute-failed", "severity": "error", "category": "service-state",
-                      "title": "The last recompute failed",
-                      "detail": f"The run that ended {last_run.get('finished_at')} produced no snapshot; "
-                                "any number shown is from an earlier run.", "ref": "scheduler"})
-
     # live snapshot degradations
     if snap is None:
         flags.append({"id": "no-snapshot", "severity": "warn", "category": "service-state",
                       "title": "No snapshot computed yet",
-                      "detail": "Trigger POST /api/v1/admin/refresh or wait for the schedule: "
-                                f"{schedule_display()}.", "ref": "scheduler"})
+                      "detail": "Trigger POST /api/v1/admin/refresh or wait for the 4-hourly "
+                                "(02/06/10/14/18/22 UTC) schedule.", "ref": "scheduler"})
     else:
-        # Old by the outage alert's own condition (app/alerts/watchdog.py: two
-        # scheduled recomputes missed and 90 minutes more), so the page and the
-        # alert agree. One missed slot raises nothing.
-        outage = evaluate_outage(last_snapshot_at=snap.computed_at, now=now)
-        if outage.firing:
-            flags.append({"id": "snapshot-old", "severity": "error", "category": "service-state",
-                          "title": "The snapshot is old: no recompute has replaced it",
-                          "detail": f"Computed {_iso(snap.computed_at)}; {outage.missed_slots} scheduled "
-                                    f"recomputes ({schedule_display()}) have passed without a new one. "
-                                    "Every number here is that old.", "ref": "scheduler"})
-        # The feed is built in the run that wrote the snapshot, after it
-        # (compute.run_recompute), and that run holds the recompute lock until
-        # both are written (routers/admin.run_recompute_guarded). So the newest
-        # feed is the older of the two only while a run is in flight, or when
-        # the last run wrote no feed: a failed build is one log line
-        # (dashboard_feed_failed), the run still counts as a success, and the
-        # endpoint goes on serving the last payload. A process stopped between
-        # the two writes leaves the same state, and the lock dies with it. Not
-        # seen in production (2026-10-05 to 11-10: 222 snapshots, 222 feeds,
-        # 0 dashboard_feed_failed).
-        if not running and (feed is None or
-                            datetime.fromisoformat(feed["computed_at"]) < snap.computed_at):
-            built = f"was built {feed['computed_at']}" if feed else "has never been built"
-            flags.append({"id": "feed-behind", "severity": "warn", "category": "service-state",
-                          "title": "The dashboard feed is older than the snapshot",
-                          "detail": f"The feed at /api/v1/dashboard/feed {built}; the snapshot is "
-                                    f"of {_iso(snap.computed_at)}. The last recompute wrote the "
-                                    "snapshot and no feed.", "ref": "dashboard feed"})
         coverage = (snap.data_freshness or {}).get("_coverage", {})
         for block_id in ("S", "D"):
             if isinstance(coverage.get(block_id), dict) and coverage[block_id].get("degraded"):
-                # A fired override keeps the band at de-risk on degraded data
-                # (compute.py, v3.7.3 A-03): the flag does not call that band
-                # suppressed.
-                band = ("the fired override keeps the action band at de-risk." if snap.override_fired
-                        else "the action band is suppressed.")
                 flags.append({
                     "id": f"coverage-{block_id}", "severity": "error", "category": "block-degraded",
                     "title": f"Block {block_id} coverage degraded",
                     "detail": f"More than 1/3 of Block {block_id}'s nominal weight is dropped or "
-                              f"stale (coverage {coverage[block_id].get('coverage')}); {band}",
-                    "ref": "coverage gate"})
+                              f"stale (coverage {coverage[block_id].get('coverage')}); the action "
+                              "band is suppressed.", "ref": "coverage gate"})
         for ind_id, lv in live.items():
             if lv.get("dropped"):
                 flags.append({
@@ -330,34 +283,27 @@ def build_status() -> dict[str, Any]:
     health = _latest_source_health()
     sources = _sources_block(health)
     providers = _providers_block()
+    audit = _science_audit(snap, sources, providers, live)
 
-    last_run: dict[str, Any] | None
     try:
         from app.routers.admin import _last, recompute_lock
 
-        # one copy: the recompute thread rewrites the record when a run starts
-        running, last_run = recompute_lock.locked(), dict(_last)
+        recompute = {"running": recompute_lock.locked(), "last": _last}
     except Exception:
-        running, last_run = False, None
-
-    now = datetime.now(UTC)
-    # Read after the lock's state: a run that has committed the snapshot read
-    # above and released the lock has committed its feed too.
-    feed = _feed_sources_block()
-    audit = _science_audit(snap, sources, providers, live, last_run, now, feed, running)
+        recompute = {"running": False, "last": None}
 
     return {
         "service": {
             "name": "bubblegauge", "version": settings.service_version,
-            "now": _iso(now),
+            "now": _iso(datetime.now(UTC)),
             "recompute_schedule": schedule_display(),
             "sms_enabled": settings.sms_enabled,
             "docs": {"swagger": "/docs", "redoc": "/redoc", "openapi": "/openapi.json"},
         },
         "snapshot": snap_summary,
-        "recompute": {"running": running, "last": last_run},
+        "recompute": recompute,
         "sources": sources,
-        "feed_sources": feed,
+        "feed_sources": _feed_sources_block(),
         "providers": providers,
         "indicators": _indicators_block(live),
         "legs_science": LEGS_SCIENCE,

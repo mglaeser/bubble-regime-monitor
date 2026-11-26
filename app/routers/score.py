@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from sqlalchemy import ColumnElement, func, select
+from sqlalchemy import func, select
 
 from app.config import get_settings
 from app.content_registry import gauge_display
 from app.db import session_scope
+from app.engine.snapshot_contract import FLAG_UNKNOWN
 from app.models import Snapshot
 from app.references import EPISTEMIC_CAVEATS
 from app.references import SCORE_EXAMPLE as _SCORE_EXAMPLE
@@ -45,15 +46,6 @@ def _parse_date_bound(value: str | None, field: str) -> datetime | None:
         ) from exc
 
 
-def _names_a_day(value: str) -> bool:
-    """True when a bound is a date without a time (`date.fromisoformat` reads it)."""
-    try:
-        date.fromisoformat(value)
-    except ValueError:
-        return False
-    return True
-
-
 def _meta(snap: Snapshot | None) -> dict[str, Any]:
     settings = get_settings()
     return {
@@ -70,6 +62,33 @@ def _latest_snapshot() -> Snapshot | None:
             select(Snapshot).order_by(Snapshot.computed_at.desc()).limit(1)
         ).scalars().first()
 
+
+def _unknown_flags(snap: Snapshot) -> list[str]:
+    """The red flags whose input was unknown on this run (v3.7.8/§24): the
+    ones the snapshot's typed contract gives the state UNKNOWN
+    (app/engine/snapshot_contract.py; flag 4 needs both of its legs, breadth
+    and the index near its high). Observability only: red_flag_count and the
+    frozen unknown-as-false rule do not read it.
+
+    The contract is the one place that says it. compute_snapshot used to
+    build a second list for this field, which named flag 4 only when breadth
+    was missing: with breadth known and the SPY series missing, the API said
+    flag 4's input was known while the contract of the same snapshot said
+    UNKNOWN and counted 2 fireable flags of the 3 the override requires.
+
+    A snapshot stored before the contract (red_flag_meta {}: migration 0007
+    leaves historical rows empty) serves []. The key `_unknown_red_flags`,
+    under which older versions stored that second list in data_freshness, is
+    not read: no reader is kept for a retired key (AGENTS.md: no backward
+    compatibility). No stored observation is lost. Production, 2026-11-10:
+    of the 125 snapshots without the contract (up to 2026-08-06) 82 hold no
+    such key and 43 an empty list; the 490 since hold an empty list and four
+    flags each, none UNKNOWN, every one with `source_key` and `state`
+    (build_red_flag_meta is the only writer). All 615 read [] before and
+    after, and the route serves only the latest snapshot, which every
+    recompute stores with the contract."""
+    flags = (snap.red_flag_meta or {}).get("flags") or {}
+    return [flag["source_key"] for flag in flags.values() if flag["state"] == FLAG_UNKNOWN]
 
 
 @router.get(
@@ -90,23 +109,25 @@ def get_score(request: Request, _: None = Depends(require_read_access)) -> dict[
         # No snapshot yet (fresh boot, first scheduled run pending) — this is
         # a 503 service-state signal, NOT an upstream-failure 500.
         raise HTTPException(status_code=503, detail="no snapshot computed yet; try POST /api/v1/admin/refresh")
+    # The width is the difference of the two quartiles served beside it. Rounded
+    # from the unrounded difference it was 0.01 off them on 163 of the 615
+    # production snapshots up to 2026-11-10 (06:00 that day: 49.8, 54.0 and 4.19).
+    q1, q3 = round(snap.iqr_lo, 2), round(snap.iqr_hi, 2)
     data = {
         "headline_median": round(snap.median),
         # v3.7.8/M-02: `iqr` is the (q1,q3) interquartile INTERVAL (kept for
         # compatibility); `iqr_width` is the IQR proper (q3 - q1).
-        "iqr": [round(snap.iqr_lo, 2), round(snap.iqr_hi, 2)],
-        "q1": round(snap.iqr_lo, 2),
-        "q3": round(snap.iqr_hi, 2),
-        "iqr_width": round(snap.iqr_hi - snap.iqr_lo, 2),
+        "iqr": [q1, q3],
+        "q1": q1,
+        "q3": q3,
+        "iqr_width": round(q3 - q1, 2),
         "band_5_95": [round(snap.band5, 2), round(snap.band95, 2)],
         "point_score": round(snap.point_score, 2),
         "action_band": snap.action_band,
         "override_fired": snap.override_fired,
         "red_flag_count": snap.red_flag_count,
         "red_flag_detail": snap.red_flag_detail,
-        # v3.7.8/§24: red flags whose input was unknown this run (observability;
-        # does NOT change red_flag_count / the frozen unknown-as-false rule).
-        "unknown_red_flags": (snap.data_freshness or {}).get("_unknown_red_flags", []),
+        "unknown_red_flags": _unknown_flags(snap),
         "block_S": snap.block_s,
         "block_D": snap.block_d,
         "V": {
@@ -141,54 +162,37 @@ def get_score(request: Request, _: None = Depends(require_read_access)) -> dict[
 def get_history(
     request: Request,
     from_: str | None = Query(None, alias="from", description="ISO date lower bound (inclusive)"),
-    to: str | None = Query(None, description="ISO date upper bound (inclusive: a date covers its whole day)"),
+    to: str | None = Query(None, description="ISO date upper bound (inclusive)"),
     granularity: str = Query("raw", pattern="^(raw|daily|monthly)$",
                              description="raw = every snapshot; daily/monthly = last snapshot per period"),
-    limit: int = Query(1000, ge=1, le=10000,
-                       description="Maximum rows returned (most recent kept): snapshots for raw, days or months otherwise"),
+    limit: int = Query(1000, ge=1, le=10000, description="Maximum rows returned (most recent kept)"),
     _: None = Depends(require_read_access),
 ) -> dict[str, Any]:
     from_dt = _parse_date_bound(from_, "from")
     to_dt = _parse_date_bound(to, "to")
-    within: list[ColumnElement[bool]] = []
-    if from_dt is not None:
-        within.append(Snapshot.computed_at >= from_dt)
-    if to is not None and to_dt is not None:
-        if _names_a_day(to):
-            # a date is inclusive of its whole day; guard the +1-day arithmetic
+    with session_scope() as session:
+        q = select(Snapshot)
+        if from_dt is not None:
+            q = q.where(Snapshot.computed_at >= from_dt)
+        if to_dt is not None:
+            # 'to' is inclusive of the whole day; guard the +1-day arithmetic
             # against OverflowError near datetime.max (e.g. ?to=9999-12-31),
             # which otherwise surfaced as a 500 (found by adversarial verification).
             try:
-                within.append(Snapshot.computed_at < to_dt + timedelta(days=1))
+                upper = to_dt + timedelta(days=1)
             except OverflowError:
-                pass  # no row is later than the last day there is
-        else:
-            # A bound with a time is the instant it names (_parse_date_bound).
-            # The day was added to every `to`, so ?to=2026-11-10T06:00:00
-            # answered with the snapshots up to 2026-11-11 02:00.
-            within.append(Snapshot.computed_at <= to_dt)
-    newest_first = Snapshot.computed_at.desc()
-    with session_scope() as session:
-        if granularity == "raw":
-            q = select(Snapshot).where(*within).order_by(newest_first).limit(limit)
-        else:
-            # The last snapshot of each UTC day or month, and `limit` counts
-            # those periods: the reduction is the database's GROUP BY, so the
-            # limit can only apply to what is returned. Limiting the snapshots
-            # first and reducing them afterwards answered daily&limit=30 with
-            # 5 days on the production rows (615 snapshots, six a day, on
-            # 2026-11-10), and would have answered the dashboard's own call,
-            # granularity=daily&limit=1000, with a sliding 167 days from the
-            # 1,001st snapshot on (mid-January 2027). strftime reads the UTC
-            # text every row is stored as (app/models.py:TZDateTime; the
-            # service is SQLite-only). A period's last snapshot is found by
-            # its computed_at: one recompute runs at a time, and no two of
-            # the 615 production rows share one.
+                upper = datetime.max
+            q = q.where(Snapshot.computed_at < upper)
+        if granularity != "raw":
+            # The database finds the last snapshot of each UTC day or month, so
+            # that `limit` counts the days or months returned. strftime reads
+            # the UTC text the column stores (app/models.py:TZDateTime).
             period = func.strftime("%Y-%m-%d" if granularity == "daily" else "%Y-%m", Snapshot.computed_at)
             last = func.max(Snapshot.computed_at)
-            last_of_each = select(last).where(*within).group_by(period).order_by(last.desc()).limit(limit)
-            q = select(Snapshot).where(Snapshot.computed_at.in_(last_of_each)).order_by(newest_first)
-        # newest-first in SQL, then restore chronological order
+            q = select(Snapshot).where(Snapshot.computed_at.in_(
+                q.with_only_columns(last).group_by(period).order_by(last.desc()).limit(limit)))
+        # filter + newest-first limit in SQL, then restore chronological order
+        q = q.order_by(Snapshot.computed_at.desc()).limit(limit)
         rows = list(reversed(session.execute(q).scalars().all()))
 
     data = [

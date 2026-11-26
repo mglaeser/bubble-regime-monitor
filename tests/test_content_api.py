@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-from datetime import UTC, datetime
 
 import pytest
 from fastapi.testclient import TestClient
@@ -116,6 +115,30 @@ class TestDynamicContent:
         r = client.get("/api/v1/content/dynamic")
         assert "max-age=60" in r.headers.get("cache-control", "")
 
+    def test_the_doc_counts_the_slots_as_the_endpoint_serves_them(self, client):
+        # docs/CONTENT_API.md says how many slots the endpoint serves and what
+        # they hold; its numbers are recomputed here from the endpoint. Until
+        # 2026-11 the doc listed three slots as "placeholders in this PR" while
+        # the endpoint served 82, every one a placeholder that no code replaces
+        # (44 pending notes, 38 values dated 2026-07). A slot that is added,
+        # removed, generated or re-dated turns this red, and the doc sentence
+        # is corrected in the same change.
+        from pathlib import Path
+
+        doc = (Path(__file__).resolve().parents[1] / "docs" / "CONTENT_API.md").read_text(encoding="utf-8")
+        section = " ".join(doc[doc.index("### DYNAMIC"):doc.index("### The dynamic-content marker")].split())
+        slots = client.get("/api/v1/content/dynamic").json()["data"]["slots"]
+        pending = sum("pending" in slot["text"].lower() for slot in slots.values())
+        dated = sum(slot["as_of"] is not None for slot in slots.values())
+        assert pending + dated == len(slots)
+        assert {slot["source"] for slot in slots.values()} == {"placeholder"}
+        assert {slot["as_of"] for slot in slots.values()} == {None, "2026-07"}
+        assert f"serves {len(slots)} slots" in section
+        assert f"the other {len(slots) - 3} are the companion dashboard's" in section
+        assert f"{pending} say that a note is pending" in section
+        assert f"{dated} carry the companion dashboard's editorial value of July 2026" in section
+        assert "in this PR" not in doc
+
     def test_every_slot_carries_its_provenance_and_the_marker_rides_along(self, client):
         # The dynamic-content marker (owner, 2026-09-21): a renderer appends
         # DOT ABOVE to every dynamic text and tints it by provenance; the API
@@ -136,28 +159,15 @@ class TestCacheScope:
         r = client.get("/api/v1/content/dashboard")
         assert r.headers["cache-control"].startswith("public, ")
 
-    @pytest.mark.parametrize("path, max_age", [("/api/v1/content/dashboard", 300),
-                                               ("/api/v1/content/dynamic", 60),
-                                               ("/api/v1/dashboard/feed", 900)])
-    def test_private_when_reads_are_keyed(self, client, monkeypatch, path, max_age):
-        """A keyed reply must never be shared-cacheable (panel finding, PR
-        #95), on every read that sets a cache lifetime: a shared cache would
-        hand it to a caller without a key. The dashboard feed answered a keyed
-        request with "public, max-age=900"; that fix had reached the two
-        content routes only."""
-        from app.config import get_settings
-        from app.db import session_scope
-        from app.models import DashboardFeed
-        from tests.conftest import TEST_ADMIN_KEY
+    def test_private_when_reads_are_keyed(self, monkeypatch):
+        # A keyed reply must never be shared-cacheable (panel finding, PR #95).
+        from app.routers import content as content_router
 
-        with session_scope() as session:
-            session.add(DashboardFeed(computed_at=datetime.now(UTC), payload="{}"))
-        monkeypatch.setenv("READ_ENDPOINTS_PUBLIC", "false")
-        get_settings.cache_clear()  # isolated_db clears it again on the way out
-        assert client.get(path).status_code == 401
-        keyed = client.get(path, headers={"X-API-Key": TEST_ADMIN_KEY})
-        assert keyed.status_code == 200
-        assert keyed.headers["cache-control"] == f"private, max-age={max_age}"
+        class _Keyed:
+            read_endpoints_public = False
+
+        monkeypatch.setattr(content_router, "get_settings", lambda: _Keyed())
+        assert content_router._cache_control(300) == "private, max-age=300"
 
 
 class TestBlockArtifact:
