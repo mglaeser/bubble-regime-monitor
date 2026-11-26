@@ -511,7 +511,7 @@ def test_freds_newest_first_answer_to_a_limit_is_read_oldest_first(monkeypatch):
 
 # The SEC contact has one setting. AGENTS.md: "compatibility shims (none are
 # kept: the owner ruled on 2026-09-20 that there is no backward compatibility
-# anywhere)". It had two: SEC_USER_AGENT, the name the template fills, and
+# anywhere)". It had two: SEC_USER_AGENT, the name the template offers, and
 # SEC_EDGAR_UA ("the v3.1 name"), which won when it was set. One module reads
 # the contact (app/sources/edgar.py) and no test named either setting.
 
@@ -580,3 +580,24 @@ def test_the_edgar_request_carries_the_configured_contact(monkeypatch, leftover)
         get_settings.cache_clear()
     assert [url for url, _ in sent] == [edgar.BASE.format(cik=cik) for cik in edgar.CIKS.values()]
     assert [headers for _, headers in sent] == [{"User-Agent": _CONTACT}] * len(edgar.CIKS)
+
+
+def test_without_a_contact_no_edgar_request_is_made_and_d3_is_dropped(monkeypatch):
+    """SEC_USER_AGENT has no placeholder: unset, the adapter asks EDGAR nothing,
+    the gather's EDGAR step fails, and D3 is dropped (AGENTS.md rules 3 and 4)."""
+    import app.sources.edgar as edgar
+    from app.config import Settings
+    from app.services.compute import _track, compute_snapshot
+    from tests.conftest import make_golden_raw_inputs
+
+    sent: list[str] = []
+    monkeypatch.setattr(edgar, "fetch", lambda source, url, **kwargs: sent.append(url))
+    monkeypatch.setattr(edgar, "MIN_INTERVAL_S", 0.0)
+    monkeypatch.delenv("SEC_USER_AGENT", raising=False)
+    monkeypatch.setattr(edgar, "get_settings", lambda: Settings(_env_file=None))
+
+    raw = make_golden_raw_inputs()
+    step = _track(raw, "sec_edgar", edgar.hyperscaler_readings)
+    assert step is None and "sec_edgar" in raw.gather_errors and sent == []
+    raw.hyperscalers = None   # gather_inputs keeps a reading only from a step that returned one
+    assert compute_snapshot(raw, mc_samples=2_000, mc_seed=1).indicators["d3"].dropped
