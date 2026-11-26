@@ -8,7 +8,7 @@ Per DASHBOARD_FEED_SPEC.md sign-off: frozen key inventory; points ALWAYS length
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 import pytest
 from fastapi.testclient import TestClient
@@ -74,6 +74,19 @@ def patched_sources(monkeypatch):
     monkeypatch.setattr(df, "_fred_series", fake_fred)
     monkeypatch.setattr(df, "_td_series", fake_td)
     monkeypatch.setattr(df, "_fear_greed", fake_fear_greed)
+
+
+@pytest.fixture()
+def monday(monkeypatch):
+    """The feed's clock at 12:00 UTC on Monday 2026-11-23."""
+    moment = datetime(2026, 11, 23, 12, tzinfo=UTC)
+
+    class _Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return moment.astimezone(tz) if tz else moment.replace(tzinfo=None)
+
+    monkeypatch.setattr(df, "datetime", _Clock)
 
 
 class TestBuildFeedGolden:
@@ -179,36 +192,29 @@ class TestBuildFeedGolden:
         sup = g["detail"]["gsadf_sup"]                      # sup still visible
         assert (sup["stat"], sup["cv90"], sup["cv95"]) == (SUP_1986, SUP_CV90, SUP_CV95)
 
-    def test_the_feed_dates_the_ratio_and_nothing_else(self, snapshot, patched_sources):
-        """raw.vix_as_of is the New York session the VIX / VIX3M pair was
-        measured in. Friday's close read on Monday morning is three calendar
-        days old and current: the ratio ages by the feed's rule for a daily
-        market value (7 d), not by a literal 2. The VIX level (FRED's close),
-        the VRP and SKEW are other readings and do not borrow the date."""
+    def test_the_ratios_date_is_not_lent_to_the_level_the_vrp_or_skew(
+            self, snapshot, patched_sources, monday):
+        """raw.vix_as_of is the date of the VIX / VIX3M pair, and the ratio ages
+        as a daily market series: Friday's close read on Monday is current. The
+        level, the VRP and SKEW are other readings and do not borrow the date."""
         raw, data = snapshot
-        raw.vix_as_of = (datetime.now(UTC).date() - timedelta(days=3)).isoformat()
+        raw.vix_as_of = "2026-11-20"
         m = df.build_feed(raw, data)["metrics"]
-        assert m["vix_term_ratio"]["as_of"] == raw.vix_as_of
+        assert m["vix_term_ratio"]["as_of"] == m["vix_term_state"]["as_of"] == "2026-11-20"
         assert m["vix_term_ratio"]["stale"] is False
-        assert m["vix_term_state"]["as_of"] == raw.vix_as_of
         for key in ("vix_level", "vrp", "skew"):
             assert m[key]["as_of"] is None and m[key]["stale"] is None, key
 
-    @pytest.mark.parametrize(("source", "age_days"), [
-        ("fred_VIXCLS", 1),     # the chain's first source: FRED's daily close, dated
-        ("cboe_vix", None),     # its fallback: the CBOE quote, undated
+    @pytest.mark.parametrize(("source", "as_of"), [
+        ("fred_VIXCLS", "2026-11-20"),  # a daily close with its observation date
+        ("cboe_vix", None),             # a quote without a date
     ])
     def test_the_feed_names_the_vix_levels_source_and_day(self, snapshot, patched_sources,
-                                                          source, age_days):
-        """The VIX level is FRED's VIXCLS close first and the CBOE quote only
-        as the fallback (vix.vix_level), and the VRP is computed from it. The
-        feed said "cboe" with no date for both. Production, feed row of
-        2026-11-10 22:02 UTC: vix_level 19.92, source "cboe", as_of null, beside
-        a ratio from the CBOE quote of that run, 19.46 / 20.64; 19.92 is the
-        close of 11-09."""
+                                                          monday, source, as_of):
+        """The level is published with the source and the date the gather
+        recorded for it, and the VRP, which is computed from the level, names
+        that source."""
         raw, data = snapshot
-        as_of = (None if age_days is None else
-                 (datetime.now(UTC).date() - timedelta(days=age_days)).isoformat())
         raw.vix_level_source, raw.vix_level_as_of = source, as_of
         m = df.build_feed(raw, data)["metrics"]
         assert m["vix_level"]["value"] == raw.vix_level
@@ -216,7 +222,20 @@ class TestBuildFeedGolden:
         assert m["vix_level"]["as_of"] == as_of
         assert m["vix_level"]["stale"] is (None if as_of is None else False)
         assert m["vrp"]["source"] == f"{source}+spy_realized"
-        assert m["vrp"]["as_of"] is None        # what dates the VRP is not decided here
+
+    @pytest.mark.parametrize(("source", "as_of"), [("fred_VIXCLS", "2026-11-09"), ("cboe_vix", None)])
+    def test_the_gather_carries_the_vix_levels_source_and_day(self, isolated_db, monkeypatch,
+                                                              source, as_of):
+        """Through gather_inputs: the adapter's provenance reaches RawInputs.
+        `_track` answers the level's step and fails every other one."""
+        from app.services import compute
+        from app.sources import Provenance, SourceResult
+
+        level = SourceResult(19.92, Provenance(source=source, as_of=as_of))
+        monkeypatch.setattr(compute, "_track",
+                            lambda raw, step, fn: level if step == "vix_level" else None)
+        raw = compute.gather_inputs()
+        assert (raw.vix_level, raw.vix_level_source, raw.vix_level_as_of) == (19.92, source, as_of)
 
 
 class TestDegradation:

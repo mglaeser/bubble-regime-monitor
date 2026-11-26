@@ -64,7 +64,6 @@ from app.logging_conf import get_logger
 from app.models import HyOasHistory, Snapshot, SourceHealth
 from app.redaction import sanitize
 from app.references import REGISTRY
-from app.sources import Provenance, SourceResult
 
 log = get_logger(__name__)
 
@@ -782,18 +781,14 @@ def gather_inputs() -> RawInputs:
         cause = raw.gather_errors.get("lppls", "unknown cause")
         raw.lppls_note = f"LPPLS floored ({cause}); excluded from Block D, which renormalizes"
 
-    r = _track(raw, "vix_term_structure", lambda: _v_reading(datetime.now(UTC)))
+    r = _track(raw, "vix_term_structure", vix_src.term_structure_ratio)
     if r:
         raw.vix_ratio = r.value
         raw.vix_ratio_source = r.provenance.source
         raw.vix_ratio_fallback = r.provenance.fallback_used
-        # The New York session the CBOE pair was measured in, by the clock and
-        # the NYSE calendar (vix.session_of_pair; the payload's own time is not
-        # read); for a kept reading the session that measured it; or FRED's
-        # observation date. It stays None (v3.7.8/§9: an unknown date is never
-        # stamped) for a pair measured outside a session with nothing kept. V
-        # is a multiplier, not a coverage-gated block indicator: the date is
-        # shown (data_freshness.v, the feed) and gates nothing.
+        # v3.7.8/§9: never fabricate `today` — an unknown source date stays None
+        # (unverified), consistent with the breadth/EBP provenance policy. V is a
+        # multiplier, not a coverage-gated block indicator, so this is display-only.
         raw.vix_as_of = r.provenance.as_of
     r = _track(raw, "vix_level", vix_src.vix_level)
     if r:

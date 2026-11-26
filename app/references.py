@@ -567,8 +567,7 @@ REGISTRY: dict[str, Methodology] = {
             "State: ratio < 0.95 -> contango -> V = 1.00; 0.95 <= ratio <= 1.0 -> flat -> "
             "V = 1.05; ratio > 1.0 -> backwardation -> V = 1.15. Applied as "
             "D = min(D_raw * V, 1.0). Source order: CBOE delayed quotes (primary) -> FRED ratio "
-            "(fallback). The CBOE pair is measured only while both indices are of one New York "
-            "session; a run before the open is scored with the last measured reading."
+            "(fallback)."
         ),
         why=(
             "In calm markets longer-dated implied volatility exceeds near-dated (contango), which "

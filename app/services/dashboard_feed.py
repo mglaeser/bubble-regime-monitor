@@ -369,16 +369,10 @@ def build_feed(raw: Any, data: Any) -> dict[str, Any]:
         detail={"state": d4.state, "bands": lp.get("bands"),
                 "n_windows_qualifying": lp.get("n_windows_qualifying"),
                 "n_windows_positive": lp.get("n_windows_positive")})
-    # raw.vix_as_of dates the VIX / VIX3M ratio only: the New York session the
-    # pair was measured in. It was None on every production run until the
-    # ratio got that date, so the VRP and SKEW below, which are other
-    # readings, published as_of null and stale null and still do. A Friday
-    # close read on Monday morning is 3 calendar days old: the ratio ages as
-    # every other daily market value here does.
-    # The level is FRED's VIXCLS close of an earlier session (the CBOE quote
-    # only when FRED fails), with its own source and date. The feed said
-    # "cboe" and no date: on 2026-11-10 22:02 UTC it published 19.92, the
-    # close of 11-09, beside a ratio from that run's CBOE quote of 19.46.
+    # raw.vix_as_of is the date of the VIX / VIX3M ratio. The level is published
+    # with the source and the date of its own reading, SKEW's quote undated, and
+    # the level and the ratio age as daily market series: Friday's close read on
+    # Monday is 3 days old.
     m["vix_level"] = _scalar(raw.vix_level, "level", raw.vix_level_as_of,
                              raw.vix_level_source, sla_days=SLA_DAILY)
     m["vix_term_ratio"] = _scalar(data.v_ratio, "ratio", raw.vix_as_of,
@@ -390,8 +384,8 @@ def build_feed(raw: Any, data: Any) -> dict[str, Any]:
                                   detail={"state": data.v_state},
                                   available=data.v_ratio is not None)
     fa = data.fast_alarm or {}
-    # The VRP is computed from that level, so it names the level's source.
-    # What dates it (the level's day or SPY's last close) is not decided here.
+    # The VRP is computed from that level and SPY's closes, so it names the
+    # level's source and takes the date of neither.
     m["vrp"] = _scalar(fa.get("vrp"), fa.get("vrp_units", "annualized_variance_pts_pct2"),
                        None, f"{raw.vix_level_source}+spy_realized")
     m["skew"] = _scalar(raw.skew, "level", None, "cboe")
