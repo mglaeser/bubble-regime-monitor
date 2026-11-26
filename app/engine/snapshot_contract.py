@@ -204,8 +204,7 @@ def build_red_flag_meta(
     Callers pass the same inputs the frozen `evaluate_red_flags` consumed, plus
     per-source provenance. Nothing here re-decides whether a flag fired: the
     booleans come from the already-evaluated `red_flags`. That is why rf4's
-    near-ATH leg enters as its availability alone: whether the index was near
-    its high is inside `red_flags` already, and the record has no field for it.
+    near-ATH leg enters as its availability alone.
     """
     values = red_flags.as_dict()
 
@@ -274,9 +273,6 @@ def build_red_flag_meta(
                     stale=breadth_stale),
     }
 
-    # The two counts are read from this record by key, once, where the snapshot
-    # row is written (app/services/compute.py); every later reader takes the
-    # row's columns.
     return {
         "contract_version": ALERT_CONTRACT_VERSION,
         "flags": {fid: fact.as_dict() for fid, fact in facts.items()},

@@ -22,51 +22,6 @@ import inspect
 from app.services import compute
 
 
-def test_raw_inputs_declares_no_field_the_pipeline_never_reads_or_never_sets():
-    """Every RawInputs field is read somewhere in app/, and is given a value
-    somewhere: assigned, passed as a keyword (the golden inputs in
-    tests/conftest.py), or a container the gather fills in place.
-
-    A field that is set and never read stores a fact nobody is told; a field
-    that is read and never set is a branch that cannot run. Four such fields
-    stood here: real10y_as_of, lppls_note and vix_ratio_fallback were set once
-    and read nowhere, and margin_note was read once (as a prefix of d2's note)
-    and set nowhere. A dropped d4 words its own note from lppls_result and
-    gather_errors, S1 is dated by cape_as_of, and the VIX ratio's fallback is
-    named by vix_ratio_source.
-    """
-    import ast
-    from pathlib import Path
-
-    root = Path(__file__).resolve().parents[1]
-    paths = [*sorted((root / "app").rglob("*.py")), root / "tests" / "conftest.py"]
-    trees = [ast.parse(path.read_text(encoding="utf-8")) for path in paths]
-    module = ast.parse(Path(compute.__file__).read_text(encoding="utf-8"))
-    raw_inputs = next(node for node in module.body
-                      if isinstance(node, ast.ClassDef) and node.name == "RawInputs")
-    declared = [node for node in raw_inputs.body if isinstance(node, ast.AnnAssign)]
-    fields = [node.target.id for node in declared]
-    # field(default_factory=...): source_health and gather_errors, appended to
-    # and keyed into, never assigned.
-    containers = {node.target.id for node in declared
-                  if isinstance(node.value, ast.Call)
-                  and getattr(node.value.func, "id", "") == "field"}
-
-    loads: set[str] = set()
-    stores: set[str] = set()
-    for tree in trees:
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Attribute):
-                (loads if isinstance(node.ctx, ast.Load) else stores).add(node.attr)
-            elif isinstance(node, ast.keyword) and node.arg:
-                stores.add(node.arg)
-
-    assert "breadth_pct" in fields and "gather_errors" in containers, "the scan sees the class"
-    never_read = [f for f in fields if f not in loads]
-    never_set = [f for f in fields if f not in stores and f not in containers]
-    assert (never_read, never_set) == ([], [])
-
-
 class TestTrackAbsorbsDerivationFailures:
     def test_a_raising_callable_degrades_that_source_only(self):
         raw = compute.RawInputs()

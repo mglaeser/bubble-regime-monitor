@@ -1009,8 +1009,8 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         # "GSADF not computable" was true by construction; since v4.0 _s4_ok gates
         # the ENDPOINT triple, so this branch is reachable with a perfectly good
         # sup sitting in the same payload under extra.s4_statistic.gsadf_sup.
-        # SCORED_STATISTIC is one of these two keys in every running process:
-        # s4_gsadf refuses to import on an absent or unrecognised value.
+        # SCORED_STATISTIC is one of these two keys: s4_gsadf refuses to import
+        # on an absent or unrecognised value.
         _floor_lab = {"bsadf_endpoint": "BSADF@endpoint",
                       "gsadf_sup": "GSADF sup"}[s4_gsadf.SCORED_STATISTIC]
         s4_note = (f"s4 scored statistic ({_floor_lab}) not computable this run; "
@@ -1043,10 +1043,8 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
             "bsadf_endpoint": ("BSADF@endpoint", raw.bsadf_stat, raw.bsadf_cv90),
             "gsadf_sup": ("GSADF sup", raw.gsadf_stat, raw.gsadf_cv90),
         }
-        # SCORED_STATISTIC is one of the two keys or the process did not start
-        # (s4_gsadf._frozen_enum refuses to import on anything else; pinned by
-        # tests/test_s4_endpoint_statistic.py::TestABadArtifactRefusesToIMPORT).
-        # A config fault therefore aborts the boot; it cannot reach a request.
+        # SCORED_STATISTIC is one of the two keys: s4_gsadf refuses to import on
+        # anything else.
         _scored_family = _families.pop(s4_gsadf.SCORED_STATISTIC)
         if None not in _scored_family[1:]:
             _lab, _st, _cv = _scored_family

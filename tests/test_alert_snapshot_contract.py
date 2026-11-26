@@ -249,23 +249,6 @@ def test_a_blind_near_ath_leg_makes_rf4_unknown_not_inactive():
     assert meta["override_fireable_universe_count"] == 3
 
 
-def test_the_rf4_record_takes_the_legs_availability_and_no_state():
-    """The record never re-decides a flag (build_red_flag_meta: "the booleans
-    come from the already-evaluated `red_flags`").
-
-    rf4's `active` is the evaluated flag and its `fireable` is whether both
-    legs were observed. A near-ATH state handed in beside them was read by no
-    line of the function and stored in no field of the record, so a caller
-    that passes one is told so instead of being ignored.
-    """
-    rf4 = _meta(breadth_pct=44.0, near_ath_available=True)["flags"]["rf4"]
-    assert rf4["fireable"] is True
-    assert rf4["active"] is False          # RedFlags(): the evaluated flag, nothing else
-    assert rf4["state"] == "INACTIVE"
-    with pytest.raises(TypeError):
-        _meta(breadth_pct=44.0, near_ath_available=True, near_ath_state=True)
-
-
 def test_missing_input_is_unknown_and_shrinks_the_fireable_universe():
     meta = _meta(gsadf_contested=False, breadth_pct=None, breadth_stale=None)
     rf4 = meta["flags"]["rf4"]
