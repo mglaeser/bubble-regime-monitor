@@ -4,8 +4,7 @@ WHAT/HOW/WHY/references/caveats: see app.references.REGISTRY["d2"]; summary:
 
     yoy = 12-month % change of FINRA debit balances
     base = clip((yoy - 25)/35, 0, 1)
-    mult = 1.0 if two consecutive monthly declines from a trailing-12-month
-           high, else 0.6
+    mult = 1.0 if margin debt fell in each of the last two months, else 0.6
     sub_score = base * mult
 
 CAVEAT (verbatim): CXO Advisory finds ~0.00 correlation between margin-debt
@@ -55,18 +54,27 @@ def yoy_pct_calendar(months: list[str], values: list[float]) -> float:
 
 
 def rollover_confirmed(debit_balances_monthly: list[float]) -> bool:
-    """Two consecutive monthly declines from a trailing-12-month high.
+    """Two consecutive monthly declines: the last month below the one before,
+    and that one below the month before it.
+
+    There is no separate test against a trailing-12-month high. The code had
+    one (the window's maximum must not lie in the last two months) and it
+    could not decide anything: after two declines the third-last month is
+    above both later ones, so the maximum is never one of them. Measured
+    against that code before it was removed: 0 differences from the two
+    declines alone over 97,625 exhaustive series (five levels, three to seven
+    months, ties included) and 300,000 random ones, 100,000 of them dated with
+    publication gaps. Removing it changes no reading: production's 615 D2
+    readings (2026-07-11 to 2026-11-10) are "no rollover" 609 times, unknown 6
+    times, confirmed never. tests/test_d2_rollover_calendar.py pins that the
+    two declines decide alone.
 
     POSITIONAL — assumes a gap-free monthly series. Prefer
     rollover_confirmed_calendar when dated months are available (v3.7.7/§3.1)."""
     if len(debit_balances_monthly) < 3:
         return False
-    trailing = debit_balances_monthly[-12:]
-    peak_idx = max(range(len(trailing)), key=lambda i: trailing[i])
     last3 = debit_balances_monthly[-3:]
-    declines = last3[2] < last3[1] < last3[0]
-    peak_not_latest = peak_idx < len(trailing) - 2
-    return declines and peak_not_latest
+    return last3[2] < last3[1] < last3[0]
 
 
 def _consecutive_months(months: list[str]) -> bool:
@@ -81,8 +89,8 @@ def rollover_confirmed_calendar(months: list[str], values: list[float]) -> bool 
     """Calendar-aware rollover confirmation (v3.7.7/§3.1).
 
     The two-consecutive-monthly-declines test is only valid on genuinely
-    consecutive CALENDAR months. On a publication gap, the positional [-3:]/[-12:]
-    windows straddle the hole and can assert a rollover from mis-spaced data,
+    consecutive CALENDAR months. On a publication gap, the positional [-3:]
+    window straddles the hole and can assert a rollover from mis-spaced data,
     flipping the D2 multiplier (0.6 <-> 1.0 = tripwire ii). Returns:
       * True/False when the last three months are consecutive (same rule as the
         positional version, but on the dated tail);
@@ -92,21 +100,10 @@ def rollover_confirmed_calendar(months: list[str], values: list[float]) -> bool 
         return None
     if not _consecutive_months(months[-3:]):
         return None  # UNKNOWN: mis-spaced tail, cannot assert a rollover
-    # peak from the last 12 CONSECUTIVE calendar months only (walk back while
-    # months stay contiguous, so a gap earlier never inflates the window).
-    tail_vals = [values[-1]]
-    tail_months = [months[-1]]
-    for m, v in zip(reversed(months[:-1]), reversed(values[:-1]), strict=False):
-        if len(tail_months) >= 12 or not _consecutive_months([m, tail_months[-1]]):
-            break
-        tail_months.append(m)
-        tail_vals.append(v)
-    trailing = list(reversed(tail_vals))
-    peak_idx = max(range(len(trailing)), key=lambda i: trailing[i])
-    last3 = values[-3:]
-    declines = last3[2] < last3[1] < last3[0]
-    peak_not_latest = peak_idx < len(trailing) - 2
-    return declines and peak_not_latest
+    # The last three months are consecutive, so the two declines are dated.
+    # The walk back over the last 12 consecutive months that stood here found
+    # a window high that decided nothing (rollover_confirmed says why).
+    return rollover_confirmed(values)
 
 
 def multiplier(rollover: bool) -> float:

@@ -11,8 +11,9 @@ reading against it.
 
 Everything here is REPO-AUTHORED: the registries' own sentences and labels,
 never upstream or user text (AGENTS.md, ground rule 1). Nothing here puts a
-number on the wire: the material is for the model's understanding, and the
-context it writes is judged separately.
+number on the wire: the material is for the model's understanding, and what
+the model writes from it passes the basic checks and nothing else (the owner's
+ruling of 2026-09-25, docs/MESSAGE_ENGINE.md decision 24).
 """
 from __future__ import annotations
 
@@ -24,7 +25,8 @@ from app.references import FRAMEWORK, LEGS_SCIENCE, REGISTRY, SOURCE_REGISTRY
 #: Which methodology records explain which trigger. Every trigger of the
 #: prompt library is listed, most with nothing: an operational notice, a
 #: band change or a trend-rule flip has no single indicator behind it, and a
-#: trigger without material gets no generated context at all.
+#: trigger without material gets the same prompt without the REFERENCES block
+#: (`composer.prompt_for`).
 TRIGGER_INDICATORS: dict[str, tuple[str, ...]] = {
     "daily_digest": ("s1", "s2", "s3", "s4", "s5", "d1", "d2", "d3", "d4", "v"),
     "MARGIN_ROLLOVER": ("d2",),
