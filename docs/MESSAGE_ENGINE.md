@@ -210,8 +210,14 @@ Relaxing the constraint would weaken a live SMS invariant to make room for a
 different channel. Instead the engine persists its own rows: code-point count,
 channel, source (`generated` | `fallback`; a `deterministic` text asks no
 model and writes no row, decision 8),
-every attempt including timeouts and rejections (Q46: full rows, 90-day
-retention). The alert schema is untouched.
+every attempt including timeouts and rejections (Q46: full rows). The rows are
+kept: on 2026-11-25 the owner delegated the decision ("Do it as most sensible
+or recommend"), and it strikes Q46's 90-day retention for them. They are the
+governor's state - the breaker counts the failed calls since the last success
+at any age (`governor.refusal`), so deleting one can hand a failing model more
+calls - and they are small and the owner's own: 58 rows and 0.04 MB on
+2026-11-11, about 0.3 MB a year, every text in them a daily digest for the
+owner. The alert schema is untouched.
 The engine's text is never an `AlertRender` row: `engine_delivery.deliver`
 sends it without the alert dispatcher, and the alert renderer refuses a body
 over 160 septets or outside GSM-7 before a row is written
