@@ -375,17 +375,9 @@ def evaluate_condition(node: Condition, ctx: EvaluationContext, rule: RuleSpec,
     if isinstance(node, NeverCondition):
         return ConditionOutcome(truth=False, status=EvaluationStatus.DISABLED,
                                 reasons=[f"structurally dark: {node.reason}"])
-    # A transition or crossing episode lasts while the state it led to lasts:
-    # the flag stays off, the leg stays in, the value stays beyond the level.
-    # `single_shot` holds as `auto_on_inverse` does. Ending the episode at the
-    # next evaluation instead would lose the P2 of the 22:00 UTC slot: it is
-    # held until 07:00 Berlin, the 02:00 UTC evaluation would resolve its
-    # episode, and `outbox.revalidate_members` drops a resolved member as
-    # RESOLVED_BEFORE_SEND. It would also put the 48 h reminder of
-    # structure.s3_tier_150 out of reach. With the hold a held all-clear is
-    # sent in the morning while it is still true and dropped when it is not.
-    # No auto_on_inverse rule has a crossing condition (0 of 90), so the
-    # crossing hold reaches the single_shot rules only.
+    # `single_shot` holds as `auto_on_inverse` does: while firing, a transition
+    # or crossing stays true as long as the state it led to lasts (the flag
+    # stays off, the leg stays in, the value stays where it crossed to).
     hold_inverse_target = (
         currently_firing and rule.resolution.policy in ("auto_on_inverse", "single_shot")
     )

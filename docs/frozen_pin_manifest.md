@@ -2,12 +2,14 @@
 
 > **Governance note (F-01 / L-07).** This manifest DOCUMENTS the frozen,
 > score-effective constants of the bubblegauge engine for governance and
-> change-control. It is a mirror of the values currently hard-coded in the
-> engine — it is **NOT** yet wired into the engine, and the engine is **NOT**
-> switched to load its constants from this file (that is the deferred F-01/L-07
-> runtime-artifact work). Every value below is quoted verbatim from the live
-> source as of service_version **3.7.7**. The golden fixture headline (seeded
-> Monte-Carlo median) is **52.43**, IQR **(50, 55)**.
+> change-control. It is the readable mirror of `frozen_methodology.json`, which
+> the engine loads at import (`app/methodology.py`). The test file
+> `tests/test_frozen_methodology.py` pins the artifact's bytes and holds the
+> engine's constants to it. The page itself is kept by hand; the engine never
+> reads it: where the page and the artifact differ, the artifact is right. The
+> service version is not a pin and is not listed here (`app/config.py` has it).
+> The golden fixture's deterministic point score is **52.43**, its seeded Monte
+> Carlo median (the headline) **52.56**, IQR **(50, 55)**.
 >
 > Provisional / deferred items are labelled inline. In particular the S5 lag
 > convention is **`provisional_positional`** (defects C-01 / C-02 / C-03 deferred
@@ -15,7 +17,7 @@
 > emits `{"s5_lag": "provisional_positional", "known_defects": ["C-01","C-02","C-03"]}`
 > in its runtime payload. Do not treat a provisional pin as final.
 >
-> Source-of-truth files:
+> The files the "Source" columns below point to, where the engine uses them:
 > `app/engine/aggregate.py`, `app/engine/montecarlo.py`, `app/config.py`,
 > `app/references.py`, `app/services/compute.py`, `app/indicators/*.py`,
 > `r/gsadf.R`.
@@ -212,7 +214,7 @@ A dropped OR stale indicator = fully lost weight. `stale is None` (unknown date)
 |---|---|---|---|---|---|---|---|---|---|
 | 35 | 3 | 3 | 35 | 45 | 3 | 75 | 100 | 3 | 2 |
 
-s5 = 45 and ages from the reference **month-END** (v3.7.6/C-04). Source: `compute.py`.
+s2, s3, d1 and d4 count NYSE sessions since `as_of` (`compute.py:SESSION_AGED`); the others count calendar days. s5 = 45 and ages from the reference **month-END** (v3.7.6/C-04). Source: `compute.py`.
 
 ## 10. Quality values (fidelity to construct, not fallback position)
 
@@ -221,7 +223,7 @@ s5 = 45 and ages from the reference **month-END** (v3.7.6/C-04). Source: `comput
 | s1 full / s1 ECY-only shim | `1.0` / `0.5` |
 | s4 COMPUTED / FLOOR | `1.0` / `0.0` (sub-score still 0.25) |
 | s5 EBP / BAA-DGS10 / HY-OAS | `1.0` / `0.5` / `0.3` |
-| d1 breadth | `min(1.0, breadth_n / 503)` |
+| d1 breadth | `min(1.0, breadth_n / breadth_universe)` (the current constituent list's size, not a fixed 503) |
 | d3 hyperscaler | `usable / 5` |
 | d4 VALID(_ZERO) full / partial / FLOOR | `1.0` / `0.5` / `0.0` |
 | default | `1.0` |
@@ -246,7 +248,7 @@ Source: `compute.py`, `d4_lppls.py`.
 | Dirichlet concentration | `DIRICHLET_CONCENTRATION = 50.0`; weights ~ `Dirichlet(base * 50)` | `montecarlo.py` |
 | Alpha | `alpha ~ U(0.40, 0.60)` (`ALPHA_RANGE`), `beta = 1 - alpha` | `montecarlo.py:ALPHA_RANGE` |
 | Headline / IQR / band | `np.median` / `np.percentile[25,75]` / `np.percentile[5,95]` | `montecarlo.py` |
-| Override in MC | `np.maximum(scores, 70.0)` when override fires | `montecarlo.py` |
+| Override in MC | `np.maximum(scores, _OVERRIDE_TARGET)` when override fires; `_OVERRIDE_TARGET` is the artifact's `override.target_score` (`70.0`), the Target of section 7 | `montecarlo.py` |
 
 MC anchor ranges: CAPE window integers `U[20,40]`; concentration `lo U(16,20)`, `hi U(38,44)`; breadth `lo U(30,40)`, `hi U(85,95)`, floor 0.05; s3 `Beta(32,8)`/`Beta(21,19)`/low-tier deterministic. Quantile convention: numpy default (linear interpolation).
 
@@ -267,8 +269,7 @@ Note: `1.49` is a SADF critical value and must NEVER be hard-coded; the simulate
 
 | Item | Value | Source |
 |---|---|---|
-| service_version | `3.7.7` | `config.py` |
-| Golden fixture headline | `52.43`, IQR `(50, 55)` | `references.py` CHANGELOG; `tests/conftest.py` golden inputs |
+| Golden fixture: point score / seeded MC median (the headline) | `52.43` / `52.56`, IQR `(50, 55)` | `tests/test_golden_fixture.py`; `tests/conftest.py` golden inputs |
 | S1 no-history CAPE step | `35` | `compute.py` |
 
 ---
@@ -276,6 +277,6 @@ Note: `1.49` is a SADF critical value and must NEVER be hard-coded; the simulate
 ## Values to verify before a hard freeze
 
 1. **LPPLS `O_min` / `D_min` / tc-window params.** Not set in our code — `FILTER_CONDITIONS` overrides only `m`/`w`. Quoted from the `d4_lppls.py` module comment as the "library DS-LPPLS defaults" for lppls==0.6.24. Confirm against the pinned lppls 0.6.24 source before pinning them as ours.
-2. **Golden `52.43` / IQR `(50,55)`.** Sourced from the CHANGELOG prose and the seeded golden fixture (`tests/conftest.py` + `tests/test_golden_fixture.py`); the number is regenerated by the seeded Monte Carlo, not stored as a byte literal.
+2. **Golden `52.43` / median `52.56` / IQR `(50,55)`.** `52.43` is the deterministic point score of the golden sub-scores (`tests/conftest.py`), asserted by `tests/test_golden_fixture.py` and recorded in the artifact as `_meta.golden_headline`. The median and the IQR are regenerated by the seeded Monte Carlo (n = 100,000, seed 20260711) and asserted by the same test to three decimals (52.5605; 50.0439, 54.9951).
 
-*This manifest is documentation for governance (F-01 / L-07). The engine is not yet switched to load from it. Research and engineering documentation — not investment advice.*
+*This manifest is documentation for governance (F-01 / L-07). The engine loads `frozen_methodology.json`, not this page. Research and engineering documentation — not investment advice.*
