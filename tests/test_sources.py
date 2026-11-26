@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import calendar
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -95,6 +96,88 @@ class TestStaleness:
         assert payload["stale"] is False and payload["age_days"] == 0
 
 
+def _finra_xlsx(month_cells: list, heading: str = "Year-Month", third: tuple[str, list] | None = None) -> bytes:
+    """A margin-statistics file: the heading row, then one row per month cell.
+    `third` adds a column behind the debit column: its heading and its cells."""
+    import io
+
+    import pandas as pd
+
+    rows = [[heading, "Debit Balances in Customers' Securities Margin Accounts"]]
+    rows += [[cell, 900_000.0 + i] for i, cell in enumerate(month_cells)]
+    if third:
+        rows = [row + [cell] for row, cell in zip(rows, [third[0], *third[1]], strict=True)]
+    buf = io.BytesIO()
+    pd.DataFrame(rows).to_excel(buf, header=False, index=False)
+    return buf.getvalue()
+
+
+class TestFinraMonths:
+    """app/sources/finra.py: the months are the one column headed "Year-Month",
+    every cell the text "YYYY-MM". Otherwise the pull fails."""
+
+    MONTHS = [(y, m) for y in range(1997, 2027) for m in range(1, 13)][:-3]      # 1997-01 .. 2026-09
+
+    def test_the_files_months_are_read_without_a_guess(self):
+        """Without a format pandas guesses one and takes the day a cell lacks
+        from today: it warned on 2026-10-31, September being the newest month.
+        A test cannot set that clock, so on the unchanged code this is red only
+        on a day the newest month lacks."""
+        import warnings
+
+        from app.sources.finra import parse_debit_balances
+
+        content = _finra_xlsx([f"{y}-{m:02d}" for y, m in reversed(self.MONTHS)])
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            _, labels, as_of = parse_debit_balances(content)
+        assert labels == [f"{y}-{m:02d}" for y, m in self.MONTHS] and as_of == "2026-09-30"
+
+    @pytest.mark.parametrize("spell", [
+        lambda y, m: f"{calendar.month_abbr[m]}-{y % 100:02d}",
+        lambda y, m: y * 100 + m,
+        lambda y, m: f"{y}-{m:02d}-01",
+    ], ids=["Sep-26", "202609-a-number", "2026-09-01"])
+    def test_a_month_in_another_spelling_is_a_failure_not_a_guess(self, spell):
+        """Guessed, "Sep-26" came back as 36 months ending 1999-12 and the
+        numbers as the one month 1970-01, each a healthy pull. The full date
+        was read right and fails as well: the file's cells carry no day."""
+        from app.sources.finra import parse_debit_balances
+
+        with pytest.raises(SourceError, match="no parseable date column"):
+            parse_debit_balances(_finra_xlsx([spell(y, m) for y, m in reversed(self.MONTHS)]))
+
+    @pytest.mark.parametrize("newest", ["2026-9", "Sep-26", "2026-13", None, "0000-09"],
+                             ids=["unpadded", "another-spelling", "month-13", "empty", "year-0000"])
+    def test_one_cell_that_is_no_month_fails_the_pull(self, newest):
+        """The newest row's cell is the only one that is not "YYYY-MM" with a
+        year from 1000 and a month 01 to 12. The pull fails: the column is not
+        read without that row, and "2026-9" is not read as September."""
+        from app.sources.finra import parse_debit_balances
+
+        cells = [newest] + [f"{y}-{m:02d}" for y, m in reversed(self.MONTHS[:-1])]
+        with pytest.raises(SourceError, match="no parseable date column"):
+            parse_debit_balances(_finra_xlsx(cells))
+
+    @pytest.mark.parametrize(("newest", "heading", "other_heading"), [
+        ("2026-9", "Year-Month", "Posted"),
+        ("2026-09", "Year-Month", "Year-Month"),
+        ("2026-09", "Month", "Posted"),
+    ], ids=["headed-column-malformed", "two-headed-columns", "no-headed-column"])
+    def test_no_other_column_stands_in_for_the_month_column(self, newest, heading, other_heading):
+        """Only the one column headed "Year-Month" is read for the months.
+        Beside it stands a column of valid months of the following year. It
+        does not stand in when the headed column has a cell that is no month;
+        under the same heading there is no single month column; and without
+        the heading neither column is read. The pull fails each time."""
+        from app.sources.finra import parse_debit_balances
+
+        cells = [newest] + [f"{y}-{m:02d}" for y, m in reversed(self.MONTHS[:-1])]
+        other = [f"{y + 1}-{m:02d}" for y, m in reversed(self.MONTHS)]
+        with pytest.raises(SourceError, match="no parseable date column"):
+            parse_debit_balances(_finra_xlsx(cells, heading, third=(other_heading, other)))
+
+
 class _Response:
     def __init__(self, text: str = "", content: bytes = b"", payload: dict | None = None):
         self.text, self.content, self._payload = text, content, payload
@@ -174,6 +257,66 @@ class TestSourceChains:
         assert result.value == 31.5
         assert result.provenance.fallback_used is True
         assert fetched == ["multpl", "shillerdata"]
+
+    # The two places of https://www.multpl.com/shiller-pe that state the value,
+    # as the page served them on 2026-11-14 (each verbatim, the lines between
+    # them left out): the description line and the element with the id "current".
+    MULTPL_PAGE = (
+        '<meta name="description" content="Shiller PE Ratio chart, historic, and current data. '
+        'Current Shiller PE Ratio is 39.95, a change of -0.15 from previous market close." />\n'
+        '<div id="current">\n<b>Current<span class="currentTitle">\nShiller PE Ratio</span>:</b>\n39.95\n\n\n\n\n\n'
+        '<span class="neg">\n\n-0.15\n(-0.37%)\n\n</span>\n\n<div id="timestamp">\n\n\n4:00 PM EST, Fri Nov 13\n\n</div>\n'
+        '</div>\n')
+
+    def test_the_current_cape_is_the_own_text_of_multpls_current_element(self):
+        from app.sources.cape import _current_from_multpl
+
+        assert _current_from_multpl(self.MULTPL_PAGE) == 39.95
+
+    @pytest.mark.parametrize("page, reading", [
+        ("<!-- " + MULTPL_PAGE.replace("39.95", "17.33") + " -->" + MULTPL_PAGE, 39.95),
+        (MULTPL_PAGE.replace("39.95", "39,950.12"), None),
+        (MULTPL_PAGE.replace("39.95", "39.95abc"), None),
+    ], ids=["an-old-copy-in-a-comment", "a-larger-number", "letters-glued-to-the-number"])
+    def test_a_comment_is_not_read_and_a_text_that_is_not_one_number_is_no_reading(self, page, reading):
+        """Taking the first digits behind the words "Current Shiller PE Ratio"
+        in the page source returned 17.33, 39.0 and 39.95 on these pages, each
+        as a healthy multpl reading."""
+        from app.sources.cape import _current_from_multpl
+
+        if reading is None:
+            with pytest.raises(SourceError, match="could not parse current CAPE"):
+                _current_from_multpl(page)
+        else:
+            assert _current_from_multpl(page) == reading
+
+    @pytest.mark.parametrize("page", [
+        "",
+        MULTPL_PAGE.replace("39.95", "") + MULTPL_PAGE.replace("39.95", "17.33"),
+        MULTPL_PAGE + MULTPL_PAGE.replace("39.95", ""),
+        '<?xml version="1.0" encoding="utf-8"?>\n' + MULTPL_PAGE,
+    ], ids=["an-empty-page", "two-elements-the-second-holds-a-number",
+            "two-elements-the-first-holds-a-number", "an-xml-declaration-in-a-str"])
+    def test_anything_but_one_element_with_one_number_is_a_source_error(self, page):
+        # lxml raises errors of its own on the first and on the last page
+        # (ParserError, ValueError); on the two in between, one of the two
+        # elements that carry the id holds a number.
+        from app.sources.cape import _current_from_multpl
+
+        with pytest.raises(SourceError):
+            _current_from_multpl(page)
+
+    def test_a_multpl_page_without_the_element_hands_over_to_shillers_spreadsheet(self, monkeypatch):
+        import app.sources.cape as cape
+
+        # The first digits behind the words: 6.0, from the class name.
+        page = _Response(text='<b>Current Shiller PE Ratio</b> <span class="h6">39.70</span>', content=b"xls")
+        monkeypatch.setattr(cape, "fetch", lambda source, url, **kwargs: page)
+        monkeypatch.setattr(cape, "_history_from_shillerdata", lambda content: [38.0, 39.1])
+        result = cape.current_cape()
+        assert result.value == 39.1
+        assert result.provenance.source == "shillerdata_ie_data"
+        assert result.provenance.fallback_used is True
 
     def test_the_multpl_monthly_table_needs_no_beautifulsoup(self, monkeypatch):
         import sys
