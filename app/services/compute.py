@@ -231,10 +231,10 @@ COVERAGE_DROP_THRESHOLD = _M.get_path("coverage", "drop_threshold")  # 1/3
 # That reading is a tier of the fallback chain (AGENTS.md rule 3), not the
 # neutral placeholder rule 4 forbids: the service measured it itself, it is
 # carried as it was stored (value, quality, provenance, the day it was
-# measured on) and flagged fallback_used, and it ends with the SLA. When S1's
-# newest stored reading cannot be carried (last_primary_reading; no row stored
-# before this change holds the yield's date), nothing is filled in and S1 is
-# dropped.
+# measured on), flagged fallback_used and its source marked "(carried)", and
+# it ends with the SLA. When S1's newest stored reading cannot be carried
+# (last_primary_reading; no row stored before this change holds the yield's
+# date), nothing is filled in and S1 is dropped.
 #
 # Why: on 2026-10-21 18:00, 22:00 and 10-22 02:00 UTC FRED answered the DFII10
 # request with a body that was not JSON. S1 was dropped and the median read
@@ -562,8 +562,10 @@ def last_primary_reading(indicator_id: str) -> dict[str, Any] | None:
     """The newest stored reading of an indicator of Block S that its own
     sources served, as it was stored: value, sub-score, source, quality, note,
     its date (as_of, CAPE's for S1) and the real yield's observation date
-    (real10y_as_of, which S1 stores). Not dropped and not a fallback: a
-    carried reading is stored with fallback_used, so it is never carried again.
+    (real10y_as_of, which S1 stores). Not dropped and not itself carried: a
+    carried reading is stored with its source marked "(carried)", so it is
+    never carried again. fallback_used is not read: on a live reading it says
+    CAPE came from the fallback source.
 
     Exactly one row is read, the newest such reading. It is returned when its
     value, sub-score and quality are finite numbers (the quality from 0 to 1)
@@ -578,7 +580,7 @@ def last_primary_reading(indicator_id: str) -> dict[str, Any] | None:
             .join(Snapshot, IndicatorReading.snapshot_id == Snapshot.id)
             .where(IndicatorReading.indicator_id == indicator_id,
                    IndicatorReading.dropped.is_(False),
-                   IndicatorReading.fallback_used.is_(False))
+                   ~IndicatorReading.data_source.endswith(" (carried)", autoescape=True))
             .order_by(Snapshot.id.desc()).limit(1)
         ).first()
     if found is None:
@@ -1049,7 +1051,8 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         # yield's SLA, counted from that yield's observation date and not from
         # the day the reading was stored (see REAL10Y_SLA_DAYS). Value,
         # quality, source, date and note are the stored ones; the carry adds
-        # fallback_used and its own note. A reduced reading keeps its stored
+        # fallback_used, "(carried)" to the source, as D2's cached reading is
+        # marked, and its own note. A reduced reading keeps its stored
         # quality (0.5 for the ECY-only blend): that is what main scored on the
         # day it was stored. The Monte Carlo uses the sub-score pinned for
         # every draw, as for the ECY-only reading above: on the golden raw
@@ -1063,7 +1066,7 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
                  f"for at most {REAL10Y_SLA_DAYS} days after the yield's date")
         stored_note = raw.s1_last.get("note")
         indicators["s1"] = IndicatorOutput(
-            "s1", raw.s1_last["value"], sub, False, raw.s1_last["data_source"], True,
+            "s1", raw.s1_last["value"], sub, False, f"{raw.s1_last['data_source']} (carried)", True,
             note=f"{carry}; {stored_note}" if stored_note else carry,
             as_of=raw.s1_last["as_of"], quality=raw.s1_last["quality"],
             extra={"real10y_as_of": raw.s1_last["real10y_as_of"]})

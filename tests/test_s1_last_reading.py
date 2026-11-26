@@ -159,14 +159,19 @@ def test_an_unusable_newest_reading_carries_nothing(isolated_db, clock, field, u
     assert _snapshot(_without_the_yield(compute.last_primary_reading("s1"))).indicators["s1"].dropped
 
 
-@pytest.mark.parametrize("cape_history", [True, False], ids=["full", "ecy-only"])
-def test_the_carried_reading_is_the_stored_one_quality_included(isolated_db, clock, cape_history):
+@pytest.mark.parametrize(("cape_history", "cape_from_multpl"), [(True, False), (False, False), (True, True)],
+                         ids=["full", "ecy-only", "cape-fallback"])
+def test_the_carried_reading_is_the_stored_one_quality_included(isolated_db, clock, cape_history,
+                                                                cape_from_multpl):
     """Carried while FRED fails, S1 is the reading as it was stored, its
     quality included (0.5 for the ECY-only blend without CAPE history), so
-    Block S coverage is what it was on the day the reading was stored."""
+    Block S coverage is what it was on the day the reading was stored. A
+    reading whose CAPE came from the fallback source is carried like any other."""
     raw = _golden()
     if not cape_history:
         raw.cape_history = []
+    if cape_from_multpl:
+        raw.cape_source, raw.cape_fallback = "multpl", True
     stored = _snapshot(raw)
     compute.persist_snapshot(stored, raw)
 
@@ -175,7 +180,8 @@ def test_the_carried_reading_is_the_stored_one_quality_included(isolated_db, clo
     got, was = carried.indicators["s1"], stored.indicators["s1"]
     assert got.fallback_used is True
     assert ((got.value, got.sub_score, got.data_source, got.quality, got.as_of, got.extra)
-            == (was.value, was.sub_score, was.data_source, was.quality, was.as_of, was.extra))
+            == (was.value, was.sub_score, f"{was.data_source} (carried)", was.quality, was.as_of,
+                was.extra))
     assert (was.note or "") in (got.note or "")
     assert carried.coverage["S"] == stored.coverage["S"]
 
