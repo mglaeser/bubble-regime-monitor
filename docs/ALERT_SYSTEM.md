@@ -812,6 +812,14 @@ trigger's (17.4) — otherwise the member renders from trigger facts with
 `CONTEXT_STALE`, because mixing numbers computed two different ways into one
 comparison is worse than admitting staleness.
 
+The current view is the newest sidecar of the trigger's origin at send time (a
+recompute's for a market alert, the watchdog's for the recompute-outage
+alert), whatever its eligibility: the evaluator decides on `PARTIAL` inputs,
+and the message about a decision is worded from what was decided on. A
+`NOT_EVALUABLE` newest sidecar makes the context stale; no older one stands in
+for it (`app/alerts/repository.py` `load_latest_compatible_input`,
+tests/test_alert_current_context.py).
+
 Only the shipped phrase set, v3.5, is kept (owner ruling 3): v3.2-v3.4 and the
 single-language form were kept only for compatibility. A registry still keeps
 the bytes of every set it registered - immutable audit data, never changed -
