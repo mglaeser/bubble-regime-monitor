@@ -122,7 +122,7 @@ Base path `/api/v1`; every response is `{"data": ..., "meta": ...}` with the fiv
 | Endpoint | Purpose |
 |----------|---------|
 | `GET /api/v1/score` | Headline median, IQR, 5–95 band, blocks, red flags, action band, legs, judgment call |
-| `GET /api/v1/score/history?from&to&granularity` | History (`raw`/`daily`/`monthly`) |
+| `GET /api/v1/score/history?from&to&granularity` | History (`raw`/`daily`/`monthly`), each row with the versions that computed it: `service_version` and `methodology_version` (null on snapshots from before v3.8.0, which began recording it) |
 | `GET /api/v1/indicators` · `GET /api/v1/indicators/{id}` | Weights/grounding; full WHAT/HOW/WHY methodology |
 | `GET /api/v1/legs/trend` · `GET /api/v1/legs/fast-alarm` | Faber states; VIX curve/VRP/SKEW |
 | `GET /api/v1/meta/methodology` | Framework, references, falsification criteria, changelog |
