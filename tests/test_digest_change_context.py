@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import re
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 
 import pytest
 
@@ -210,10 +209,17 @@ class TestWhatTheApiServes:
         assert composer.typed("judgment", stored) == stored
 
     def test_the_volatility_states_are_the_producers(self):
-        ratios = [0.5, 0.94, 0.95, 0.97, 1.0, 1.01, 2.0]
-        assert {v_vix.state(r) for r in ratios} == composer.WORDS["vol_state"]
-        # compute's neutral default for an invalid ratio is one of them
-        assert 'v_state, v_mult = "contango", 1.0' in Path(compute.__file__).read_text(encoding="utf-8")
+        """v_vix.state's three states for a measured ratio, and the state
+        compute_snapshot stores for a run without one: a fourth word, not one
+        of the three, so the model is never told a curve nobody measured."""
+        from tests.conftest import make_golden_raw_inputs
+
+        measured = {v_vix.state(ratio) for ratio in [0.5, 0.94, 0.95, 0.97, 1.0, 1.01, 2.0]}
+        raw = make_golden_raw_inputs()
+        raw.vix_ratio = None
+        no_ratio = compute.compute_snapshot(raw, mc_samples=2_000, mc_seed=1).v_state
+        assert no_ratio not in measured
+        assert measured | {no_ratio} == composer.WORDS["vol_state"]
 
 
 class TestTheChange:

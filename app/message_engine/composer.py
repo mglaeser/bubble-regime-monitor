@@ -191,7 +191,7 @@ _CONTROL_RE = re.compile(
 #: prompt leaves it out.
 _TRENDS = frozenset({"IN", "OUT", "unknown", "?"})
 _DIGEST_BANDS = frozenset(ACTION_BANDS) | {"suppressed (block degraded)", "de-risk (data degraded)"}
-_VOL_STATES = frozenset({"contango", "flat", "backwardation"})
+_VOL_STATES = frozenset({"contango", "flat", "backwardation", "unknown"})
 _FLAG_STATES = frozenset({FLAG_ACTIVE, FLAG_INACTIVE, FLAG_UNKNOWN, FLAG_BLOCKED})
 WORDS: dict[str, frozenset[str]] = {
     # the digest: the snapshot's band - the whole of its producer's range,
@@ -207,7 +207,9 @@ WORDS: dict[str, frozenset[str]] = {
     "qqq_trend": _TRENDS,
     "spy_trend_1d_ago": _TRENDS,
     "qqq_trend_1d_ago": _TRENDS,
-    # the VIX term structure, v_vix.state's three states, today and a day earlier
+    # the VIX term structure: v_vix.state's three states, and compute.py's
+    # word for a run without a usable ratio (the multiplier beside it is 1.0),
+    # today and a day earlier
     "vol_state": _VOL_STATES,
     "vol_state_1d_ago": _VOL_STATES,
     # each warning flag's state as the snapshot contract types it
