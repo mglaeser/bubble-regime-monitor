@@ -207,6 +207,22 @@ class TestSourceChains:
         else:
             assert _current_from_multpl(page) == reading
 
+    @pytest.mark.parametrize("page", [
+        "",
+        MULTPL_PAGE.replace("39.95", "") + MULTPL_PAGE.replace("39.95", "17.33"),
+        MULTPL_PAGE + MULTPL_PAGE.replace("39.95", ""),
+        '<?xml version="1.0" encoding="utf-8"?>\n' + MULTPL_PAGE,
+    ], ids=["an-empty-page", "two-elements-the-second-holds-a-number",
+            "two-elements-the-first-holds-a-number", "an-xml-declaration-in-a-str"])
+    def test_anything_but_one_element_with_one_number_is_a_source_error(self, page):
+        # lxml raises errors of its own on the first and on the last page
+        # (ParserError, ValueError); on the two in between, one of the two
+        # elements that carry the id holds a number.
+        from app.sources.cape import _current_from_multpl
+
+        with pytest.raises(SourceError):
+            _current_from_multpl(page)
+
     def test_a_multpl_page_without_the_element_hands_over_to_shillers_spreadsheet(self, monkeypatch):
         import app.sources.cape as cape
 

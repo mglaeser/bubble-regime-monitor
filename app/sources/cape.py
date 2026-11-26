@@ -22,18 +22,28 @@ SHILLERDATA_URL = "https://img1.wsimg.com/blobby/go/e5e77e0b-59d1-44d9-ab25-4763
 
 
 def _current_from_multpl(html: str) -> float:
+    """Returns a number in exactly one case: the page parses, exactly one
+    element has the id "current", that element's own text is one number and
+    nothing else, and the number lies between 5 and 100. Everything else is
+    SourceError, every exception of the parser included."""
     # multpl's page states the value in the element with the id "current": a
     # label in <b>, the day's change in a <span>, the time in a <div>, and the
     # value as the element's own text (the page of 2026-11-14; the element is
     # kept in tests/test_sources.py). An HTML parser reads the page, so a
-    # comment is not text. The own text, its pieces joined by a space, has to
-    # be one number and nothing else, or there is no reading. The patterns that
-    # stood here took the first digits behind the words "Current Shiller PE
-    # Ratio" anywhere in the page source, a comment or a class name included.
-    own_text = " ".join(lxml.html.fromstring(html).xpath('//*[@id="current"]/text()')).strip()
-    if not re.fullmatch(r"[0-9]+(\.[0-9]+)?", own_text):
+    # comment is not text. The pieces of the own text are joined by a space, so
+    # two pieces never read as one number. The patterns that stood here took
+    # the first digits behind the words "Current Shiller PE Ratio" anywhere in
+    # the page source, a comment or a class name included.
+    try:
+        own_texts = [" ".join(element.xpath("text()")).strip()
+                     for element in lxml.html.fromstring(html).xpath('//*[@id="current"]')]
+    except Exception as exc:
+        raise SourceError(f"multpl: the page does not parse ({type(exc).__name__})") from exc
+    if len(own_texts) != 1:
+        raise SourceError(f"multpl: {len(own_texts)} elements with the id of the current CAPE, not one")
+    if not re.fullmatch(r"[0-9]+(\.[0-9]+)?", own_texts[0]):
         raise SourceError("multpl: could not parse current CAPE")
-    cape = float(own_text)
+    cape = float(own_texts[0])
     if not 5.0 < cape < 100.0:
         raise SourceError(f"multpl: implausible CAPE {cape}")
     return cape
