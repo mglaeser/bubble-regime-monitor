@@ -98,6 +98,34 @@ class TestMypyDepthPin:
         assert mypy_pin.main(tmp_path) == 1
         assert "BLOCK" in capsys.readouterr().err
 
+    TABLE = b"[tool.mypy]\nstrict = true\n"
+    NUMBER = b"[tool]\nmypy = 1\n"
+    ARRAY = b"[[tool.mypy]]\nstrict = true\n"
+    # tomllib parses it; printing an integer that long raises ValueError by default.
+    LONG = b"[tool.mypy]\nstrict = 0x" + b"f" * 4000 + b"\n"
+
+    @pytest.mark.parametrize(("pyproject", "pinned", "named"), [
+        (b"tool = []\n", TABLE, "pyproject.toml"),
+        (NUMBER, NUMBER, "pyproject.toml"),
+        (TABLE + b"\xff", TABLE, "pyproject.toml"),
+        (TABLE, None, ".mypy-config.pinned"),
+        (ARRAY, ARRAY, "pyproject.toml"),
+        (TABLE, LONG, ".mypy-config.pinned"),
+    ], ids=["tool-is-an-array", "the-same-number-in-both", "a-byte-that-is-not-utf-8",
+            "no-pin-file", "the-same-array-of-tables-in-both", "a-number-too-long-to-print"])
+    def test_anything_but_two_equal_tables_is_one_block_line(
+            self, tmp_path, capsys, pyproject, pinned, named):
+        # The pin passes on two equal tables and on nothing else: neither equal
+        # values that are no tables nor an exception get through.
+        (tmp_path / "pyproject.toml").write_bytes(pyproject)
+        if pinned is not None:
+            (tmp_path / ".mypy-config.pinned").write_bytes(pinned)
+        assert mypy_pin.main(tmp_path) == 1
+        printed = capsys.readouterr()
+        blocks = [line for line in printed.err.splitlines() if line.startswith("BLOCK")]
+        assert len(blocks) == 1 and named in blocks[0], printed.err
+        assert "Traceback" not in printed.out + printed.err
+
     def test_the_type_check_step_runs_the_pin_and_names_the_config_file(self):
         # A mypy.ini outranks pyproject.toml when mypy looks for its
         # configuration, so the step names the file the pin compares. The pin

@@ -15,35 +15,40 @@ from __future__ import annotations
 import sys
 import tomllib
 from pathlib import Path
-from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
-
-
-def table(path: Path) -> dict[str, Any] | None:
-    """The `[tool.mypy]` table of a TOML file, sub-tables included. The file is
-    opened in binary and read by `tomllib.load`, as mypy 2.3.1 reads
-    pyproject.toml: the pin decodes no text and translates no line end itself."""
-    with path.open("rb") as file:
-        return tomllib.load(file).get("tool", {}).get("mypy")
+FILES = ("pyproject.toml", ".mypy-config.pinned")
 
 
 def problems(root: Path = ROOT) -> list[str]:
-    tables = []
-    for name in ("pyproject.toml", ".mypy-config.pinned"):
-        try:
-            tables.append(table(root / name))
-        except tomllib.TOMLDecodeError as refusal:
-            return [f"{name} is not TOML as tomllib reads it: {refusal}"]
-    actual, pinned = tables
-    # The two are compared as printed below, so the order of the keys and the
-    # type of each value count, in every sub-table. Measured with mypy 2.3.1:
-    # the later of two spellings of one option wins (`ignore_errors`,
-    # `no_ignore_errors`), and `strict = 1.0`, which Python calls equal to
-    # `true`, is "Not a boolean" and leaves strict off.
-    if actual is None or repr(actual) != repr(pinned):
-        return [f"[tool.mypy] in pyproject.toml is {actual!r}; .mypy-config.pinned holds {pinned!r}"]
-    return []
+    """The pin passes (an empty list) in exactly one case: both files open and
+    parse as TOML, `tool.mypy` is a table in both, and the two tables are equal
+    with the order of their keys and the type of each value. Everything else,
+    every exception included, is the refusal: one line that names the file,
+    which `main` prints as its BLOCK line before it returns exit status 1."""
+    name = FILES[0]
+    try:
+        printed = []
+        for name in FILES:
+            # Opened in binary and read by `tomllib.load`, as mypy 2.3.1 reads
+            # pyproject.toml: the pin decodes no text and translates no line
+            # end itself.
+            with (root / name).open("rb") as file:
+                found = tomllib.load(file)["tool"]["mypy"]
+            if not isinstance(found, dict):
+                return [f"{name}: tool.mypy is {found!r}, which is no table"]
+            printed.append(repr(found))
+        actual, pinned = printed
+        # The two are compared as printed, so the order of the keys and the
+        # type of each value count, in every sub-table. Measured with mypy 2.3.1:
+        # the later of two spellings of one option wins (`ignore_errors`,
+        # `no_ignore_errors`), and `strict = 1.0`, which Python calls equal to
+        # `true`, is "Not a boolean" and leaves strict off.
+        if actual != pinned:
+            return [f"[tool.mypy] in pyproject.toml is {actual}; .mypy-config.pinned holds {pinned}"]
+        return []
+    except Exception as exc:  # whatever opening, parsing, extracting or printing raises
+        return [f"{name} holds no [tool.mypy] table the pin can compare: {type(exc).__name__}: {exc}"]
 
 
 def main(root: Path = ROOT) -> int:
