@@ -84,7 +84,7 @@ snapshot is never held hostage to the alert layer. P0a and P0b are separate
 because a lost sidecar is a permanent hole in the replay record, while a lost
 evaluation is simply retried. The recovery job does it (:15/:45,
 `app/jobs/alert_recovery.py`): it re-runs the newest recompute's evaluation
-while it has not committed, at most `ALERTS_EVAL_RETRY_MAX` (2) times.
+while it has not committed, at most `ALERTS_EVAL_RETRY_MAX` (default 2) times.
 
 P1 holds no write lock. On a single-writer SQLite database, doing rule
 evaluation and history reads inside the write transaction would block the next
@@ -434,12 +434,8 @@ the apply is one transaction. The recovery job re-runs it, and an `ABANDONED`
 run whoever swept it, for the newest recompute only, because the decisions of
 an older input would be applied to a state a later input has already moved
 (`tests/test_alert_recovery.py::test_an_older_input_is_not_rerun_once_a_newer_one_exists`).
-`recover-evaluations --once` and `POST /admin/alerts/recover` sweep; the job's
-next run re-runs. Past the budget the recovery component reports `degraded`
-with `retries_budget_exhausted` until a newer recompute exists. A watchdog
-input's evaluation is not the job's: the watchdog evaluates its own input
-again on every pass while the outage lasts, and its recovery observation while
-the outage episode is open.
+Past the budget the recovery component reports `degraded` with
+`retries_budget_exhausted` until a newer recompute exists.
 
 `recover-leases --once` is the separate delivery-lease sweep. An expired
 `LEASED` row with no `request_started_at` is definitely pre-wire and returns to

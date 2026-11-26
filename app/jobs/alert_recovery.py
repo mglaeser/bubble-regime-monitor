@@ -134,44 +134,18 @@ _NOT_COMMITTED = (EvaluationRunStatus.ABANDONED, EvaluationRunStatus.TIMED_OUT,
 def _unfinished_evaluations(session: Any, *, ambient_mode: str) -> list[str]:
     """The NEWEST RECOMPUTE's evaluations that ended without committing.
 
-    Read from the table, not from this sweep's report: a run that ends
-    TIMED_OUT, CONFLICT or FAILED never held an expired lease, and one that a
-    manual sweep (`alerts recover-evaluations`, POST /admin/alerts/recover)
-    marked ABANDONED is in no later report. Both were final, and a transition
-    rule compares with the predecessor only, so that input's band change was
-    never alerted. Production, 2026-11-01 06:03 UTC: one evaluation of 306
-    ended TIMED_OUT (1,620 ms against 1,500) and the 06:15 and 06:45 runs of
-    this job reported `retried 0`.
+    Read from the table, not from this sweep's report: the report lists what
+    this sweep marked ABANDONED, so a run that ended TIMED_OUT, CONFLICT or
+    FAILED is in none, and a row a manual sweep marked is in no later one.
 
-    Only the newest. Its decisions are applied to the state as it is now, so an
-    older input re-run after a later one announces a state that no longer holds
-    (executed: trim, de-risk [not committed], trim, then the re-run opens the
-    de-risk P1 while the band is trim). That includes the evaluation this job's
-    own sweep abandons, which was re-run whatever had been evaluated since. The
-    scheduled evaluations start :01 to :07 after their slot and this job runs
-    at :15 and :45, so the two re-runs the budget allows happen before the next
-    recompute (production: never less than 239 minutes between two). What this
-    selection cannot see is an input captured between it and the re-run's own
-    reads: a recompute that ends within a second of :15:00 or :45:00, one
-    started by hand or a scheduled one that takes a quarter of an hour. Then
-    overlapping applies end in CONFLICT by the state compare-and-set, and a
-    re-run that starts just after the newer evaluation committed is applied
-    late.
+    Only the newest: its decisions are applied to the state as it is now, so
+    an older input re-run after a later one announces a state that no longer
+    holds. Only a recompute: a watchdog input carries the timestamp of the
+    last snapshot, so by time it ties with that recompute's input, and its
+    evaluation is the watchdog's (`app/alerts/watchdog.py`).
 
-    Only a recompute. A watchdog input carries no scoring state and the
-    timestamp of the last snapshot, so by time it ties with that recompute's
-    input (production: the one watchdog input, 2026-08-29 08:23, and the input
-    of snapshot 174). Counted here, which of the two is the newest would be
-    undefined, and the recovery observation the watchdog captures at :10 after
-    an outage could end the re-runs of the recompute that came back at :00.
-    The watchdog evaluates its own input again on every pass while the outage
-    lasts, and its recovery observation while the outage episode is open
-    (`app/alerts/watchdog.py::run_once`), so its evaluations need no re-run
-    from here.
-
-    An input that has committed in the mode a re-run would use is done: that is
-    what ends the re-runs after a promotion (the re-run commits a new row under
-    the promoted rules) and after the operator reduced the mode.
+    An input that has committed in the mode a re-run would use is done: a
+    re-run under promoted rules or in a reduced mode commits a row of its own.
     """
     moment = func.coalesce(AlertInputSnapshot.computed_at, AlertInputSnapshot.built_at)
     newest = session.execute(
