@@ -173,9 +173,7 @@ def sub_score(stat: float | None, cv90: float | None, cv95: float | None,
         # score-shifting and went through the ceremony (v4.1, 2026-08-23):
         # version bump, artifact re-pin, measured delta recorded -- 53.30 ->
         # 51.82 on the golden raw inputs with the July statistic, action band
-        # unchanged; production had no step at release, its reading was a
-        # rejection (app/references.py, CHANGELOG v3.9.0). Setting
-        # contested_rule = "symmetric" restores the cap.
+        # unchanged. Setting contested_rule = "symmetric" restores the cap.
         #
         # Residual, stated: a non-rejection can also mean LOW POWER rather than
         # genuine absence, and Chen et al. establish size distortion, not power
