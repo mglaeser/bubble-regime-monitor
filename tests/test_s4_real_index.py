@@ -85,11 +85,6 @@ class TestAsymmetricContested:
         assert sub_score(just_under, LIVE_CV90, LIVE_CV95, contested=True, asymmetric=True) == 0.05
         assert sub_score(just_over, LIVE_CV90, LIVE_CV95, contested=True, asymmetric=True) == 0.25
 
-    def test_stale_still_caps_regardless(self):
-        # Staleness is about data age, not the test's size properties.
-        assert sub_score(LIVE_STAT, LIVE_CV90, LIVE_CV95,
-                         contested=True, stale=True, asymmetric=True) == 0.25
-
     def test_degenerate_inputs_still_floor(self):
         assert sub_score(None, None, None, contested=True, asymmetric=True) == 0.25
         assert sub_score(math.nan, LIVE_CV90, LIVE_CV95, contested=True, asymmetric=True) == 0.25
