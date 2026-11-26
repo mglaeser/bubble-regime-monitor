@@ -61,8 +61,9 @@ last() {
 git fetch --quiet --prune --no-tags origin "+refs/heads/$BRANCH:$REMOTE"
 TARGET="$(git rev-parse "$REMOTE")"
 # The one comparison. A container that runs main's commit and does not answer
-# is the unit's: podman's health check kills it after three failed checks,
-# Restart= boots it again, and the alarms report it. The release probes
+# is the unit's: podman's health check kills it after five failed checks in a
+# row and Restart= boots it again; no message says so (the alarms report a
+# failed, stuck or missed recompute, not a restart). The release probes
 # nothing here - the probe on this path was where #143's rounds 3, 29 and 37
 # came from - and releases nothing it would only restart.
 [[ "$TARGET" != "$(running)" ]] || exit 0

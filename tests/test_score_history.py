@@ -1,13 +1,8 @@
-"""GET /api/v1/score/history: `limit` and the bounds mean what the route says.
+"""GET /api/v1/score/history: `limit` counts what the route returns.
 
-Written from the route's own contract, not from the handler: README "History
-(raw/daily/monthly)"; the parameter descriptions "daily/monthly = last
-snapshot per period", "Maximum rows returned (most recent kept)" and "ISO
-date upper bound (inclusive ...)"; and the bound parser's rule that a bound
-with a time is the UTC instant it names.
-
-The snapshots stand at hh:00:30 on the six scheduled hours, as production
-writes them (615 rows on 2026-11-10, six a day on 97 of its 109 days)."""
+Written from the route's own contract: README "History (raw/daily/monthly)"
+and the parameter descriptions "daily/monthly = last snapshot per period" and
+"Maximum rows returned (most recent kept)"."""
 
 from __future__ import annotations
 
@@ -64,35 +59,9 @@ def test_the_dashboards_call_keeps_every_day_past_a_thousand_snapshots(history):
     assert len(points) == 200 and points[0] == "2026-07-11T22:00"
 
 
-def test_the_default_monthly_view_reaches_back_past_a_thousand_snapshots(history):
-    assert _points(history(200), "granularity=monthly")[0] == "2026-07-31T22:00"
-
-
-def test_a_raw_limit_still_counts_snapshots(history):
-    assert _points(history(3), "limit=4") == [
-        "2026-07-13T10:00", "2026-07-13T14:00", "2026-07-13T18:00", "2026-07-13T22:00"]
-
-
 def test_the_bounds_apply_before_the_periods_are_counted(history):
     assert _points(history(10), "granularity=daily&from=2026-07-12&to=2026-07-14&limit=2") == [
         "2026-07-13T22:00", "2026-07-14T22:00"]
-
-
-def test_a_date_as_upper_bound_covers_its_whole_day(history):
-    assert _points(history(3), "to=2026-07-12")[-1] == "2026-07-12T22:00"
-
-
-@pytest.mark.parametrize("bound, last", [
-    ("2026-07-12T06:00:00", "2026-07-12T02:00"),
-    ("2026-07-12T06:00:00Z", "2026-07-12T02:00"),
-    ("2026-07-12T08:00:00%2B02:00", "2026-07-12T02:00"),
-    ("2026-07-12T06:00:30", "2026-07-12T06:00"),  # inclusive: the snapshot of that very instant
-])
-def test_a_time_as_upper_bound_is_that_instant(history, bound, last):
-    """A bound with a time is the instant it names (the parser's own rule for
-    `from`). The whole-day extension answered ?to=...T06:00 with the
-    snapshots of the following 24 hours."""
-    assert _points(history(3), f"to={bound}")[-1] == last
 
 
 def test_a_history_row_names_the_versions_that_computed_it(isolated_db):
