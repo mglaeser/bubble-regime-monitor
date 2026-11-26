@@ -123,8 +123,9 @@ install -D -m 644 deploy/systemd/bubblegauge-alert-watchdog.service ~/.config/sy
 install -D -m 644 deploy/systemd/bubblegauge-alert-watchdog.timer ~/.config/systemd/user/bubblegauge-alert-watchdog.timer
 install -D -m 644 deploy/systemd/bubblegauge-alert-watchdog-failed.service ~/.config/systemd/user/bubblegauge-alert-watchdog-failed.service
 install -d -m 700 ~/.config/bubblegauge
-touch ~/.config/bubblegauge/imessage.env && chmod 600 ~/.config/bubblegauge/imessage.env
-touch .env && chmod 600 .env
+# mode 600 from creation; an existing file keeps its content, and its owner checks it first: a chmod cannot shut out a reader who opened it while it was wider
+[ -e ~/.config/bubblegauge/imessage.env ] || install -m 600 /dev/null ~/.config/bubblegauge/imessage.env; chmod 600 ~/.config/bubblegauge/imessage.env
+[ -e .env ] || install -m 600 /dev/null .env; chmod 600 .env
 ```
 
 Two files are written by hand before anything is started. The host notices'
