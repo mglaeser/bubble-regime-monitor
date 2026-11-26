@@ -151,6 +151,7 @@ hand, piece by piece: this sequence as a whole has not been run on a new host.
 ```bash
 systemctl --user list-timers bubblegauge-release.timer   # next check
 journalctl --user -u bubblegauge-release.service -n 50   # last releases
+journalctl --user -u bubblegauge.service -n 100          # the service: its JSON lines, uvicorn's start and stop, the traceback of a failed boot or request
 systemctl --user start bubblegauge-release.service       # release now
 systemctl --user status bubblegauge.service              # the container
 systemctl --user restart bubblegauge.service             # apply a changed .env: the release moves code only

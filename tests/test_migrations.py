@@ -458,7 +458,7 @@ def test_admin_atomicity_migration_upgrade_downgrade_upgrade(tmp_path):
     # Bump this in the same PR that adds a migration — that is the point of
     # pinning it rather than reading `head`, which would pass vacuously.
     assert connection.execute(
-        "select version_num from alembic_version").fetchone() == ("0026",)
+        "select version_num from alembic_version").fetchone() == ("0027",)
     connection.close()
 
 
@@ -551,7 +551,7 @@ def test_the_evidence_stamp_drop_round_trips_and_keeps_the_immutability_trigger(
             connection.execute(
                 "update alert_ruleset_registry set canonical_yaml = 'changed'")
         assert connection.execute(
-            "select version_num from alembic_version").fetchone() == ("0026",)
+            "select version_num from alembic_version").fetchone() == ("0027",)
     finally:
         connection.close()
 
@@ -822,7 +822,7 @@ def test_the_inheritance_drop_resets_inherited_state_and_round_trips(tmp_path):
         command.upgrade(cfg, "head")
 
     _run_with_db(db, _cycle)
-    assert _read("select version_num from alembic_version") == [("0026",)]
+    assert _read("select version_num from alembic_version") == [("0027",)]
 
 
 def _delivery_and_memory_shape(db: str) -> dict[str, object]:
@@ -972,7 +972,7 @@ def test_the_manual_retry_drop_round_trips_and_keeps_the_delivery_triggers(tmp_p
         command.upgrade(cfg, "head")
 
     _run_with_db(db, _cycle)
-    assert _read("select version_num from alembic_version") == [("0026",)]
+    assert _read("select version_num from alembic_version") == [("0027",)]
 
 
 def _sqlite_master(db: str) -> set[tuple]:
@@ -1292,6 +1292,92 @@ def test_the_instance_reminder_count_drop_round_trips_from_the_deliveries(tmp_pa
     assert _read("select version_num from alembic_version") == [("0026",)]
 
 
+#: A fake FRED key in the shape of the real one: 32 hexadecimal characters.
+_FAKE_FRED_KEY = "9f8e7d6c5b4a39281706f5e4d3c2b1a0"  # pragma: allowlist secret
+
+#: The note of production's source_health row 223 (fred_baa_dgs10, 2026-07-15
+#: 18:11:59), the text of a FRED 504 with the API key in its URL, here with
+#: the fake key ...
+_LEAKED_NOTE = (
+    "Server error '504 Gateway Time-out' for url 'https://api.stlouisfed.org/fred/series/"
+    f"observations?series_id=BAA&api_key={_FAKE_FRED_KEY}&file_type=json&sort_order=asc'\n"
+    "For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/504")
+#: ... and as the gather stores such a note today (app/services/compute.py _track).
+_LEAKED_NOTE_AS_THE_GATHER_STORES_IT = (
+    "Server error '504 Gateway Time-out' for url 'https://api.stlouisfed.org/fred/series/"
+    "observations?series_id=BAA&api_key=[redacted]&file_type=json&sort_order=asc' "
+    "For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/504")
+
+_INSERT_SOURCE_HEALTH = (
+    "insert into source_health (source, ok, latency_ms, http_status, checked_at, note) "
+    "values (?, ?, 1.0, NULL, ?, ?)")
+
+
+def test_0027_redacts_a_stored_note_that_carries_a_provider_key(tmp_path):
+    """SourceHealth.note must stay free of raw provider error text: the
+    unauthenticated GET /readyz serves it. The gather has redacted what it
+    stores since 2026-08-17 (app/services/compute.py _track); the rows stored
+    before that were left as they were, and one of production's is the text
+    of a FRED 504 with the API key in its URL. The first row below is that
+    note with a fake key.
+
+    0027 leaves it as the gather stores such a note today. A note the gather
+    already redacted, a note without a credential and a row without a note
+    are not touched."""
+    from app.redaction import sanitize
+
+    db = str(tmp_path / "stored-notes.db")
+    already_redacted = (
+        "Server error '500 Internal Server Error' for url 'https://api.stlouisfed.org/fred/series/"
+        "observations?series_id=BAA&api_key=[redacted]&file_type=json&sort_order=asc' "
+        "For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500")
+    stored = [  # source, ok, checked_at, note
+        ("fred_baa_dgs10", 0, "2026-07-15 18:11:59.086967", _LEAKED_NOTE),
+        ("fred_baa_dgs10", 0, "2026-09-01 06:01:02.000000", already_redacted),
+        ("fred_DFII10", 0, "2026-10-21 18:00:01.000000", "Expecting value: line 1 column 1 (char 0)"),
+        ("price_QQQ", 1, "2026-10-21 18:00:02.000000", None),
+    ]
+
+    def _rows() -> list[tuple]:
+        connection = sqlite3.connect(db)
+        try:
+            return connection.execute(
+                "select id, source, ok, latency_ms, http_status, checked_at, note "
+                "from source_health order by id").fetchall()
+        finally:
+            connection.close()
+
+    def _cycle():
+        from alembic import command
+
+        from app.db_migrate import _alembic_config
+
+        cfg = _alembic_config()
+        command.upgrade(cfg, "0026")
+        connection = sqlite3.connect(db)
+        connection.executemany(_INSERT_SOURCE_HEALTH, stored)
+        connection.commit()
+        connection.close()
+        before = _rows()
+        assert [row[1:3] + row[5:] for row in before] == stored
+
+        command.upgrade(cfg, "0027")
+
+        after = _rows()
+        assert len(after) == len(before) == 4
+        changed = [(old, new) for old, new in zip(before, after, strict=True) if old != new]
+        assert len(changed) == 1, "only the note that carried a key is rewritten"
+        old, new = changed[0]
+        assert old[-1] == _LEAKED_NOTE and new[:-1] == old[:-1], "and nothing of its row but the note"
+        assert new[-1] == _LEAKED_NOTE_AS_THE_GATHER_STORES_IT == sanitize(_LEAKED_NOTE, limit=400)
+        assert _FAKE_FRED_KEY not in new[-1]
+
+    _run_with_db(db, _cycle)
+    connection = sqlite3.connect(db)
+    assert connection.execute("select version_num from alembic_version").fetchall() == [("0027",)]
+    connection.close()
+
+
 def test_the_weekly_digest_storage_is_dropped_and_restored_exactly(tmp_path):
     """Owner decision D2a: the weekly digest is deleted, and 0024 drops what it
     stored - the alert_digest_item table with its indexes, the DIGEST branch
@@ -1363,7 +1449,7 @@ def test_the_weekly_digest_storage_is_dropped_and_restored_exactly(tmp_path):
         command.upgrade(cfg, "head")
 
     _run_with_db(db, _cycle)
-    assert _read("select version_num from alembic_version") == [("0026",)]
+    assert _read("select version_num from alembic_version") == [("0027",)]
 
 
 def test_the_weekly_digest_migration_refuses_to_drop_its_items(tmp_path):
