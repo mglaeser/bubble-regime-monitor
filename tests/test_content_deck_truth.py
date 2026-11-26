@@ -51,3 +51,38 @@ def test_no_verdict_or_band_line_tells_the_reader_to_act():
     said += [text for name in ("band.oneliner", "splash.band_blurb")
              for text in deck[name]["entries"].values()]
     assert [t for t in said if any(p in t.lower() for p in ACTION_COPY)] == []
+
+
+def test_the_changelog_reaches_every_score_shifting_release():
+    from app.references import CHANGELOG
+
+    # A release whose served changelog entry opens its score field with one of
+    # these marks has a row in the deck's table.
+    marks = ("METHODOLOGY CHANGE", "D4 METHOD CHANGE", "SCORE-SHIFTING")
+    shifting = [entry["version"] for entry in CHANGELOG if entry["score"].startswith(marks)]
+    assert {"v3.3.0", "v3.3.2", "v3.9.0"} <= set(shifting)   # the marks select them
+
+    deck = _deck()
+    shown = {row["v"].removeprefix("v") for row in deck["changelog"]["items"]}
+    assert [version for version in shifting if version.removeprefix("v") not in shown] == []
+
+
+def test_the_override_line_says_what_fires_while_s4_is_contested():
+    from app.config import Settings
+    from app.engine.aggregate import evaluate_red_flags
+
+    # What the service does: GSADF_CONTESTED is true by default, a contested
+    # GSADF flag does not fire whatever the statistic reads, and the override
+    # needs three flags. So it fires only when the three other flags fire
+    # together; one of them calm and it does not.
+    assert Settings.model_fields["gsadf_contested"].default is True
+    firing = {"gsadf_explosive_p05": True, "gsadf_contested": True, "semi_runup_pp": 200.0,
+              "hy_oas_bps": 500.0, "hy_oas_3yr_tight_bps": 300.0, "breadth_pct": 40.0,
+              "index_within_2pct_of_ath": True}
+    flags = evaluate_red_flags(**firing)
+    assert not flags.gsadf_explosive_noncontested
+    assert flags.override_fired
+    for calm in ({"semi_runup_pp": 100.0}, {"hy_oas_bps": 350.0}, {"breadth_pct": 60.0}):
+        assert not evaluate_red_flags(**{**firing, **calm}).override_fired
+
+    assert "all three others" in _deck()["redflag.header"]["text"]
