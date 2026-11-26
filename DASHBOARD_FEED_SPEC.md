@@ -8,7 +8,7 @@
 >
 > Capture #1 (same day, one recompute earlier) exposed two issues, both resolved and regression-tested:
 > 1. All six Tiingo series failed (`only 61 rows`) — a ≥100-row guard meant for GSADF's long-history calibration; the feed now passes `min_rows=24`. Capture #2 shows all six populated.
-> 2. `XAG/USD` needs a paid Twelve Data plan (XAU/USD is free) — on the free tier `silver_spot` **permanently** serves the labeled SLV-close fallback (`source: tiingo:SLV`, note "NOT spot"), the 1A-detectable behavior; `gold_silver_ratio` declares its `mixed` basis. Confirmed live in capture #2.
+> 2. `XAG/USD` needs a paid Twelve Data plan (XAU/USD is free) — on the free tier `silver_spot` **permanently** serves the labeled SLV-close fallback (`source: tiingo:SLV`, note "NOT spot"), the 1A-detectable behavior; `gold_silver_ratio` declares its `mixed` basis. Confirmed live in capture #2. Since then `silver_spot` and `gold_silver_ratio` have left the contract and `gold_spot` has lost its ETF fallback (section 2); this item describes the capture.
 >
 > Known run-to-run property (documented, not a bug): `lppls_confidence` uses random-restart fits and moves between recomputes (0.294 → 0.253 across captures); consume it with its `detail.state`/bands, not as a stable constant.
 
@@ -18,7 +18,7 @@
 
 | # | Decision | Implementation |
 |---|---|---|
-| 1A | XAU/XAG spot via Twelve Data, labeled GLD/SLV fallback | `gold_spot`/`silver_spot` source `twelvedata:XAU/USD` when true spot; on spot failure they degrade to the ETF close with `source: tiingo:GLD` and `note: "… ETF close proxy — NOT spot"` — **fallback detectable via source+note**, as required |
+| 1A | XAU spot via Twelve Data; a spot key carries the spot quote or is not served (**amended** by the owner's merge, see the note in section 2) | `gold_spot` has source `twelvedata:XAU/USD`; when the quote fails it ships `available:false`, `value:null`. The labeled GLD/SLV fallback of v1.0 is gone: an ETF close is a price per fund share, not per ounce. `silver_spot` left the contract |
 | 2A | Fed Broad Dollar Index, never DXY | key `usd_broad_index`, source `fred:DTWEXBGS`, name "US dollar (Fed Broad Dollar Index)", note says **NOT ICE DXY** |
 | 3A | FRED monthly series + TD fresh scalars | `usdjpy`/`usdchf` *series* from FRED H.10 (10-day stale SLA); *scalars* from TD `USD/JPY`/`USD/CHF` with automatic FRED fallback |
 | 4B | **TR rate series in addition to yields** | `ust10y_tr` (IEF, dividend-adjusted) and `tbill3m_tr` (BIL) as `kind:"total_return"`, labeled ETF proxies — alongside `ust10y_yield`/`tbill3m_yield` (`kind:"yield"`) |
@@ -41,6 +41,18 @@
 > service (2026-09-27). The companion dashboard reads metrics by name and reads
 > neither key (checked at its main, 2026-10-03), so it needs no change; no
 > backward compatibility is kept (owner ruling 2026-09-20).
+>
+> **Decision 1A amended (the owner's merge; evidence 2026-10-05 to 11-10):**
+> `ndx_close`, `silver_spot` and `gold_silver_ratio` leave the contract; totals
+> are now **13 series + 30 metrics**. `ndx_close` was built `available:false`
+> on every payload. `XAG/USD` answered HTTP 404 on 222 of 222 recomputes, so
+> `silver_spot` was the SLV close, a price per fund share (14 of 14 retained
+> payloads), and `gold_silver_ratio` divided USD per ounce by USD per share
+> (86.77 on 2026-11-10). `gold_spot` keeps its key and loses its GLD fallback.
+> The feed endpoint reads a stored row through `to_contract`
+> (`app/services/dashboard_feed.py`), so a row stored before the change is
+> served without the three keys, and a GLD close stored under `gold_spot` as
+> `available:false`.
 
 ### Series (12 + 1, see §7)
 
@@ -59,9 +71,9 @@
 | `ust10y_tr` | 10Y US Treasuries TR (IEF ETF proxy) | total_return | USD | tiingo:IEF | decision 4B |
 | `tbill3m_tr` | 3M T-bills / cash TR (BIL ETF proxy) | total_return | USD | tiingo:BIL | decision 4B |
 
-### Metrics (32 + 1, see §7)
+### Metrics (29 + 1, see §7)
 
-`cape` · `excess_cape_yield` · `sp500_top10_weight_pct` · `semis_runup_2yr_pp` · `hy_oas_bps` · `hy_oas_52w_change_bps` (≈252 business-day lookback in the persisted history) · `pct_above_200dma` · `margin_debt_yoy_pct` · `gsadf` (detail: statistic, cv90, cv95, contested, state, gsadf_sup — **since v4.0 the value is the endpoint BSADF, not the GSADF sup; see §8**) · `lppls_confidence` (detail: state, bands, n_windows_qualifying, n_windows_positive) · `vix_level` · `vix_term_state` (categorical: value null, `detail.state` ∈ contango/flat/backwardation, or `unknown` on a run without a usable ratio) · `vix_term_ratio` · `vrp` (unit `annualized_variance_pts_pct2`) · `skew` · `qqq_close` · `spy_close` · `ndx_close` (**always** available:false — the service reads no raw index; use `qqq_close`) · `gold_spot` · `silver_spot` · `gold_silver_ratio` (note states spot vs ETF basis) · `gold_ttm_pct` · `btc_spot` · `btc_ath` (detail: basis `monthly_closes+spot`, coverage_start — **not a curated all-time record**) · `btc_drawdown_pct` (≤ 0 by construction) · `usd_broad_index_level` · `usd_broad_index_ytd_pct` (vs last-December month-end) · `usdjpy` · `usdchf` · `ust10y_yield_pct` · `tbill3m_yield_pct` · `mmf_total_assets_usd` (USD_mn, quarterly Z.1)
+`cape` · `excess_cape_yield` · `sp500_top10_weight_pct` · `semis_runup_2yr_pp` · `hy_oas_bps` · `hy_oas_52w_change_bps` (≈252 business-day lookback in the persisted history) · `pct_above_200dma` · `margin_debt_yoy_pct` · `gsadf` (detail: statistic, cv90, cv95, contested, state, gsadf_sup — **since v4.0 the value is the endpoint BSADF, not the GSADF sup; see §8**) · `lppls_confidence` (detail: state, bands, n_windows_qualifying, n_windows_positive) · `vix_level` · `vix_term_state` (categorical: value null, `detail.state` ∈ contango/flat/backwardation, or `unknown` on a run without a usable ratio) · `vix_term_ratio` · `vrp` (unit `annualized_variance_pts_pct2`) · `skew` · `qqq_close` · `spy_close` · `gold_spot` (the XAU/USD quote, or available:false — no ETF fallback) · `gold_ttm_pct` · `btc_spot` · `btc_ath` (detail: basis `monthly_closes+spot`, coverage_start — **not a curated all-time record**) · `btc_drawdown_pct` (≤ 0 by construction) · `usd_broad_index_level` · `usd_broad_index_ytd_pct` (vs last-December month-end) · `usdjpy` · `usdchf` · `ust10y_yield_pct` · `tbill3m_yield_pct` · `mmf_total_assets_usd` (USD_mn, quarterly Z.1)
 
 ## 3 · Endpoint
 
@@ -89,8 +101,8 @@ GET /api/v1/dashboard/feed?sections=series&symbols=qqq,gold,btc
 
 - Built **inside every scheduled recompute (`app/engine/recompute_slots.py`; the schedule is served as `service.recompute_schedule` by `/api/v1/status`), strictly after the score persists** — a feed failure never touches scoring; the endpoint then serves the previous payload. Manual `POST /api/v1/admin/refresh` also rebuilds it. **No on-request upstream pulls, ever** (cached read of a persisted row; migration 0005, table `dashboard_feed`).
 - Stale SLAs: daily market data 7 d · FRED H.10 FX 10 d · CAPE 45 d · FINRA 75 d · quarterly MMF 290 d (the newest quarter is about 163 to 255 days old by FRED's date). `stale` is null when `as_of` is unknown.
-- Quota cost per recompute: ~6 Tiingo requests, ~6 Twelve Data credits (through the existing per-minute throttle and credit governor), ~6 FRED series. Negligible against all limits.
-- Tests: golden-fixture build (frozen inventories, 61-point pad, honest kinds), one-source-down degradation (200 + `available:false`), spot→ETF fallback labeling, endpoint 503/filters/lenient-params. 206 tests green.
+- Quota cost per recompute: ~6 Tiingo requests, 5 Twelve Data credits (through the existing per-minute throttle and credit governor), ~6 FRED series. Negligible against all limits.
+- Tests: golden-fixture build (frozen inventories, 61-point pad, honest kinds), one-source-down degradation (200 + `available:false`), a failed spot quote ships `available:false`, a stored payload older than the contract is served through the contract, endpoint 503/filters/lenient-params.
 
 ## 5 · REAL captured payload — capture #2 (production, 2026-07-15T23:29:51+00:00)
 
@@ -273,7 +285,7 @@ And a REAL degradation row (capture #1, before the min_rows fix) — this is pre
 4. `vix_term_state` is categorical: `value` is null (the contract requires numeric values) and the reading lives in `detail.state`; the numeric companion is `vix_term_ratio`.
 5. ~~COFER reserve shares ship `available:false` (new IMF provider = out of scope).~~ **Resolved in v3.7.5:** both are connected via `app/sources/imf_reserves.py`. `cofer_ust_share_pct` IS COFER (USD share of allocated FX reserves); `cofer_gold_share_pct` is IMF **IFS** (gold ÷ total reserves), NOT COFER — COFER is FX-only, so the key name stays a labeled historical misnomer. Quarterly (~1-quarter lag), non-scoring, per-item graceful degradation. Requires a deploy-host network policy that allows `imf.org`. **Not connected again since 2026-09-27:** the IMF retired that service, both keys ship `available:false`. **Dropped 2026-10-03 (owner decision D13):** both keys left the contract.
 6. §5 now carries real capture-#2 bytes (metrics block verbatim + envelope); the capture's full payload is committed at `docs/dashboard-feed-capture2.json`. The pre-capture sketch is retained under "5-legacy" for history only.
-7. **`silver_spot` is permanently the labeled SLV-close fallback on the free Twelve Data tier** (XAG/USD needs the Grow plan; XAU/USD works free — confirmed by capture #1). The dashboard's "render prose spot only when source is true spot" rule handles this by design; `gold_silver_ratio` states its `mixed` basis. If a paid TD plan is ever added, true silver spot activates automatically with no code change.
+7. ~~**`silver_spot` is permanently the labeled SLV-close fallback on the free Twelve Data tier** (XAG/USD needs the Grow plan; XAU/USD works free — confirmed by capture #1). The dashboard's "render prose spot only when source is true spot" rule handles this by design; `gold_silver_ratio` states its `mixed` basis. If a paid TD plan is ever added, true silver spot activates automatically with no code change.~~ **Dropped with `gold_silver_ratio` (section 2):** a spot key carries the spot quote or is not served.
 8. Twelve Data 1-month bars are dated at the month **start** (the current partial bar reads `YYYY-MM-01`), so the `btc` series uses a 35-day stale SLA; `btc_spot` (daily) carries the fresh date.
 
 ---
