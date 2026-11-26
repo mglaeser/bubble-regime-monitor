@@ -108,6 +108,8 @@ def test_edgar_yields_capex_over_operating_cash_flow(upstream, monkeypatch):
     from app.sources import edgar
 
     answers, seen = upstream
+    monkeypatch.setenv("SEC_USER_AGENT", "Example Research research@example.com")   # no default contact
+    get_settings.cache_clear()
     monkeypatch.setattr(edgar, "MIN_INTERVAL_S", 0.0)       # the 8 req/s self-cap would sleep
     monkeypatch.setattr(edgar, "_last_request", [0.0])      # ... and its clock is put back afterwards
     answers["data.sec.gov"] = httpx.Response(200, json=_companyfacts(ocf=100e9, capex=60e9))
