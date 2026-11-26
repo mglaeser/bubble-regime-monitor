@@ -120,8 +120,9 @@ class Settings(BaseSettings):
     deploy_note_path: str = "/app/deploy-note"
 
     # --- ALERT SYSTEM (docs/ALERT_SYSTEM.md) --------------------------------
-    # Two INDEPENDENT switches. Evidence capture may run with alerting fully
-    # disabled, and enabling alerts never implies capture. `live` is never
+    # Two switches, not symmetric. Evidence capture may run with alerting fully
+    # disabled; enabling alerts does not turn capture on, and with capture off
+    # no recompute is evaluated (`alert_evaluation_skipped`). `live` is never
     # reached automatically: it requires promoted rule + phrase artifacts and a
     # deliberate operator edit.
     #
@@ -227,7 +228,8 @@ class Settings(BaseSettings):
     # operator can widen them without a code change (Q42).
     message_engine_min_interval_s: int = 300     # floor between two model calls
     message_engine_breaker_strikes: int = 5      # failed calls in a row -> cooldown
-    message_engine_breaker_cooldown_s: int = 86400   # no call for this long after them
+    # Half a day (a day until 2026-11-25): the next morning's digest is the probe.
+    message_engine_breaker_cooldown_s: int = 43200   # no call for this long after them
 
     # Volume cap (ruling Q40). At the cap no call is made and the template goes
     # out — never a dropped message. No message announces the cap: the attempt
