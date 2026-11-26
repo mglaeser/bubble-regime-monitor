@@ -229,25 +229,16 @@ def test_admin_requires_key(client):
     assert client.get("/api/v1/admin/refresh/status").status_code == 401
 
 
-def test_every_operator_route_refuses_a_caller_without_the_key(client, monkeypatch, tmp_path):
+def test_every_operator_route_and_every_write_refuses_a_caller_without_the_key(client, monkeypatch):
     """SECURITY.md: the admin routes and every alert route take X-API-Key; only
     the other reads are public. Asked of the running application, for every
-    operation its own schema lists under the two operator paths: no key is 401
-    and a wrong key is 401, with public reads on (the default) - the setting
-    under which the read dependency lets everyone in.
-
-    Executed on 9f79c7a: 25 operations, each (401, 401). With
-    POST /api/v1/admin/send-sms moved to the read dependency it answered
-    (200, 200), the forced digest ran, and no test failed."""
+    operation its own schema lists under the two operator paths and for every
+    write: no key is 401 and a wrong key is 401, with public reads on - the
+    setting under which the read dependency lets every caller in."""
     import re
 
     from app.config import get_settings
 
-    # Settings reads `.env` from the working directory, and a red run of this
-    # test runs operator handlers without a key, the forced digest among them.
-    # From a directory without one no deployment's transport can be loaded, so
-    # a red run sends nothing (the digest answers "not configured").
-    monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("READ_ENDPOINTS_PUBLIC", "true")
     monkeypatch.setenv("ALERTS_WRITE_API_KEY", "test-silence-key-not-the-placeholder-0123456789")
     get_settings.cache_clear()
@@ -255,8 +246,8 @@ def test_every_operator_route_refuses_a_caller_without_the_key(client, monkeypat
         operations = sorted(
             (method.upper(), re.sub(r"\{[^}]+\}", "no-such-id", path))
             for path, item in client.app.openapi()["paths"].items()
-            if path.startswith(("/api/v1/admin", "/api/v1/alerts"))
-            for method in item if method in {"get", "post", "put", "patch", "delete"})
+            for method in item if method in {"get", "post", "put", "patch", "delete"}
+            if method != "get" or path.startswith(("/api/v1/admin", "/api/v1/alerts")))
         # A filter that selects nothing, or one of the two paths only, cannot pass.
         assert {("POST", "/api/v1/admin/send-sms"), ("GET", "/api/v1/alerts/health"),
                 ("POST", "/api/v1/alerts/silences")} <= set(operations)
