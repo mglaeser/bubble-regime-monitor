@@ -9,7 +9,7 @@ read-only unless its name says otherwise.
     python -m app.alerts.cli ruleset
     python -m app.alerts.cli health
     python -m app.alerts.cli pending
-    python -m app.alerts.cli evaluate --input-identity ID     # always shadow
+    python -m app.alerts.cli evaluate --input-identity ID [--shadow]
     python -m app.alerts.cli dryrun [--from T] [--to T] --state-db PATH [--out PATH]
     python -m app.alerts.cli explain --evaluation-id ID
     python -m app.alerts.cli recover-evaluations --once
@@ -178,7 +178,7 @@ def cmd_retention(args: argparse.Namespace) -> int:
 
     result = run_once(dry_run=bool(args.dry_run))
     _print(result)
-    return 1 if result["status"] == "refused" else 0
+    return 1 if result.get("skipped") else 0
 
 
 def cmd_ruleset(_args: argparse.Namespace) -> int:
@@ -232,11 +232,7 @@ def cmd_pending(_args: argparse.Namespace) -> int:
 def cmd_evaluate(args: argparse.Namespace) -> int:
     from app.services.alert_integration import evaluate_input
 
-    # Always shadow: a live evaluation is the recompute's, the recovery job's
-    # or POST /api/v1/admin/alerts/evaluate with shadow=false. The command had
-    # a --shadow flag that was `store_true, default=True`: on whether given or
-    # not, so it never chose anything.
-    outcome = evaluate_input(args.input_identity, mode="shadow")
+    outcome = evaluate_input(args.input_identity, mode="shadow" if args.shadow else None)
     if outcome is None:
         _print({"error": "no captured sidecar with that identity, or alerting is disabled"})
         return 1
@@ -425,9 +421,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("reconcile-sidecars", help="snapshots with no sidecar").set_defaults(
         func=cmd_reconcile)
 
-    evaluate = sub.add_parser("evaluate",
-                              help="evaluate one captured sidecar in shadow; sends nothing")
+    evaluate = sub.add_parser("evaluate", help="evaluate one captured sidecar")
     evaluate.add_argument("--input-identity", required=True)
+    evaluate.add_argument("--shadow", action="store_true", default=True)
     evaluate.set_defaults(func=cmd_evaluate)
 
     dryrun = sub.add_parser("dryrun", help="replay captured sidecars (isolated, no send)")

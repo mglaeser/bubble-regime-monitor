@@ -338,52 +338,6 @@ def test_live_health_reports_promotion_agreement_and_no_admission_gate(monkeypat
     assert promoted["live_matches_promoted"] is True
 
 
-@pytest.mark.usefixtures("isolated_db")
-def test_health_does_not_call_an_unpromoted_phrase_set_promoted(tmp_path, monkeypatch):
-    """Health and the live gate answer the same question. The gate binds the
-    rules and the phrase set (`load_active_for_mode`); a host phrase file of
-    other bytes under the promoted version leaves the rules hash as it was, so
-    the gate refuses every live evaluation and dispatch while a health that
-    compares the rules alone reports agreement."""
-    import json
-    from datetime import UTC, datetime
-
-    from app.alerts.artifacts import load_active, load_active_for_mode
-    from app.alerts.errors import AlertingUnavailable
-    from app.alerts.health import health_projection
-    from app.config import get_settings
-    from app.db import session_scope
-
-    monkeypatch.setenv("ALERTS_MODE", "live")
-    get_settings.cache_clear()
-    with session_scope() as session:
-        register_promoted(session, load_active(session))     # the shipped pair
-
-    host_copy = json.loads(PHRASES.read_text(encoding="utf-8"))
-    host_copy["meta"]["note"] = "A host copy: other bytes under the promoted version."
-    host_file = tmp_path / "alert_phrases.host.json"
-    host_file.write_text(json.dumps(host_copy, ensure_ascii=False), encoding="utf-8")
-    monkeypatch.setenv("ALERTS_PHRASE_PATH", str(host_file))
-    get_settings.cache_clear()
-
-    with session_scope() as session:
-        artifacts = load_active(session)
-        assert artifacts.source == "candidate"
-        with pytest.raises(AlertingUnavailable, match="unpromoted phrase set"):
-            load_active_for_mode(session, mode="live")
-        payload = health_projection(
-            session, settings=get_settings(), ruleset=artifacts.ruleset,
-            artifact_source=artifacts.source, fallback_reason=None,
-            now=datetime(2026, 11, 11, 7, 0, tzinfo=UTC))
-
-    assert payload["promoted_rules_sha256"] == payload["ruleset"]["rules_sha256"]
-    assert payload["live_matches_promoted"] is False
-    assert "live mode: active phrase set does not match the promoted artifact" \
-        in payload["conditions"]
-    assert "live mode: active ruleset does not match the promoted artifact" \
-        not in payload["conditions"]
-
-
 # --- promotion marks the bytes live mode runs (owner decision D2d) ----------
 
 

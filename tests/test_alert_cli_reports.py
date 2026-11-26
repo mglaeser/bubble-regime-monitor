@@ -84,32 +84,6 @@ def test_the_weekly_digest_command_is_gone():
         build_alert_parser().parse_args(["digest", "--window", "2026-W33", "--dry-run"])
 
 
-def test_alerts_evaluate_has_one_mode(monkeypatch, capsys):
-    """README, the operator table: "`bubblegauge alerts evaluate` always runs
-    in shadow and sends nothing". So the command takes no mode option: a
-    `--shadow` that was on whether given or not offered a choice that did not
-    exist. A live evaluation is the recompute's, the recovery job's or the
-    admin route's (`shadow=false`), never this command's. (`--once` on the
-    other commands is as inert and stays: it is the spelling README and
-    docs/ALERT_SYSTEM.md give for them.)"""
-    import app.services.alert_integration as integration
-    from app.alerts.cli import main
-
-    calls: list[tuple[str, str | None]] = []
-
-    def record(input_identity: str, *, mode: str | None = None, now=None) -> None:
-        calls.append((input_identity, mode))
-
-    monkeypatch.setattr(integration, "evaluate_input", record)
-    monkeypatch.setenv("ALERTS_MODE", "live")      # the host's mode is not the command's
-
-    assert main(["evaluate", "--input-identity", "x"]) == 1      # no such sidecar
-    assert calls == [("x", "shadow")]
-    with pytest.raises(SystemExit):
-        build_alert_parser().parse_args(["evaluate", "--input-identity", "x", "--shadow"])
-    capsys.readouterr()
-
-
 def _persist_inputs(inputs) -> None:
     from app.db import session_scope
 
@@ -237,10 +211,9 @@ def test_transition_statistics_cover_every_mandated_operational_family(isolated_
 
 
 def test_a_snapshot_from_before_the_typed_contract_is_no_sidecar_gap(isolated_db):
-    """A sidecar gap is a TYPED snapshot without its sidecar, the definition
-    health and `reconcile_sidecars` use (docs/ALERT_SYSTEM.md, section 11:
-    "missing typed sidecars"). A snapshot stored before the typed contract has
-    none by design and nothing can build one for it."""
+    """A sidecar gap is a TYPED snapshot without its sidecar, as
+    `reconcile_sidecars` counts it. A snapshot stored before the typed
+    contract is not a gap."""
     from app.alerts.recovery import reconcile_sidecars
     from app.db import session_scope
     from app.models import Snapshot

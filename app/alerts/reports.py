@@ -231,10 +231,8 @@ def _faber_value(item: AlertInput, domain: str) -> str | None:
     if evidence is None or evidence.value is None \
             or evidence.data_state == DataState.MISSING:
         return None
-    # The state as the rules read it, not the stored spelling. Production's
-    # recompute sidecars hold the word as "IN" until 2026-08-25 18:01 UTC (62
-    # leg readings) and as "in" since (918). Compared as written, the report
-    # showed two trend transitions (SPY and QQQ, "IN->in") where no leg changed.
+    # The canonical state, not the stored spelling: a sidecar may hold the word
+    # as "IN" or as "in", and a change of letter case is no transition.
     return canonical_execution_leg_state("faber", evidence.value)
 
 
@@ -309,10 +307,8 @@ def transition_statistics(session: Session) -> dict[str, Any]:
         if "DATA_QUALITY_GUARD" in (episode.suppression_reasons or [])
     )
 
-    # A gap is a TYPED snapshot without its sidecar, as health and
-    # reconcile_sidecars count it. A snapshot from before the typed contract
-    # has none by design: production's report showed 125 gaps (every snapshot
-    # of 2026-07-11 .. 08-06, none of them typed) where health showed 0.
+    # A gap is a TYPED snapshot without its sidecar, as reconcile_sidecars
+    # counts it; a snapshot from before the typed contract is not one.
     sidecar_gaps = session.execute(
         select(func.count(Snapshot.id))
         .select_from(Snapshot)

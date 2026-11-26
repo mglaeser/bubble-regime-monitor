@@ -1,11 +1,11 @@
-"""Two retention horizons: one empties a text, the other deletes an event.
+"""Two retention horizons, and the list of things the short one may not touch.
 
 Addendum B H-07. Message bodies and raw model output are the sensitive,
 low-value-over-time part of the record; everything around them is the audit
 trail and is worth keeping far longer:
 
-    ALERTS_MESSAGE_RETENTION_DAYS   (default 400)  the TEXT of an `alert_render`
-    ALERTS_METADATA_RETENTION_DAYS  (default 800)  the rows of `alert_event`
+    ALERTS_MESSAGE_RETENTION_DAYS   (default 400)  rendered message BODIES
+    ALERTS_METADATA_RETENTION_DAYS  (default 800)  everything else
 
 The short sweep REDACTS rather than deletes. An `alert_render` row carries the
 phrase-set provenance it was planned under, the render source, the septet count
@@ -15,22 +15,10 @@ H-07 says must not happen. So the body is emptied in place, `body_redacted_at`
 is stamped, and migration 0009's trigger permits that ONE transition and no
 other: a render still cannot be rewritten, and cannot be redacted twice.
 
-The long sweep is intentionally narrow. It deletes `alert_event` rows of
-CLOSED, fully-settled work and nothing else, because "delete rows older than N
-days" applied to a table with open episodes is how an open episode loses the
-ruleset that opened it.
-
-No other alert table has a horizon. The sidecars (`alert_input_snapshot`), the
-evaluations, the episodes, the deliveries with their members and renders, the
-confirmation observations and the registries are kept: the sidecars are what a
-replay reads (app/alerts/replay.py), and the rest is what an event of an open
-episode points at. That is a decision by size, not an omission. Production on
-2026-11-11, 82 days of capture: 491 sidecars in 7.1 MB (about 32 MB a year),
-501 events in 0.4 MB (about 3 MB a year), 306 evaluations in 0.35 MB and every
-other alert table together 0.6 MB; the whole database 35.8 MB, growing about
-90 MB a year. Neither sweep has had a row to act on yet (76 daily runs, 0
-bodies redacted, 0 events deleted): the oldest render is of 2026-09-22 and the
-oldest event of 2026-09-20.
+The long sweep is intentionally narrow. It removes CLOSED, fully-settled
+history and nothing else, because "delete rows older than N days" applied to a
+table with open episodes is how an open episode loses the ruleset that opened
+it.
 """
 
 from __future__ import annotations
@@ -44,6 +32,7 @@ from sqlalchemy.orm import Session
 from app.alerts.models import (
     AlertDelivery,
     AlertEpisode,
+    AlertEvaluation,
     AlertEvent,
     AlertRender,
 )
@@ -51,11 +40,17 @@ from app.logging_conf import get_logger
 
 log = get_logger(__name__)
 
-# What the sweeps keep is pinned by tests/test_alert_retention.py, row for row.
-# A tuple of six names stood here (METADATA_PRESERVED, "never swept by the
-# short horizon"). No code read it; the one test that did asserted two of its
-# strings, and all nine retention tests passed with the open-episode guard
-# deleted from `sweep_settled_events`. A list of names protected nothing.
+#: Never swept by the SHORT horizon, at any age. Named rather than implied,
+#: because the failure this guards against is a future retention change that
+#: quietly starts deleting one of them (H-07).
+METADATA_PRESERVED: tuple[str, ...] = (
+    "episode transitions",
+    "delivery status and timing",
+    "member mapping",
+    "rule and ruleset provenance",
+    "budget decisions",
+    "replay eligibility",
+)
 
 
 @dataclass
@@ -105,9 +100,9 @@ def sweep_settled_events(session: Session, *, older_than: datetime) -> int:
     An event belonging to an open episode is never removed regardless of age —
     the trail that explains a still-firing mechanism is the trail an operator
     is most likely to need.  The same protection applies to deliveries not yet
-    terminal.  Delivery audit events commonly have no episode link, so checking
-    episodes alone would delete the trail of a delivery still waiting for its
-    retry.
+    terminal and to replay evidence.  Delivery audit events commonly have no
+    episode link, so checking episodes alone would delete the trail of a
+    delivery still waiting for its retry.
     """
     from app.alerts.enums import TransportStatus
 
@@ -123,24 +118,29 @@ def sweep_settled_events(session: Session, *, older_than: datetime) -> int:
         select(AlertDelivery.delivery_id).where(
             AlertDelivery.transport_status.in_(unresolved_statuses))
     ).scalars().all())
-    # No mode is exempt. Three queries here spared the events of episodes,
-    # deliveries and evaluations in mode "replay". app.alerts.enums.Mode has no
-    # such member (disabled, shadow, live, dryrun), a replay writes its state
-    # in mode "dryrun" into a database of its own and never into this one
-    # (app/alerts/replay.py:_isolated_session_factory), and production held 306
-    # evaluations, 33 episodes and 21 deliveries on 2026-11-11, all "live". The
-    # three sets were empty on every run. What a replay reads are the sidecars,
-    # and no sweep touches those
-    # (tests/test_alert_retention.py::test_retention_deletes_events_and_no_row_of_another_table).
+    replay_episode_ids = set(session.execute(
+        select(AlertEpisode.episode_id).where(AlertEpisode.mode == "replay")
+    ).scalars().all())
+    replay_delivery_ids = set(session.execute(
+        select(AlertDelivery.delivery_id).where(AlertDelivery.mode == "replay")
+    ).scalars().all())
+    replay_evaluation_ids = set(session.execute(
+        select(AlertEvaluation.evaluation_id).where(
+            AlertEvaluation.mode == "replay")
+    ).scalars().all())
     rows = session.execute(
         select(AlertEvent).where(AlertEvent.occurred_at < older_than)
     ).scalars().all()
 
     deleted = 0
     for event in rows:
-        if event.episode_id and event.episode_id in open_ids:
+        if event.episode_id and event.episode_id in (
+                open_ids | replay_episode_ids):
             continue
-        if event.delivery_id and event.delivery_id in unresolved_delivery_ids:
+        if event.delivery_id and event.delivery_id in (
+                unresolved_delivery_ids | replay_delivery_ids):
+            continue
+        if event.evaluation_id and event.evaluation_id in replay_evaluation_ids:
             continue
         session.delete(event)
         deleted += 1

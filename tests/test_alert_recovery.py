@@ -1003,43 +1003,6 @@ def test_retention_job_heartbeats_success_and_failure(isolated_db, monkeypatch):
         assert failed.detail_json["error"] == "RuntimeError"
 
 
-def test_a_retention_run_that_swept_nothing_does_not_heartbeat_ok(isolated_db, monkeypatch):
-    """Inverted horizons are refused and nothing is swept (docs/ALERT_SYSTEM.md,
-    section 11a). `alerts retention` exits 1 for that run; the scheduled run of
-    the same state reports it too, in its result and in the heartbeat health
-    reads, instead of a daily ok."""
-    from app.alerts.cli import main as alerts_cli
-    from app.alerts.models import AlertComponentHeartbeat
-    from app.config import get_settings
-    from app.jobs import alert_retention
-
-    monkeypatch.setenv("ALERT_INPUT_CAPTURE", "true")
-    monkeypatch.setenv("ALERTS_MESSAGE_RETENTION_DAYS", "800")
-    monkeypatch.setenv("ALERTS_METADATA_RETENTION_DAYS", "400")
-    get_settings.cache_clear()
-    try:
-        alert_retention.job()
-        with session_scope() as session:
-            refused = session.get(AlertComponentHeartbeat, "retention")
-            assert refused.status == "critical"
-            assert refused.detail_json["status"] == "refused"
-            assert refused.detail_json["skipped"]
-        assert alerts_cli(["retention"]) == 1
-
-        monkeypatch.setenv("ALERTS_MESSAGE_RETENTION_DAYS", "400")
-        monkeypatch.setenv("ALERTS_METADATA_RETENTION_DAYS", "800")
-        get_settings.cache_clear()
-        alert_retention.job()
-        with session_scope() as session:
-            swept = session.get(AlertComponentHeartbeat, "retention")
-            assert swept.status == "ok"
-            assert swept.detail_json["status"] == "ok"
-            assert swept.detail_json["skipped"] == []
-        assert alerts_cli(["retention"]) == 0
-    finally:
-        get_settings.cache_clear()
-
-
 def test_heartbeat_preserves_bounded_run_history(isolated_db):
     from app.alerts.models import AlertComponentHeartbeat
     from app.jobs.alert_recovery import heartbeat

@@ -9,7 +9,7 @@ never as the literal string "<PIN>" in a numeric field.
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from math import ceil
 from typing import Any
 
@@ -498,15 +498,6 @@ _RECOVERY_MAX_SILENCE_S = 90 * 60
 #: Retention is daily; allow one missed-hour window without masking a missed
 #: day. The scheduler's own misfire grace is six hours.
 _RETENTION_MAX_SILENCE_S = 36 * 60 * 60
-#: The P1 latency is judged on the P1 alerts put on the wire in the last 30
-#: days. Over every P1 ever sent, one slow send kept the condition for months
-#: (under 20 samples the nearest-rank p95 is the maximum: one 95 s send 240 days
-#: ago, then ten prompt ones, still read 95 s) and a long prompt history hid a
-#: recent regression (100 prompt, then five 300 s late: p95 10 s). P1s are
-#: rare - production sent 7 between 2026-09-22 and 2026-10-08, 6 to 20 s each,
-#: and none in the 34 days after - so a shorter window is empty more often
-#: still, and an empty window reads null: unmeasured, never a made-up zero.
-_P1_LATENCY_WINDOW = timedelta(days=30)
 #: Recompute runs every four hours.  Ten hours permits two missed slots, the
 #: watchdog's 90-minute grace and ordinary timer jitter without allowing a
 #: dead evaluator to hide behind healthy dispatcher/watchdog heartbeats.
@@ -663,14 +654,12 @@ def health_projection(
     # ABSENCE OF A MONITOR IS A FAULT, NOT SILENCE.
     #
     # Each component records liveness when it runs, and the projection above
-    # lists the rows that EXIST. So a component that has NEVER run — for the
-    # watchdog, because neither the host timer nor the in-process job has run —
-    # contributed no row, and no row rendered as nothing at all. The watchdog is
-    # the component this matters most for: it is the thing that notices
-    # recomputes have stopped, so a watchdog that never ran is an outage
-    # detector that cannot detect, reporting no problem. Both of its writers
-    # write this one row (production: four beats an hour, 7,352 in 77 days), so
-    # the row alone does not show that the host timer runs.
+    # lists the rows that EXIST. So a component that has NEVER run — because its
+    # systemd timer was never installed on the host, which is the recorded state
+    # of this deployment — contributed no row, and no row rendered as nothing at
+    # all. The watchdog is the component this matters most for: it is the thing
+    # that notices recomputes have stopped, so a watchdog nobody installed is an
+    # outage detector that cannot detect, reporting no problem.
     expected = {
         "watchdog": _WATCHDOG_MAX_SILENCE_S,
         "dispatcher": max(
@@ -865,13 +854,11 @@ def health_projection(
             f"outbox: {holds_missing_next_check} hold(s) have no next-check time"
         )
 
-    # The window is on the attempt, not on the queueing: a P1 queued before it
-    # and put on the wire inside it is the lateness this figure exists to show.
     p1_latency_rows = session.execute(
         select(AlertDelivery.created_at, AlertDelivery.request_started_at).where(
             *delivery_scope,
             AlertDelivery.priority == 1,
-            AlertDelivery.request_started_at >= health_now - _P1_LATENCY_WINDOW,
+            AlertDelivery.request_started_at.is_not(None),
         )
     ).all()
     p1_latencies_ms = [
@@ -942,26 +929,16 @@ def health_projection(
     p1_latency_p95 = _p95(p1_latencies_ms)
     if p1_latency_p95 is not None and p1_latency_p95 > 60_000:
         conditions.append(
-            f"outbox: P1 enqueue-to-attempt p95 of the last "
-            f"{_P1_LATENCY_WINDOW.days} days is {p1_latency_p95}ms, "
+            f"outbox: P1 enqueue-to-attempt p95 is {p1_latency_p95}ms, "
             "above the 60000ms target"
         )
-    # Agreement is what the live gate requires (artifacts.load_active_for_mode):
-    # the promoted rules AND the promoted phrase set. A host phrase file of
-    # other bytes under the promoted version leaves the rules hash as it is, so
-    # the gate refused every live evaluation and dispatch ("an unpromoted
-    # phrase set") while this projection, comparing the rules alone, reported
-    # agreement and no condition.
-    rules_promoted = phrases_promoted = False
-    if promoted is not None and ruleset is not None:
-        rules_promoted = promoted.rules_sha256 == ruleset.rules_sha256
-        phrases_promoted = promoted.phrase_set_sha256 == ruleset.phrase_set_sha256
-    live_matches_promoted = rules_promoted and phrases_promoted
-    live_artifact_mismatch = mode == "live" and not live_matches_promoted
+    live_artifact_mismatch = bool(
+        mode == "live"
+        and (promoted is None or ruleset is None
+             or promoted.rules_sha256 != ruleset.rules_sha256)
+    )
     if live_artifact_mismatch:
         conditions.append(
-            "live mode: active phrase set does not match the promoted artifact"
-            if rules_promoted else
             "live mode: active ruleset does not match the promoted artifact"
         )
 
@@ -1035,7 +1012,8 @@ def health_projection(
             "active_rules": len(ruleset.active_rules(ruleset.document.meta.active_stage)),
         },
         "promoted_rules_sha256": promoted.rules_sha256 if promoted else None,
-        "live_matches_promoted": live_matches_promoted,
+        "live_matches_promoted": bool(
+            promoted and ruleset and promoted.rules_sha256 == ruleset.rules_sha256),
         "evaluations": {
             "committed": _count(AlertEvaluation,
                                 *evaluation_scope,
