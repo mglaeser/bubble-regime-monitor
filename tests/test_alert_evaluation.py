@@ -1283,7 +1283,7 @@ def test_a_crossing_hold_follows_its_direction_and_only_the_two_holding_policies
     assert truth("down", "auto_on_condition_false", 50.0) is False
 
 
-def test_two_all_clears_five_days_apart_both_plan_a_message(isolated_db):
+def test_two_all_clears_five_days_apart_both_plan_a_message(isolated_db, monkeypatch):
     """The real engine and database: the breadth flag is on, clears, comes
     back five days later and clears again. Each clearing is an episode with a
     planned message; the first episode ended when the flag came back."""
@@ -1292,6 +1292,9 @@ def test_two_all_clears_five_days_apart_both_plan_a_message(isolated_db):
     from app.alerts.models import AlertDeliveryMember, AlertEpisode
     from app.db import session_scope
 
+    # `_artifacts()` reads config/ relative to the working directory, so work
+    # from the repository root that this file names.
+    monkeypatch.chdir(Path(__file__).resolve().parents[1])
     artifacts = _artifacts()
     start = datetime(2026, 8, 17, 2, 0, tzinfo=UTC)
     activated: dict[int, list[str]] = {}
