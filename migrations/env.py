@@ -12,7 +12,12 @@ from app.db import sqlite_transactional_ddl
 from app.models import Base
 
 config = context.config
-if config.config_file_name is not None:
+# Alembic's logging setup is the command line's (`make migrate`), where it is
+# what prints "Running upgrade a -> b". The boot path (app.db_migrate) switches
+# it off, by Alembic's own recipe for programmatic use: fileConfig disables
+# every logger that exists and that alembic.ini does not name - uvicorn's
+# among them - and replaces the root logger's handler and level.
+if config.config_file_name is not None and config.attributes.get("configure_logger", True):
     fileConfig(config.config_file_name)
 
 config.set_main_option("sqlalchemy.url", get_settings().db_url)
