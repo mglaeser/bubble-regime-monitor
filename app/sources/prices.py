@@ -180,8 +180,11 @@ def parse_twelvedata(payload: dict, symbol: str, min_rows: int = 50) -> list[tup
     and pass min_rows=1.
 
     Error envelope: {"code":..., "message":..., "status":"error"} —
-    429 = credits exhausted (minute or day), 403 = symbol not on plan
-    (e.g. any index on free Basic)."""
+    429 = credits exhausted (minute or day) -> RateLimited; 401 and 403 ->
+    NotOnPlan. A symbol outside the plan does not have to come as 403: for
+    XAG/USD the provider sent code 404 with its plan message on 222 of 222
+    calls (the service log, 2026-10-05 to 2026-11-10), and a 404 is raised
+    as ProviderError."""
     if payload.get("status") == "error" or ("code" in payload and "values" not in payload):
         code = int(payload.get("code", 0) or 0)
         msg = str(payload.get("message", ""))[:200]
