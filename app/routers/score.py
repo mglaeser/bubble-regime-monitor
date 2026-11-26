@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.config import get_settings
 from app.content_registry import gauge_display
@@ -183,17 +183,18 @@ def get_history(
             except OverflowError:
                 upper = datetime.max
             q = q.where(Snapshot.computed_at < upper)
+        if granularity != "raw":
+            # The database finds the last snapshot of each UTC day or month, so
+            # that `limit` counts the days or months returned. The period is the
+            # head of the UTC text the column stores (app/models.py:TZDateTime):
+            # SQLite's date functions can round 23:59:59.9995 into the next day.
+            period = func.substr(Snapshot.computed_at, 1, 10 if granularity == "daily" else 7)
+            last = func.max(Snapshot.computed_at)
+            q = select(Snapshot).where(Snapshot.computed_at.in_(
+                q.with_only_columns(last).group_by(period).order_by(last.desc()).limit(limit)))
         # filter + newest-first limit in SQL, then restore chronological order
         q = q.order_by(Snapshot.computed_at.desc()).limit(limit)
         rows = list(reversed(session.execute(q).scalars().all()))
-
-    if granularity != "raw":
-        keyfn = (lambda s: s.computed_at.date().isoformat()) if granularity == "daily" \
-            else (lambda s: s.computed_at.strftime("%Y-%m"))
-        last_per: dict[str, Snapshot] = {}
-        for s in rows:
-            last_per[keyfn(s)] = s
-        rows = sorted(last_per.values(), key=lambda s: s.computed_at)
 
     data = [
         {
