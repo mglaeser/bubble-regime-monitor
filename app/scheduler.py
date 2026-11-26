@@ -113,24 +113,11 @@ def start() -> BackgroundScheduler:
                                              timezone="UTC"),
                            id="recompute", replace_existing=True,
                            coalesce=True, misfire_grace_time=3600, max_instances=1)
-        # Breadth cache refresh twice daily, ten minutes ahead of the 06:00 and
-        # 14:00 recomputes: the walk asks for yesterday first and has it stored
-        # within seconds (by 13:00:04 for each of the 55 sessions the 13:00
-        # sweep stored from 2026-08-15 to 2026-11-10).
-        # Polygon's free plan serves a session once its New York day is over.
-        # The first sweep used to run at 01:00 UTC, when New York is still at
-        # 20:00 or 21:00 of the day asked for: all 37 of them from 2026-10-05
-        # to 2026-11-10 stored no day (26 were answered HTTP 403 for yesterday,
-        # 11 had a weekend behind them), so yesterday's session was first read
-        # by the 14:00 run. Boot refreshes did store day D at D+1 04:43 UTC
-        # (2026-08-28) and 05:34 UTC (2026-09-24), 00:43 and 01:34 in New York.
-        # 05:50 UTC is 01:50 there in summer and 00:50 in winter, so the 06:00
-        # and 10:00 runs and the 08:00 digest read yesterday's breadth instead
-        # of the day before's. No early success is on record from winter time;
-        # 00:50 is later than the earliest one by the New York clock, by UTC
-        # and by the time since the close (8 h 50 min against 8 h 43 min). If
-        # Polygon refuses at 05:50, the 13:50 sweep stores the day, as the
-        # 13:00 one did.
+        # Breadth cache refresh twice daily, ten minutes before the 06:00 and
+        # 14:00 recomputes. The walk starts at yesterday (UTC); at 01:00 UTC,
+        # when New York had not finished that day, Polygon answered it with HTTP
+        # 403. 05:50 UTC is 00:50 in New York in winter and 01:50 in summer; a
+        # day refused then is not stored, and a later walk asks for it again.
         _scheduler.add_job(_breadth_job, CronTrigger(hour="5,13", minute=50, timezone="UTC"),
                            id="breadth_refresh", replace_existing=True,
                            coalesce=True, misfire_grace_time=3600, max_instances=1)

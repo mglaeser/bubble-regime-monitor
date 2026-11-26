@@ -28,7 +28,9 @@ Repository: [`mglaeser/bubble-regime-monitor`](https://github.com/mglaeser/bubbl
 git clone https://github.com/mglaeser/bubble-regime-monitor.git && cd bubble-regime-monitor && cp .env.example .env && podman-compose up -d
 ```
 
-> **API keys (v3.1).** As of v3.1, bubblegauge's price layer requires two free API keys. Sign up (free, ~1 minute each) at **https://www.tiingo.com** (`TIINGO_API_KEY`) and **https://twelvedata.com** (`TWELVE_DATA_API_KEY`) and place both in your `.env`. Tiingo is the primary source for ETF/equity prices; Twelve Data is the backup. Neither free tier serves raw stock-index levels, so the S&P 500 and Nasdaq-100 are represented by their ETF proxies (SPY and QQQ). For the Nasdaq-100, FRED serves the native index level free on the `FRED_API_KEY` this service already requires — `NASDAQ100`, 10,239 non-missing daily observations from 1986-01-02, against QQQ's start of 1999-03 (measured 2026-08-22). FRED's `SP500` is a rolling 10-year window and is the wrong instrument for the S&P proxy. Note the licence: FRED marks the Nasdaq OMX series copyright, personal use, redistribution by permission. The service does not read it since the S4 real-index shadow went (2026-09-28). An optional Alpha Vantage key (`ALPHAVANTAGE_API_KEY`, 25 requests/day) adds a thin emergency fallback for the four core tickers only.
+> **API keys (v3.1).** As of v3.1, bubblegauge's price layer requires two free API keys. Sign up (free, ~1 minute each) at **https://www.tiingo.com** (`TIINGO_API_KEY`) and **https://twelvedata.com** (`TWELVE_DATA_API_KEY`) and place both in your `.env`. Tiingo is the primary source for ETF/equity prices; Twelve Data is the backup. Neither free tier serves raw stock-index levels, so the S&P 500 and Nasdaq-100 are represented by their ETF proxies (SPY and QQQ). For the Nasdaq-100, FRED serves the native index level free on the `FRED_API_KEY` this service already requires — `NASDAQ100`, 10,239 non-missing daily observations from 1986-01-02, against QQQ's start of 1999-03 (measured 2026-08-22). FRED's `SP500` is a rolling 10-year window and is the wrong instrument for the S&P proxy. Note the licence: FRED marks the Nasdaq OMX series copyright, personal use, redistribution by permission. The service does not read it since the S4 real-index shadow went (2026-09-28). An optional Alpha Vantage key (`ALPHAVANTAGE_API_KEY`, 25 requests/day) adds a thin emergency fallback for the four core tickers only. Breadth (D1) needs a third free key, `POLYGON_API_KEY`: Polygon's grouped-daily endpoint is its only provider, and without the key D1 is dropped and block D renormalized on every recompute.
+
+In `.env`, a comment stands on its own line, never after a value. Podman's `--env-file` reader (compose's `env_file`, the Quadlet's `EnvironmentFile=`) takes everything after the first `=` as the value, so `SMS_DAILY_HOUR=8  # UTC hour` reaches the service as that whole string and it does not boot. `.env.example` and the blocks below are written that way.
 
 Rootless Podman notes: the `:Z` suffix on the `./data:/data` bind mount applies the SELinux label (required on Fedora/RHEL rootless Podman). For boot persistence: `podman generate systemd --new --name bubblegauge` (or a Quadlet `.container` file in `~/.config/containers/systemd/`) and `systemctl --user enable --now`.
 
@@ -98,7 +100,7 @@ Red-flag count 0 → override not fired. **Deterministic point score 52.43; MC m
 
 | Indicator | Primary source | Fallback chain | SLA |
 |-----------|---------------|----------------|-----|
-| CAPE (S1) | multpl scrape | shillerdata `ie_data.xls` | 35d |
+| CAPE (S1) | Shiller's `ie_data.xls`, at the link on shillerdata.com | multpl scrape | 35d |
 | Real 10-yr (S1) | FRED `DFII10` | none (FRED core) | 3d |
 | Concentration (S2) | SSGA SPY holdings XLSX (top-10 **holdings** sum, not a sector weight) | Slickcharts (the JPMAM guide is a cross-check by hand, not a tier) | 3d |
 | Semis run-up (S3) | Tiingo `SMH`/`SPY` | Twelve Data -> Alpha Vantage -> cache; SOXX substitute for SMH | 3d |
@@ -107,9 +109,11 @@ Red-flag count 0 → override not fired. **Deterministic point score 52.43; MC m
 | HY OAS (red flag 3; S5's last tier) | FRED `BAMLH0A0HYM2` (**truncated to rolling 3 yr since Apr 2026** — own `hy_oas_history` table, seeded on first boot, appended daily) | persisted history | 3d |
 | Breadth (D1) | S&P 500 constituents (SSGA) + Polygon grouped-daily closes, 200-DMA on read | none: D1 is dropped and its block renormalized | 3d |
 | Margin (D2) | FINRA XLSX (3–4-week publication lag) | none — cache & tolerate staleness | 75d |
-| Hyperscaler FCF (D3) | SEC EDGAR companyfacts (mandatory UA, ≤8 req/s self-cap) | total-revenue gate proxy | 100d |
+| Hyperscaler FCF (D3) | SEC EDGAR companyfacts (mandatory UA, ≤8 req/s self-cap) | none: an issuer without a reading is left out (quality n/5); with none left D3 is dropped and its block renormalized | 100d |
 | LPPLS (D4) | `lppls==0.6.24` (pinned; maintenance-inactive) | **drop + renormalize Block D** | 3d |
 | VIX curve (V) | CBOE delayed quotes | FRED `VIXCLS`/`VXVCLS` (FRED's series id for VIX3M) | 2d |
+
+The 3d SLA of S2, S3, D1 and D4 counts NYSE sessions since the reading's date, so a weekend or an exchange holiday does not age a daily reading; every other SLA counts calendar days. `age_days` is always the calendar age. A daily feed that really stops is stale once more than three sessions have passed: two calendar days later than a calendar count reports it when a weekend lies in between, three when an exchange holiday does too, never earlier.
 
 ## API
 
@@ -124,7 +128,7 @@ Base path `/api/v1`; every response is `{"data": ..., "meta": ...}` with the fiv
 | `GET /api/v1/meta/methodology` | Framework, references, falsification criteria, changelog |
 | `GET /api/v1/replay/evidence` | RM-1: per-snapshot methodology stamp + append-only outcome summary |
 | `GET /api/v1/content/dashboard` · `GET /api/v1/content/dynamic` | UI content as a resource (`docs/CONTENT_API.md`): static scientific text blocks (disclaimer, section intros, endpoint catalogue, taxonomy, empty-states) + dynamic slots with hard length/regex contracts (placeholders until generation lands) — frontends render content, they never define it |
-| `GET /api/v1/dashboard/feed` | Read-only feed for the companion dashboard (v3.4.0): 13 monthly series + 33 scalar metrics incl. CNN Fear & Greed (v3.7.0, non-scoring); per-item degradation; contract in `DASHBOARD_FEED_SPEC.md` |
+| `GET /api/v1/dashboard/feed` | Read-only feed for the companion dashboard (v3.4.0): 13 monthly series + 30 scalar metrics incl. CNN Fear & Greed (v3.7.0, non-scoring); per-item degradation; contract in `DASHBOARD_FEED_SPEC.md` |
 | `GET /api/v1/alerts/*` | Alert-system read surface: `overview`, `mechanisms[/{fingerprint}]`, `rules/{id}/instances`, `episodes[/{id}]`, `events`, `latest`, `deliveries[/{id}]`, `renders/{id}` (with the message text, `no-store`), `ruleset`, `silences`, `health`. Operator-only: every alert read takes `ADMIN_API_KEY` (X-API-Key) and nothing else, and fails closed (503) while that key is empty or the placeholder (owner decision D3a). The full pipeline (capture → evaluate → plan → render → dispatch) exists; the repo is **committed at Stage 3** (operator decision 2026-08-27) with passing replay evidence — the deployment sends only after the operator promotes the exact artifact AND sets `ALERTS_MODE=live` on the host; the CI replay gate is the evidence, and nothing at runtime re-reads it (owner decision D2d, `docs/ALERT_SYSTEM.md`) |
 | `POST`/`DELETE /api/v1/alerts/silences[/{id}]` | Silence a rule, instance or bucket (`ALERTS_WRITE_API_KEY`; `Idempotency-Key` honoured) |
 | `POST /api/v1/admin/alerts/evaluate` · `promote` · `recover` · `send-test` · `render` | Evaluate one captured sidecar (shadow by default); promote the validated artifacts on disk (reads no evidence: the CI replay gate is the evidence, owner decision D2d); sweep stale leases; queue an audited memberless TEST delivery through the real dispatcher; preview the reviewed test message's text (stores and sends nothing). No route retries an UNKNOWN delivery: it is terminal (owner decision D2f) (X-API-Key) |
@@ -177,10 +181,14 @@ Two transports can carry it, and **exactly one sends**. If both switches are on,
 
 ```dotenv
 IMESSAGE_ENABLED=true
-IMESSAGE_API_BASE_URL=https://messages.example.com   # origin only, no path
-IMESSAGE_API_KEY=imp_...                             # scoped key: messages:send, NOT admin
-IMESSAGE_RECIPIENT=+49151...                         # or an Apple-ID email
-SMS_DAILY_HOUR=8                                     # UTC hour (default 08:00)
+# origin only, no path
+IMESSAGE_API_BASE_URL=https://messages.example.com
+# scoped key: messages:send, NOT admin
+IMESSAGE_API_KEY=imp_...
+# or an Apple-ID email
+IMESSAGE_RECIPIENT=+49151...
+# UTC hour (default 08:00)
+SMS_DAILY_HOUR=8
 ```
 
 **The switch alone does nothing.** iMessage is selected only when the URL, key and recipient are *all* set. Turning it on with any of them blank leaves a working SMS digest sending over SMS rather than silently stopping it, and the incomplete state is reported at boot, on the health projection as `imessage_enabled_but_unconfigured`, and by `alerts preflight`.
@@ -197,11 +205,16 @@ Create a sipgate **Personal Access Token** with the `sessions:sms:write` scope, 
 
 ```dotenv
 SMS_ENABLED=true
-SIPGATE_TOKEN_ID=token-XXXX        # PAT id (Basic-auth username)
-SIPGATE_TOKEN=...                  # PAT secret (Basic-auth password)
-SIPGATE_SMS_ID=s0                  # your Web SMS extension
-SIPGATE_RECIPIENT=+49151...        # E.164
-SMS_DAILY_HOUR=8                   # UTC hour (default 08:00)
+# PAT id (Basic-auth username)
+SIPGATE_TOKEN_ID=token-XXXX
+# PAT secret (Basic-auth password)
+SIPGATE_TOKEN=...
+# your Web SMS extension
+SIPGATE_SMS_ID=s0
+# E.164
+SIPGATE_RECIPIENT=+49151...
+# UTC hour (default 08:00)
+SMS_DAILY_HOUR=8
 ```
 
 The engine-off digest is capped at 150 characters (`SMS_MAX_LEN`), inside one 160-septet GSM-7 segment, and ASCII-coerced so a stray Unicode character cannot halve the limit. The same cap applies over iMessage, where the proxy would accept 4000 Unicode code points, so that digest is identical on both transports. With the engine on, the digest is held to its channel instead: 150 GSM-7 septets over SMS, 350 characters over iMessage (`MESSAGE_ENGINE_IMESSAGE_MAX_CHARS`).
@@ -211,10 +224,14 @@ The engine-off digest is capped at 150 characters (`SMS_MAX_LEN`), inside one 16
 The digest tells you the score. This tells you when there is no new score to tell you about.
 
 ```dotenv
-FAILURE_ALERTS_ENABLED=true    # default; sends over whichever transport above is on
-FAILURE_ALERT_REPEAT_H=24      # the alarm repeats this often while the outage lasts
-FAILURE_ALERT_STATE_PATH=/data/failure-alert-state.json   # outage memory across restarts
-FAILURE_ALERT_STUCK_AFTER_H=4  # a run holding the lock this long is reported wedged
+# default; sends over whichever transport above is on
+FAILURE_ALERTS_ENABLED=true
+# the alarm repeats this often while the outage lasts
+FAILURE_ALERT_REPEAT_H=24
+# outage memory across restarts
+FAILURE_ALERT_STATE_PATH=/data/failure-alert-state.json
+# a run holding the lock this long is reported wedged
+FAILURE_ALERT_STUCK_AFTER_H=4
 ```
 
 Every recompute — scheduled or manual — reports its outcome. A run that raises, or that completes without producing a snapshot, sends one compressed message over the transport the digest uses:
@@ -253,12 +270,14 @@ Everything bubblegauge sends to a person, by itself or on request. Times are UTC
 | **Daily digest**, engine off | Daily at `SMS_DAILY_HOUR`:`SMS_DAILY_MINUTE` (default 08:00), when a transport is chosen. | The newest snapshot: score, band, override, interquartile range, red flags, SPY and QQQ trend. | A fixed English template. No model. | The transport. ASCII, at most 150 characters (`SMS_MAX_LEN`). | No live admission: nothing. A failed send is logged. No retry. |
 | **Daily digest**, engine on | As above. | As above, plus what `GET /api/v1/score` serves: the 5-95 range, the band lines and the score's distance from them, each warning flag and its distance from its threshold, the override's rule, the trends' distance from their 10-month averages, the VIX term structure, both blocks, five readings by their own values and the nine sub-scores. And the snapshots a day and a week earlier (what changed), the snapshot's model judgment (at most 300 characters), the repository's references for the indicators (with each one's grounding and caveat) and the framework the methodology endpoint serves. | The model writes it from the library entry `daily_digest`, in `MESSAGE_LANGUAGE` (default English): one point, chosen by what changed since a day earlier, explained with its context, at the model's maximum reasoning effort (docs/MESSAGE_ENGINE.md, decision 28). It writes when the governor allows a call: one at a time, 300 s apart, 100 per UTC day, none for 24 h after 5 failed calls in a row (an unconfigured gateway counts as failed). The call may take up to 10 minutes while the gateway's stream stays alive, and a transient failure is retried once within that time. Basic checks: visible text, no control character, the channel's characters, no link or phone number, the length. | The transport. 150 GSM-7 septets on SMS, 350 characters on iMessage. | No call, a failed call or a failed check: the owner's template with the current numbers. A malformed library entry, or a template that fails a check: `bubblegauge: daily_digest fired.` An unsigned library or no live admission: nothing. The message is not sent again later. |
 | **Alert, P1**: 7 rules at stage 3 (band to de-risk, override fires, SPY trend out at high risk, persistent breadth flag, semiconductor run-up past 150 pp, execution armed, falsification event) | Every recompute (scheduled, or `POST /api/v1/admin/refresh`) is evaluated; a dispatcher pass every 20 s sends up to 5 queued alerts. The :15/:45 job re-runs an abandoned evaluation, twice at most. | The facts the rule declares, from the newest captured recompute input at send time. Caveats when data is degraded or stale, when the condition is unknown at send time, or when it moved since it fired (then trigger and current values). | Reviewed fixed phrases (`config/alert_phrases.v3.5.json`) in `MESSAGE_LANGUAGE`, else German. No model. | The transport. GSM-7, at most 160 septets, on both channels. Sent at once and alone: no quiet hours, no budget. Cooldown 48 h (semiconductor tier 30 days, falsification event none). | No connection, 429 or another unlisted 4xx: retried after 30 s per attempt (at most 5 minutes), without limit. A listed 4xx, an unexpected 2xx or no transport: final. A 3xx, a 5xx or a lost answer: `UNKNOWN`, never sent again. A text that fails its own checks: not sent. |
-| **Alert, P2**: 19 rules at stage 3 (band moves, override resolves, SPY and QQQ trend out and back in, breadth flag on and all-clear, credit stress, margin rollover, VIX backwardation, semiconductor run-up past 100 pp, data-quality and coverage notices, the recompute outage) | As P1. | As P1. | As P1. The alerts of one root cause in one evaluation share a message, which names up to three and counts the rest. | As P1, but held outside 07:00–22:00 Europe/Berlin, and at most 5 per 24 h and 8 per 7 days (rolling); over the cap, held and re-checked every 30 minutes. Cooldown 6 h to 30 days per rule. | As P1. |
+| **Alert, P2**: 19 rules at stage 3 (band moves between hold and trim, a base-band move while the band is suppressed, override resolves, SPY and QQQ trend out and back in, breadth flag on and all-clear, credit stress, margin rollover, VIX backwardation, semiconductor run-up past 100 pp, data-quality and coverage notices, the recompute outage) | As P1. | As P1. | As P1. The alerts of one root cause in one evaluation share a message, which names up to three and counts the rest. | As P1, but held outside 07:00–22:00 Europe/Berlin, and at most 5 per 24 h and 8 per 7 days (rolling); over the cap, held and re-checked every 30 minutes. Cooldown 6 h to 30 days per rule. | As P1. |
 | **Alert reminder** | One per episode: at the first evaluation 48 h after the last message about the condition (the episode's alert; or, when the cooldown kept that alert silent, the earlier message it followed) that still finds the condition firing (six of the seven P1 rules; no P2 rule has one). | As P1. | The rule's phrases again. | As P1. | As P1. |
 | **Recompute-outage alert** (the P2 rule `ops.recompute_outage`) | Two scheduled recomputes missed and 90 minutes past the second. Checked by the host's watchdog timer every 30 minutes and in the app at :10/:40. | The number of missed slots. | `Kein Rechenlauf seit {n} Slots.` / `No compute run for {n} slots.` | As P2. | As P2. No all-clear: once a recompute lands, the next check closes it without a message. |
 | **Failure alarm, all-clear** | A recompute that raises or writes no snapshot opens one outage record and alarms at once; while the outage lasts, a failure repeats the alarm once `FAILURE_ALERT_REPEAT_H` (24 h) has passed. A recompute holding its lock for `FAILURE_ALERT_STUCK_AFTER_H` (4 h), checked at :05/:35, counts as a failure. The first success after an announced outage sends the all-clear. | The outage record: failures, since when, the newest score's age, the latest error (redacted, at most 90 characters). | Fixed English text (System-failure alerts, above). | The digest's transport. At most 150 characters. Exempt from admission: it reports breakage. | Not delivered: the record stays open, and the next failure (for the all-clear, the next success) sends again. |
 | **Deploy note** | Once per release, after the new container answers on main's commit (`deploy/release.sh`). Never on a restart, a reboot or a hand rollback. | What the release wrote into the image: the commit range, the merged commits' titles and descriptions, the changed paths. | The model may only name up to three areas from a closed list of ten, and the note prints each area's fixed phrase. The last line, `Score logic: high / medium / low / very low - <reason>`, is computed from the changed files. | iMessage only, when enabled and configured, and with live admission. | A reply that is not area codes only, or a failed call: the commit and its commit count, with the same last line. No note without live admission, or when the release cannot name the commit the last container ran. A note that is not sent is not sent later. |
 | **Host notices** | The release unit fails: at once, then at most once an hour while it keeps failing. The alert-watchdog unit fails (container not running, or the watchdog crashed or hung): with every failed 30-minute run. | The failed unit, the container's state, the host, the time. | Fixed English text from `deploy/notify-outage.sh`. | iMessage only, from the host straight to the proxy, with the host's own settings (`~/.config/bubblegauge/imessage.env`). Exempt from admission: they report breakage. | curl retries a transient error twice; any 2xx counts as sent. |
+
+Leaving de-risk sends no alert of its own: no rule covers a band move out of de-risk.
 
 ### On request (admin key, or the CLI in the container)
 
@@ -299,7 +318,7 @@ Everything bubblegauge sends to a person, by itself or on request. Times are UTC
 2. Score > 60 sustained through 24 months of > 10% annualized gains without a > 15% drawdown → **falsified**.
 3. Override fires and no > 20% drawdown within 12 months → **override falsified**.
 
-Outcomes are stored in the DB and exposed via `/api/v1/meta/methodology`.
+The service evaluates none of these. The operator judges them and records an outcome by hand (`POST /api/v1/admin/falsification`, append-only); recorded outcomes are exposed via `/api/v1/meta/methodology`. An empty list there means only that no outcome has been recorded; the list is a track record only from the tracking start date (`frozen_methodology.json`, `_meta.falsification_tracking_since`), if the operator has recorded one there.
 
 ## Changelog
 

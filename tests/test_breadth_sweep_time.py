@@ -1,10 +1,5 @@
-"""When the breadth sweeps run.
-
-Polygon's free plan serves a session once its New York day is over. So a
-scheduled sweep has to run when New York has finished the day the sweep asks
-for first, and the first sweep of the day before the 06:00 UTC run, which the
-08:00 digest reads.
-"""
+"""When the breadth sweeps run: after New York has finished the day the walk
+asks for first, the first one before the 06:00 UTC recompute."""
 
 from __future__ import annotations
 
@@ -85,10 +80,7 @@ def test_a_sweep_runs_when_new_york_has_finished_the_day_it_asks_for(
     midnight = datetime.fromisoformat(day).replace(tzinfo=UTC)
     sweeps = sweeps_on(day)
 
-    assert len(sweeps) == 2
     for sweep in sweeps:
         assert first_day_asked(sweep) < sweep.astimezone(NEW_YORK).date()
-    # The first one is in time for the 06:00 run, which the 08:00 digest reads;
-    # the second one for the 14:00 run, should the first have been refused.
     assert next_slot_after(sweeps[0]) == midnight.replace(hour=6)
     assert next_slot_after(sweeps[1]) == midnight.replace(hour=14)

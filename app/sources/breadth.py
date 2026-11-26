@@ -254,9 +254,7 @@ def refresh_breadth_polygon(target_days: int = POLYGON_TARGET_DAYS,
     short-circuited once the cache reached target_days total dates, so no new
     trading day was ever fetched and breadth froze at the cold-start window.
     One call = the whole US market for a date; we keep only the SSGA
-    constituents. A weekend or an exchange holiday (the NYSE calendar,
-    app/alerts/calendars.py) is not asked for; an empty response on any other
-    day is a closure the calendar does not know and costs one call."""
+    constituents. Empty responses are non-trading days and cost one call."""
     symbols = set(sp500_symbols())
     calls = _supersede_if_rebased(symbols, target_days)
     if pace_seconds:
@@ -266,17 +264,7 @@ def refresh_breadth_polygon(target_days: int = POLYGON_TARGET_DAYS,
     stored_days = trading_seen = span = 0
     while trading_seen < target_days and span < POLYGON_MAX_CALENDAR_DAYS:
         span += 1
-        # A weekend or an exchange holiday has no session: no call. Skipping
-        # weekends only, the walk asked for every holiday in its window again
-        # on each sweep, 12 s apart, and stored nothing for it: 7 to 9 such
-        # calls on every scheduled sweep from 2026-10-05 to 2026-11-10. The
-        # calendar agrees with what Polygon answered on all 304 weekdays from
-        # 2025-09-10 to 2026-11-09: the 294 stored days are sessions, the 10
-        # without rows its holidays. A session it wrongly called closed would
-        # not be fetched and breadth would skip that one day; the alert TTLs,
-        # the trend rule's month-end and the price feeds' currency check
-        # (app/services/compute.py) already rest on the same calendar.
-        if not is_trading_day(day):
+        if not is_trading_day(day):    # not an NYSE session: no call
             day -= timedelta(days=1)
             continue
         if counts.get(day, 0) >= MIN_RESOLVED:  # COMPLETE cached day: count, no call
@@ -316,7 +304,7 @@ def refresh_breadth_polygon(target_days: int = POLYGON_TARGET_DAYS,
             stored_days += 1
             if written >= MIN_RESOLVED:   # only a COMPLETE day counts toward the target
                 trading_seen += 1
-        # else: empty response = a closure the calendar does not know; no count
+        # else: empty response = non-trading day (holiday); no count
         day -= timedelta(days=1)
         if pace_seconds:
             time.sleep(pace_seconds)
@@ -341,7 +329,8 @@ def refresh_breadth() -> dict[str, int]:
 def pct_above_200dma() -> SourceResult:
     """Percent of S&P 500 members with close > their own 200-day SMA.
 
-    RECOMPUTE PATH (no network): the Polygon daily_close cache (full universe,
+    RECOMPUTE PATH: one download, the SSGA constituent list (`sp500_symbols`);
+    the closes come from the Polygon daily_close cache (full universe,
     computed 200-DMA). Partial coverage is PUBLISHED with a provenance note +
     full-universe identification bounds (v3.7.8/B-05) plus structured metadata
     (B-06) rather than dropped. Raises SourceError without a Polygon key or

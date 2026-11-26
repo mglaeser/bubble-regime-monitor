@@ -120,8 +120,9 @@ class Settings(BaseSettings):
     deploy_note_path: str = "/app/deploy-note"
 
     # --- ALERT SYSTEM (docs/ALERT_SYSTEM.md) --------------------------------
-    # Two INDEPENDENT switches. Evidence capture may run with alerting fully
-    # disabled, and enabling alerts never implies capture. `live` is never
+    # Two switches, not symmetric. Evidence capture may run with alerting fully
+    # disabled; enabling alerts does not turn capture on, and with capture off
+    # no recompute is evaluated (`alert_evaluation_skipped`). `live` is never
     # reached automatically: it requires promoted rule + phrase artifacts and a
     # deliberate operator edit.
     #
@@ -227,10 +228,13 @@ class Settings(BaseSettings):
     # operator can widen them without a code change (Q42).
     message_engine_min_interval_s: int = 300     # floor between two model calls
     message_engine_breaker_strikes: int = 5      # failed calls in a row -> cooldown
-    message_engine_breaker_cooldown_s: int = 86400   # no call for this long after them
+    # Half a day (a day until 2026-11-25): the next morning's digest is the probe.
+    message_engine_breaker_cooldown_s: int = 43200   # no call for this long after them
 
-    # Volume cap (ruling Q40). At the cap the evergreen fallback is used and
-    # the exhaustion is reported in the next digest — never a dropped message.
+    # Volume cap (ruling Q40). At the cap no call is made and the template goes
+    # out — never a dropped message. No message announces the cap: the attempt
+    # table keeps "daily budget spent" on a not_asked row (governor.refusal,
+    # record_fallback), and that is all.
     message_engine_daily_budget: int = 100
 
     # Channel length (rulings Q27/Q29/Q30). SMS_MAX_LEN already defaults to
@@ -342,9 +346,11 @@ def configured_environment() -> dict[str, str]:
     return merged
 
 
-#: Settings that were removed. An old value in an environment changes nothing,
-#: and that is said loudly - at boot, in the alerts preflight, in health - so
-#: it is never dropped in silence the way `extra="ignore"` would drop it.
+#: Removed settings an old environment is likely to still hold. A value under
+#: one of these keys changes nothing, and that is said loudly - at boot, in the
+#: alerts preflight, in health. The list is not every removed setting: one that
+#: is not named here is dropped without a word, as `extra="ignore"` drops any
+#: unknown key.
 RETIRED_ENV_KEYS: dict[str, str] = {
     "DAILY_SMS_ENABLED": (
         "removed with the Stage-4 cutover (owner decision D2c, 2026-10-02): the daily "
