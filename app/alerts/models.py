@@ -448,7 +448,7 @@ class AlertEvent(Base):
 
 
 # ===========================================================================
-# A.12-A.15  deliveries, members, renders, LLM attempts
+# A.12-A.15  deliveries, members, renders
 # ===========================================================================
 
 
@@ -596,7 +596,7 @@ class AlertRender(Base):
 
 
 # ===========================================================================
-# A.16-A.19  silences, idempotency, reviews, heartbeats
+# A.16-A.19  silences, idempotency, heartbeats
 # ===========================================================================
 
 

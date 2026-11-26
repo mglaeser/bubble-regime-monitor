@@ -30,18 +30,19 @@ __all__ = [
 ]
 
 
-def release_time_for(priority: int, moment: datetime, *, exempt: bool = False) -> datetime:
+def release_time_for(priority: int, moment: datetime) -> datetime:
     """When a notification of this priority may be sent.
 
-    Returns `moment` unchanged for P1 and for any rule the ruleset marked
-    exempt; otherwise the start of the next allowed window.
+    Returns `moment` unchanged for P1 (the ruleset loader allows the
+    exemption to P1 rules only, and requires it of them); otherwise the start
+    of the next allowed window.
     """
-    if priority == 1 or exempt:
+    if priority == 1:
         return moment
     return next_quiet_hours_release(moment)
 
 
-def would_be_held(priority: int, moment: datetime, *, exempt: bool = False) -> bool:
-    if priority == 1 or exempt:
+def would_be_held(priority: int, moment: datetime) -> bool:
+    if priority == 1:
         return False
     return in_quiet_hours(moment)

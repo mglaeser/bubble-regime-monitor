@@ -162,9 +162,11 @@ def run_recompute_guarded() -> None:
     status_code=202,
     summary="Start a full recompute in the background (X-API-Key required)",
     description=(
-        "Returns immediately with 202. The recompute takes minutes (breadth sweep, "
-        "GSADF simulation, LPPLS). Poll GET /api/v1/admin/refresh/status or GET "
-        "/api/v1/score for the result. At most one recompute runs at a time."
+        # The breadth sweep is not part of it: that is a scheduler job of its
+        # own (app/scheduler.py), and the recompute reads the cache it fills.
+        "Returns immediately with 202. The recompute takes minutes (the LPPLS fit, "
+        "the GSADF test, the model's note). Poll GET /api/v1/admin/refresh/status or "
+        "GET /api/v1/score for the result. At most one recompute runs at a time."
     ),
 )
 def refresh(_: None = Depends(require_admin_key)) -> dict[str, Any]:

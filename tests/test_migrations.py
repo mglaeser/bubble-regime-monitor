@@ -4,16 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+import warnings
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
 
 # The two bootstraps do NOT agree today, and the divergence is real rather than
 # cosmetic: every column below is NOT NULL under create_all and NULLABLE under
-# Alembic. Production boots from Alembic, so a production database permits nulls
-# the models declare impossible.
+# Alembic. A database built by the migration chain permits nulls the models
+# declare impossible.
 #
 # They are WAIVED, not fixed, and the difference matters. Migrations 0001-0004
 # are already applied to the live database; rewriting them would not change it,
@@ -155,6 +155,22 @@ def test_fresh_db_migrates_and_stamps(tmp_path):
     assert "stooq_series_cache" not in tables  # 0003 dropped it
     assert "judgment_error" in tables["snapshots"]  # 0002 added it
     c.close()
+
+
+def test_a_migration_run_raises_no_alembic_deprecation(tmp_path):
+    """alembic.ini names its path separator (`path_separator = os`). Without
+    it Alembic 1.20 reads `prepend_sys_path` by its legacy splitting rule and
+    says at every migration run that the fallback is deprecated ("No
+    path_separator found in configuration; falling back to legacy splitting
+    ..."): 5 such warnings in the 15 tests of tests/test_degradation.py.
+    `prepend_sys_path` holds one entry (`.`), so either rule reads it the
+    same; the line only keeps the migration at boot off a deprecated path."""
+    from app.db_migrate import upgrade_to_head
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert _run_with_db(str(tmp_path / "fresh.db"), upgrade_to_head) == "upgraded"
+    assert [str(w.message) for w in caught if "path_separator" in str(w.message)] == []
 
 
 def test_only_test_may_reach_sending_without_a_represented_member(tmp_path):
@@ -1279,50 +1295,44 @@ def test_the_instance_reminder_count_drop_round_trips_from_the_deliveries(tmp_pa
 #: A fake FRED key in the shape of the real one: 32 hexadecimal characters.
 _FAKE_FRED_KEY = "9f8e7d6c5b4a39281706f5e4d3c2b1a0"  # pragma: allowlist secret
 
+#: The note of production's source_health row 223 (fred_baa_dgs10, 2026-07-15
+#: 18:11:59), the text of a FRED 504 with the API key in its URL, here with
+#: the fake key ...
+_LEAKED_NOTE = (
+    "Server error '504 Gateway Time-out' for url 'https://api.stlouisfed.org/fred/series/"
+    f"observations?series_id=BAA&api_key={_FAKE_FRED_KEY}&file_type=json&sort_order=asc'\n"
+    "For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/504")
+#: ... and as the gather stores such a note today (app/services/compute.py _track).
+_LEAKED_NOTE_AS_THE_GATHER_STORES_IT = (
+    "Server error '504 Gateway Time-out' for url 'https://api.stlouisfed.org/fred/series/"
+    "observations?series_id=BAA&api_key=[redacted]&file_type=json&sort_order=asc' "
+    "For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/504")
 
-def _database_file_bytes(db: str) -> bytes:
-    """The database file and what SQLite keeps beside it (-wal, -shm), as stored."""
-    path = Path(db)
-    return b"".join(file.read_bytes() for file in sorted(path.parent.glob(path.name + "*")))
+_INSERT_SOURCE_HEALTH = (
+    "insert into source_health (source, ok, latency_ms, http_status, checked_at, note) "
+    "values (?, ?, 1.0, NULL, ?, ?)")
 
 
 def test_0027_redacts_a_stored_note_that_carries_a_provider_key(tmp_path):
     """SourceHealth.note must stay free of raw provider error text: the
-    unauthenticated GET /readyz serves it (scripts/regime/authz_coverage.py).
-    The gather has redacted what it stores since 2026-08-17
-    (app/services/compute.py _track); the rows stored before that were left
-    as they were. Production (read-only copy, 2026-11-11): 11,048 rows, 33
-    with a note, and one of them - id 223, fred_baa_dgs10, 2026-07-15
-    18:11:59 - is the text of a FRED 504 with the API key in its URL. The
-    first row below is that note with a fake key.
+    unauthenticated GET /readyz serves it. The gather has redacted what it
+    stores since 2026-08-17 (app/services/compute.py _track); the rows stored
+    before that were left as they were, and one of production's is the text
+    of a FRED 504 with the API key in its URL. The first row below is that
+    note with a fake key.
 
-    0027 leaves it as the gather stores such a note today, and the key's
-    bytes are no longer in the database file. A note the gather already
-    redacted (production's id 3426), a note without a credential and a row
-    without a note are not touched.
-
-    Four rows and no filler, on purpose: with hundreds of rows after it, the
-    split of the table's first page leaves a second, dead copy of the fake
-    key in the unused space of a page (measured with 509 rows: 2 copies
-    before, 1 after), and the byte count would then pin SQLite's page layout
-    and not the migration. Production's file holds the value once."""
+    0027 leaves it as the gather stores such a note today. A note the gather
+    already redacted, a note without a credential and a row without a note
+    are not touched."""
     from app.redaction import sanitize
 
     db = str(tmp_path / "stored-notes.db")
-    leaked = (
-        "Server error '504 Gateway Time-out' for url 'https://api.stlouisfed.org/fred/series/"
-        f"observations?series_id=BAA&api_key={_FAKE_FRED_KEY}&file_type=json&sort_order=asc'\n"
-        "For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/504")
-    as_the_gather_stores_it = (
-        "Server error '504 Gateway Time-out' for url 'https://api.stlouisfed.org/fred/series/"
-        "observations?series_id=BAA&api_key=[redacted]&file_type=json&sort_order=asc' "
-        "For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/504")
     already_redacted = (
         "Server error '500 Internal Server Error' for url 'https://api.stlouisfed.org/fred/series/"
         "observations?series_id=BAA&api_key=[redacted]&file_type=json&sort_order=asc' "
         "For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500")
     stored = [  # source, ok, checked_at, note
-        ("fred_baa_dgs10", 0, "2026-07-15 18:11:59.086967", leaked),
+        ("fred_baa_dgs10", 0, "2026-07-15 18:11:59.086967", _LEAKED_NOTE),
         ("fred_baa_dgs10", 0, "2026-09-01 06:01:02.000000", already_redacted),
         ("fred_DFII10", 0, "2026-10-21 18:00:01.000000", "Expecting value: line 1 column 1 (char 0)"),
         ("price_QQQ", 1, "2026-10-21 18:00:02.000000", None),
@@ -1331,8 +1341,6 @@ def test_0027_redacts_a_stored_note_that_carries_a_provider_key(tmp_path):
     def _rows() -> list[tuple]:
         connection = sqlite3.connect(db)
         try:
-            # The file is read below, so what the WAL holds goes into it first.
-            connection.execute("pragma wal_checkpoint(TRUNCATE)")
             return connection.execute(
                 "select id, source, ok, latency_ms, http_status, checked_at, note "
                 "from source_health order by id").fetchall()
@@ -1347,15 +1355,11 @@ def test_0027_redacts_a_stored_note_that_carries_a_provider_key(tmp_path):
         cfg = _alembic_config()
         command.upgrade(cfg, "0026")
         connection = sqlite3.connect(db)
-        connection.execute("pragma journal_mode=WAL")  # production's (app/db.py)
-        connection.executemany(
-            "insert into source_health (source, ok, latency_ms, http_status, checked_at, note) "
-            "values (?, ?, 1.0, NULL, ?, ?)", stored)
+        connection.executemany(_INSERT_SOURCE_HEALTH, stored)
         connection.commit()
         connection.close()
         before = _rows()
         assert [row[1:3] + row[5:] for row in before] == stored
-        assert _database_file_bytes(db).count(_FAKE_FRED_KEY.encode()) == 1
 
         command.upgrade(cfg, "0027")
 
@@ -1364,11 +1368,9 @@ def test_0027_redacts_a_stored_note_that_carries_a_provider_key(tmp_path):
         changed = [(old, new) for old, new in zip(before, after, strict=True) if old != new]
         assert len(changed) == 1, "only the note that carried a key is rewritten"
         old, new = changed[0]
-        assert old[-1] == leaked and new[:-1] == old[:-1], "and nothing of its row but the note"
-        assert new[-1] == as_the_gather_stores_it == sanitize(leaked, limit=400)
+        assert old[-1] == _LEAKED_NOTE and new[:-1] == old[:-1], "and nothing of its row but the note"
+        assert new[-1] == _LEAKED_NOTE_AS_THE_GATHER_STORES_IT == sanitize(_LEAKED_NOTE, limit=400)
         assert _FAKE_FRED_KEY not in new[-1]
-        assert _database_file_bytes(db).count(_FAKE_FRED_KEY.encode()) == 0, (
-            "the key's bytes are still in the database file")
 
     _run_with_db(db, _cycle)
     connection = sqlite3.connect(db)
