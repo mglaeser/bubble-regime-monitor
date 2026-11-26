@@ -338,7 +338,7 @@ class TestImageContextExcludesCredentials:
         host's own git configuration."""
         git = shutil.which("git")
         if git is None:
-            pytest.skip("git absent")
+            pytest.skip("no git executable found: this test asks git itself")
         home = tmp_path / "home"
         work = tmp_path / "work"
         home.mkdir()
@@ -348,8 +348,10 @@ class TestImageContextExcludesCredentials:
         for path, _ in cases:
             (work / path).parent.mkdir(parents=True, exist_ok=True)
             (work / path).write_text("x\n", encoding="utf-8")
-        env = {"PATH": os.environ["PATH"], "HOME": str(home), "GIT_CONFIG_NOSYSTEM": "1"}
-        for command in (["init", "-q"], ["add", "-A"]):
+        env = {"PATH": os.environ.get("PATH", os.defpath), "HOME": str(home),
+               "GIT_CONFIG_GLOBAL": str(home / ".gitconfig"),
+               "GIT_CONFIG_NOSYSTEM": "1", "GIT_ATTR_NOSYSTEM": "1"}
+        for command in (["init", "-q", "--template="], ["add", "-A"]):
             subprocess.run([git, *command], cwd=work, env=env, check=True, capture_output=True)
         staged = set(subprocess.run([git, "ls-files"], cwd=work, env=env, check=True,
                                     capture_output=True, text=True).stdout.split())
