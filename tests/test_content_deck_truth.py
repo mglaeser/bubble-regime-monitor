@@ -37,3 +37,17 @@ def test_the_s5_gloss_describes_the_reading_of_two_years_ago():
     said = " ".join(s5["entries"].values())
     assert not re.search(r"25-year|as of \w+ 20\d\d|spreads (are|were) ", said, re.I), said
     assert "as_of" not in s5
+
+
+# The wording of the five replaced lines. A pin on them, not a detector of
+# advice in free text.
+ACTION_COPY = ("de-risk now", "trim now", "is warranted", "consider ")
+
+
+def test_no_verdict_or_band_line_tells_the_reader_to_act():
+    deck = _deck()
+    said = [row["template"] for name in ("verdict.lead", "verdict.detail")
+            for row in deck[name]["items"]]
+    said += [text for name in ("band.oneliner", "splash.band_blurb")
+             for text in deck[name]["entries"].values()]
+    assert [t for t in said if any(p in t.lower() for p in ACTION_COPY)] == []
