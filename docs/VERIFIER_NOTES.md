@@ -1,12 +1,11 @@
 # VERIFIER_NOTES — panel round log for the open PR (standing regime)
 
-Reset on 2026-11-15, by the rule below ("This file is per-PR working state;
+Reset by the rule below ("This file is per-PR working state;
 it resets at merge"): the round logs of #95 to #114, the last of them merged
 on 2026-09-19, are in this file's history
 (`git log -- docs/VERIFIER_NOTES.md`), with the reviewer guidance and the
 lessons written between them. "Round 4" in the clause below is round 4 of
-#95. The two owner-directed paragraphs stand as written; no pull request is
-logged here now.
+#95. The two owner-directed paragraphs stand as written.
 
 **Standing rule (owner-directed, 2026-08-28):** when a cross-vendor panel
 refutation is *disproven*, the proof lives HERE — in the PR diff, where the
