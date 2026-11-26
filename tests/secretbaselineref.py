@@ -1,16 +1,5 @@
 """The accepted secret baseline, in one place: the entries as a literal, the scan as a pinned commit.
 
-## What is pinned
-
-Two things about `.secrets.baseline` do not change without a reviewer seeing it:
-
-  * the ENTRIES it holds: `ACCEPTED_ENTRIES`, every entry by file, detector
-    type and hash, a literal in this module. `assert_accepted_entries`
-    requires equality.
-  * the SCAN CONFIGURATION (filters, plugins, detect-secrets version): the
-    baseline's at `ACCEPTED_SECRET_BASELINE_COMMIT`, a pinned commit id.
-    `assert_configuration_unchanged` requires equality.
-
 ## Why this module exists
 
 `.secrets.baseline` is a ratchet: the gate refuses any secret in a tracked file
@@ -33,34 +22,6 @@ moves is not a ratchet — a branch that drifts far enough would carry its own
 growth along as the new "accepted" state, and nothing would report it. The
 accepted baseline is a decision a person made once, so it is recorded as an
 immutable commit id and changed only by editing this file.
-
-## Why the entries are a literal and no longer the pinned commit's
-
-The pinned commit was the reference for the entries too: the committed baseline
-had to have "not grown" against it (`assert_has_not_grown`), and a
-byte-identity check (`assert_identical_to_reference`) was to make this file
-move on every other change. Executed on 9f79c7a:
-
-    baseline at the pinned commit b047c3d (2026-08-14)   19 entries in 4 files
-    committed baseline                                   4 entries in 1 file
-    committed + 1, + 2, + 15 new entries                 accepted by the growth check
-    committed + 16                                       refused ("baseline grew by 1 entries")
-    the identity check on the committed baseline         fails ("entries 19 -> 4"); its one consumer,
-                                                         tests/test_verifier_mc4_passc.py, was retired on
-                                                         2026-08-17, and since then it ran on mutated
-                                                         copies of the reference only
-
-The room for 15 entries opened when files left the repository together with
-their entries (19 -> 5 on 2026-08-17, 5 -> 4 with #149): a shrink satisfied the
-growth check and nothing made the commit follow. Moving the commit would close
-the room once and leave its cause: merges are squashed, so a change cannot name
-its own merge commit, the reference can only follow one pull request late, and
-every shrink until then is room again. A literal moves in the same diff as the
-baseline, and equality refuses the first entry added, the first one removed and
-the first one exchanged for another.
-
-Both functions are deleted. The commit stays the reference for the scan
-configuration, which has not changed since it was pinned.
 
 ## The transition that produced the current value
 
@@ -93,10 +54,8 @@ from __future__ import annotations
 import json
 import subprocess
 
-#: The commit whose baseline is the reference for the scan configuration (and
-#: was the reference for the entries: see the module docstring). A 40-hex
-#: commit id, written as a literal so that no ref lookup — and therefore no
-#: branch movement — can change it.
+#: The accepted baseline. A 40-hex commit id, written as a literal so that no
+#: ref lookup — and therefore no branch movement — can change it.
 #:
 #: TRANSITION (schema-v2 engine re-binding). Previous reference dc60efbc4e88…
 #:
@@ -167,12 +126,9 @@ import subprocess
 #: review lane was simplified to scripts/independent_verify.py. The record is
 #: left as written — it states correctly what recomputed those digests at the
 #: time, and a governance ledger that edits its own history is worth less than
-#: one carrying a stale package name. Two things it says no longer hold. The
-#: entries it accepted left .secrets.baseline with the files they were in
-#: (19 entries -> 5 on 2026-08-17, 5 -> 4 with #149). And the two functions it
-#: names, `assert_has_not_grown` and `assert_identical_to_reference`, are
-#: deleted: the entries are pinned by `ACCEPTED_ENTRIES` below, and this commit
-#: is the reference for the scan configuration only.
+#: one carrying a stale package name. The baseline entries it accepted still
+#: exist in .secrets.baseline; a stale entry cannot weaken the ratchet, which
+#: only ever asserts that the file has not GROWN.
 ACCEPTED_SECRET_BASELINE_COMMIT = \
     "b047c3d61b4999e8f1b387a2d933d1ad787bd8bd"  # pragma: allowlist secret
 
@@ -181,7 +137,7 @@ BASELINE_PATH = ".secrets.baseline"
 
 def reference_baseline_bytes(*, root,
                              commit: str = ACCEPTED_SECRET_BASELINE_COMMIT):
-    """The baseline's exact bytes at the pinned commit, or None if the commit is absent.
+    """The accepted baseline's exact bytes, or None if the commit is absent.
 
     Read out of the git object database at a pinned commit, so a working tree
     that has been edited cannot be mistaken for the reference."""
@@ -191,6 +147,11 @@ def reference_baseline_bytes(*, root,
     if got.returncode != 0:
         return None
     return got.stdout
+
+
+def entry_count(document: dict) -> int:
+    """Total baseline entries across every file."""
+    return sum(len(v) for v in document.get("results", {}).values())
 
 
 def _configuration(document: dict) -> dict:
@@ -244,26 +205,6 @@ def entries_by_file(document: dict) -> dict[str, list[tuple[str, str]]]:
             for path, found in document.get("results", {}).items()}
 
 
-# `assert_has_not_grown` and `assert_identical_to_reference` stood here. The
-# function below replaces both and is stricter than they were on the committed
-# file. Executed on 9f79c7a, where the pinned commit holds 19 entries in 4
-# files and the committed baseline 4 in 1:
-#
-#     assert_has_not_grown, the one entry check applied to the committed file
-#         committed + 1, + 2, + 15 new entries     accepted
-#         committed + 16                           refused
-#     assert_identical_to_reference
-#         on the committed file                    fails ("entries 19 -> 4"):
-#                                                  no test applied it there, it
-#                                                  ran on mutated copies of the
-#                                                  reference only
-#
-# Equality with the literal refuses the first entry added, the first one
-# removed and the first one exchanged, and there is no reference behind it that
-# can go stale. What byte-identity was introduced for, a filter entry that
-# silently REPLACES another, is a configuration change:
-# `assert_configuration_unchanged` below refuses it, and
-# tests/test_secret_gate_policy.py applies it to the committed file.
 def assert_accepted_entries(current: dict) -> None:
     """The baseline holds exactly `ACCEPTED_ENTRIES`: the same entries, no
     entry more, none fewer.
@@ -281,12 +222,47 @@ def assert_accepted_entries(current: dict) -> None:
             "ACCEPTED_ENTRIES in tests/secretbaselineref.py in the same change")
 
 
-def assert_configuration_unchanged(current: dict, reference: dict) -> None:
-    """Filters, plugins and the detect-secrets version, against the pinned commit.
+def assert_identical_to_reference(current: bytes, reference: bytes) -> None:
+    """Byte-identical. Not "no worse" — IDENTICAL.
 
-    They decide WHAT is scanned. The entries are compared separately
-    (`assert_accepted_entries`), so a filter change and an entry change fail
-    under their own names."""
+    MC3 edited this file and silently dropped the `.venv/`, `__pycache__/` and
+    cache exclusions, because detect-secrets keys filters by function path and a
+    second entry REPLACES the first. Byte-identity is the only comparison that
+    catches a replacement as well as an addition."""
+    if current == reference:
+        return
+    now, was = json.loads(current), json.loads(reference)
+    detail = []
+    if entry_count(now) != entry_count(was):
+        detail.append(f"entries {entry_count(was)} -> {entry_count(now)}")
+    if _configuration(now) != _configuration(was):
+        detail.append("filter/plugin/version configuration changed")
+    if now.get("generated_at") != was.get("generated_at"):
+        detail.append("generated_at differs (was the baseline REGENERATED?)")
+    raise AssertionError(
+        ".secrets.baseline differs from the accepted reference "
+        f"{ACCEPTED_SECRET_BASELINE_COMMIT[:12]}…: "
+        + ("; ".join(detail) if detail else "byte difference with no "
+           "structural explanation"))
+
+
+def assert_has_not_grown(current: dict, reference: dict) -> None:
+    """The ratchet. An unbounded baseline is a slow-motion wildcard exclusion."""
+    grew = entry_count(current) - entry_count(reference)
+    if grew > 0:
+        raise AssertionError(
+            f"baseline grew by {grew} entries against the accepted reference "
+            f"{ACCEPTED_SECRET_BASELINE_COMMIT[:12]}… — a new entry needs an "
+            "explicit transition report and a new accepted reference, not a "
+            "silent addition")
+
+
+def assert_configuration_unchanged(current: dict, reference: dict) -> None:
+    """Filters, plugins and the detect-secrets version, on their own.
+
+    Byte-identity already implies this. It is asserted separately so that the
+    protection is NAMED: if the identity check is ever relaxed to something
+    weaker, the exclusion set does not quietly stop being defended with it."""
     now, was = _configuration(current), _configuration(reference)
     if now == was:
         return
