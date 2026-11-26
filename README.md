@@ -115,7 +115,7 @@ The 3d SLA of S2, S3, D1 and D4 counts NYSE sessions since the reading's date, s
 
 ## API
 
-Base path `/api/v1`; every response is `{"data": ..., "meta": ...}` with the five epistemic caveats in `meta`. Each per-indicator object carries `as_of`, `age_days`, and `stale` (true past the source's freshness SLA), plus provenance (`data_source`, `fallback_used`, `dropped`, `note`). Reads rate-limited 60/min/IP; `READ_ENDPOINTS_PUBLIC` toggles key requirement; admin refresh requires `X-API-Key`.
+Base path `/api/v1`. The score, history, indicator, legs, methodology and content reads answer `{"data": ..., "meta": ...}` with the five epistemic caveats in `meta`; the other routes have shapes of their own. Each per-indicator object carries `as_of`, `age_days`, and `stale` (true past the source's freshness SLA), plus provenance (`data_source`, `fallback_used`, `dropped`, `note`). Reads rate-limited 60/min/IP; `READ_ENDPOINTS_PUBLIC` toggles key requirement; admin refresh requires `X-API-Key`.
 
 | Endpoint | Purpose |
 |----------|---------|
