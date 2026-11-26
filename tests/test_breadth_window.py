@@ -76,3 +76,32 @@ def test_a_member_is_counted_with_200_closes_in_the_newest_210_sessions(
     _seed("GAP", [d for d in DAYS if d not in gap], 100.0)   # 294 - missing closes in all
 
     assert _counts(breadth_keyed) == (0, resolved)
+
+
+def test_a_session_stored_during_the_read_does_not_count_a_member_with_199_closes(
+        breadth_keyed):
+    """The sweep stores the next session just before the closes are read. GAP has
+    199 closes in the newest 210 sessions before that write and after it, and 200
+    from the oldest session of the earlier window to the new one."""
+    from sqlalchemy import event
+
+    from app.db import get_engine
+
+    new = OBS + timedelta(days=1)
+    gap = set(DAYS[-60:-49])                                  # 11 of the newest 209
+    _seed("GAP", [d for d in DAYS[-210:] if d not in gap], 100.0)
+    stored: list[date] = []
+
+    def _sweep(conn, cursor, statement, *args) -> None:
+        if "daily_close.close" in statement and not stored:  # the closes' read
+            stored.append(new)
+            for symbol in breadth_keyed.sp500_symbols():
+                _seed(symbol, [new], 100.0)
+
+    engine = get_engine()
+    event.listen(engine, "before_cursor_execute", _sweep)
+    try:
+        meta = breadth_keyed.pct_above_200dma().metadata
+    finally:
+        event.remove(engine, "before_cursor_execute", _sweep)
+    assert (meta["above"], meta["resolved"], meta["common_date"]) == (0, 25, new.isoformat())

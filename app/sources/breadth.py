@@ -101,15 +101,14 @@ def _breadth_from_daily_close(symbols: list[str]) -> tuple[int, int, date | None
         # above its mean whatever the truth. Inside the window it has 139 closes
         # and is not counted until it has 200. 2026-11-09 reads 305/490 = 62.24 %
         # instead of 306/491 = 62.32 %; BNY is the only member this changes.
-        window = session.execute(
-            select(DailyClose.date).distinct().order_by(DailyClose.date.desc())
-            .limit(POLYGON_TARGET_DAYS)
-        ).scalars().all()
-        if not window:
-            return 0, 0, None
+        # The window and its closes are one statement, which SQLite reads from
+        # one snapshot: a session the sweep stores meanwhile is in both or in
+        # neither.
+        window = (select(DailyClose.date).distinct().order_by(DailyClose.date.desc())
+                  .limit(POLYGON_TARGET_DAYS))
         rows = session.execute(
             select(DailyClose.symbol, DailyClose.date, DailyClose.close)
-            .where(DailyClose.date >= window[-1])
+            .where(DailyClose.date.in_(window))
             .order_by(DailyClose.symbol, DailyClose.date)
         ).all()
     for sym, d, close in rows:
