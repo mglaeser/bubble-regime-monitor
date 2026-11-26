@@ -9,6 +9,7 @@ capturing evidence is independent of whether alerting is switched on.
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
+from pathlib import Path
 
 import pytest
 
@@ -22,8 +23,9 @@ from app.alerts.registry import instance_fingerprint, unresolved_pins, validate_
 from app.redaction import sanitize
 from tests.conftest import register_promoted
 
-RULES_PATH = "config/alert_rules.v3.2.yaml"
-PHRASES_PATH = "config/alert_phrases.v3.5.json"
+ROOT = Path(__file__).resolve().parents[1]
+RULES_PATH = ROOT / "config/alert_rules.v3.2.yaml"
+PHRASES_PATH = ROOT / "config/alert_phrases.v3.5.json"
 
 
 # ---------------------------------------------------------------------------
@@ -941,10 +943,8 @@ def test_an_inert_confirmation_basis_is_reported_not_silently_accepted(ruleset):
 
 
 def _flat(path: str) -> str:
-    """A text file as one line: a sentence is found wherever it is wrapped."""
-    from pathlib import Path
-
-    return " ".join(Path(path).read_text(encoding="utf-8").replace("#", " ").split())
+    """A repository file as one line: a sentence is found wherever it is wrapped."""
+    return " ".join((ROOT / path).read_text(encoding="utf-8").replace("#", " ").split())
 
 
 def test_the_document_states_the_loaders_counts(ruleset):
