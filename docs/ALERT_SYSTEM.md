@@ -528,23 +528,14 @@ reports the evaluator as not required.
 The health projection also reports the latest and p95 evaluation duration, P1
 enqueue-to-provider-attempt p95, rolling LLM cap/call/fallback evidence,
 missing typed sidecars, overdue or malformed outbox holds, the UNKNOWN
-deliveries, the deliveries that ended without a send, SQLite
-WAL/foreign-key/busy-timeout/RETURNING
+deliveries, SQLite WAL/foreign-key/busy-timeout/RETURNING
 capabilities, the Alembic revision, required partial indexes and immutability
 triggers, and live artifact/promotion agreement. Missing scheduler components
 or required schema objects are critical; sidecar gaps, overdue holds and P1
 latency above 60 seconds are degraded rather than silently green. An UNKNOWN
 delivery is counted and degrades nothing: it is terminal, and no operator step
 awaits it (owner decision D2f, section 11d); a dispatch pass whose send ends
-UNKNOWN reports its heartbeat critical. A delivery the transport refused for
-good (`DEAD_PERMANENT`: a listed 4xx such as the 401 of an expired proxy key,
-a 2xx that is not a send operation, or no transport) or whose text failed its
-checks (`RENDER_FAILED`) is counted the same way (`outbox.dead_permanent`,
-`outbox.render_failed`), degrades nothing, and is logged at warning level
-(`alert_delivery_not_sent`). Neither is sent again
-(tests/test_alert_end_to_end.py::test_health_counts_an_alert_the_proxy_refused_for_good,
-`::test_health_counts_an_alert_whose_text_failed_its_checks`). Production held
-neither: 21 deliveries, all `SENT` (read-only, 2026-11-11).
+UNKNOWN reports its heartbeat critical.
 
 None of that bypasses rollout. In live mode the evaluation, the dispatch job
 and the message engine load through `load_active_for_mode`, which refuses a
@@ -790,14 +781,7 @@ refuses a set without them. Both values are built
 from one rule-authorized typed fact at the same reviewed display precision;
 the complete trigger view, compatible current view, and every visible delta
 remain separate in the render-context hash. Scheduling metadata such as
-`F_NEXT_CHECK` cannot manufacture a material market change. In a bundle the
-trigger and current values are shown for a member the message names; a member
-that is only counted is not described, while a caveat without facts
-(`DATA_DEGRADED`, `UNKNOWN_AT_RENDER`, `CONTEXT_STALE`) is about the message
-and stays
-(tests/test_alert_render_contract.py::test_a_member_the_message_only_counts_is_not_described,
-`::test_a_counted_members_caveat_about_the_message_stays`). Production has
-sent no bundle yet: 21 deliveries, one member each (read-only, 2026-11-11).
+`F_NEXT_CHECK` cannot manufacture a material market change.
 
 Current facts join a render only when their schema and methodology match the
 trigger's (17.4) — otherwise the member renders from trigger facts with

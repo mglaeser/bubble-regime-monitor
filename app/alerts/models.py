@@ -501,10 +501,6 @@ class AlertDelivery(Base):
     lease_until: Mapped[datetime | None] = mapped_column(TZDateTime, nullable=True)
     request_started_at: Mapped[datetime | None] = mapped_column(
         TZDateTime, nullable=True)
-    # Never written: NULL on every row, and the sender returns no id for it
-    # (`sender._classify_imessage_response`). Kept because dropping it takes a
-    # schema revision - the pinned revision moves, a migration runs at boot -
-    # for an empty column.
     provider_correlation_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     last_http_status: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)

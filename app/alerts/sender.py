@@ -488,11 +488,10 @@ def _classify_imessage_response(response: httpx.Response, accepted_id: Any) -> S
             )
         # The operation id proves that the body is an accepted SendOperation,
         # and is not kept. It used to be returned, redacted because it "gets
-        # persisted on the delivery row" - and no code ever stored it:
+        # persisted on the delivery row", and
         # `alert_delivery.provider_correlation_id` was NULL on 21 of 21 sent
         # rows in production (read-only, 2026-11-11). A value that is not
-        # returned needs no redaction, and the delivery id already travels as
-        # the Idempotency-Key.
+        # returned needs no redaction.
         return SendResult(outcome=SenderOutcome.CONFIRMED_SUCCESS, http_status=status,
                           request_started=True)
 

@@ -399,19 +399,13 @@ def test_only_failures_that_wrote_nothing_are_auto_retryable(monkeypatch, exc,
     assert result.request_started is not retryable
 
 
-def test_a_send_result_carries_only_what_the_dispatcher_records(monkeypatch):
-    """`outcome` decides the state; `http_status`, `error_code` and
-    `error_message_redacted` go to the delivery row (`outbox.mark_*`);
-    `request_started` says whether bytes could have left, the line between a
-    retryable and an ambiguous failure.
-
-    The proxy's operation id is not among them. It was returned as
-    `provider_correlation_id`, redacted because it "lands on the delivery
-    row", and no code ever stored it: the column was NULL on 21 of 21 sent
-    rows in production (read-only, 2026-11-11). So the field is gone, and with
-    it the redaction test that stood here: an id that is not returned reaches
-    no row and no log, whatever the proxy puts into it. The delivery id
-    already follows a send into the proxy, as the Idempotency-Key.
+def test_a_send_result_does_not_carry_the_proxys_operation_id(monkeypatch):
+    """The proxy's operation id is not among a send result's fields. It was
+    returned as `provider_correlation_id`, redacted because it "lands on the
+    delivery row", and the column was NULL on 21 of 21 sent rows in production
+    (read-only, 2026-11-11). So the field is gone, and with it the redaction
+    test that stood here: an id that is not returned is not in the result,
+    whatever the proxy puts into it.
     """
     import dataclasses
 

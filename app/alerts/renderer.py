@@ -5,12 +5,10 @@ rule names CODES, and every digit, unit and sentence comes from here. A wrong
 number in a financial alert is indistinguishable from a real one at 3 a.m.
 
 Fitting is by OMISSION of whole reviewed fragments in a defined priority order,
-never by truncation. A required caveat about the message is never omitted, and
-neither is a named member's own trigger/now clause — if the message cannot fit
-with them, the renderer falls back to the minimal template, and if even that
-does not fit it FAILS. A data-quality alert with its data-quality caveat
-trimmed off would be worse than nothing. A bundle member the message only
-counts is not described: its trigger/now clause is not shown.
+never by truncation. Required caveats are never omitted — if the message cannot
+fit with them, the renderer falls back to the minimal template, and if even
+that does not fit it FAILS. A data-quality alert with its data-quality caveat
+trimmed off would be worse than nothing.
 
 Validation runs before a single character reaches the wire:
 
@@ -18,8 +16,7 @@ Validation runs before a single character reaches the wire:
   2. every selected code is authorized FOR THAT MEMBER;
   3. every fact id is authorized for that member (no cross-member references);
   4. every slot a fragment declares is filled;
-  5. every required caveat is present (but for the trigger/now clause of a
-     bundle member that is only counted);
+  5. every required caveat is present;
   6. the honesty lint passes (no probability, advice or certainty language);
   7. the body is GSM-7;
   8. the body is <= 160 septets.
@@ -135,49 +132,29 @@ def render(
     dropped: list[str] = []
 
     # Required caveats are collected PER MEMBER.  Generic identical fragments
-    # are shown once.  A caveat whose fragment carries a member's facts - the
-    # trigger and the current value of MATERIAL_CHANGE, the one such caveat in
-    # the shipped phrase set - describes that member, so it is shown only for
-    # a member the message names (README: a bundle "names up to three and
-    # counts the rest").  For a member that is only counted, its pair of
-    # numbers stood in the message without a subject, and because only named
-    # members can be shed, those clauses kept their room and refused bundles
-    # that fit without them.  Swept on 2026-11-12 over every ordered subset of
-    # two or more shipped P2 rules of one group that can fire together, each
-    # member firing, moved or unknown, the data degraded or not: of 3,428
-    # bundles 1,022 carried such a clause and 54 were refused, which is
-    # RENDER_FAILED for every member; with this rule none and none.  The 138
-    # single-alert bodies and the 1,756 bundles that named every member are
-    # byte-identical.  Every member's caveats are still checked and filled,
-    # so an unauthorized code or a missing fact is refused as before.  No
-    # member's fact is ever used to fill another member's caveat.
-    def caveats_for(named_count: int) -> list[tuple[MemberContext, str, FragmentSpec, str]]:
-        parts: list[tuple[MemberContext, str, FragmentSpec, str]] = []
-        seen: set[tuple[str, str]] = set()
-        # `ordered_members` puts the primary first, so a position below
-        # `named_count` is a named member.
-        for position, member in enumerate(ordered_members):
-            required = list(member.required_caveat_codes)
-            if member is primary:
-                required.extend(caveat_codes)
-            for code in dict.fromkeys(required):
-                if code not in member.authorized_phrase_codes:
-                    raise RenderRejected(
-                        f"caveat {code!r} is not authorized for {member.rule_id}")
-                fragment = _lookup(phrase_set, code, "caveat")
-                filled = _fill(fragment, member)
-                if fragment.slots and position >= named_count:
-                    continue
-                identity = (code, filled)
-                if identity not in seen:
-                    parts.append((member, code, fragment, filled))
-                    seen.add(identity)
-        return parts
+    # are shown once; a future caveat containing member facts is retained once
+    # per distinct filled text.  No member's fact is ever used to fill another
+    # member's caveat.
+    caveat_parts: list[tuple[MemberContext, str, FragmentSpec, str]] = []
+    seen_caveats: set[tuple[str, str]] = set()
+    for member in ordered_members:
+        required = list(member.required_caveat_codes)
+        if member is primary:
+            required.extend(caveat_codes)
+        for code in dict.fromkeys(required):
+            if code not in member.authorized_phrase_codes:
+                raise RenderRejected(
+                    f"caveat {code!r} is not authorized for {member.rule_id}")
+            fragment = _lookup(phrase_set, code, "caveat")
+            filled = _fill(fragment, member)
+            identity = (code, filled)
+            if identity not in seen_caveats:
+                caveat_parts.append((member, code, fragment, filled))
+                seen_caveats.add(identity)
 
-    # Prefer the documented number of named members, but never cut a named
-    # member's clause or a required caveat about the message to make it fit.
-    # When full clauses cannot all fit, the omitted members are represented by
-    # one exact dashboard count.
+    # Prefer the documented number of named members, but never cut a member
+    # clause or a required caveat to make it fit.  When full clauses cannot all
+    # fit, the omitted members are represented by one exact dashboard count.
     chosen_named = min(MAX_NAMED_MEMBERS, len(context.members))
     summary_text: str | None = None
     summary_fragment: FragmentSpec | None = None
@@ -195,13 +172,12 @@ def render(
         mandatory = [item[3] for item in named[:candidate]]
         if candidate_summary:
             mandatory.append(candidate_summary)
-        mandatory.extend(item[3] for item in caveats_for(candidate))
+        mandatory.extend(item[3] for item in caveat_parts)
         if septets(JOIN.join(mandatory)) <= SINGLE_SMS_SEPTETS:
             chosen_named = candidate
             summary_text = candidate_summary
             summary_fragment = candidate_fragment
             break
-    caveat_parts = caveats_for(chosen_named)
 
     prefix_parts = [item[3] for item in named[:chosen_named]]
     tail_parts = ([summary_text] if summary_text else []) + [

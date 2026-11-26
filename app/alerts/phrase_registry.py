@@ -10,8 +10,7 @@ order — never by cutting one in half. A required caveat is never omitted: if
 the message cannot fit with its caveats, the render falls back to the minimal
 template, and if even that does not fit the render FAILS. Sending a
 data-quality alert with its data-quality caveat trimmed off would be worse than
-sending nothing. The one exception is a bundle member the message only counts:
-its own trigger/now clause is not shown (`renderer.render`).
+sending nothing.
 
 Three things are checked at validation time, not at send time:
 

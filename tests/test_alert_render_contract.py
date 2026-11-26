@@ -17,7 +17,6 @@ from app import methodology as _M
 from app.alerts import observation as obs
 from app.alerts.dto import AlertInput, EvidenceModel, RedFlagFactModel
 from app.alerts.errors import RenderRejected, RulesetInvalid
-from app.alerts.gsm7 import SINGLE_SMS_SEPTETS, septets
 from app.alerts.observation import build_evidence
 from app.alerts.outbox import validated_represented_member_ids
 from app.alerts.phrase_registry import validate_phrase_set
@@ -26,9 +25,8 @@ from app.alerts.render_context import (
     RenderContext,
     build_member_context,
     material_fact_deltas,
-    render_time_status,
 )
-from app.alerts.renderer import MAX_NAMED_MEMBERS, render, render_with_cascade
+from app.alerts.renderer import MAX_NAMED_MEMBERS, render
 
 RULES_PATH = Path("config/alert_rules.v3.2.yaml")
 PHRASES_PATH = Path("config/alert_phrases.v3.5.json")
@@ -519,156 +517,6 @@ def test_bundle_overflow_is_explicitly_represented_by_an_exact_count(phrase_set)
     )
     assert "+1 mehr im Dashboard" in result.body
     assert result.represented_member_ids == [member.episode_id for member in members]
-
-
-# --- a bundle member the message only counts is not described ---------------------
-#
-# README, alerts P2: "The alerts of one root cause in one evaluation share a
-# message, which names up to three and counts the rest." The three tripwire rules
-# below share one group. Each member is built as the dispatcher builds it
-# (`dispatcher._build_context`): the shipped rule's render contract, the facts
-# from a trigger input and a later compatible one, the status from
-# `render_time_status`.
-
-_TRIPWIRES = ("tripwire.rf4_first", "tripwire.rf3_credit_stress",
-              "tripwire.margin_rollover")
-
-
-def _later(trigger: AlertInput, *, breadth: float, rf3_distance: float,
-           margin: float, degraded: bool) -> AlertInput:
-    """A compatible later input: breadth (rf4_first), the credit distance
-    (rf3_credit_stress) and the margin multiplier (margin_rollover) as given.
-    The trigger has 47.5, 12.5 and 1.1."""
-    current = _with_breadth(trigger, identity="c" * 64, breadth=breadth)
-    indicators = [
-        item.model_copy(update={"value": margin})
-        if item.observation_domain_id == obs.DOMAIN_MARGIN else item
-        for item in current.indicators
-    ]
-    flags = [
-        flag.model_copy(update={"distance_to_threshold": rf3_distance})
-        if flag.flag_id == "rf3" else flag
-        for flag in current.red_flags
-    ]
-    return current.model_copy(update={
-        "indicators": indicators, "red_flags": flags, "data_degraded": degraded})
-
-
-def _bundle(ruleset, phrase_set, rule_ids, *, current: AlertInput,
-            unknown: frozenset[str] = frozenset()):
-    """One message for `rule_ids`, the first as primary, all triggered by
-    `_input()` and rendered against `current`. A rule in `unknown` has an
-    UNKNOWN condition at render time."""
-    trigger = _input()
-    members = []
-    for index, rule_id in enumerate(rule_ids):
-        rule = ruleset.rule(rule_id)
-        contract = rule.render
-        allowed = frozenset(contract.allowed_fact_ids)
-        deltas = material_fact_deltas(
-            trigger=trigger, current=current, previous=None,
-            labels=dict(rule.labels), authorized_fact_ids=allowed)
-        members.append(build_member_context(
-            episode_id=f"01K0000000000000000000000{index}",
-            rule_id=rule_id,
-            priority=2,
-            trigger=trigger,
-            current=current,
-            labels=dict(rule.labels),
-            authorized_fact_ids=allowed,
-            authorized_phrase_codes=contract.authorized_codes(rule),
-            required_caveat_codes=tuple(rule.required_caveat_codes),
-            condition_status=render_time_status(
-                condition_state="UNKNOWN" if rule_id in unknown else "FIRING",
-                resolved=False, materially_changed=bool(deltas)),
-            origin_phrase_set_version=phrase_set.version,
-            origin_phrase_set_sha256=phrase_set.sha256,
-            origin_rules_sha256="r" * 64,
-            headline_code=contract.headline_code,
-            phrase_codes=tuple(contract.allowed_phrase_codes),
-            next_check_code=contract.next_check_code,
-        ))
-    primary = ruleset.rule(rule_ids[0]).render
-    return render_with_cascade(
-        context=RenderContext(members=members), phrase_set=phrase_set,
-        headline_code=primary.headline_code,
-        phrase_codes=list(primary.allowed_phrase_codes),
-        next_check_code=primary.next_check_code, caveat_codes=[])
-
-
-def test_a_member_the_message_only_counts_is_not_described(phrase_set, ruleset):
-    """The breadth flag and credit stress fire together, both moved before the
-    send, and the data is degraded: only the first fits by name. The message
-    shows the named member's own trigger and current value. The counted
-    member's pair ("Ausloeser 12.5, jetzt 30.1.") is not shown: it used to
-    stand at the end of the message, after "+1 mehr im Dashboard.", with no
-    subject. Both episodes stay represented by the message."""
-    result = _bundle(
-        ruleset, phrase_set, _TRIPWIRES[:2],
-        current=_later(_input(), breadth=44.0, rf3_distance=30.1, margin=1.1,
-                       degraded=True))
-
-    assert len(result.validation["named_member_ids"]) == 1
-    assert result.validation["overflow_count"] == 1
-    assert "+1 mehr im Dashboard." in result.body
-    assert "Ausloeser 47.5, jetzt 44.0." in result.body
-    assert result.body.count("Ausloeser ") == 1
-    assert "12.5" not in result.body and "30.1" not in result.body
-    assert "Daten lueckenhaft." in result.body
-    assert len(result.represented_member_ids) == 2
-    assert "F_TRIGGER_VALUE" in result.selected_fact_ids
-
-
-def test_three_alerts_of_one_cause_that_all_moved_are_sent_not_refused(
-        phrase_set, ruleset):
-    """All three tripwires fire together and all three moved before the send.
-    The clauses of the two members that cannot be named kept their room, so
-    the message came to 225 septets and was refused - RENDER_FAILED, final,
-    for all three alerts. It names one, counts two and fits."""
-    result = _bundle(
-        ruleset, phrase_set, _TRIPWIRES,
-        current=_later(_input(), breadth=44.0, rf3_distance=30.1, margin=1.3,
-                       degraded=True))
-
-    assert septets(result.body) <= SINGLE_SMS_SEPTETS
-    assert "+2 mehr im Dashboard." in result.body
-    assert "Ausloeser 47.5, jetzt 44.0." in result.body
-    assert result.body.count("Ausloeser ") == 1
-    assert "Daten lueckenhaft." in result.body
-    assert len(result.represented_member_ids) == 3
-
-
-def test_a_named_member_keeps_its_trigger_and_current_value(phrase_set, ruleset):
-    """What does not change: both members fit by name, so the one that moved
-    shows its pair."""
-    result = _bundle(
-        ruleset, phrase_set, _TRIPWIRES[:2],
-        current=_later(_input(), breadth=47.5, rf3_distance=30.1, margin=1.1,
-                       degraded=False))
-
-    assert len(result.validation["named_member_ids"]) == 2
-    assert result.validation["overflow_count"] == 0
-    assert "Ausloeser 12.5, jetzt 30.1." in result.body
-
-
-def test_a_counted_members_caveat_about_the_message_stays(phrase_set, ruleset):
-    """What does not change either: a caveat without facts is about the
-    message and is never shed with its member. The margin rollover is only
-    counted here and its condition is unknown at render time: "Zustand
-    unklar." stays, beside the named member's pair and the degraded-data
-    caveat."""
-    result = _bundle(
-        ruleset, phrase_set, _TRIPWIRES,
-        current=_later(_input(), breadth=44.0, rf3_distance=12.5, margin=1.1,
-                       degraded=True),
-        unknown=frozenset({"tripwire.margin_rollover"}))
-
-    assert len(result.validation["named_member_ids"]) == 1
-    assert result.validation["overflow_count"] == 2
-    assert "Zustand unklar." in result.body
-    assert "Daten lueckenhaft." in result.body
-    assert "Ausloeser 47.5, jetzt 44.0." in result.body
-    assert septets(result.body) <= SINGLE_SMS_SEPTETS
 
 
 def test_cooldown_evidence_accepts_only_members_proven_by_the_render():
