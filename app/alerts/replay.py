@@ -21,8 +21,7 @@ here rather than a matter of care:
   Determinism is the Stage 1 gate, so it is asserted, not assumed.
 
 Nothing here can send. The sender is `NullSender` by construction and the mode
-is `DRYRUN`, which is its own state namespace. A planned alert is taken as sent
-at its release time, so cooldowns and reminders run as they do in production.
+is `DRYRUN`, which is its own state namespace.
 """
 
 from __future__ import annotations

@@ -215,30 +215,16 @@ period, the condition re-fires and the cooldown is the only thing standing
 between that and a second message.
 
 When a condition can fire again is decided by the rule's `resolution.policy`.
-Under `auto_on_inverse` and `single_shot` the episode of a transition or a crossing
-lasts while the state it reported lasts (the flag stays off, the leg stays in,
-the run-up stays at or above its tier) and ends with it, and the rule fires
-again at the next occurrence. A P2 held for quiet hours is therefore sent in
-the morning while it is still true and dropped as `RESOLVED_BEFORE_SEND` when
-it is not (section 11e), and the 48 h reminder of `structure.s3_tier_150` goes
-out only while the run-up is still at or above 150 pp
-(tests/test_alert_replay.py::test_the_150_pp_tier_is_reminded_only_while_the_run_up_stays_beyond_it).
-A condition that names no lasting state, the `delta` of
-`constellation.falsification_event`, ends at the first false evaluation: its
-P1 goes out at once, and one that could not be sent before the next evaluation
-is withdrawn like any alert whose episode has ended.
-
-Until 2026-11 a `single_shot` episode never ended, so each of the seven enabled
-`single_shot` rules fired once per ruleset: production's
-`tripwire.rf4_all_clear` fired on 2026-10-16 and sent nothing when the flag,
-back on 10-20, cleared again on 10-21, and `structure.s3_tier_100` read FIRING
-since 09-22 at a run-up of 64.7
-(tests/test_alert_evaluation.py::test_the_all_clear_fires_for_every_clearing,
-::test_a_crossing_holds_beyond_its_level_and_fires_at_the_next_crossing,
-::test_two_all_clears_five_days_apart_both_plan_a_message). Rows stored in
-that state need no migration: the next evaluation ends the episode whose state
-is over, without a message, and keeps the one whose state still holds
-(::test_the_rows_stuck_in_production_settle_at_the_next_evaluation).
+Under `auto_on_inverse` and `single_shot` the episode of a transition or a
+crossing lasts while the state it reported lasts (the flag stays off, the leg
+stays in, the run-up stays at or above its tier) and ends with it, and the
+rule fires again at the next occurrence. A P2 still held for quiet hours when
+an evaluation reads that state as over is dropped as `RESOLVED_BEFORE_SEND`
+(section 11e). A condition that names no lasting state, the `delta` of
+`constellation.falsification_event`, ends at the first false evaluation. An
+episode stored open under the earlier reading, in which a `single_shot`
+episode never ended, needs no migration: from the next evaluation on it, too,
+lasts while its state lasts and ends with it, without a message.
 
 The loader emits a warning naming each such rule and the cooldown carrying the
 weight, because the failure mode this documents is a reader trusting an
@@ -929,22 +915,12 @@ unchanged caps, the 168h mean `8.0 -> 6.0`, `held_quiet` `3 -> 1`,
 `held_budget` `2 -> 1`, `SUPERSEDED` `4 -> 3` and `COOLDOWN` `0 -> 4`. No
 verdict moved.
 
-The regeneration of 2026-11 moves Stages 3 and 4 for two reasons; Stage 1, the
-bound hashes, the history and the catalogue do not move, and both stages still
-pass with 5 of 5 mandatory events detected. First, the replay takes a planned
-alert as sent, so a repeat inside a rule's cooldown is no longer planned:
-deliveries planned `13 -> 10`, P1 `5 -> 4` (the second de-risk entry comes
-36 h after the first, cooldown 48 h), the non-P1 maxima `5 -> 3` per 24 h and
-`8 -> 6` per 168 h against the unchanged caps of 5 and 8, `held_budget`
-`2 -> 1`, `held_quiet` `3 -> 1`, `SUPERSEDED` `4 -> 3` and `COOLDOWN`
-`0 -> 4`. Second, a `single_shot` rule fires for every occurrence (section 5):
-episodes opened `20 -> 22`, activated `19 -> 21`, resolved `17 -> 19`. The two
-new episodes are the arc's second `tripwire.rf4_all_clear` and second
+A `single_shot` episode ending with its state (section 5) moved Stages 3 and
+4: episodes opened `20 -> 22`, activated `19 -> 21`, resolved `17 -> 19`. The
+two new episodes are the arc's second `tripwire.rf4_all_clear` and second
 `legs.faber_spy_back_in`, each 20 h after the first and inside its 48 h
-cooldown, so neither plans a message and `COOLDOWN` reads `6`. The second
-change without the first fails the gate (non-P1 `6 > 5` per 24 h and `10 > 8`
-per 168 h): the arc's two repeats would be planned, which production does not
-do.
+cooldown, so neither plans a message and `COOLDOWN` goes `4 -> 6`. No verdict
+moved.
 
 `tests/fixtures/alert_replay_history.json` declares the **arc** — twenty
 recompute slots through hold → trim → de-risk → recovery, with two blind slots
