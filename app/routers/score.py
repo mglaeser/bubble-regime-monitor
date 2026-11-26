@@ -205,19 +205,7 @@ def get_history(
             "override_fired": s.override_fired,
             "red_flag_count": s.red_flag_count,
             # The versions that computed this row, as stored with it
-            # (meta.service_version is the answering service's). Without them
-            # a step a release made reads as a market move: on 2026-07-14 the
-            # median went from 32.83 (hold) to 45.46 (trim) between two
-            # snapshots nine hours apart, the first computed by 3.2.0 and the
-            # second by 3.3.0, which changed the aggregation. Twelve service
-            # versions computed the 615 production rows of 2026-11-10. Every
-            # row has a service_version; methodology_version is recorded
-            # since v3.8.0 (533 rows, from 2026-07-29) and null on the 82
-            # rows before. The two keys add about 74 bytes a row: the raw
-            # answer over those rows grows from 109 to 154 kB, the companion
-            # dashboard's daily call (109 days) from 19 to 27 kB. That
-            # dashboard checks only that `data` is a list and reads the keys
-            # it draws by name.
+            # (meta.service_version is the answering service's).
             "service_version": s.service_version,
             "methodology_version": s.methodology_version,
         }

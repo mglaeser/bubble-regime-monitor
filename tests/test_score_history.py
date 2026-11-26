@@ -66,11 +66,7 @@ def test_the_bounds_apply_before_the_periods_are_counted(history):
 
 def test_a_history_row_names_the_versions_that_computed_it(isolated_db):
     """README, API: each history row carries the service and methodology
-    version that computed it. The three snapshots are production's. On
-    2026-07-14 the median went from 32.83 (hold) to 45.46 (trim) within nine
-    hours: 3.2.0 computed the first and 3.3.0, which changed the aggregation,
-    the second. The methodology stamp exists since v3.8.0 (2026-07-29) and is
-    null on the rows before. A daily or monthly point is one kept snapshot and
+    version that computed it. A daily or monthly point is one kept snapshot and
     carries that snapshot's versions, never the answering service's
     (`meta.service_version`)."""
     from app.db import session_scope
