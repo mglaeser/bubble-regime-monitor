@@ -835,6 +835,12 @@ Three properties are structural rather than a matter of care:
   wall-clock duration. Two runs of the same history produce byte-identical
   JSON.
 
+A replay sends nothing, so before each evaluation it takes every planned alert
+released by then as sent at its release time: the members the dispatcher's
+`outbox.revalidate_members` keeps then, each through the step
+`outbox.mark_sent` takes for a member it sends. A rule's cooldown and its
+reminders run from that time. A hold by budget is not modelled.
+
 `--stage N` gates the rules at a rollout stage other than the committed one.
 That is the reason replay exists: the evidence for advancing to stage N is what
 stage N *would have done* over real history, and that cannot be gathered by
@@ -895,6 +901,13 @@ of 30.44 days, both edges of the window included, and
 `band_excursion_covers_24_months`: whether `window_last` is at least one such
 window after `window_first`. The verdict fails when that largest number is
 above the cap of `regime.band_to_derisk`'s keep condition, one per 24 months.
+
+Taking a planned alert as sent moved Stages 3 and 4: a repeat inside its
+rule's cooldown is no longer planned. Deliveries planned `13 -> 10`, P1
+`5 -> 4`, the non-P1 maxima `5 -> 3` per 24h and `8 -> 6` per 168h against the
+unchanged caps, the 168h mean `8.0 -> 6.0`, `held_quiet` `3 -> 1`,
+`held_budget` `2 -> 1`, `SUPERSEDED` `4 -> 3` and `COOLDOWN` `0 -> 4`. No
+verdict moved.
 
 `tests/fixtures/alert_replay_history.json` declares the **arc** — twenty
 recompute slots through hold → trim → de-risk → recovery, with two blind slots
