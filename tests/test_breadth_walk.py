@@ -1,8 +1,8 @@
 """What the breadth sweep asks Polygon for.
 
-The module's contract (app/sources/breadth.py): once the cache is warm, a
-sweep asks for each session it has not stored, here yesterday's, and probes
-one cached day. A day the exchange was closed has no session to ask for.
+The module's contract (app/sources/breadth.py): once the cache is warm, "the
+daily incremental is ONE call", the one for yesterday's session. A day the
+exchange was closed has no session to ask for.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ def test_the_sweep_does_not_ask_for_an_exchange_holiday(isolated_db, monkeypatch
 
     def _grouped(iso: str) -> dict[str, float]:
         asked.append(iso)
-        return {} if iso == "2026-09-07" else {"AAA": 1.0, "BBB": 1.0}   # what the cache holds
+        return {} if iso == "2026-09-07" else {"AAA": 1.0, "BBB": 2.0}
 
     monkeypatch.setattr(breadth, "fetch_polygon_grouped", _grouped)
     # Warm cache: the five sessions up to the Friday before the holiday weekend.
@@ -40,5 +40,5 @@ def test_the_sweep_does_not_ask_for_an_exchange_holiday(isolated_db, monkeypatch
 
     summary = breadth.refresh_breadth_polygon(target_days=5, pace_seconds=0)
 
-    assert asked == ["2026-08-31", "2026-09-08"]    # the probe, yesterday's session, nothing else
-    assert summary["calls"] == 2 and summary["stored_days"] == 1
+    assert asked == ["2026-09-08"]          # yesterday's session, and nothing else
+    assert summary["calls"] == 1 and summary["stored_days"] == 1

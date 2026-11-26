@@ -11,9 +11,10 @@ already fetches), NOT Wikipedia (its User-Agent policy returns 403).
 Closes come from Polygon/Massive grouped-daily, the ONLY provider (owner
 decision D9, 2026-09-28): one call returns every US ticker's close for one
 date, so a cold start caches ~210 trading days for the whole S&P 500 in ~210
-calls (5/min free tier); once warm, a sweep asks for each session it has not
-stored and probes one cached day, and asks for the whole window again when
-the probe's answer differs from the cache (_rebased). The 200-DMA is
+calls (5/min free tier) and the daily incremental is ONE call. Each sweep also
+asks again for each member D1 counts on its earliest close in the window D1
+reads, and fetches the window again unless the answers confirm those closes
+(_rebased). The 200-DMA is
 computed on read from the daily_close table. Without a Polygon key, or with
 too little cached history, breadth raises and D1 is dropped and its block
 renormalized (guardrail #5); the 503-symbol Twelve Data sweep that used to be
@@ -77,7 +78,8 @@ def sp500_symbols() -> list[str]:
 # Polygon/Massive grouped-daily PRIMARY path (v3.3.0)
 # ---------------------------------------------------------------------------
 
-def _breadth_from_daily_close(symbols: list[str]) -> tuple[int, int, date | None]:
+def _breadth_from_daily_close(symbols: list[str], earliest: dict[str, tuple[date, float]] | None = None
+                              ) -> tuple[int, int, date | None]:
     """(above, counted, obs_date) — the %>200-DMA cross-section on ONE common
     observation date (v3.7.6/B-07), read from the newest POLYGON_TARGET_DAYS
     stored sessions, in which a member needs 200 closes.
@@ -90,7 +92,8 @@ def _breadth_from_daily_close(symbols: list[str]) -> tuple[int, int, date | None
     constituent's 200-DMA up to and including that date; count a constituent ONLY
     if it has a close on that date AND >= 200 closes through it (a symbol absent
     on the common date is excluded from BOTH numerator and denominator);
-    obs_date is that common date, never a later per-symbol date."""
+    obs_date is that common date, never a later per-symbol date. A given
+    `earliest` receives each counted member's first (date, close) in the window."""
     wanted = set(symbols)
     by_sym: dict[str, dict[date, float]] = {}
     with session_scope() as session:
@@ -137,12 +140,14 @@ def _breadth_from_daily_close(symbols: list[str]) -> tuple[int, int, date | None
         return 0, 0, None   # no date has enough usable symbols -> breadth unavailable
     common_date = max(eligible)
     above = counted = 0
-    for series in by_sym.values():
+    for sym, series in by_sym.items():
         if common_date not in series:          # absent on the common date -> excluded
             continue
         closes = [series[d] for d in sorted(series) if d <= common_date]
         if len(closes) < 200:
             continue
+        if earliest is not None:
+            earliest[sym] = min(series.items())
         counted += 1
         above += closes[-1] > sum(closes[-200:]) / 200.0
     return above, counted, common_date
@@ -165,36 +170,30 @@ def _cached_polygon_date_counts(symbols: set[str]) -> dict[date, int]:
     return {d: int(n) for d, n in rows}
 
 
-def _rebased(symbols: set[str], counts: dict[date, int], target_days: int,
-             pace_seconds: float) -> tuple[int, bool]:
-    """(calls, rebased): ask the provider again for the oldest of the newest
-    target_days complete cached days. Rebased when its answer would change a
-    close stored there: a served constituent's close differs (a split re-bases
-    the provider's adjusted closes before it) or is missing (one that joined
-    the list after the day was cached has none)."""
-    window = sorted((d for d, n in counts.items() if n >= MIN_RESOLVED), reverse=True)[:target_days]
-    if not window:
-        return 0, False
-    probe = window[-1]
-    grouped: dict[str, float] | None = None
-    try:
-        grouped = fetch_polygon_grouped(probe.isoformat())
-    except ProviderNotConfigured:
-        raise
-    except Exception as exc:    # a probe without an answer changes nothing
-        log.warning("breadth_polygon_probe_skipped", date=probe.isoformat(), error=str(exc)[:120])
-    if pace_seconds:
-        time.sleep(pace_seconds)    # the probe is a call under the 5/min limit, answered or not
-    if grouped is None:
-        return 0, False
-    with session_scope() as session:
-        cached = {sym: close for sym, close in session.execute(
-            select(DailyClose.symbol, DailyClose.close).where(DailyClose.date == probe))}
-    changed = sorted(s for s in symbols & grouped.keys() if cached.get(s) != grouped[s])
+def _rebased(symbols: set[str], pace_seconds: float) -> tuple[int, bool]:
+    """(calls, rebased): ask the provider again for each member D1 counts on its
+    earliest close in the window D1 reads, one call per such day. A split
+    re-bases every close before it, so one that re-based a close D1 uses
+    re-based the earliest too. Rebased unless every answer confirms its close:
+    a close that differs, a member missing from an answer, an empty answer and
+    a failed call all count."""
+    earliest: dict[str, tuple[date, float]] = {}
+    _breadth_from_daily_close(list(symbols), earliest)
+    answers: dict[date, dict[str, float]] = {}
+    for day in sorted({day for day, _close in earliest.values()}):
+        try:
+            answers[day] = fetch_polygon_grouped(day.isoformat())
+        except ProviderNotConfigured:
+            raise
+        except Exception as exc:
+            log.warning("breadth_polygon_probe_skipped", date=day.isoformat(), error=str(exc)[:120])
+            answers[day] = {}
+        if pace_seconds:
+            time.sleep(pace_seconds)    # a probe is a call under the 5/min limit, answered or not
+    changed = sorted(s for s, (day, close) in earliest.items() if answers[day].get(s) != close)
     if changed:
-        log.warning("breadth_polygon_rebased", date=probe.isoformat(), changed=len(changed),
-                    sample=changed[:5])
-    return 1, bool(changed)
+        log.warning("breadth_polygon_rebased", changed=len(changed), sample=changed[:5])
+    return len(answers), bool(changed)
 
 
 def refresh_breadth_polygon(target_days: int = POLYGON_TARGET_DAYS,
@@ -206,12 +205,11 @@ def refresh_breadth_polygon(target_days: int = POLYGON_TARGET_DAYS,
     and counting already-cached days toward the target without a call. Starting
     at yesterday each time (not at the cache's end) is what makes the daily
     incremental actually pick up new trading days: cold start ~210 calls
-    (~42 min at 5/min); once warm, the probe (_rebased) and ~1 call for
+    (~42 min at 5/min); once warm, the probes (_rebased) and ~1 call for
     yesterday's new close, then the walk hits cached days and stops at
-    target_days. When the probe finds the cache rebased, the walk asks for the
-    cached days as well. A refresh that is cut starts over at a later sweep:
-    the walk goes newest day first, so the probe, which asks for the oldest,
-    finds the difference again.
+    target_days. When the probes find the cache rebased, the walk asks for the
+    cached days as well. A refresh that is cut is not resumed; the next sweep
+    probes again.
 
     v3.7.3 (B-01/02/07): the previous `while len(have) < target_days` guard
     short-circuited once the cache reached target_days total dates, so no new
@@ -220,7 +218,7 @@ def refresh_breadth_polygon(target_days: int = POLYGON_TARGET_DAYS,
     constituents. Empty responses are non-trading days and cost one call."""
     symbols = set(sp500_symbols())
     counts = _cached_polygon_date_counts(symbols)   # v3.7.8/§2: per-date coverage
-    calls, rebased = _rebased(symbols, counts, target_days, pace_seconds)
+    calls, rebased = _rebased(symbols, pace_seconds)
     day = datetime.now(UTC).date() - timedelta(days=1)  # EOD; yesterday is the latest settled day
     stored_days = trading_seen = span = 0
     while trading_seen < target_days and span < POLYGON_MAX_CALENDAR_DAYS:
