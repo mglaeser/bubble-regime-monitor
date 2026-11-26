@@ -73,8 +73,10 @@ def _constituents_from_xlsx(content: bytes) -> list[str]:
 
     Same file S2 already fetches successfully — one download yields both the
     top-10 weights AND the constituent list, so breadth no longer depends on
-    scraping Wikipedia. Class-share dots become dashes (BRK.B -> BRK-B) for the
-    Twelve Data symbol convention; cash/FX/placeholder rows are dropped.
+    scraping Wikipedia. Class-share dots become dashes (BRK.B -> BRK-B) so that
+    the list and the Polygon grouped-daily rows share one key
+    (prices.parse_polygon_grouped does the same); cash/FX/placeholder rows are
+    dropped.
     """
     import re
 

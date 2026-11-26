@@ -42,8 +42,7 @@ def fake_fred(series_id):
 def fake_td(symbol, interval, outputsize):
     if interval == "1month":  # BTC monthly: SHORT history -> left-pad expected
         return [(f"{m}-01", 40_000.0 + i * 500) for i, m in enumerate(_months_now(24))]
-    spot = {"XAU/USD": 3350.0, "XAG/USD": 39.5, "USD/JPY": 156.2,
-            "USD/CHF": 0.874, "BTC/USD": 96_000.0}
+    spot = {"XAU/USD": 3350.0, "USD/JPY": 156.2, "USD/CHF": 0.874, "BTC/USD": 96_000.0}
     return [(datetime.now(UTC).date().isoformat(), spot.get(symbol, 1.0))]
 
 
@@ -82,7 +81,7 @@ class TestBuildFeedGolden:
         feed = df.build_feed(raw, data)
         assert sorted(feed["series"].keys()) == sorted(df.SERIES_KEYS)
         assert sorted(feed["metrics"].keys()) == sorted(df.METRIC_KEYS)
-        assert len(df.SERIES_KEYS) == 13 and len(df.METRIC_KEYS) == 33  # v3.7.0 +fear_greed; D13 -2 IMF keys
+        assert len(df.SERIES_KEYS) == 13 and len(df.METRIC_KEYS) == 30  # v3.7.0 +fear_greed; D13 -2 IMF keys; 1A as amended -3
 
     def test_points_always_61_and_left_padded(self, snapshot, patched_sources):
         raw, data = snapshot
@@ -119,12 +118,10 @@ class TestBuildFeedGolden:
         feed = df.build_feed(raw, data)
         m = feed["metrics"]
         assert m["gold_spot"]["source"] == "twelvedata:XAU/USD"      # true spot (1A)
-        assert m["gold_silver_ratio"]["value"] == pytest.approx(3350.0 / 39.5, rel=1e-3)
         assert m["btc_ath"]["value"] >= m["btc_spot"]["value"]        # spot included in basis
         assert m["btc_drawdown_pct"]["value"] <= 0.0
         assert m["usd_broad_index_ytd_pct"]["value"] is not None
         assert m["mmf_total_assets_usd"]["unit"] == "USD_mn"
-        assert m["ndx_close"]["available"] is False                   # never fabricated
         # ECY consistency with S1 inputs
         assert m["excess_cape_yield"]["value"] == pytest.approx(
             (1.0 / raw.cape - raw.real10y_decimal) * 100.0, abs=0.05)
@@ -199,7 +196,7 @@ class TestDegradation:
         # neighbours unaffected
         assert feed["series"]["qqq"]["available"] is True
         assert feed["series"]["silver"]["available"] is True
-        # spot keeps its true-spot source; the ETF fallback is only for spot failure
+        # the spot quote is its own source: a failed GLD series does not touch it
         assert feed["metrics"]["gold_spot"]["available"] is True
 
     def test_the_imf_reserve_keys_left_the_contract(self, snapshot, patched_sources):
@@ -212,23 +209,24 @@ class TestDegradation:
             assert key not in m and key not in df.METRIC_KEYS
         assert m["mmf_total_assets_usd"]["unit"] == "USD_mn"    # neighbours unaffected
 
-    def test_spot_failure_falls_back_to_labeled_etf_close(self, snapshot, patched_sources,
-                                                          monkeypatch):
+    def test_a_spot_key_never_carries_an_etf_share_price(self, snapshot, patched_sources,
+                                                         monkeypatch):
+        """A failed XAU/USD quote ships unavailable, not the GLD close: a fund
+        share's price, not an ounce's (369.36 USD beside a quote of 4033.09 on
+        2026-11-10)."""
         raw, data = snapshot
 
-        def td_no_metals(symbol, interval, outputsize):
-            if symbol in ("XAU/USD", "XAG/USD"):
-                raise RuntimeError("symbol not on plan")
+        def td_no_gold(symbol, interval, outputsize):
+            if symbol == "XAU/USD":
+                raise RuntimeError("quote failed")
             return fake_td(symbol, interval, outputsize)
 
-        monkeypatch.setattr(df, "_td_series", td_no_metals)
+        monkeypatch.setattr(df, "_td_series", td_no_gold)
         feed = df.build_feed(raw, data)
         gs = feed["metrics"]["gold_spot"]
-        # 1A: fallback must be clearly detectable via source/note
-        assert gs["available"] is True
-        assert gs["source"].startswith("tiingo:")
-        assert "NOT spot" in gs["note"]
-        assert "ETF" in feed["metrics"]["gold_silver_ratio"]["note"]
+        assert gs["available"] is False and gs["value"] is None
+        assert gs["source"] == "twelvedata:XAU/USD"
+        assert gs["note"].startswith("source failed")
 
 
 class TestFeedEndpoint:
@@ -276,3 +274,63 @@ class TestFeedEndpoint:
         r = client.get("/api/v1/dashboard/feed?sections=bogus")
         assert r.status_code == 200                      # unknown section ignored
         assert "series" in r.json()["data"]
+
+    # What an older build stored and the contract no longer holds, with the
+    # values, sources and notes of production's newest row of 2026-11-10.
+    _LEFT_THE_CONTRACT = {
+        "ndx_close": {"value": None, "unit": "index", "as_of": None, "source": "none",
+                      "available": False, "stale": None,
+                      "note": "no free raw NASDAQ-100 index source; use qqq_close (ETF proxy)"},
+        "silver_spot": {"value": 46.48, "unit": "USD", "as_of": "2026-11-10",
+                        "source": "tiingo:SLV", "available": True, "stale": False,
+                        "note": "SLV ETF close proxy - NOT spot (spot source failed)"},
+        "gold_silver_ratio": {"value": 86.77, "unit": "ratio", "as_of": "2026-11-10",
+                              "source": "twelvedata:XAU/USD/tiingo:SLV", "available": True,
+                              "stale": False,
+                              "note": "basis: mixed - one leg spot, one leg ETF close (see source)"},
+    }
+    # A GLD close under `gold_spot`, in the form the old fallback wrote on a failed quote.
+    _GLD_CLOSE = {"value": 369.36, "unit": "USD", "as_of": "2026-11-10", "source": "tiingo:GLD",
+                  "available": True, "stale": False,
+                  "note": "GLD ETF close proxy - NOT spot (spot source failed)"}
+
+    def _store_a_payload_from_before(self, snapshot, gold_spot=None):
+        """Store what an older build wrote: today's payload plus the three
+        keys, and the GLD close under `gold_spot` when one is given."""
+        from app.db import session_scope
+        from app.models import DashboardFeed
+
+        payload = df.build_feed(*snapshot)
+        payload["metrics"].update(self._LEFT_THE_CONTRACT)
+        if gold_spot is not None:
+            payload["metrics"]["gold_spot"] = gold_spot
+        with session_scope() as s:
+            s.add(DashboardFeed(computed_at=datetime(2026, 11, 10, 22, 2, tzinfo=UTC),
+                                payload=json.dumps(payload)))
+
+    def _served_metrics(self, client, query=""):
+        return client.get("/api/v1/dashboard/feed" + query).json()["data"]["metrics"]
+
+    def test_a_stored_payload_is_served_without_the_keys_that_left(
+            self, client, snapshot, patched_sources):
+        """A row stored by an older build holds the three keys that left the
+        contract: they are not served, by default or by name; the spot quote
+        under `gold_spot` is."""
+        self._store_a_payload_from_before(snapshot)
+        served = self._served_metrics(client)
+        assert sorted(served) == sorted(df.METRIC_KEYS)
+        assert served["gold_spot"]["value"] == 3350.0
+        assert served["gold_spot"]["source"] == "twelvedata:XAU/USD"
+        assert self._served_metrics(
+            client, "?symbols=ndx_close,silver_spot,gold_silver_ratio") == {}
+
+    def test_a_stored_etf_close_is_not_served_as_gold_spot(
+            self, client, snapshot, patched_sources):
+        """A row stored by an older build on a failed quote holds the GLD close
+        under `gold_spot`: it is served as a failed quote is served, unavailable
+        and without a value."""
+        self._store_a_payload_from_before(snapshot, gold_spot=self._GLD_CLOSE)
+        gold = self._served_metrics(client)["gold_spot"]
+        assert gold["available"] is False and gold["value"] is None
+        assert gold["source"] == "twelvedata:XAU/USD"
+        assert gold["note"].startswith("source failed")
