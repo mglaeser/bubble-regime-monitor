@@ -1,7 +1,7 @@
 """Deterministic message assembly from reviewed fragments. Pure.
 
-The renderer owns every number. A model may select CODES; it never writes a
-digit, a unit or a sentence. That is the whole containment: a hallucinated
+The renderer owns every number. No model takes part (owner decision D2b): a
+rule names CODES, and every digit, unit and sentence comes from here. A wrong
 number in a financial alert is indistinguishable from a real one at 3 a.m.
 
 Fitting is by OMISSION of whole reviewed fragments in a defined priority order,

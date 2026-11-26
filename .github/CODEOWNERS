@@ -9,8 +9,10 @@
 # ENFORCEMENT STATUS (kept accurate on purpose — a stale note here is a claim
 # the repository makes about itself, and those are what the claims ledger
 # exists to catch):
-#   Required status checks   ACTIVE. A ruleset on main requires "test (3.12)"
-#                            and "image", with no bypass actors. A direct push
+#   Required status checks   ACTIVE. A ruleset on main requires "test (3.12)",
+#                            "image" and "independent-verify" (the review
+#                            panel's verdict, a commit status), with no bypass
+#                            actors (settings read 2026-11-15). A direct push
 #                            to main is rejected.
 #   Code Owner review        NOT enabled, and deliberately so. GitHub does not
 #                            accept a self-approval, so requiring it in a
