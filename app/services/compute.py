@@ -320,7 +320,7 @@ class RawInputs:
     bsadf_argmax: int | None = None   # 1-based index of the sup within the sequence
     bsadf_n: int | None = None
     bsadf_n_finite: int | None = None  # < bsadf_n means the history has holes
-    bsadf_cv_route: str | None = None  # "bsadf_cv" | "augment_join" | "unavailable"
+    bsadf_cv_route: str | None = None  # "bsadf_cv" | "unavailable": r/gsadf.R has one route
 
     hy_oas_bps: float | None = None
     hy_oas_history_bps: list[float] | None = None
@@ -922,13 +922,18 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
                      mc_seed: int | None = None,
                      gsadf_contested: bool | None = None,
                      as_of_date: str | None = None) -> SnapshotData:
-    """PURE scoring pipeline: raw inputs -> snapshot data. Never raises on
+    """Scoring pipeline: raw inputs -> snapshot data. Never raises on
     missing sources; drops indicators and renormalizes instead.
+
+    Not pure: the same raw inputs give a different snapshot on another day,
+    because the age of every reading (the freshness map and, through the
+    freshness SLAs, the coverage gate) and D2's 75-day branch are measured
+    against the wall clock.
 
     `as_of_date` (ISO) is the day the caller is evaluating on, used ONLY to
     decide whether a price feed's last month has ended. It is optional and
-    defaults to the newest bar's own month, so the function stays pure and
-    reproducible for fixtures and replay; production passes the real date
+    defaults to the newest bar's own month, so that this one decision is the
+    same whenever a fixture or a replay runs; production passes the real date
     because without it a completed month is not recognised until the first bar
     of the NEXT month arrives, which delays a month-end P1 by a day or more.
     """
@@ -1011,7 +1016,8 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
     # Mapping: explosive p<0.05 non-contested -> 1.0; p<0.10 -> 0.5;
     # contested-or-stale-or-DATA-MISSING -> 0.25; tested-and-not-explosive -> 0.05.
     # asymmetric= is deliberately NOT bound to a setting: see app/config.py. It
-    # defaults False, so this call is byte-equivalent to the pre-branch one.
+    # is the frozen gsadf.contested_rule, "asymmetric" since v4.1, so this
+    # call passes True (the parameter's own default is False).
     s4_stat, s4_cv90, s4_cv95 = scored_s4_statistic(raw)
     # v4.1 contested rule, also an import-time constant.
     s4_asym = s4_gsadf.ASYMMETRIC_CONTESTED
@@ -1148,7 +1154,8 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
                                                "fed_ebp", sub,
                                                raw_value=ebp_t2_persisted, raw_unit="pp"))
     elif raw.baa_spread_history_bps and len(raw.baa_spread_history_bps) >= 24:
-        # PREFERRED: long-history percentile on the BAA-DGS10 proxy (monthly),
+        # SECOND TIER, taken only without the EBP above (quality 0.5):
+        # long-history percentile on the BAA-DGS10 proxy (monthly),
         # LSSZ t-2yr lag (24 months). HY OAS is FRED-truncated to 3yr, so its
         # own percentile is regime-limited; the Baa spread goes back to 1997.
         spread_t2 = s5_credit.t_minus_2_value(raw.baa_spread_history_bps, lag_obs=24)
