@@ -235,7 +235,6 @@ Source: `compute.py`, `d4_lppls.py`.
 - Never HTTP 500 on data failure: fall back down the chain, or drop the indicator and renormalize its block, always with a provenance note (guardrail #5).
 - Drop + renormalize over present keys (`aggregate.py:renormalize`; raises if a block empties → recompute returns None, no 500).
 - d4 FLOOR / s4 FLOOR: row stays in payload with `quality=0.0`; the value is EXCLUDED from the geometric mean (block renormalizes). `VALID_ZERO` (a genuine 0) ENTERS the aggregation.
-- s1 / s2 on their fallback source (shillerdata, Slickcharts), or on the primary when its date cannot be read: undated (`as_of` null), scored, not counted toward coverage (section 8).
 - s5 chain: EBP (≥24 mo) → BAA-DGS10 proxy (≥24 mo) → HY-OAS 3yr → drop.
 - d2: within 75d SLA → YoY + rollover; else last-good cached (rollover unknown); else drop.
 

@@ -81,22 +81,6 @@ def test_g04_sub_score_floors_on_degenerate_cv():
     assert sub_score(3.0, 1.9, 2.1, contested=False) == pytest.approx(1.0)
 
 
-# ---- K-01: concentration fallback parses the holdings TABLE structurally ----
-# (v3.7.5 supersedes the v3.7.4 page-wide >10% filter — see
-# tests/test_revalidation_v375.py::test_k01_structural_table_parse.)
-
-def test_k01_slickcharts_needs_a_table_not_page_text():
-    from app.sources import SourceError
-    from app.sources.ssga import _top10_from_slickcharts
-
-    # A page with percentages but NO holdings table must FAIL, not harvest stray
-    # page figures as "weights" (the old regex summed these).
-    html = "".join(f"{w:.2f}%" for w in [7.1, 6.2, 3.3, 2.9, 2.4, 2.1, 1.9, 1.8, 1.7, 1.5])
-    html += " 52-week range 68.58% ytd 15.40%"
-    with pytest.raises(SourceError):
-        _top10_from_slickcharts(html)
-
-
 # ---- A-05: geometric_block rejects un-renormalized weights ------------------
 
 def test_a05_geometric_block_validates_weights():

@@ -102,22 +102,3 @@ def test_s5_provisional_lag_flag_present(isolated_db, path, mutate, expect_sourc
 
 
 # ---- §3.1 (FINRA rollover calendar) lives in tests/test_d2_rollover_calendar.py
-
-
-# ---- §4.2  Slickcharts picks the holdings table, not an incidental one -------
-
-def test_k01_selects_holdings_table_over_incidental():
-    from app.sources.ssga import _top10_from_slickcharts
-
-    # First table: an incidental "Portfolio %" performance table (10 rows @ 2.00%).
-    incidental = "".join(f"<tr><td>X{i}</td><td>2.00%</td></tr>" for i in range(10))
-    # Second table: the real holdings weight table (12 rows; top-10 sum = 30.9).
-    hold_w = [7.10, 6.20, 3.30, 2.90, 2.40, 2.10, 1.90, 1.80, 1.70, 1.50, 0.10, 0.10]
-    holdings = "".join(f"<tr><td>SY{i}</td><td>{w:.2f}%</td></tr>"
-                       for i, w in enumerate(hold_w))
-    html = ("<html><body>"
-            f"<table><tr><th>Name</th><th>Portfolio %</th></tr>{incidental}</table>"
-            f"<table><tr><th>Symbol</th><th>Weight</th></tr>{holdings}</table>"
-            "</body></html>")
-    # v3.7.6 returned the FIRST table's sum (20.0); v3.7.7 uses the larger holdings table.
-    assert _top10_from_slickcharts(html) == pytest.approx(30.9, abs=0.01)

@@ -532,19 +532,7 @@ def gather_inputs() -> RawInputs:
     r = _track(raw, "cape", cape_src.current_cape)
     if r:
         raw.cape, raw.cape_source, raw.cape_fallback = r.value, r.provenance.source, r.provenance.fallback_used
-        # The source's own date, NEVER `or today` (as for breadth, v3.7.6/B-02,
-        # and the VIX curve, v3.7.8/§9): the day multpl stamps its value with,
-        # or None from Shiller's spreadsheet, which states no day. An undated
-        # reading is scored and does not count toward coverage (v3.7.3/A-01):
-        # block S loses S1's 0.33 or S2's 0.27, and the log names the reading.
-        # Stamped with the day of the fetch, S1 and S2 read age 0 on every
-        # scored row from 2026-07-11 to 2026-11-10 (612 and 615), 180 of them on
-        # a Saturday or a Sunday, and S1 on the 35 snapshots from 2026-10-30
-        # 22:00 to 2026-11-05 14:00 UTC while multpl's value stood at 40.13
-        # over three sessions.
-        raw.cape_as_of = r.provenance.as_of
-        if raw.cape_as_of is None:
-            log.warning("reading_undated", indicator="s1", source=raw.cape_source)
+        raw.cape_as_of = r.provenance.as_of   # the date the source states, or None
     hist = _track(raw, "cape_history", cape_src.monthly_cape_history)
     if hist:
         raw.cape_history = hist.value
@@ -557,12 +545,7 @@ def gather_inputs() -> RawInputs:
     r = _track(raw, "ssga_spy_xlsx", ssga_src.top10_concentration)
     if r:
         raw.top10_pct, raw.top10_source, raw.top10_fallback = r.value, r.provenance.source, r.provenance.fallback_used
-        # The holdings date the workbook states, or None from Slickcharts, which
-        # states none. The file published on a session states the session
-        # before it, so the date is one or two NYSE sessions old (SLA 3).
-        raw.top10_as_of = r.provenance.as_of
-        if raw.top10_as_of is None:
-            log.warning("reading_undated", indicator="s2", source=raw.top10_source)
+        raw.top10_as_of = r.provenance.as_of   # the workbook's holdings date, or None
 
     # Prices via the v3.1 provider chain (Tiingo -> Twelve Data -> Alpha
     # Vantage -> cache). Index levels use ETF proxies (NDX->QQQ,
@@ -787,7 +770,7 @@ def gather_inputs() -> RawInputs:
     r = _track(raw, "lppls", _lppls)
     if r is not None:
         raw.lppls_confidence = r["value"]
-        raw.lppls_as_of = ndx.provenance.as_of   # `_lppls` raises without the series
+        raw.lppls_as_of = ndx.provenance.as_of if ndx else None
     else:
         cause = raw.gather_errors.get("lppls", "unknown cause")
         raw.lppls_note = f"LPPLS floored ({cause}); excluded from Block D, which renormalizes"

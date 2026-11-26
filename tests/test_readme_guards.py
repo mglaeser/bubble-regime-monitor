@@ -138,10 +138,9 @@ def test_readme_sla_column_is_the_frozen_artifact():
     assert found == {key: f"{FRESHNESS_SLA_DAYS[key]}d" for key in _SLA_ROW}
 
 
-def test_readme_s2_row_lists_the_one_fallback_the_code_asks(monkeypatch):
-    """Concentration has two sources, the SSGA sheet and then Slickcharts. The
-    JPMAM guide is compared by hand (app/sources/ssga.py); the row listed it as
-    a tier after Slickcharts."""
+def test_readme_s2_row_lists_no_fallback_as_the_code_asks_none(monkeypatch):
+    """Concentration has one source, the SSGA sheet. The JPMAM guide is
+    compared by hand (app/sources/ssga.py), not a tier."""
     from app.sources import SourceError, ssga
 
     asked = []
@@ -153,11 +152,9 @@ def test_readme_s2_row_lists_the_one_fallback_the_code_asks(monkeypatch):
     monkeypatch.setattr(ssga, "fetch", down)
     with pytest.raises(SourceError):
         ssga.top10_concentration()
-    assert asked == ["ssga_spy_xlsx", "slickcharts"]
+    assert asked == ["ssga_spy_xlsx"]
 
-    fallback = _sources_table()["Concentration (S2)"][1]
-    assert "Slickcharts" in fallback
-    assert "→" not in fallback and "->" not in fallback, "S2 has one fallback tier"
+    assert _sources_table()["Concentration (S2)"][1].startswith("none")
 
 
 def test_readme_s4_row_names_the_value_a_failed_test_keeps():

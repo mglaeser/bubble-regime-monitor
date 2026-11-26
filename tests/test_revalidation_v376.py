@@ -168,24 +168,6 @@ def test_x01_identical_date_ok(monkeypatch):
     assert res.provenance.as_of == "2026-07-15"
 
 
-# ---- K-01: concentration fallback parses the TABLE, not the page ------------
-
-def test_k01_structural_table_parse():
-    from app.sources.ssga import _top10_from_slickcharts
-
-    rows = "".join(
-        f"<tr><td>{i}</td><td>Co{i}</td><td>SY{i}</td><td>{w:.2f}%</td></tr>"
-        for i, w in enumerate(
-            [7.10, 6.20, 3.30, 2.90, 2.40, 2.10, 1.90, 1.80, 1.70, 1.50], 1))
-    html = ("<html><body>"
-            "<div>52-week range 68.58% · YTD 7.42% · sector 5.10%</div>"
-            "<table><tr><th>#</th><th>Company</th><th>Symbol</th><th>Weight</th></tr>"
-            f"{rows}</table></body></html>")
-    top10 = _top10_from_slickcharts(html)
-    # exactly the ten TABLE weights; the stray 7.42/5.10 (page text) are excluded.
-    assert top10 == pytest.approx(30.9, abs=0.01)
-
-
 # ---- A-05: geometric_block rejects non-finite / negative weights ------------
 
 def test_a05_rejects_nonfinite_and_negative_weights():

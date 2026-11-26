@@ -4,9 +4,8 @@ URL (path changed 2024-08-16, verified July 2026):
 https://www.ssga.com/us/en/institutional/library-content/products/fund-data/etfs/us/holdings-daily-us-en-spy.xlsx
 
 The S2 input is the sum of the top-10 INDIVIDUAL HOLDING weights — not a
-sector-table figure. Fallback chain: Slickcharts scrape, then JPMAM Guide to
-the Markets cross-check (manual). The reading is dated by the workbook's own
-holdings date; Slickcharts states no day, so a weight from it is undated.
+sector-table figure. No fallback tier: the JPMAM Guide to the Markets is a
+cross-check by hand.
 """
 
 from __future__ import annotations
@@ -23,7 +22,6 @@ XLSX_URL = (
     "https://www.ssga.com/us/en/institutional/library-content/products/"
     "fund-data/etfs/us/holdings-daily-us-en-spy.xlsx"
 )
-SLICKCHARTS_URL = "https://www.slickcharts.com/sp500"
 
 
 def _top10_from_xlsx(content: bytes) -> float:
@@ -46,26 +44,20 @@ def _top10_from_xlsx(content: bytes) -> float:
 
 
 def _as_of_from_xlsx(content: bytes) -> str | None:
-    """The holdings date the workbook states above its header row, as an ISO
-    date; None when it states none.
-
-    Row 3 of the file reads `Holdings: | As of 12-Nov-2026` (taken 2026-11-14,
-    a Saturday: the file published on a session states the session before it).
-    The date is the cell to the right of the one that reads `Holdings:`, and
-    only that cell: another cell in the same form is not the holdings date and
-    would count an old weight as fresh. When that cell is missing or in
-    another form the weight is undated; the footer's "as of the date
-    indicated" is not a date."""
-    head = pd.read_excel(io.BytesIO(content), header=None, nrows=20)
-    for row in head.to_numpy().tolist():
-        cells = [str(c).strip() for c in row]
-        if "Holdings:" in cells[:-1]:
-            try:
-                return datetime.strptime(cells[cells.index("Holdings:") + 1],
-                                         "As of %d-%b-%Y").date().isoformat()
-            except ValueError:
-                return None
-    return None
+    """Returns an ISO date in exactly one case: the workbook parses, exactly
+    one cell of its first sheet is the text "Holdings:", and the cell to its
+    right is a text of the form `As of %d-%b-%Y` ("As of 12-Nov-2026" in the
+    file of 2026-11-14). Everything else is None, every exception of the
+    reader included."""
+    try:
+        rows = pd.read_excel(io.BytesIO(content), header=None).to_numpy().tolist()
+        labels = [(i, j) for i, row in enumerate(rows) for j, cell in enumerate(row) if cell == "Holdings:"]
+        if len(labels) != 1:
+            return None
+        i, j = labels[0]
+        return datetime.strptime(rows[i][j + 1], "As of %d-%b-%Y").date().isoformat()
+    except Exception:
+        return None
 
 
 def _constituents_from_xlsx(content: bytes) -> list[str]:
@@ -114,59 +106,11 @@ def sp500_constituents() -> SourceResult:
                                             note=f"{len(tickers)} constituents"))
 
 
-def _top10_from_slickcharts(html: str) -> float:
-    # v3.7.6/K-01: STRUCTURAL parse — read the holdings TABLE's weight column,
-    # never harvest percentages page-wide. The prior regex (even with a >10%
-    # filter) still summed sub-10% strays (YTD move, sector figures, ad copy) as
-    # "holding weights"; a plausibility threshold is not a parse. pandas.read_html
-    # isolates real <table> columns, so page text outside the table can never
-    # enter the sum. The SSGA XLSX primary (real Weight column) is unaffected;
-    # this only hardens the degraded fallback.
-    try:
-        # flavor="lxml": use the installed parser only (never fall back to an
-        # optional html5lib), and raise ValueError (not ImportError) on no table.
-        tables = pd.read_html(io.StringIO(html), flavor="lxml")
-    except (ValueError, ImportError) as exc:
-        raise SourceError(f"Slickcharts: no HTML table found ({exc})") from exc
-    # Pick the table with the MOST single-name weight rows (v3.7.7/§4.2): the real
-    # holdings table has ~500 constituents, so an incidental portfolio/performance
-    # table that merely happens to have a "weight"/"portfolio" column can no longer
-    # win over it just by appearing first.
-    best = None  # weights Series of the strongest candidate table
-    for df in tables:
-        wcol = next((c for c in df.columns
-                     if "weight" in str(c).strip().lower()
-                     or "portfolio" in str(c).strip().lower()), None)
-        if wcol is None:
-            continue
-        cleaned = df[wcol].astype(str).str.replace("%", "", regex=False).str.strip()
-        weights = pd.to_numeric(cleaned, errors="coerce").dropna()
-        # single-name index weights only (no S&P 500 name exceeds ~8%)
-        weights = weights[(weights > 0.0) & (weights <= 10.0)]
-        if len(weights) >= 10 and (best is None or len(weights) > len(best)):
-            best = weights
-    if best is None:
-        raise SourceError("Slickcharts: no holdings weight column in any table")
-    top10 = float(best.nlargest(10).sum())
-    if not 5.0 < top10 < 80.0:
-        raise SourceError(f"Slickcharts: implausible top-10 sum {top10}")
-    return top10
-
-
 def top10_concentration() -> SourceResult:
-    """Top-10 S&P 500 holdings weight (percent), with fallback chain."""
-    try:
-        resp = fetch("ssga_spy_xlsx", XLSX_URL)
-        return SourceResult(_top10_from_xlsx(resp.content),
-                            Provenance(source="ssga_spy_xlsx",
-                                       as_of=_as_of_from_xlsx(resp.content)))
-    except Exception as primary_err:
-        try:
-            resp = fetch("slickcharts", SLICKCHARTS_URL)
-            return SourceResult(
-                _top10_from_slickcharts(resp.text),
-                Provenance(source="slickcharts", fallback_used=True,
-                           note=f"SSGA failed: {primary_err}"),
-            )
-        except Exception as fallback_err:
-            raise SourceError(f"concentration: all sources failed ({fallback_err})") from fallback_err
+    """Top-10 S&P 500 holdings weight (percent) from the SSGA workbook. The
+    Slickcharts fallback went on 2026-11-26 by the audit lead's decision: no
+    page of it was ever recorded to read its date from, and it served none of
+    the 615 snapshots to 2026-11-10."""
+    content = fetch("ssga_spy_xlsx", XLSX_URL).content
+    return SourceResult(_top10_from_xlsx(content),
+                        Provenance(source="ssga_spy_xlsx", as_of=_as_of_from_xlsx(content)))

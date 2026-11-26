@@ -102,7 +102,7 @@ Red-flag count 0 → override not fired. **Deterministic point score 52.43; MC m
 |-----------|---------------|----------------|-----|
 | CAPE (S1) | multpl scrape | shillerdata `ie_data.xls` | 35d |
 | Real 10-yr (S1) | FRED `DFII10` | none (FRED core) | 3d |
-| Concentration (S2) | SSGA SPY holdings XLSX (top-10 **holdings** sum, not a sector weight) | Slickcharts (the JPMAM guide is a cross-check by hand, not a tier) | 3d |
+| Concentration (S2) | SSGA SPY holdings XLSX (top-10 **holdings** sum, not a sector weight) | none: S2 is dropped and Block S renormalized (the JPMAM guide is a cross-check by hand, not a tier) | 3d |
 | Semis run-up (S3) | Tiingo `SMH`/`SPY` | Twelve Data -> Alpha Vantage -> cache; SOXX substitute for SMH | 3d |
 | GSADF (S4) | `Rscript r/gsadf.R` (exuber) | no second source: without a statistic S4 keeps the declared 0.25 in Block S (state `FLOOR`, quality 0.0, so the coverage gate counts its 0.07 as lost) + provenance note; 0.05 is a completed test that does not reject | 35d |
 | Credit tightness (S5) | Fed Excess Bond Premium CSV (monthly, 1973+; the reading of 24 months back) | FRED `BAA` − `DGS10` (monthly, quality 0.5) → FRED `BAMLH0A0HYM2` (HY OAS, quality 0.3) → S5 is dropped and Block S renormalized | 45d |
@@ -114,8 +114,6 @@ Red-flag count 0 → override not fired. **Deterministic point score 52.43; MC m
 | VIX curve (V) | CBOE delayed quotes | FRED `VIXCLS`/`VXVCLS` (FRED's series id for VIX3M) | 2d |
 
 The 3d SLA of S2, S3, D1 and D4 counts NYSE sessions since the reading's date, so a weekend or an exchange holiday does not age a daily reading; every other SLA counts calendar days. `age_days` is always the calendar age. A daily feed that really stops is stale once more than three sessions have passed: two calendar days later than a calendar count reports it when a weekend lies in between, three when an exchange holiday does too, never earlier.
-
-S1 and S2 carry the date their source states, never the day of the fetch: the day multpl stamps its value with, and the holdings date of the SSGA workbook (the file published on a session states the session before it, so S2 is one or two sessions old). The two fallbacks (Shiller's spreadsheet, Slickcharts) state no day, and a primary whose date cannot be read has none either: such a reading is scored, has `as_of: null`, and does not count toward coverage. Block S then stands at 0.67 (without S1) or 0.73 (without S2) at best, and below the gate's 2/3, with the band withheld, as soon as another of its readings is stale or dropped.
 
 ## API
 
