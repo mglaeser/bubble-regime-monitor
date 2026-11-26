@@ -520,14 +520,11 @@ def last_finra_reading() -> dict[str, Any] | None:
     A cached reading is stored with fallback_used, so it is never read back:
     the reading served is the last one the file gave, and its age keeps
     counting from that file's reference month. Without the filter each cached
-    row cited the cached row before it (production, 2026-07-16: the 18:03 UTC
-    note read "serving cached reading from 2026-07-16T06:04:27", itself a
-    cached row; the file's reading was the one of 2026-07-15 23:29).
+    row cited the cached row before it.
 
     The month is the stored payload's own as_of (block_d.indicators.d2);
-    indicator_readings has no date column. All 615 production payloads carry
-    it. A row without it yields as_of None, which compute_snapshot does not
-    serve."""
+    indicator_readings has no date column. A row without it yields as_of
+    None, which compute_snapshot does not serve."""
     from app.models import IndicatorReading
 
     with session_scope() as session:
@@ -1220,22 +1217,20 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
                 margin_yoy = d2_margin.yoy_pct(raw.margin_balances)
         except ValueError as exc:
             log.warning("margin_yoy_calendar_gap", error=str(exc)[:120])
-    # FINRA SLA: 75 days from the reference month-end. The series posts ~3
-    # weeks after month-end (in production a month appeared 14 to 20 days
-    # after its end), so the month in hand stays inside the SLA while the next
-    # one arrives up to 44 days after its own end. One skipped publication is
-    # generally NOT covered: the file after it arrives two months plus that
-    # lag, 73 to 82 days, after the month in hand ended, and D2 is dropped
-    # until it does. Beyond the SLA, never compute a YoY.
+    # FINRA SLA: 75 days from the reference month-end (the series posts ~3
+    # weeks after month-end). One skipped publication is generally NOT
+    # covered: the file after it arrives 73 to 82 days after the month in
+    # hand ended, and D2 is dropped until it does. Beyond the SLA, never
+    # compute a YoY.
     if margin_yoy is not None and (margin_age is None or margin_age <= 75):
         yoy = margin_yoy
         # Within the FINRA SLA (75 days) the rollover confirmation is asserted
-        # normally. FINRA posts monthly ~3 weeks after month-end, so between
-        # two publications the month in hand is routinely up to ~7 weeks old
-        # (14 to 46 days in production, dated by month-end) — as current as
-        # the series gets, NOT stale. (A file older than the SLA never reaches
-        # here: below, D2 is served from a stored reading only while that
-        # reading's own month is inside the SLA, and dropped otherwise.)
+        # normally. FINRA posts monthly ~3 weeks after month-end, so the FRESHEST
+        # possible reading is routinely ~45-75 days old — a ~71-day age is as
+        # current as the series ever gets, NOT stale. (A file older than the SLA
+        # never reaches here: below, D2 is served from a stored reading only
+        # while that reading's own month is inside the SLA, and dropped
+        # otherwise.)
         # Rollover confirmation is CALENDAR-aware when dated months are available
         # (v3.7.7/§3.1): on a publication gap the positional [-3:] window
         # straddles the hole and could flip the D2 multiplier (0.6<->1.0) from
@@ -1281,10 +1276,6 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         # Its date is the reading's, not the failed fetch's: with as_of None
         # the coverage gate cannot count it as fresh, and Block D coverage
         # reads 0.87 instead of 1.0 although the month is weeks old.
-        # One failed pull must not drop D2: replayed on the stored series (605
-        # snapshots, 2026-07-14 .. 2026-11-10, point score), dropping it steps
-        # the headline at once by -1.68 to +3.37 points (median +2.10) and
-        # changes the band word on 130 snapshots (127 of them trim -> de-risk).
         sub = float(raw.margin_cached["sub_score"])
         sub_d["d2"] = sub
         mc_in.d2_sub = sub
@@ -1307,13 +1298,11 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         # was then dated by its first day): the file's month read 76 days old,
         # the gate refused its YoY, and the sub-score stored from that same
         # month was scored for two more recomputes.
-        # A stored reading with no end keeps one sub-score in the headline for
-        # as long as the file is unreadable, and that is not harmless either:
-        # on the same stored series a D2 frozen at July's 0.492 starts level
-        # with the live headline and reads 3.30 points above it by 2026-11-10
-        # (52.11 against 48.81; band word different on 138 snapshots). So the
-        # reading is carried for the SLA and then dropped, a step of the size
-        # given above on that day.
+        # The numeric move: none while the file gives a reading. On the day a
+        # stored reading passes the SLA the headline steps as when any
+        # indicator is dropped: replayed on the stored series (605 snapshots,
+        # 2026-07-14 .. 2026-11-10, point score) by -1.68 to +3.37 points
+        # (median +2.10), and the band word changes on 130 of them.
         reason = (f"reference month {raw.margin_as_of} older than 75d SLA"
                   if margin_age is not None and margin_age > 75 else "margin statistics unavailable")
         indicators["d2"] = IndicatorOutput("d2", None, None, True, "finra_xlsx", False,

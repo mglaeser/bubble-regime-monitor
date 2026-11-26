@@ -77,7 +77,7 @@ class TestStaleness:
         fresh = datetime.now(UTC).date().isoformat()
         assert IndicatorOutput("d1", 56.0, 0.5, False, "x", False, as_of=old).stale is True  # SLA 3d
         assert IndicatorOutput("d1", 56.0, 0.5, False, "x", False, as_of=fresh).stale is False
-        assert IndicatorOutput("d2", 50.0, 0.5, False, "x", False, as_of=old).stale is False  # SLA 75d
+        assert IndicatorOutput("d2", 50.0, 0.5, False, "x", False, as_of=old).stale is False  # SLA 45d
         assert IndicatorOutput("d1", 56.0, 0.5, False, "x", False, as_of=None).stale is None
 
     def test_snapshot_freshness_populated(self, isolated_db):
