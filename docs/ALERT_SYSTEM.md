@@ -820,6 +820,13 @@ and the message about a decision is worded from what was decided on. A
 for it (`app/alerts/repository.py` `load_latest_compatible_input`,
 tests/test_alert_current_context.py).
 
+A fact a compatible current sidecar lacks (an indicator the recompute dropped)
+is the trigger's, also with `CONTEXT_STALE`; the render does not fail for it
+(`app/alerts/render_context.py` `build_member_context`,
+tests/test_alert_fact_fallback.py). A stale member carries no material-change
+clause, whichever way it became stale: the ruleset validator proves the stale
+and the material-change caveats each alone to fit one message, not both.
+
 Only the shipped phrase set, v3.5, is kept (owner ruling 3): v3.2-v3.4 and the
 single-language form were kept only for compatibility. A registry still keeps
 the bytes of every set it registered - immutable audit data, never changed -
