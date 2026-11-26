@@ -184,7 +184,8 @@ class ProviderHealth(Base):
 class DailyClose(Base):
     """Per-symbol daily close for the D1 breadth 200-DMA, populated from the
     Polygon/Massive grouped-daily endpoint (one call = the whole US market for
-    one day). Keyed (symbol, date); the 200-day SMA is computed on read from the
+    one day). Keyed (symbol, date); the 200-day SMA is computed on read, inside
+    the newest 210 stored sessions (breadth.py, POLYGON_TARGET_DAYS), from the
     most recent 200 rows per symbol. The only breadth source (owner decision
     D9, 2026-09-28)."""
 
