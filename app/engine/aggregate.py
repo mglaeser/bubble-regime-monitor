@@ -37,8 +37,13 @@ from dataclasses import dataclass, field
 
 from app import methodology as _M
 
-# All score-effective constants below are LOADED from the canonical frozen
-# artifact (F-01/L-07) — the module no longer hardcodes them. Rescale-then-
+# The score-effective constants below are LOADED from the canonical frozen
+# artifact (F-01/L-07). Two numbers of this module repeat an artifact value
+# without reading it: the baseline alpha 0.5, the default of combine and
+# deterministic_score (aggregation.alpha_baseline; counted in
+# tests/test_frozen_methodology.py, KNOWN_COLLISIONS), and the scale 100
+# (aggregation.score_scale). The band words action_band returns are written
+# out here as well (action_bands.labels). Rescale-then-
 # aggregate floor (UNDP HDI / OECD-JRC style strictly-positive geometric mean):
 # every sub-score in [0,1] is first mapped to [RESCALE_FLOOR, 1] before the
 # weighted geometric mean, so a single 0-valued indicator can no longer
