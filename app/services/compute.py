@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 
 from app import methodology as _M
 from app.alerts.calendars import is_trading_day, trading_days_after
@@ -214,10 +214,10 @@ COVERAGE_DROP_THRESHOLD = _M.get_path("coverage", "drop_threshold")  # 1/3
 # That reading is a tier of the fallback chain (AGENTS.md rule 3), not the
 # neutral placeholder rule 4 forbids: the service measured it itself, it is
 # carried as it was stored (value, quality, provenance, the day it was
-# measured on) and flagged fallback_used, and it ends with the SLA. Without a
-# stored reading whose payload holds its yield's date and its quality (no row
-# stored before this change holds the yield's date), nothing is filled in and
-# S1 is dropped.
+# measured on) and flagged fallback_used, and it ends with the SLA. When S1's
+# newest stored reading cannot be carried (last_primary_reading; no row stored
+# before this change holds the yield's date), nothing is filled in and S1 is
+# dropped.
 #
 # Why: on 2026-10-21 18:00, 22:00 and 10-22 02:00 UTC FRED answered the DFII10
 # request with a body that was not JSON. S1 was dropped and the median read
@@ -543,20 +543,17 @@ def _track_closes(raw: RawInputs, source: str, canonical: str) -> Any:
 
 def last_primary_reading(indicator_id: str) -> dict[str, Any] | None:
     """The newest stored reading of an indicator of Block S that its own
-    sources served and that its stored payload lets carry, loaded in the same
-    read: value, sub-score, source, quality, date, note and the real yield's
-    observation date (real10y_as_of, which S1 stores).
+    sources served, as it was stored: value, sub-score, source, quality, note,
+    its date (as_of, CAPE's for S1) and the real yield's observation date
+    (real10y_as_of, which S1 stores). Not dropped and not a fallback: a
+    carried reading is stored with fallback_used, so it is never carried again.
 
-    Not dropped and not a fallback: a carried reading is stored with
-    fallback_used, so it is never carried again and its age keeps counting
-    from the yield of the last reading that was measured. A row whose payload
-    lacks a real10y_as_of written YYYY-MM-DD, a numeric quality from 0 to 1 or
-    a text as_of is never chosen, so it cannot hide another."""
+    Exactly one row is read, the newest such reading. It is returned when its
+    value, sub-score and quality are finite numbers (the quality from 0 to 1)
+    and both dates are text that date.fromisoformat reads; otherwise None, and
+    no older reading is returned in its place, so nothing is carried."""
     from app.models import IndicatorReading
 
-    path = f"$.indicators.{indicator_id}"
-    yield_on = func.json_extract(Snapshot.block_s, f"{path}.real10y_as_of")
-    quality = func.json_extract(Snapshot.block_s, f"{path}.quality")
     with session_scope() as session:
         found = session.execute(
             select(IndicatorReading.value, IndicatorReading.sub_score,
@@ -564,20 +561,26 @@ def last_primary_reading(indicator_id: str) -> dict[str, Any] | None:
             .join(Snapshot, IndicatorReading.snapshot_id == Snapshot.id)
             .where(IndicatorReading.indicator_id == indicator_id,
                    IndicatorReading.dropped.is_(False),
-                   IndicatorReading.fallback_used.is_(False),
-                   IndicatorReading.sub_score.is_not(None),
-                   func.date(yield_on) == yield_on,
-                   func.json_type(Snapshot.block_s, f"{path}.quality").in_(("integer", "real")),
-                   quality.between(0, 1),
-                   func.json_type(Snapshot.block_s, f"{path}.as_of") == "text")
-            .order_by(IndicatorReading.timestamp.desc()).limit(1)
+                   IndicatorReading.fallback_used.is_(False))
+            .order_by(Snapshot.id.desc()).limit(1)
         ).first()
     if found is None:
         return None
-    stored = found.block_s["indicators"][indicator_id]
-    return {"value": found.value, "sub_score": found.sub_score, "data_source": found.data_source,
-            "quality": float(stored["quality"]), "as_of": stored.get("as_of"),
-            "note": stored.get("note"), "real10y_as_of": stored["real10y_as_of"]}
+    try:
+        stored = found.block_s["indicators"][indicator_id]
+        reading = {"value": found.value, "sub_score": found.sub_score,
+                   "data_source": found.data_source, "quality": stored["quality"],
+                   "as_of": stored["as_of"], "note": stored.get("note"),
+                   "real10y_as_of": stored["real10y_as_of"]}
+        for day in (reading["as_of"], reading["real10y_as_of"]):
+            date.fromisoformat(day)
+        numbers = (reading["value"], reading["sub_score"], reading["quality"])
+        if not (all(isinstance(x, int | float) and not isinstance(x, bool) and math.isfinite(x)
+                    for x in numbers) and 0 <= reading["quality"] <= 1):
+            return None
+    except Exception:
+        return None
+    return reading
 
 
 def gather_inputs() -> RawInputs:
@@ -1038,8 +1041,8 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         sub = float(raw.s1_last["sub_score"])
         sub_s["s1"] = sub
         mc_in.s1_sub = sub
-        carry = (f"real yield unavailable (FRED DFII10); serving the reading of "
-                 f"{raw.s1_last['as_of']} (real yield of {raw.s1_last['real10y_as_of']}) "
+        carry = (f"real yield unavailable (FRED DFII10); serving S1's last reading "
+                 f"(CAPE of {raw.s1_last['as_of']}, real yield of {raw.s1_last['real10y_as_of']}) "
                  f"for at most {REAL10Y_SLA_DAYS} days after the yield's date")
         stored_note = raw.s1_last.get("note")
         indicators["s1"] = IndicatorOutput(

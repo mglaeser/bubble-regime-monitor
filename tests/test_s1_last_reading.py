@@ -86,6 +86,7 @@ def test_a_failed_yield_fetch_does_not_move_the_headline():
     assert got.as_of == _day(0)
     assert got.payload()["real10y_as_of"] == _day(1)
     assert "FRED" in (got.note or "")
+    assert f"CAPE of {_day(0)}, real yield of {_day(1)}" in (got.note or "")
 
 
 def test_the_reading_is_served_for_the_sla_and_dropped_after_it():
@@ -105,14 +106,9 @@ def test_the_reading_is_served_for_the_sla_and_dropped_after_it():
 
 
 def test_a_carried_reading_is_not_carried_again(isolated_db, clock):
-    """Each recompute without FRED serves the last MEASURED reading that can be
-    carried: a carried one is stored as a fallback and never carried itself,
-    and a newer one without its yield's date does not hide it."""
+    """Each recompute without FRED serves the last MEASURED reading: a carried
+    one is stored as a fallback and never carried itself."""
     raw = _golden()
-    compute.persist_snapshot(_snapshot(raw), raw)
-    clock(NOW.replace(hour=6))
-    raw = _golden()
-    raw.real10y_as_of = None
     compute.persist_snapshot(_snapshot(raw), raw)
 
     for hour in (6, 10, 14):              # three recomputes of the next day without FRED
@@ -122,6 +118,45 @@ def test_a_carried_reading_is_not_carried_again(isolated_db, clock):
         data = _snapshot(raw)
         assert data.indicators["s1"].fallback_used is True
         compute.persist_snapshot(data, raw)
+
+
+def _spoil_newest_s1(field: str, value) -> None:
+    """Set one field of the newest stored S1 payload."""
+    from sqlalchemy import select
+    from sqlalchemy.orm.attributes import flag_modified
+
+    from app.db import session_scope
+    from app.models import Snapshot
+
+    with session_scope() as session:
+        snap = session.execute(select(Snapshot).order_by(Snapshot.id.desc()).limit(1)).scalar_one()
+        indicators = dict(snap.block_s["indicators"])
+        indicators["s1"] = {**indicators["s1"], field: value}
+        snap.block_s = {**snap.block_s, "indicators": indicators}
+        flag_modified(snap, "block_s")   # True == 1.0 would otherwise read as no change
+
+
+@pytest.mark.parametrize(("field", "unusable"), [
+    ("real10y_as_of", None),                  # as on every row stored before it was kept
+    ("real10y_as_of", "0000-01-01"),          # year 0, which date.fromisoformat refuses
+    ("real10y_as_of", "2026-11-09 12:00"),    # a timestamp, not a date
+    ("as_of", "garbage"),
+    ("quality", True),                        # a JSON true, not a number
+    ("quality", 1.5),
+])
+def test_an_unusable_newest_reading_carries_nothing(isolated_db, clock, field, unusable):
+    """Only the newest stored reading is considered: when it cannot be carried,
+    S1 is dropped, and an older usable reading is not carried in its place."""
+    raw = _golden()
+    compute.persist_snapshot(_snapshot(raw), raw)
+    clock(NOW.replace(hour=6))
+    raw = _golden()
+    compute.persist_snapshot(_snapshot(raw), raw)
+    _spoil_newest_s1(field, unusable)
+
+    clock(NOW.replace(hour=10))
+    assert compute.last_primary_reading("s1") is None
+    assert _snapshot(_without_the_yield(compute.last_primary_reading("s1"))).indicators["s1"].dropped
 
 
 @pytest.mark.parametrize("cape_history", [True, False], ids=["full", "ecy-only"])
