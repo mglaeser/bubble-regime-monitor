@@ -266,10 +266,12 @@ the same triggers on the `create_all` path. The guarantee must not depend on
 which bootstrap ran; `tests/test_migrations.py::test_migrations_match_models`
 checks the schemas match.
 
-`busy_timeout` is now set (`ALERTS_BUSY_TIMEOUT_MS`, default 5000). The alert
-system adds a second and third writer to what was a single-writer service;
-without it SQLite returns `SQLITE_BUSY` immediately on contention — a lost
-alert plan rather than a slower one.
+`busy_timeout` is set explicitly (`ALERTS_BUSY_TIMEOUT_MS`, default 5000 ms,
+the value Python's sqlite3 driver would also use). The alert system adds a
+second and third writer to what was a single-writer service: a writer that
+finds the lock held waits that long for it, and the wait is this service's
+setting rather than the driver's. At 0 SQLite returns `SQLITE_BUSY` at once on
+contention — a lost alert plan rather than a slower one.
 
 ---
 
@@ -879,6 +881,14 @@ moved.
 
 Owner decision D2a (2026-10-03) removes the summary's `digest_items` with the
 weekly digest. It was 0 in every run, and no other number moved.
+
+Replay-summary schema `4 -> 5` adds
+`transient_one_snapshot_band_p1_busiest_24_months`: the largest number of
+transient one-snapshot entries into de-risk inside any one window of 24 months
+of 30.44 days, both edges of the window included, and
+`band_excursion_covers_24_months`: whether `window_last` is at least one such
+window after `window_first`. The verdict fails when that largest number is
+above the cap of `regime.band_to_derisk`'s keep condition, one per 24 months.
 
 `tests/fixtures/alert_replay_history.json` declares the **arc** — twenty
 recompute slots through hold → trim → de-risk → recovery, with two blind slots
