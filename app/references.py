@@ -107,7 +107,7 @@ REGISTRY: dict[str, Methodology] = {
             "without double-counting."
         ),
         how=(
-            "cape = current Shiller CAPE (multpl primary; shillerdata ie_data.xls as the "
+            "cape = current Shiller CAPE (the last monthly value of Shiller's ie_data.xls; multpl as the "
             "fallback). pct = percentile rank of cape within a rolling window of the last W "
             "years of monthly CAPE, W MC-sampled on integers U[20,40], baseline W = 30; pct in [0,1]. "
             "real10y = FRED DFII10 latest value / 100. ecy = (1/cape) - real10y in percentage points. "
