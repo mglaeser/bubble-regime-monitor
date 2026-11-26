@@ -100,7 +100,7 @@ Red-flag count 0 → override not fired. **Deterministic point score 52.43; MC m
 
 | Indicator | Primary source | Fallback chain | SLA |
 |-----------|---------------|----------------|-----|
-| CAPE (S1) | multpl scrape | shillerdata `ie_data.xls` | 35d |
+| CAPE (S1) | Shiller's `ie_data.xls`, at the link on shillerdata.com | multpl scrape | 35d |
 | Real 10-yr (S1) | FRED `DFII10` | S1's last reading as it was stored, quality included, while the real yield it was computed from is at most 3 days old by its own observation date, flagged as a fallback; after that S1 is dropped and Block S renormalized | 3d |
 | Concentration (S2) | SSGA SPY holdings XLSX (top-10 **holdings** sum, not a sector weight) | Slickcharts (the JPMAM guide is a cross-check by hand, not a tier) | 3d |
 | Semis run-up (S3) | Tiingo `SMH`/`SPY` | Twelve Data -> Alpha Vantage -> cache; SOXX substitute for SMH | 3d |
