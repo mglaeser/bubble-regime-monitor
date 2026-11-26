@@ -136,5 +136,14 @@ def test_methodology_documents_empty_outcomes(isolated_db, monkeypatch):
 
     with TestClient(create_app()) as client:
         d = client.get("/api/v1/meta/methodology").json()["data"]
-    assert d["falsification_outcomes"] == []          # nothing tripped yet
-    assert "no falsification criterion has tripped" in d["falsification_outcomes_note"]
+    assert d["falsification_outcomes"] == []
+    note = d["falsification_outcomes_note"]
+    # The note is fixed text and does not read the tracking start date
+    # (frozen_methodology.json, _meta.falsification_tracking_since), so it
+    # says nothing that turns false when the operator sets one: no time
+    # "since tracking began", and a start date only as "if one is recorded".
+    assert "since tracking began" not in note
+    assert "if one is recorded there" in note
+    # README "Falsification criteria": no job decides a criterion; the operator
+    # judges and records by hand. Said on the page, not implied.
+    assert "evaluates no criterion" in note and "by hand" in note
