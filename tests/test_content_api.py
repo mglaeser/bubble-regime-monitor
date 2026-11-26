@@ -152,6 +152,16 @@ class TestDynamicContent:
         assert content_registry.provenance_of("fallback") == "template"
         assert content_registry.provenance_of("placeholder") == "template"
 
+    def test_a_slot_carries_these_fields_and_names_no_writer(self, client):
+        # docs/CONTENT_API.md, "Endpoints": the fields of a served slot.
+        from pathlib import Path
+
+        fields = ("text", "source", "provenance", "updated_at", "purpose", "as_of", "constraints")
+        slots = client.get("/api/v1/content/dynamic").json()["data"]["slots"]
+        assert {frozenset(slot) for slot in slots.values()} == {frozenset(fields)}
+        doc = (Path(__file__).resolve().parents[1] / "docs" / "CONTENT_API.md").read_text(encoding="utf-8")
+        assert "dynamic slots {slug: {" + ", ".join(fields) + "}} + marker" in doc
+
 
 class TestCacheScope:
     def test_public_while_read_surface_is_public(self, client):
