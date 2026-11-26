@@ -30,10 +30,16 @@ CODEOWNERS = ROOT / ".github" / "CODEOWNERS"
 
 # Every surface whose change alters what the pipeline ALLOWS, rather than what
 # the product computes. Each entry is (path, why it carries policy).
+#
+# `governance/` ("the constitution and its attested hash") stood in this list
+# and in CODEOWNERS with no directory behind it: its last files left the
+# repository on 2026-08-17 (d6d1647). The constitution is AGENTS.md.
 PROTECTED: tuple[tuple[str, str], ...] = (
     (".github/", "workflow definitions and the CODEOWNERS list itself"),
     ("scripts/", "the review panel and the regime gates"),
-    ("governance/", "the constitution and its attested hash"),
+    ("AGENTS.md", "the constitution: the frozen invariants and the gate every change passes"),
+    (".mypy-config.pinned", "the pinned depth of the type check"),
+    (".secrets.baseline", "what the secret scan accepts"),
     ("audit/", "the 2026-07 audit's findings ledger, which the findings gate reports"),
     ("frozen_methodology.json", "the frozen scoring methodology (F-01/L-07)"),
     ("app/methodology.py", "the code that reads the frozen methodology"),
