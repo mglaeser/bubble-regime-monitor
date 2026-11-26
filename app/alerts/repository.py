@@ -636,15 +636,8 @@ def load_latest_compatible_input(session: Session, *, like: AlertInput,
     evaluable or absent means the caller renders from trigger facts alone,
     with CONTEXT_STALE.
 
-    Eligibility is no filter. The README promises an alert "from the newest
-    captured recompute input at send time", the evaluator decides on PARTIAL
-    inputs, and the message about a decision is worded from what was decided
-    on. Selecting `EVALUABLE` rows here worded 20 of the 21 alerts sent from
-    2026-09-22 to 2026-11-10 from a sidecar that was not the newest, up to
-    27.5 days older than their trigger (445 of 490 recompute sidecars were
-    PARTIAL, a month label dated after the run; none NOT_EVALUABLE): 10 named
-    a wrong value or band, 17 a wrong next run. The first move to de-risk, on
-    2026-09-25, went out as "Stufe trim erreicht".
+    Eligibility is no filter: the evaluator decides on PARTIAL inputs, and the
+    message about a decision is worded from what was decided on.
 
     Same origin, because a comparison of trigger and current needs like with
     like: a watchdog sidecar carries no market fact and a recompute sidecar no

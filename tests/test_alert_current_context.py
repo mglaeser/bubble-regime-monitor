@@ -4,13 +4,6 @@ README, "What it sends by itself": an alert is built "from the newest captured
 recompute input at send time". docs/ALERT_SYSTEM.md 11e: current facts join a
 render only when schema and methodology match the trigger's, otherwise the
 member renders from trigger facts with CONTEXT_STALE.
-
-Production, 2026-08-20 .. 2026-11-10 (read-only copy): 445 of 490 recompute
-sidecars are PARTIAL and 45 EVALUABLE, the 45 on eight days around three month
-turns; none is NOT_EVALUABLE. The loader took the newest EVALUABLE one, so 20
-of 21 sent alerts were worded from a sidecar that was not the newest, up to
-27.5 days older than their trigger: 10 named a wrong value or band, 17 a wrong
-next run.
 """
 from __future__ import annotations
 
@@ -43,28 +36,6 @@ def _row(inp, *, eligibility: str, origin: str = "RECOMPUTE",
         payload_sha256="p" * 64)
 
 
-def test_a_partial_trigger_is_its_own_current_context():
-    """The newest reading is current, whatever its eligibility says.
-
-    The evaluator decides on PARTIAL inputs, so the message about that
-    decision is worded from them too, never from an older EVALUABLE one.
-    """
-    from app.alerts.repository import load_latest_compatible_input
-
-    month_end = make_input(identity="a" * 64, computed_at="2026-08-31T18:00:00+00:00",
-                           effective="trim", base="trim")
-    trigger = make_input(identity="b" * 64, computed_at="2026-09-25T22:00:00+00:00",
-                         effective="de-risk", base="de-risk")
-    with session_scope() as session:
-        session.add_all([_row(month_end, eligibility="EVALUABLE"),
-                         _row(trigger, eligibility="PARTIAL")])
-    with session_scope() as session:
-        current = load_latest_compatible_input(session, like=trigger)
-    assert current is not None
-    assert current.input_identity == trigger.input_identity
-    assert current.effective_action_state == "de-risk"
-
-
 def test_a_not_evaluable_newest_sidecar_makes_the_context_stale():
     """No older row stands in for it: the caller renders the trigger, stale."""
     from app.alerts.repository import load_latest_compatible_input
@@ -86,8 +57,7 @@ def test_the_outage_alert_reads_the_watchdogs_newest_count(newest_first):
     newest sidecar, never a recompute's, and a market alert's never the
     watchdog's. The watchdog's sidecars of one outage share `computed_at`
     (the last snapshot's), so the one built last is the newest."""
-    from app.alerts.dto import ALERT_INPUT_SCHEMA_VERSION
-    from app.alerts.input_builder import build_watchdog_input, serialize
+    from app.alerts.input_builder import build_watchdog_input
     from app.alerts.repository import load_latest_compatible_input
 
     last_at = datetime(2026, 8, 20, 6, 0, tzinfo=UTC)
@@ -101,18 +71,11 @@ def test_the_outage_alert_reads_the_watchdogs_newest_count(newest_first):
         last = _snapshot(session, computed_at=last_at, effective="trim", prev_id=None)
         session.add(_row(recompute, eligibility="EVALUABLE"))
         for slot, missed, built_at in (reversed(passes) if newest_first else passes):
-            # what app/alerts/watchdog.py run_once persists
             seen[missed] = build_watchdog_input(
                 expected_slot_key=slot, missed_slots=missed, built_at=built_at,
                 service_version="test", last_snapshot=last)
-            payload, digest = serialize(seen[missed])
-            session.add(AlertInputSnapshot(
-                input_identity=seen[missed].input_identity, snapshot_id=None,
-                origin="WATCHDOG", built_at=built_at, computed_at=last.computed_at,
-                alert_input_schema_version=ALERT_INPUT_SCHEMA_VERSION,
-                reconstructed=False, evaluation_eligibility="PARTIAL",
-                ineligibility_reasons=list(seen[missed].ineligibility_reasons),
-                payload=payload, payload_sha256=digest))
+            session.add(_row(seen[missed], eligibility="PARTIAL", origin="WATCHDOG",
+                             built_at=built_at))
     with session_scope() as session:
         outage = load_latest_compatible_input(session, like=seen[2])
         market = load_latest_compatible_input(session, like=recompute)
@@ -142,8 +105,7 @@ def test_an_alert_on_an_ordinary_day_is_worded_from_its_trigger(tmp_path, monkey
     from app.alerts.sender import NullSender
 
     _stage3_shadow(tmp_path, monkeypatch, "current-context")
-    # A reading dated on the run's day: EVALUABLE. One dated after it (S4's
-    # month label on every other day of the month): PARTIAL.
+    # A reading dated on the run's day: EVALUABLE. One dated after it: PARTIAL.
     first = _run("trim", MONTH_END, None, s4_label="2026-08-31")
     later = MONTH_END + timedelta(days=25)
     second = _run("trim", later, first, s4_label="2026-09-30")
