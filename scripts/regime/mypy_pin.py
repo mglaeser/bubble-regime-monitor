@@ -28,7 +28,12 @@ def table(text: str) -> dict[str, Any] | None:
 def problems(root: Path = ROOT) -> list[str]:
     actual = table((root / "pyproject.toml").read_text(encoding="utf-8"))
     pinned = table((root / ".mypy-config.pinned").read_text(encoding="utf-8"))
-    if actual is None or actual != pinned:
+    # The two are compared as printed below, so the order of the keys and the
+    # type of each value count, in every sub-table. Measured with mypy 2.3.1:
+    # the later of two spellings of one option wins (`ignore_errors`,
+    # `no_ignore_errors`), and `strict = 1.0`, which Python calls equal to
+    # `true`, is "Not a boolean" and leaves strict off.
+    if actual is None or repr(actual) != repr(pinned):
         return [f"[tool.mypy] in pyproject.toml is {actual!r}; .mypy-config.pinned holds {pinned!r}"]
     return []
 

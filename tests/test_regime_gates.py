@@ -73,13 +73,21 @@ class TestMypyDepthPin:
         assert mypy_pin.main(root) == 1
         assert "BLOCK" in capsys.readouterr().err
 
-    def test_a_reordered_table_passes_the_pin(self, tmp_path):
-        # The contract is the parsed table, not its bytes: the same keys in
-        # another order, with a comment between them, are the same depth.
-        pinned = '[tool.mypy]\npython_version = "3.12"\nstrict = true\nignore_missing_imports = true\n'
-        reordered = ('[tool.mypy]\nignore_missing_imports = true\n# a comment\n'
-                     'strict = true\npython_version = "3.12"\n')
-        assert mypy_pin.problems(self._tree(tmp_path, reordered, pinned=pinned)) == []
+    @pytest.mark.parametrize("sub_table", ["", '[[tool.mypy.overrides]]\nmodule = ["app.*"]\n'],
+                             ids=["table", "override"])
+    def test_a_reordered_table_fails_the_pin(self, tmp_path, sub_table):
+        # mypy takes the later of two spellings of one option: the pinned table
+        # reports errors, the reordered one ignores them.
+        head = "[tool.mypy]\nstrict = true\n" + sub_table
+        pinned = head + "no_ignore_errors = false\nignore_errors = false\n"
+        reordered = head + "ignore_errors = false\nno_ignore_errors = false\n"
+        assert mypy_pin.problems(self._tree(tmp_path, reordered, pinned=pinned))
+
+    def test_a_value_of_another_type_fails_the_pin(self, tmp_path):
+        # Python calls `1.0` equal to `true`; mypy answers "Not a boolean" and
+        # checks without `strict`.
+        loosened = "[tool.mypy]\nstrict = 1.0\n"
+        assert mypy_pin.problems(self._tree(tmp_path, loosened, pinned="[tool.mypy]\nstrict = true\n"))
 
     def test_the_type_check_step_runs_the_pin_and_names_the_config_file(self):
         # A mypy.ini outranks pyproject.toml when mypy looks for its

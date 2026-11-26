@@ -20,7 +20,8 @@
 # (mypy 2.3.1, 126 source files, ceiling 116): a [[tool.mypy.overrides]]
 # table with module = ["app.*"] and ignore_errors = true passed at 0 errors,
 # and a mypy.ini without strict beside an unchanged pyproject.toml passed at
-# 33. The same keys in another order now pass: the table is the contract.
+# 33. The parsed table is the contract, with the order of its keys and the
+# type of its values: the same keys in another order fail the pin.
 #
 # Outside this pin: a per-file `# mypy:` line and `# type: ignore` comments.
 # They are in the diff of the file they loosen.
