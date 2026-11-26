@@ -16,11 +16,10 @@
 # restart the service - the new image migrates the database as it boots, one
 # transaction - and wait for /healthz. A release that fails exits non-zero -
 # the unit's OnFailure= reports it - and is tried again at the next tick. A
-# fetch that fails is not a release that fails: the tick ends, the next one
-# tries again, and what is reported is an hour without a fetch that succeeded
-# (see the fetch). Nothing rolls back: after the switch the service is
-# systemd's, and a release main cannot run is fixed forward
-# (docs/AUTO_DEPLOY.md, "The release timer").
+# fetch that fails ends the tick without a failure in one case only: a fetch
+# that succeeded within the last hour is on record (see the fetch). Nothing
+# rolls back: after the switch the service is systemd's, and a release main
+# cannot run is fixed forward (docs/AUTO_DEPLOY.md, "The release timer").
 set -Eeuo pipefail
 
 IMAGE=localhost/bubblegauge
@@ -62,21 +61,25 @@ last() {
 # Exactly origin's branch head, by explicit refspec and without tags: neither a
 # tag named like the branch nor a local ref stands in for it (#143 round 27).
 #
-# A fetch that fails is not a release that fails. The tick ends before the
-# comparison - what origin's head is, is not known, so nothing is released
-# from the last known head either - and the next tick tries again. What fails
-# the unit, and reaches the owner through OnFailure=, is a failure that lasts:
-# no fetch has succeeded for an hour (a revoked deploy key, a changed host
-# key). On the host, 2026-10-05 to 11-10, 18 ticks failed here with main
-# unmoved and the service up, none more than 27 minutes after a good fetch.
-# git keeps no time of its last good fetch - a refused one empties FETCH_HEAD
-# - so the release keeps it: an empty file in the unit's StateDirectory=,
-# touched after a fetch that succeeded and never by one that failed; with no
-# file at all the first failed fetch is reported. It is no memory of a
-# release: the comparison below still knows nothing of earlier runs.
+# A fetch that fails releases nothing: what origin's head is, is not known, so
+# nothing is released from the last known head either. The tick then ends
+# with exit 0 in one case only: `fetched`, an empty file in the unit's
+# StateDirectory= touched after every fetch that succeeded and never after
+# one that failed, is a regular file this script can read, and its
+# modification time is not after now and less than an hour before it. Every
+# other case fails the unit, and OnFailure= reports it: no such file (a host
+# where no fetch has succeeded yet), one that cannot be read, a time in the
+# future (the clock was set back), an hour or more (a revoked deploy key, a
+# changed host key). On the host, 2026-10-05 to 11-10, 18 ticks failed here
+# with main unmoved and the service up, none more than 27 minutes after a
+# good fetch. git keeps no time of its last good fetch: a refused one empties
+# FETCH_HEAD.
 if ! git fetch --quiet --prune --no-tags origin "+refs/heads/$BRANCH:$REMOTE"; then
-  [[ -n "$(find "$STATE_DIRECTORY/fetched" -mmin -60 2>/dev/null)" ]] \
-    || die "no fetch from origin has succeeded for an hour: merges do not deploy; $SERVICE is untouched"
+  now="$(date +%s)"
+  fetched="$(stat -c %Y "$STATE_DIRECTORY/fetched" 2>/dev/null)" || fetched=""
+  [[ -f "$STATE_DIRECTORY/fetched" && -r "$STATE_DIRECTORY/fetched" && "$fetched" =~ ^[0-9]+$ ]] \
+    && (( fetched <= now && now - fetched < 3600 )) \
+    || die "the fetch failed, and no fetch from origin is on record within the last hour: merges do not deploy; $SERVICE is untouched"
   printf '==> the fetch failed: nothing is released, and the next tick tries again\n' >&2
   exit 0
 fi

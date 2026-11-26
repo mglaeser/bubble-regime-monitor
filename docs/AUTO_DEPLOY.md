@@ -11,7 +11,7 @@ chain is deleted, in the repository and on the host.
 | The service | `deploy/quadlet/bubblegauge.container` | A Podman Quadlet unit: systemd starts the container at boot (with linger), restarts it when it dies, and kills it when it stops answering `/healthz` five checks in a row (podman's own health check). It runs `localhost/bubblegauge:latest`. |
 | The release | `deploy/release.sh`, installed as `~/.local/bin/bubblegauge-release`, via `deploy/systemd/bubblegauge-release.service` | One comparison and no memory of a release: the commit the running container carries (its OCI revision label; a stopped container carries none) against `origin/main`. Different: build main's commit from an export, point `:latest` at the image, restart the service - the new image migrates the database as it boots, one transaction - and wait for `/healthz`. Equal: nothing - a container that runs main's commit and does not answer is the service unit's to kill and restart, not the release's. |
 | The schedule | `deploy/systemd/bubblegauge-release.timer` | Five minutes after the last release ended, and two minutes after boot. |
-| The alarm | `deploy/systemd/bubblegauge-notify-failed@.service` | A failed release is reported once over iMessage through the host's notifier, then at most once an hour while it persists. A fetch that fails is not a failed release; it is reported once no fetch has succeeded for an hour. |
+| The alarm | `deploy/systemd/bubblegauge-notify-failed@.service` | A failed release is reported once over iMessage through the host's notifier, then at most once an hour while it persists. A fetch that fails is reported the same way unless a fetch that succeeded is on record from the last hour (see the contract). |
 
 **The contract.** The service runs `origin/main`'s commit, and main reaches
 production only as images, built and run in rootless containers: what runs
@@ -22,12 +22,15 @@ would fetch its fix. The checkout follows main fast-forward only, and git
 refuses rather than overwrite anything of the host's - local edits, untracked
 files and, with `--no-overwrite-ignore`, ignored ones such as `.env` and
 `data/`: a commit that tracked them would otherwise replace the host's
-secrets or its database. A fetch that fails is not a release that fails:
-nothing was being released and the service is untouched, so the tick says so
-and ends, and the next one tries again. When no fetch has succeeded for an
-hour the release fails and is reported: merges do not deploy. The time of the
-last good fetch is one empty file,
-`~/.local/state/bubblegauge-release/fetched` (the unit's state directory).
+secrets or its database. A fetch that fails releases nothing and leaves the
+service untouched. The release touches an empty file,
+`~/.local/state/bubblegauge-release/fetched` (the unit's state directory),
+after every fetch that succeeded, and after a fetch that failed the tick
+ends without a failure in one case only: that file is a regular file the
+release can read, and its modification time is not in the future and less
+than an hour old. In every other case the release fails and is reported: no
+such file, as on a host where no fetch has succeeded yet; one that cannot be
+read; a time in the future, after the clock was set back; an hour or older.
 A release that fails
 exits non-zero, is reported, and is tried again at the next tick; a commit that
 cannot be built, or cannot boot from scratch, touches nothing - the candidate

@@ -18,7 +18,6 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
-import time
 from pathlib import Path
 
 import pytest
@@ -72,6 +71,11 @@ status="${STATUS:-200}"; printf '%s' "$status"
 [[ "$TRUNCATED" != "1" ]] || exit 18
 [[ "$*" != *" -f"* && "$*" != *"-fsS"* ]] || (( status < 400 )) || exit 22
 exit 0
+""",
+    "date": r"""#!/usr/bin/env bash
+# The clock the release reads: $NOW where a test sets it, else the next date on PATH.
+[[ -z "${NOW:-}" || "$*" != "+%s" ]] || { echo "$NOW"; exit 0; }
+PATH="${PATH#*:}" exec date "$@"
 """,
 }
 
@@ -153,7 +157,7 @@ def release(tmp_path):
         runtime.mkdir(exist_ok=True)
         environ = {**os.environ, "HOME": str(home), "PATH": f"{shims}:{os.environ['PATH']}", "CALLS": str(calls),
                    "SHIM_STATE": str(state), "RUNTIME_DIRECTORY": str(runtime), "HEALTH_TIMEOUT": "2",
-                   "STATE_DIRECTORY": str(kept),
+                   "STATE_DIRECTORY": str(kept), "NOW": "",
                    **(env or {})}
         result = subprocess.run([exec_start], cwd=workdir, env=environ,  # noqa: S603
                                 capture_output=True, text=True, timeout=120)
@@ -401,59 +405,47 @@ def test_the_five_newest_commit_tags_stay(release):
 
 
 class TestAFetchThatFails:
-    """docs/AUTO_DEPLOY.md, "The contract": a fetch that fails is not a release
-    that fails - nothing was being released and the service is untouched, so
-    the tick says so and ends, and the next one tries again. What is reported
-    is a failure that lasts: no fetch has succeeded for an hour, so merges do
-    not deploy."""
+    """docs/AUTO_DEPLOY.md, "The contract": a fetch that fails releases
+    nothing, and the tick ends without a failure in one case only: the marker
+    is a regular file the release can read, and its modification time is not
+    in the future and less than an hour old. Every other case fails the unit,
+    which OnFailure= reports. The release reads the clock through `date`,
+    which answers $NOW where a test sets it."""
+
+    NOW = 1_764_000_000
 
     @staticmethod
     def _origin_refuses(release) -> None:
         _git("remote", "set-url", "origin", str(release.checkout.parent / "gone.git"), cwd=release.checkout)
 
-    @staticmethod
-    def _last_good_fetch_was(release, minutes_ago: int) -> None:
-        when = time.time() - minutes_ago * 60
-        os.utime(release.kept / "fetched", (when, when))
-
-    def test_a_fetch_that_fails_is_not_a_failed_release(self, release):
-        target = release.advance()
-        assert release(running=target)[0] == 0                 # a quiet tick: the fetch succeeds
+    @pytest.mark.parametrize(("kind", "age", "code"), [
+        pytest.param("file", 3599, 0, id="59m59s-old"),
+        pytest.param(None, None, 1, id="missing"),
+        pytest.param("directory", 60, 1, id="unreadable"),    # its time is fresh; no file to read, as root too
+        pytest.param("file", -1, 1, id="in-the-future"),
+        pytest.param("file", 3600, 1, id="an-hour-old"),
+    ])
+    def test_a_failed_fetch_ends_quietly_only_after_a_good_fetch_within_the_hour(self, release, kind, age, code):
+        fetched = release.kept / "fetched"
+        if kind is not None:
+            fetched.mkdir() if kind == "directory" else fetched.touch()
+            os.utime(fetched, (self.NOW - age, self.NOW - age))
         self._origin_refuses(release)
-        code, calls = release(running=target)
-        assert code == 0 and "the next tick tries again" in release.output
-        assert not any(c.startswith(_RELEASING) for c in calls), calls
-
-    def test_no_fetch_for_an_hour_is_a_failed_release(self, release):
-        """A revoked deploy key, a host key that changed: merges do not deploy,
-        and the unit's OnFailure= says so - at once, then hourly (the notifier)."""
-        target = release.advance()
-        assert release(running=target)[0] == 0
-        self._origin_refuses(release)
-        self._last_good_fetch_was(release, minutes_ago=59)
-        assert release(running=target)[0] == 0
-        self._last_good_fetch_was(release, minutes_ago=61)
-        code, calls = release(running=target)
-        assert code != 0 and "merges do not deploy" in release.output
-        assert "bubblegauge.service is untouched" in release.output
+        result, calls = release(running=release.main(), env={"NOW": str(self.NOW)})
+        assert result == code
+        assert ("the next tick tries again" if code == 0 else "merges do not deploy") in release.output
         assert not any(c.startswith(_RELEASING) for c in calls), calls
 
     def test_a_fetch_that_fails_does_not_count_as_a_good_one(self, release):
         """The hour runs from the last fetch that SUCCEEDED: a tick that fails
         every five minutes must not keep the report away for good."""
         target = release.advance()
-        assert release(running=target)[0] == 0
+        assert release(running=target)[0] == 0                 # a good fetch touches the marker
         self._origin_refuses(release)
-        self._last_good_fetch_was(release, minutes_ago=30)
-        before = (release.kept / "fetched").stat().st_mtime
-        assert release(running=target)[0] == 0
-        assert (release.kept / "fetched").stat().st_mtime == before
-
-    def test_a_host_that_never_reached_origin_reports_it_at_once(self, release):
-        self._origin_refuses(release)
-        code, calls = release(running=release.main())
-        assert code != 0 and "merges do not deploy" in release.output
-        assert not any(c.startswith(_RELEASING) for c in calls), calls
+        fetched = release.kept / "fetched"
+        os.utime(fetched, (self.NOW - 1800, self.NOW - 1800))
+        assert release(running=target, env={"NOW": str(self.NOW)})[0] == 0
+        assert fetched.stat().st_mtime == self.NOW - 1800
 
     def test_a_fetch_that_fails_releases_nothing_from_the_last_known_head(self, release):
         """What origin's head is, is not known on such a tick: a commit fetched
