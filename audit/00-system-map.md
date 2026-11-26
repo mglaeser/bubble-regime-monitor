@@ -49,7 +49,6 @@
 | Store | Location | Contents |
 |---|---|---|
 | Primary DB | **SQLite** `/data/bubble.db` (`DB_URL`), Alembic migrations (`migrations/versions/`, authoritative) | `snapshots` and `indicator_readings` (score history), `daily_close` (Polygon breadth), `price_series_cache`, `hy_oas_history`, `source_health` / `provider_health`, `falsification_outcomes`, `dashboard_feed`, `message_engine_attempts`, the alert tables (`alert_*`, `api_idempotency_record`); the models are `app/models.py` and `app/alerts/models.py` |
-| Filesystem | `data/snapshots/` | optional Parquet exports (disabled without pyarrow) |
 | Caches | none external (no Redis/Memcached) | — |
 | Vector store | **none** | — |
 

@@ -3,7 +3,9 @@
 The specification these are written from:
   - app/services/alert_integration.py: "a lost sidecar is a hole in the replay
     record that can never be filled";
-  - app/engine/judgment.py: "never block the recompute".
+  - app/engine/judgment.py: "never block the recompute";
+  - AGENTS.md, "Delete before you add": dead code is "removed, not
+    maintained".
 """
 
 from __future__ import annotations
@@ -142,3 +144,13 @@ def test_a_note_the_previous_snapshot_gets_while_the_model_is_asked_is_the_fallb
 
     recompute.completion = _previous_note_lands_then_fails
     assert recompute.note(recompute.run()) == ("A plain note.", True, "TimeoutError")
+
+
+def test_a_snapshot_is_written_to_the_database_and_nowhere_else(recompute, isolated_db):
+    recompute.run()
+    assert recompute.on_disk() == {"snapshots": 1, "sidecars": 1}
+    # The database's directory holds the database file (and what SQLite keeps
+    # under its name) and nothing else: no `snapshots/date=.../*.parquet`.
+    beside = sorted(p.name for p in isolated_db.parent.iterdir()
+                    if not p.name.startswith(isolated_db.name))
+    assert beside == []

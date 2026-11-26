@@ -246,7 +246,7 @@ There is **one outage record** (since 2026-09-28): the first failure sends at on
 
 Either digest needs live admission, on top of its transport: the alert ruleset and phrase set the service loads must be the promoted ones (`POST /api/v1/admin/alerts/promote`, once per host and again after a release that ships new ones), whatever `ALERTS_MODE` says. On a host that promoted nothing, the scheduled digest is not sent and the test call below answers `"status": "refused"` with its blockers.
 
-Test either digest without waiting for the schedule: `curl -X POST -H "X-API-Key:<key>" localhost:8000/api/v1/admin/send-sms` — the path is unchanged so existing operator scripts keep working, and the response names the `transport` that actually carried it. Example body with the engine off: `bubblegauge 41/100 hold. range 34-47. SPY IN, QQQ IN. Flags 0/4.` (since v3.6.0 the digest carries no disclaimer tag; the research-only framing lives on the status/spec pages)
+Test either digest without waiting for the schedule: `curl -X POST -H "X-API-Key:<key>" localhost:8000/api/v1/admin/send-sms` — the response names the `transport` that actually carried it. Example body with the engine off: `bubblegauge 41/100 hold. range 34-47. SPY IN, QQQ IN. Flags 0/4.` (since v3.6.0 the digest carries no disclaimer tag; the research-only framing lives on the status/spec pages)
 
 ## Every message the service sends
 
