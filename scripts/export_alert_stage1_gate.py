@@ -51,7 +51,7 @@ STAGES = (1, 3, 4)
 #: Bare content digests are still not written into a per-run summary: an
 #: entropy detector cannot tell a 64-hex digest from a 64-hex token, which is
 #: the correct default, and this repository's secret baseline is a
-#: reviewed set of entries that may not grow to carry them. Truncation is not
+#: byte-identical ratchet that may not grow to carry them. Truncation is not
 #: the answer either - the detector scores Shannon entropy rather than length,
 #: so whether a prefix passes depends on which characters the hash happened to
 #: produce, and a future ruleset edit would fail CI for reasons that have

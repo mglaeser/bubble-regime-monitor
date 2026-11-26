@@ -122,17 +122,24 @@ class TestBaselineShape:
         for path in results:
             assert path in tracked, f"baseline entry for untracked {path}"
 
-    def test_the_baseline_holds_exactly_the_accepted_entries(self):
+    def test_the_baseline_has_not_grown_against_main(self):
         # An unbounded baseline is a slow-motion wildcard exclusion.
         #
+        # The reference is a PINNED commit shared with
+        # `test_verifier_mc4_passc.py`, not a merge-base: a ratchet whose
+        # reference moves with the branches is not a ratchet. See
+        # `tests/secretbaselineref.py` for the accepted transition.
+        reference = secretbaselineref.reference_baseline_bytes(root=ROOT)
+        if reference is None:
+            pytest.skip("accepted baseline reference unavailable")
+        secretbaselineref.assert_has_not_grown(_baseline(),
+                                               json.loads(reference))
+
+    def test_the_baseline_holds_exactly_the_accepted_entries(self):
         # The accepted entries are a literal in `tests/secretbaselineref.py`,
         # each named by file, detector type and hash, and the comparison is
         # equality: an entry added, removed or exchanged for another fails
-        # here until the literal moves. This replaces "not grown against
-        # the pinned commit" (`assert_has_not_grown`): that commit holds 19
-        # entries and the baseline 4, so the old comparison accepted the
-        # baseline plus 15 new entries and refused the 16th (executed on
-        # 9f79c7a).
+        # here until the literal moves.
         # No skip path: a literal needs no git object, so a checkout without
         # the pinned commit is checked like any other.
         secretbaselineref.assert_accepted_entries(_baseline())

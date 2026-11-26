@@ -44,7 +44,7 @@ one product. Cosmetic, and a deliberate choice either way — parked rather than
 decided unilaterally.
 
 ## U-05 — `.secrets.baseline` cannot carry 64-hex digests
-The baseline's accepted-entries check and the entropy detector are in tension:
+The byte-identical baseline ratchet and the entropy detector are in tension:
 detect-secrets cannot distinguish a published sha256 digest from a leaked
 token, so any doc or fixture that gains a literal 64-hex string needs a
 `# pragma: allowlist secret` rather than a baseline entry. Discovered while
