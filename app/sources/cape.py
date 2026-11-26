@@ -1,7 +1,7 @@
 """Shiller CAPE adapter (S1 raw input).
 
-Fallback chain: multpl scrape -> shillerdata.com ie_data.xls (compute CAPE
-from real price / 10-yr avg real EPS). Freshness SLA 35 days. GuruFocus,
+Fallback chain: Shiller's ie_data.xls, at the link on shillerdata.com ->
+multpl. Freshness SLA 35 days. GuruFocus,
 once the second tier, answers 403 since 2026-09.
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import re
+from urllib.parse import urljoin, urlsplit
 
 import lxml.html
 import pandas as pd
@@ -18,7 +19,10 @@ from app.sources import Provenance, SourceError, SourceResult
 
 MULTPL_URL = "https://www.multpl.com/shiller-pe"
 MULTPL_TABLE_URL = "https://www.multpl.com/shiller-pe/table/by-month"
-SHILLERDATA_URL = "https://img1.wsimg.com/blobby/go/e5e77e0b-59d1-44d9-ab25-4763ac982e53/downloads/ie_data.xls"
+# On 2026-11-26 Shiller's page linked an ie_data.xls that runs to 2026.11; the
+# fixed path of the file that stood here served one that ends with 2024.09.
+SHILLERDATA_PAGE_URL = "https://shillerdata.com/"
+SHILLERDATA_FILE_HOST = "img1.wsimg.com"
 
 
 def _current_from_multpl(html: str) -> float:
@@ -58,20 +62,45 @@ def _history_from_shillerdata(content: bytes) -> list[float]:
     return [float(v) for v in series.tolist()]
 
 
+def _file_url_from_shillerdata(html: str) -> str:
+    """Returns a URL in exactly one case: the page parses, the href values of
+    its <a> elements, each resolved against https://shillerdata.com/ by
+    urllib.parse, name exactly one distinct URL whose path ends in
+    /ie_data.xls, and urllib.parse reads that URL's scheme as https and its
+    host as img1.wsimg.com. Everything else is SourceError, every exception of
+    the parser and of the URL parsing included."""
+    try:
+        links = {urlsplit(urljoin(SHILLERDATA_PAGE_URL, str(href)))
+                 for href in lxml.html.fromstring(html).xpath("//a/@href")}
+    except Exception as exc:
+        raise SourceError(f"shillerdata: the page could not be read ({type(exc).__name__})") from exc
+    files = {link for link in links if link.path.endswith("/ie_data.xls")}
+    if len(files) != 1:
+        raise SourceError(f"shillerdata: {len(files)} links to ie_data.xls, not one")
+    link = files.pop()
+    if link.scheme != "https" or link.hostname != SHILLERDATA_FILE_HOST:
+        raise SourceError(f"shillerdata: the link to ie_data.xls is not https on {SHILLERDATA_FILE_HOST}")
+    return link.geturl()
+
+
+def _shillerdata_history() -> list[float]:
+    """The CAPE column of the ie_data.xls that Shiller's page links."""
+    page = fetch("shillerdata", SHILLERDATA_PAGE_URL).text
+    return _history_from_shillerdata(fetch("shillerdata", _file_url_from_shillerdata(page)).content)
+
+
 def current_cape() -> SourceResult:
-    """Current CAPE with the multpl -> shillerdata chain."""
+    """Current CAPE: the last value in the CAPE column of Shiller's file, multpl's page as the fallback."""
     errors: list[str] = []
     try:
-        return SourceResult(_current_from_multpl(fetch("multpl", MULTPL_URL).text),
-                            Provenance(source="multpl"))
-    except Exception as e:
-        errors.append(f"multpl: {e}")
-    try:
-        history = _history_from_shillerdata(fetch("shillerdata", SHILLERDATA_URL).content)
-        return SourceResult(history[-1],
-                            Provenance(source="shillerdata_ie_data", fallback_used=True))
+        return SourceResult(_shillerdata_history()[-1], Provenance(source="shillerdata_ie_data"))
     except Exception as e:
         errors.append(f"shillerdata: {e}")
+    try:
+        return SourceResult(_current_from_multpl(fetch("multpl", MULTPL_URL).text),
+                            Provenance(source="multpl", fallback_used=True))
+    except Exception as e:
+        errors.append(f"multpl: {e}")
     raise SourceError("CAPE: all sources failed: " + "; ".join(errors))
 
 
@@ -80,7 +109,7 @@ def monthly_cape_history() -> SourceResult:
     multpl monthly table fallback)."""
     errors: list[str] = []
     try:
-        history = _history_from_shillerdata(fetch("shillerdata", SHILLERDATA_URL).content)
+        history = _shillerdata_history()
         if len(history) < 240:
             raise SourceError("shillerdata: too little history")
         return SourceResult(history, Provenance(source="shillerdata_ie_data"))
