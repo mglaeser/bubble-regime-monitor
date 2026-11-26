@@ -115,8 +115,6 @@ Red-flag count 0 → override not fired. **Deterministic point score 52.43; MC m
 
 The 3d SLA of S2, S3, D1 and D4 counts NYSE sessions since the reading's date, so a weekend or an exchange holiday does not age a daily reading; every other SLA counts calendar days. `age_days` is always the calendar age. A daily feed that really stops is stale once more than three sessions have passed: two calendar days later than a calendar count reports it when a weekend lies in between, three when an exchange holiday does too, never earlier.
 
-The daily price series (SPY, QQQ, SMH: S3, D4, the trend legs, realized variance, the near-high leg) are fetched once per NYSE session, by the first recompute after the session's UTC day (02:00 UTC). The stored series answers the other runs, and every run while all providers fail.
-
 ## API
 
 Base path `/api/v1`; every response is `{"data": ..., "meta": ...}` with the five epistemic caveats in `meta`. Each per-indicator object carries `as_of`, `age_days`, and `stale` (true past the source's freshness SLA), plus provenance (`data_source`, `fallback_used`, `dropped`, `note`). Reads rate-limited 60/min/IP; `READ_ENDPOINTS_PUBLIC` toggles key requirement; admin refresh requires `X-API-Key`.
