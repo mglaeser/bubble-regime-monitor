@@ -20,8 +20,8 @@ here rather than a matter of care:
   summary contains no ULID, no timestamp-of-run and no wall-clock duration.
   Determinism is the Stage 1 gate, so it is asserted, not assumed.
 
-Nothing here can send. The sender is `NullSender` by construction and the mode
-is `DRYRUN`, which is its own state namespace.
+Nothing here can send. No sender and no dispatcher is built, and the mode is
+`DRYRUN`, which is its own state namespace.
 """
 
 from __future__ import annotations
@@ -159,6 +159,10 @@ class ReplaySummary:
     deliveries_sent: int = 0
     deliveries_by_kind: dict[str, int] = field(default_factory=dict)
     held_quiet: int = 0
+    #: A replay marks no delivery SENT, so no planned row leaves the budget
+    #: count the way a sent row does in production, when its window passes:
+    #: this can count holds production would not make. `_decide`, which makes
+    #: the verdict, does not read it.
     held_budget: int = 0
     held_grouping: int = 0
     cancelled_superseded: int = 0
