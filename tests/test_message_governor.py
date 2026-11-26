@@ -162,6 +162,23 @@ class TestAnyFailedCallIsAStrike:
         later = NOW + timedelta(minutes=10)
         assert _reserve(now=later)[0].reason == "breaker open: 5 failed calls in a row"
 
+    def test_by_default_the_next_mornings_digest_is_the_probe(self):
+        """The default cooldown is shorter than the day between two digests
+        (decided on 2026-11-25; the owner delegated it). Five failed calls,
+        each ended three minutes after its digest's trigger: the digest a day
+        after the last trigger is admitted as the probe. With the day's
+        cooldown it was refused, so an open breaker asked the model only every
+        second day."""
+        # the field's declared default, whatever the process environment sets
+        cooldown = Settings.model_fields["message_engine_breaker_cooldown_s"].default
+        defaults = _settings(message_engine_breaker_cooldown_s=cooldown)
+        day = 24 * 60
+        for days in (5, 4, 3, 2, 1):
+            _row(gov.Outcome.TECHNICAL_ERROR, minutes_ago=days * day,
+                 finished_minutes_ago=days * day - 3)
+        decision, claim = _reserve(defaults)
+        assert decision.may_ask and claim is not None, decision.reason
+
 
 def test_two_workers_cannot_both_claim_inside_the_floor():
     results: list[bool] = []

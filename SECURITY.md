@@ -18,6 +18,8 @@ Provider keys/tokens used during the original construction were disclosed in a d
 
 `FRED_API_KEY` · `TIINGO_API_KEY` · `TWELVE_DATA_API_KEY` · `ALPHAVANTAGE_API_KEY` · `POLYGON_API_KEY` · `ADMIN_API_KEY` · `SIPGATE_TOKEN_ID` + `SIPGATE_TOKEN`.
 
+`FRED_API_KEY` was disclosed a second way, so rotate it whatever became of the chat disclosure: on 2026-07-15 a FRED 504 wrote it into `source_health.note` (row 223), the unauthenticated `GET /readyz` returned that note from 18:11 to 22:25 UTC, and the row held it until migration 0027 passed the stored notes through the gather's redaction. Every copy of the database taken before that migration ran still holds it.
+
 `LLM_API_KEY` is the active inference credential. It is host-only configuration and must be rotated if it has been shared; unlike the legacy list above, this document has no evidence that its value was disclosed.
 
 Historical container builds used an unfiltered repository context with `COPY . .`, so an existing image or build cache may contain the deploy host's `.env` and runtime `data/`. The synchronized `.dockerignore`/`.containerignore` files prevent new copies; they cannot cleanse old artifacts. Deploy a fixed image, purge prior bubblegauge images/build cache, then rotate every credential that may have been baked.
