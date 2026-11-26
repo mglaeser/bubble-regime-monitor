@@ -47,12 +47,18 @@ def get_methodology(request: Request, _: None = Depends(require_read_access)) ->
             {"criterion": o.criterion, "tripped_at": o.tripped_at.isoformat(), "detail": o.detail}
             for o in outcomes
         ],
-        # An empty list is the EXPECTED state: no criterion has tripped yet.
-        # Outcomes are recorded manually (operator judgment against the three
-        # criteria above) — no automated job writes this table.
+        # The service evaluates no criterion: the operator judges the three
+        # sentences above and records an outcome by hand (POST
+        # /api/v1/admin/falsification). The note is fixed text and does not
+        # read the start date (frozen_methodology.json,
+        # _meta.falsification_tracking_since), so it says only what holds
+        # with a date set and without one.
         "falsification_outcomes_note": (
-            "empty = no falsification criterion has tripped since tracking began; "
-            "outcomes are recorded manually by the operator, not by an automated job"
+            "The service evaluates no criterion: the operator judges the criteria "
+            "and records an outcome by hand. "
+            "An empty list means only that no outcome has been recorded. "
+            "The list is a track record only from the tracking start date in "
+            "frozen_methodology.json, if one is recorded there."
         ),
         "changelog": CHANGELOG,
         "unverified_citations": UNVERIFIED_CITATIONS,   # [] — all resolved (audit 2026-07-14)
