@@ -82,7 +82,7 @@ def test_the_libraries_that_would_flood_the_journal_are_held():
     from app.logging_conf import configure_logging
 
     root = logging.getLogger()
-    loggers = [root, *map(logging.getLogger, ("httpx", "apscheduler", "slowapi"))]
+    loggers = [root, *map(logging.getLogger, ("httpx", "httpcore", "apscheduler", "slowapi"))]
     levels = [logger.level for logger in loggers]
     configured, configuration = structlog.is_configured(), structlog.get_config()
     # The server's root logger has no handler before configure_logging, so its
@@ -96,8 +96,9 @@ def test_the_libraries_that_would_flood_the_journal_are_held():
         assert jobs.isEnabledFor(logging.WARNING)        # "Run time of job ... was missed", a job that raised
         assert not logging.getLogger("slowapi").isEnabledFor(logging.WARNING)   # a line per 429
         assert not logging.getLogger("httpx").isEnabledFor(logging.INFO)        # the URL, the provider's key in it
+        assert [logging.getLogger(name).level for name in ("httpx", "httpcore")] == [logging.WARNING] * 2
     finally:
-        # These four levels and structlog's configuration are the whole
+        # These five levels and structlog's configuration are the whole
         # process's: the tests after this one find what it found.
         for logger, level in zip(loggers, levels, strict=True):
             logger.setLevel(level)

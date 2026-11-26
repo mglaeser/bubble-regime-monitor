@@ -162,7 +162,7 @@ class TestTheReadSideStaysClean:
 
 
 # ---------------------------------------------------------------------------
-# The error text is made without the query string (app.http_client.require_success)
+# A failed request's error text names no URL (app.http_client)
 # ---------------------------------------------------------------------------
 
 #: Each raising site: the provider, its fake key, and the label its error text starts with.
@@ -235,14 +235,10 @@ def test_an_http_error_names_no_query_string(keyed, monkeypatch, provider, key, 
 
 
 @pytest.mark.parametrize(("status", "text"), [
-    pytest.param(403, "fred:DTB3: HTTP 403 Forbidden for https://api.stlouisfed.org/fred/series/observations",
-                 id="403"),
-    pytest.param(520, "fred:DTB3: HTTP 520 for https://api.stlouisfed.org/fred/series/observations",
-                 id="520"),   # the standard library has no phrase for 520
+    pytest.param(403, "fred:DTB3: HTTP 403 Forbidden", id="403"),
+    pytest.param(520, "fred:DTB3: HTTP 520", id="520"),   # the standard library has no phrase for 520
 ])
-def test_an_http_error_names_its_source_its_status_and_the_url_up_to_its_path(
-    keyed, monkeypatch, status, text,
-):
+def test_an_http_error_names_its_source_and_its_status(keyed, monkeypatch, status, text):
     assert str(_provider_error(keyed, monkeypatch, "fred", status)) == text
 
 
@@ -250,41 +246,49 @@ SECRET = "FAKEsecret0123456789"                 # pragma: allowlist secret
 
 
 def _echoing(request: httpx.Request) -> httpx.Response:
-    """An upstream that echoes the secret: in a redirect's target, and in the
-    reason phrase, a header and the body of its 403."""
+    """An upstream that echoes the secret: in the reason phrase, a header and
+    the body of its 403, and at /moved in a redirect to a Location httpx
+    cannot parse."""
     if request.url.path == "/moved":
-        return httpx.Response(302, headers={"Location": f"https://example.test/echo/{SECRET}"})
+        return httpx.Response(302, headers={"Location": f"https://example.test:{SECRET}/"})
     return httpx.Response(403, headers={"X-Echo": SECRET}, text=SECRET,
                           extensions={"reason_phrase": f"Bad api_key={SECRET}".encode()})
 
 
-@pytest.mark.parametrize(("url", "params", "named"), [
-    pytest.param(f"https://user:{SECRET}@example.test/data#{SECRET}", None,  # pragma: allowlist secret
-                 "https://example.test/data", id="userinfo-and-fragment"),
-    pytest.param("https://example.test/data", {"api_key": SECRET}, "https://example.test/data",
-                 id="reason-phrase"),
-    pytest.param(f"https://example.test/data?api_key={SECRET}", None, "https://example.test/data",
-                 id="inline-query"),
-    pytest.param("https://example.test/moved", {"api_key": SECRET}, "https://example.test/moved",
-                 id="redirect"),
-    pytest.param(f"https://example.test:port/data?api_key={SECRET}", None, "", id="unparseable"),
+FORBIDDEN = ("probe: HTTP 403 Forbidden", {"status": 403, "error_class": "HTTPStatusError"})
+
+
+@pytest.mark.parametrize(("url", "params", "said"), [
+    pytest.param("https://example.test/data", {"api_key": SECRET}, FORBIDDEN, id="keyed-query"),
+    pytest.param(f"https://user:{SECRET}@example.test/data", None,  # pragma: allowlist secret
+                 FORBIDDEN, id="userinfo"),
+    pytest.param(f"https://example.test/data#{SECRET}", None, FORBIDDEN, id="fragment"),
+    pytest.param("https://example.test/data%0Ainjected", {"api_key": SECRET}, FORBIDDEN,
+                 id="encoded-newline"),
+    pytest.param("https://[::1]/data", {"api_key": SECRET}, FORBIDDEN, id="ipv6-host"),
+    pytest.param("https://example.test/moved", {"api_key": SECRET},
+                 ("probe: RemoteProtocolError", {"error_class": "RemoteProtocolError"}),
+                 id="malformed-redirect"),
 ])
-def test_the_secret_reaches_neither_the_error_nor_the_failure_log(
-    keyed, monkeypatch, url, params, named,
-):
-    """`named` is all of the URL the failure log may hold. The module's
-    logger is replaced, so the test sees what is handed to it."""
+def test_what_fetch_raises_and_logs_names_no_url(keyed, monkeypatch, url, params, said):
+    """The error names the source and the status, or the type of what failed,
+    and nothing is chained to it; the module's logger is replaced, so the test
+    sees what is handed to it."""
     log = mock.Mock()
     monkeypatch.setattr(keyed, "log", log)
     monkeypatch.setattr(keyed, "_client", httpx.Client(      # redirects are followed, as by the pooled client
         transport=httpx.MockTransport(_echoing), follow_redirects=True, timeout=5))
 
-    with pytest.raises((httpx.HTTPStatusError, httpx.InvalidURL)) as caught:
+    with pytest.raises((httpx.HTTPStatusError, keyed.FetchError)) as caught:
         keyed.fetch("probe", url, params=params)
 
-    assert SECRET not in str(caught.value)
-    assert SECRET not in repr(log.mock_calls)
-    assert log.mock_calls == [mock.call.warning("source_fetch_failed", source="probe", url=named)]
+    text, fields = said
+    assert str(caught.value) == text
+    assert caught.value.__cause__ is None and caught.value.__context__ is None
+    assert log.mock_calls == [mock.call.warning("source_fetch_failed", source="probe", **fields)]
+    parsed = httpx.URL(url)
+    for written in (str(caught.value), repr(log.mock_calls)):
+        assert all(part not in written for part in (SECRET, parsed.host, parsed.path, "://", "\n"))
 
 
 def test_no_module_calls_httpx_raise_for_status():

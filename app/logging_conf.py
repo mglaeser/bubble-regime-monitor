@@ -17,6 +17,8 @@ def configure_logging(level: str = "INFO") -> None:
     # a failed release. One line closes all four providers on
     # both the success and the failure path.
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    # httpcore's DEBUG lines carry each answer's reason phrase and headers, a redirect's Location among them.
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     # The root logger above is every library's in this process: the boot
     # migration leaves it alone (app.db_migrate), where Alembic's own setup
     # used to replace it with alembic.ini's WARN at every boot. Two libraries
