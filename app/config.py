@@ -17,7 +17,9 @@ class Settings(BaseSettings):
     # Hosted OpenAI-compatible gateway. All application routing details are
     # operator config: these defaults carry no deployment hostname, key, model
     # route, or auth-header value. Partial configuration is unavailable, never
-    # inferred from a public default.
+    # inferred from a public default. The gate is GatewayConfig at the use site
+    # (app/llm_gateway.py): it refuses a partial or malformed configuration
+    # before a client is built.
     llm_api_base_url: str = Field(default="", repr=False)
     llm_api_key: SecretStr = SecretStr("")
     llm_model: str = Field(default="", repr=False)
@@ -38,14 +40,13 @@ class Settings(BaseSettings):
     admin_api_key: str = "change-me-to-a-long-random-string"
     read_endpoints_public: bool = True
 
-    # SEC EDGAR etiquette (MANDATORY, format: "Name email").
-    # SEC_EDGAR_UA is the v3.1 name; SEC_USER_AGENT remains accepted.
-    sec_user_agent: str = "bubblegauge-monitor admin@example.com"
-    sec_edgar_ua: str = ""
-
-    @property
-    def effective_sec_ua(self) -> str:
-        return self.sec_edgar_ua or self.sec_user_agent
+    # SEC EDGAR etiquette (MANDATORY, format: "Name email"): the contact every
+    # companyfacts request carries, D3's one source. One setting, the name the
+    # template offers. SEC_EDGAR_UA, a second name that won when it was set,
+    # went: no backward compatibility (the owner's ruling of 2026-09-20,
+    # AGENTS.md). A leftover SEC_EDGAR_UA changes nothing and is reported
+    # (RETIRED_ENV_KEYS below).
+    sec_user_agent: str = ""
 
     # The SMS transport, the sipgate REST API v2 (POST /sessions/sms), for the
     # daily digest, the failure alarm and the alerts when iMessage is not
@@ -120,8 +121,9 @@ class Settings(BaseSettings):
     deploy_note_path: str = "/app/deploy-note"
 
     # --- ALERT SYSTEM (docs/ALERT_SYSTEM.md) --------------------------------
-    # Two INDEPENDENT switches. Evidence capture may run with alerting fully
-    # disabled, and enabling alerts never implies capture. `live` is never
+    # Two switches, not symmetric. Evidence capture may run with alerting fully
+    # disabled; enabling alerts does not turn capture on, and with capture off
+    # no recompute is evaluated (`alert_evaluation_skipped`). `live` is never
     # reached automatically: it requires promoted rule + phrase artifacts and a
     # deliberate operator edit.
     #
@@ -185,7 +187,6 @@ class Settings(BaseSettings):
     # 0.02 off, 2 000 draws about 0.13. A host that still sets one of the two
     # - .env.example carried both lines, with the artifact's values - is told
     # to remove it (RETIRED_ENV_KEYS below).
-    tz: str = "UTC"
     # Set by the test suite (conftest): skips the boot warm-up threads and the
     # scheduler in lifespan. Leaked daemon threads (hy-oas-seed /
     # breadth-backfill) crossing test boundaries corrupted other tests'
@@ -227,31 +228,19 @@ class Settings(BaseSettings):
     # operator can widen them without a code change (Q42).
     message_engine_min_interval_s: int = 300     # floor between two model calls
     message_engine_breaker_strikes: int = 5      # failed calls in a row -> cooldown
-    message_engine_breaker_cooldown_s: int = 86400   # no call for this long after them
+    # Half a day (a day until 2026-11-25): the next morning's digest is the probe.
+    message_engine_breaker_cooldown_s: int = 43200   # no call for this long after them
 
-    # Volume cap (ruling Q40). At the cap the evergreen fallback is used and
-    # the exhaustion is reported in the next digest — never a dropped message.
+    # Volume cap (ruling Q40). At the cap no call is made and the template goes
+    # out — never a dropped message. No message announces the cap: the attempt
+    # table keeps "daily budget spent" on a not_asked row (governor.refusal,
+    # record_fallback), and that is all.
     message_engine_daily_budget: int = 100
 
     # Channel length (rulings Q27/Q29/Q30). SMS_MAX_LEN already defaults to
     # 150; iMessage counts CODE POINTS, not septets. 350 since the owner's
     # request of 2026-10-04: one point per message, explained at more length.
     message_engine_imessage_max_chars: int = 350
-
-    @property
-    def llm_configured(self) -> bool:
-        """All values needed to open the gateway connection are present.
-
-        Shape and transport-safety validation happens in ``GatewayConfig`` at
-        the use site; this property only distinguishes deliberately unavailable
-        from an attempted call whose configuration is invalid.
-        """
-        return bool(
-            self.llm_api_base_url
-            and self.llm_api_key.get_secret_value()
-            and self.llm_model
-            and self.llm_auth_header
-        )
 
     @property
     def sms_configured(self) -> bool:
@@ -342,9 +331,12 @@ def configured_environment() -> dict[str, str]:
     return merged
 
 
-#: Settings that were removed. An old value in an environment changes nothing,
-#: and that is said loudly - at boot, in the alerts preflight, in health - so
-#: it is never dropped in silence the way `extra="ignore"` would drop it.
+#: Removed settings an old environment is likely to still hold. A value under
+#: one of these keys changes nothing, and that is said loudly - at boot, in the
+#: alerts preflight, in health. The list is not every removed setting: one that
+#: is not named here is dropped without a word, as `extra="ignore"` drops any
+#: unknown key. `TZ` is not named: the image sets it on every boot
+#: (Containerfile), so naming it would report every boot.
 RETIRED_ENV_KEYS: dict[str, str] = {
     "DAILY_SMS_ENABLED": (
         "removed with the Stage-4 cutover (owner decision D2c, 2026-10-02): the daily "
@@ -375,6 +367,10 @@ RETIRED_ENV_KEYS: dict[str, str] = {
              "the sample count of frozen_methodology.json (monte_carlo.seed, "
              "monte_carlo.samples) whatever the environment says, so remove this key")
        for key in ("MC_SAMPLES", "MC_SEED")},
+    "SEC_EDGAR_UA": (
+        "removed as the second name of the SEC contact (no backward compatibility, the "
+        "owner's ruling of 2026-09-20): SEC_USER_AGENT alone names it, so put the contact "
+        "there and remove this key"),
 }
 
 

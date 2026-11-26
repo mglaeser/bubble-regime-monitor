@@ -7,9 +7,10 @@ nothing else. It marks the exact bytes live mode runs and reads no evidence
 promotes.
 
 Fallback never escalates. If the candidate ruleset on disk is invalid, the
-service keeps evaluating the ruleset that was already promoted and reports
-`ops.rules_invalid`. If nothing valid is available at all it reports
-`ops.alerting_unavailable` and evaluates nothing — it does not "do its best".
+service keeps evaluating the ruleset that was already promoted, logs
+`alert_rules_invalid` and carries the reason into alert health
+(`fallback_reason`). If nothing valid is available at all it raises
+`AlertingUnavailable` and evaluates nothing — it does not "do its best".
 
 Queued work resolves rules and phrases from the REGISTRY, not from the files:
 a delivery planned before a deploy must render with the bytes it was planned
@@ -79,7 +80,6 @@ def validate_from_disk(
     rules_path: Path | None = None,
     phrase_path: Path | None = None,
     service_version: str | None = None,
-    available_calibrations: frozenset[str] = frozenset(),
 ) -> LoadedArtifacts:
     """Validate the candidate artifacts. Raises on an invalid pair."""
     settings = get_settings()
@@ -103,7 +103,6 @@ def validate_from_disk(
         methodology_version=_M.get_path("_meta", "methodology_version"),
         methodology_manifest_sha256=_M.frozen_sha256(),
         service_version=service_version or settings.service_version,
-        available_calibrations=available_calibrations,
     )
     return LoadedArtifacts(ruleset=ruleset, phrase_set=phrase_set, source="candidate")
 
