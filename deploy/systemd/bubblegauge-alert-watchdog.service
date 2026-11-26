@@ -5,8 +5,8 @@
 # stopped — which is the failure it exists to catch.
 #
 # It is still not a complete answer: a total host or network failure silences
-# this timer too. That needs external monitoring, and no amount of local
-# scheduling substitutes for it.
+# this timer too. Nothing watches from outside: by the owner's decision
+# (2026-10-04) a host that is down reports nothing (docs/AUTO_DEPLOY.md).
 #
 # Install (rootless podman, user units):
 #   cp deploy/systemd/bubblegauge-alert-watchdog.* ~/.config/systemd/user/
