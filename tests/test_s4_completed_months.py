@@ -30,11 +30,9 @@ def test_the_gather_fits_and_dates_s4_on_completed_months(isolated_db, monkeypat
     daily = SourceResult([(TODAY.isoformat(), 103.0)],
                          Provenance(source="tiingo:QQQ", as_of=TODAY.isoformat()))
     # Every source but the two Nasdaq-100 pulls fails at `_track`, the gather's
-    # one chokepoint; the monthly history is a tracked source of its own.
-    real_track = compute._track
+    # one chokepoint.
     monkeypatch.setattr(compute, "_track", lambda raw, source, fn: (
-        daily if source == "price_NDX"
-        else real_track(raw, source, fn) if source == "price_NDX_monthly" else None))
+        daily if source == "price_NDX" else fn() if source == "price_NDX_monthly" else None))
     monkeypatch.setattr(prices, "fetch_tiingo_monthly", lambda symbol: VENDOR)
     fitted: list[list[float]] = []
     # R is not run: the stub records the series it is handed.

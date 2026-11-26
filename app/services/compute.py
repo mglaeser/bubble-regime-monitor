@@ -598,46 +598,12 @@ def gather_inputs() -> RawInputs:
     if ndx:
         import math
 
-        # ONE SERIES OR NO READING, PREPARED INSIDE ITS OWN BOUNDARY. The long
-        # monthly history is fetched, cut to completed months and put into
-        # logs by one tracked callable (_s4_series), as _ebp and _baa_spread
-        # are below. When any of that fails S4 has no statistic this run, and
-        # the mapping answers with its declared 0.25, state FLOOR, quality 0.0;
-        # no shorter series stands in (see _s4_series for what did, and why it
-        # went). The gate on the daily series above is as it was: S4 has always
-        # waited for it, and it has not failed (price_NDX: 613 of 613 health
-        # rows ok, 2026-07-12 .. 2026-11-10).
+        # GSADF needs a long monthly history to calibrate (PSY tables start at
+        # T=100); fetch QQQ monthly from 1999 (T~329). The fetch, the cut to
+        # completed months and the logarithms run inside `_track`, like `_ebp`
+        # below: when one of them fails, S4 has no statistic this run and no
+        # shorter series stands in.
         def _s4_series() -> tuple[list[float], str, str]:
-            """S4's input as one tracked source: the log prices R is handed (the last
-            gsadf.series_months_max completed months), the date of the last of them,
-            and the source note with how many completed months the history holds.
-
-            FETCHED AND DERIVED IN ONE CALLABLE, so `_track` covers both: the rule
-            `_ebp` and `_baa_spread` follow in gather_inputs. The fetch used to run
-            untracked and the logarithm in the gather body. math.log raises on a bar
-            <= 0, the adapter accepts any float, and nothing between the gather body
-            and the scheduler catches an exception: one such bar would have ended
-            every recompute without a snapshot until the vendor corrected it (the
-            2026-08 EBP date format did that for twelve days), where it should cost S4
-            alone, weight 0.07, its reading. No such bar was ever served. A history
-            with no completed month fails here the same way (no last row).
-
-            ONE SERIES OR NO READING. The test is calibrated on the long monthly
-            history: QQQ from 1999, T~330; the adapter refuses fewer than 100 rows, the
-            documented minimum (PSY tables start at T=100). When that fetch failed, the
-            months inside the daily cache stood in here: about 42 months from 893 daily
-            rows, exuber's minimum window then about 12 where the long history has 35
-            or 36, i.e. another statistic under the same name, published as COMPUTED at
-            quality 1.0 and deciding 0.05 or 0.25 (about 1.4 points of the score). A
-            length check would refuse that series every time (893 daily rows cannot
-            hold 100 months), so it is removed, not guarded. It never ran in production
-            (2026-07-15 .. 2026-11-10: 601 of 601 computed readings were fitted on
-            T=329..333, 0 of 615 notes say "short series"), so no stored reading
-            changes. A failed fetch now raises into the caller's boundary, and S4 gets
-            what the mapping declares for a statistic that could not be computed: 0.25,
-            state FLOOR, quality 0.0, which costs Block S the 0.07 of S4 (coverage
-            0.93 with the other four counted; the block degrades below two thirds).
-            """
             # Completed months only. Tiingo's monthly series ends with the month
             # in progress, under the label of that month's last business day
             # (2026-11-30 on 2026-11-10): a date in the future, which reads as
@@ -668,8 +634,6 @@ def gather_inputs() -> RawInputs:
                 # once by the s4 note builder; do not repeat it here (was double-nested).
                 raw.gsadf_note = "R/exuber unavailable or the fit failed"
         else:
-            # The reason as _track recorded it: redacted (app.redaction), the
-            # same text the price_NDX_monthly health row carries.
             cause = raw.gather_errors.get("price_NDX_monthly", "unknown cause")
             raw.gsadf_note = f"long monthly history unavailable: {cause[:80]}"
     else:
