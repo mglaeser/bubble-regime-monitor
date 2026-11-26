@@ -378,8 +378,10 @@ def send_imessage(message: str, *, recipient: str | None = None) -> ImessageResu
 
 
 #: Bounds on the read timeout. The floor keeps a 0 or negative value from
-#: making every send fail instantly; the ceiling keeps an absurd one from
-#: outliving the dispatch lease.
+#: making every send fail instantly; the ceiling bounds an absurd one at ten
+#: minutes. It is above the dispatch lease (`alerts_dispatch_lease_s`, default
+#: 120 s): what keeps a send inside its lease is the timeout's default of 30 s
+#: (`imessage_timeout_s`), not this bound.
 _MIN_TIMEOUT_S, _MAX_TIMEOUT_S = 1.0, 600.0
 
 

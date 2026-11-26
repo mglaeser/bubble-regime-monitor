@@ -17,6 +17,16 @@ os.environ["LLM_MAX_TOKENS"] = "8000"
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+# No host file either: Settings reads `.env` from the working directory, and a
+# suite started in a deployed checkout would run on that host's recipient and
+# provider keys (with such a file present, a test on `isolated_db` saw iMessage
+# enabled, the file's proxy URL and its provider key). A test that needs a
+# dotenv file names it itself. Pinned by
+# tests/test_suite_hermetic.py::test_the_suite_reads_no_dotenv_file.
+from app.config import Settings  # noqa: E402
+
+Settings.model_config["env_file"] = None
+
 # A strong, non-placeholder admin key used across the suite (B-06/C-01).
 TEST_ADMIN_KEY = "test-admin-key-not-the-placeholder-0123456789"
 
@@ -26,7 +36,9 @@ def isolated_db(tmp_path, monkeypatch):
     """Point the app at a throwaway SQLite file and reset cached singletons."""
     db_path = tmp_path / "test.db"
     monkeypatch.setenv("DB_URL", f"sqlite:///{db_path}")
-    monkeypatch.setenv("MC_SAMPLES", "20000")
+    # The suite draws 20 000 samples where the artifact says 100 000 (speed),
+    # on the pipeline's own constant: no environment variable sets the count.
+    monkeypatch.setattr("app.services.compute.MC_SAMPLES", 20_000)
     monkeypatch.setenv("FRED_API_KEY", "")
     for name in ("LLM_API_BASE_URL", "LLM_API_KEY", "LLM_MODEL", "LLM_AUTH_HEADER"):
         monkeypatch.setenv(name, "")

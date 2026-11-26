@@ -190,6 +190,39 @@ class TestRM4Policies:
         assert cov["fraction"] < 2.0 / 3.0         # boundary verdict preserved
         assert cov["lost_weight"]["x"] == 1.0 - 0.66666
 
+    def test_a_payload_without_a_quality_counts_as_the_gate_counted_it(self):
+        # The replay mirrors compute._coverage_gate, and the gate reads
+        # IndicatorOutput.quality, whose default is 1.0: an indicator nobody
+        # gave a quality counts with its whole weight. The key entered the
+        # stored payload with v3.3.0, so production snapshots 1-10
+        # (2026-07-11..14) hold none. Read as 0.0, the report counted those ten
+        # as runs with BOTH blocks degraded.
+        from datetime import UTC, datetime
+
+        from app.services.compute import IndicatorOutput, _coverage_gate
+        from app.services.replay import _WD, _block_coverage
+
+        today = datetime.now(UTC).date().isoformat()
+        inds = {key: IndicatorOutput(key, 1.0, 0.5, False, "x", False, as_of=today)
+                for key in _WD}                      # no quality given
+        gate = _coverage_gate(inds)["D"]
+        assert (gate["coverage"], gate["degraded"]) == (1.0, False)
+
+        stored = {key: ind.payload() for key, ind in inds.items()}
+        for payload in stored.values():
+            del payload["quality"]                   # as snapshots 1-10 store it
+        cov = _block_coverage(stored, _WD)
+        assert cov["fraction"] == gate["coverage"]
+        assert cov["lost_weight"] == dict.fromkeys(_WD, 0.0)
+
+        # A stored 0.0 (FLOOR: nothing was measured) or null is a statement,
+        # not a missing key, and that indicator's weight stays lost.
+        for stated in (0.0, None):
+            stored["d4"]["quality"] = stated
+            floored = _block_coverage(stored, _WD)
+            assert floored["lost_weight"] == {**dict.fromkeys(_WD, 0.0), "d4": _WD["d4"]}
+            assert floored["fraction"] == pytest.approx(1.0 - _WD["d4"] / sum(_WD.values()))
+
 class TestRM5Assembler:
     def test_packages_mark_host_studies_pending(self, isolated_db):
         from app.services.replay import assemble_decision_packages

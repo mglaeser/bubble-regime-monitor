@@ -126,6 +126,37 @@ class TestSourceChains:
         assert result.provenance.fallback_used is False
         assert fetched == [vix.CBOE_VIX_URL, vix.CBOE_VIX3M_URL]
 
+    def test_the_vix_curve_falls_back_to_freds_vixcls_and_vxvcls(self, monkeypatch):
+        """FRED publishes the CBOE 3-month VIX as series VXVCLS
+        (fred.stlouisfed.org/series/VXVCLS) and has no series VIX3M: a request
+        for that id is answered 400 Bad Request. The fake FRED below knows only
+        the two real ids and answers any other id the same way."""
+        import app.sources.fred as fred
+        import app.sources.vix as vix
+
+        def cboe_down(source, url, **kwargs):
+            raise SourceError(f"{source}: 403 Forbidden")
+
+        closes = {"VIXCLS": 26.0, "VXVCLS": 24.0}
+        asked: list[str] = []
+
+        def fake_fred(source, url, params=None, **kwargs):
+            series_id = params["series_id"]
+            asked.append(series_id)
+            if series_id not in closes:
+                raise SourceError(f"{source}: 400 Bad Request")
+            return _Response(payload={"observations": [
+                {"date": "2026-11-20", "value": str(closes[series_id])}]})
+
+        monkeypatch.setattr(vix, "fetch", cboe_down)
+        monkeypatch.setattr(fred, "fetch", fake_fred)
+        result = vix.term_structure_ratio()
+        assert asked == ["VIXCLS", "VXVCLS"]
+        assert result.value == pytest.approx(26.0 / 24.0)
+        assert result.provenance.source == "fred_vix_ratio"
+        assert result.provenance.fallback_used is True
+        assert result.provenance.as_of == "2026-11-20"
+
     def test_shillerdata_follows_multpl_for_the_current_cape(self, monkeypatch):
         import app.sources.cape as cape
 
@@ -143,6 +174,66 @@ class TestSourceChains:
         assert result.value == 31.5
         assert result.provenance.fallback_used is True
         assert fetched == ["multpl", "shillerdata"]
+
+    # The two places of https://www.multpl.com/shiller-pe that state the value,
+    # as the page served them on 2026-11-14 (each verbatim, the lines between
+    # them left out): the description line and the element with the id "current".
+    MULTPL_PAGE = (
+        '<meta name="description" content="Shiller PE Ratio chart, historic, and current data. '
+        'Current Shiller PE Ratio is 39.95, a change of -0.15 from previous market close." />\n'
+        '<div id="current">\n<b>Current<span class="currentTitle">\nShiller PE Ratio</span>:</b>\n39.95\n\n\n\n\n\n'
+        '<span class="neg">\n\n-0.15\n(-0.37%)\n\n</span>\n\n<div id="timestamp">\n\n\n4:00 PM EST, Fri Nov 13\n\n</div>\n'
+        '</div>\n')
+
+    def test_the_current_cape_is_the_own_text_of_multpls_current_element(self):
+        from app.sources.cape import _current_from_multpl
+
+        assert _current_from_multpl(self.MULTPL_PAGE) == 39.95
+
+    @pytest.mark.parametrize("page, reading", [
+        ("<!-- " + MULTPL_PAGE.replace("39.95", "17.33") + " -->" + MULTPL_PAGE, 39.95),
+        (MULTPL_PAGE.replace("39.95", "39,950.12"), None),
+        (MULTPL_PAGE.replace("39.95", "39.95abc"), None),
+    ], ids=["an-old-copy-in-a-comment", "a-larger-number", "letters-glued-to-the-number"])
+    def test_a_comment_is_not_read_and_a_text_that_is_not_one_number_is_no_reading(self, page, reading):
+        """Taking the first digits behind the words "Current Shiller PE Ratio"
+        in the page source returned 17.33, 39.0 and 39.95 on these pages, each
+        as a healthy multpl reading."""
+        from app.sources.cape import _current_from_multpl
+
+        if reading is None:
+            with pytest.raises(SourceError, match="could not parse current CAPE"):
+                _current_from_multpl(page)
+        else:
+            assert _current_from_multpl(page) == reading
+
+    @pytest.mark.parametrize("page", [
+        "",
+        MULTPL_PAGE.replace("39.95", "") + MULTPL_PAGE.replace("39.95", "17.33"),
+        MULTPL_PAGE + MULTPL_PAGE.replace("39.95", ""),
+        '<?xml version="1.0" encoding="utf-8"?>\n' + MULTPL_PAGE,
+    ], ids=["an-empty-page", "two-elements-the-second-holds-a-number",
+            "two-elements-the-first-holds-a-number", "an-xml-declaration-in-a-str"])
+    def test_anything_but_one_element_with_one_number_is_a_source_error(self, page):
+        # lxml raises errors of its own on the first and on the last page
+        # (ParserError, ValueError); on the two in between, one of the two
+        # elements that carry the id holds a number.
+        from app.sources.cape import _current_from_multpl
+
+        with pytest.raises(SourceError):
+            _current_from_multpl(page)
+
+    def test_a_multpl_page_without_the_element_hands_over_to_shillers_spreadsheet(self, monkeypatch):
+        import app.sources.cape as cape
+
+        # The first digits behind the words: 6.0, from the class name.
+        page = _Response(text='<b>Current Shiller PE Ratio</b> <span class="h6">39.70</span>', content=b"xls")
+        monkeypatch.setattr(cape, "fetch", lambda source, url, **kwargs: page)
+        monkeypatch.setattr(cape, "_history_from_shillerdata", lambda content: [38.0, 39.1])
+        result = cape.current_cape()
+        assert result.value == 39.1
+        assert result.provenance.source == "shillerdata_ie_data"
+        assert result.provenance.fallback_used is True
 
     def test_the_multpl_monthly_table_needs_no_beautifulsoup(self, monkeypatch):
         import sys

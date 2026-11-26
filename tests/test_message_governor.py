@@ -162,6 +162,23 @@ class TestAnyFailedCallIsAStrike:
         later = NOW + timedelta(minutes=10)
         assert _reserve(now=later)[0].reason == "breaker open: 5 failed calls in a row"
 
+    def test_by_default_the_next_mornings_digest_is_the_probe(self):
+        """The default cooldown is shorter than the day between two digests
+        (decided on 2026-11-25; the owner delegated it). Five failed calls,
+        each ended three minutes after its digest's trigger: the digest a day
+        after the last trigger is admitted as the probe. With the day's
+        cooldown it was refused, so an open breaker asked the model only every
+        second day."""
+        # the field's declared default, whatever the process environment sets
+        cooldown = Settings.model_fields["message_engine_breaker_cooldown_s"].default
+        defaults = _settings(message_engine_breaker_cooldown_s=cooldown)
+        day = 24 * 60
+        for days in (5, 4, 3, 2, 1):
+            _row(gov.Outcome.TECHNICAL_ERROR, minutes_ago=days * day,
+                 finished_minutes_ago=days * day - 3)
+        decision, claim = _reserve(defaults)
+        assert decision.may_ask and claim is not None, decision.reason
+
 
 def test_two_workers_cannot_both_claim_inside_the_floor():
     results: list[bool] = []
@@ -386,3 +403,26 @@ class TestRoundSevenOn140:
         _row(gov.Outcome.TECHNICAL_ERROR, minutes_ago=30, finished_minutes_ago=29)
         decision, _claim = _reserve()
         assert decision.may_ask
+
+
+@pytest.mark.parametrize("settings, priority, trigger", [
+    ({"message_engine_enabled": False}, 2, "daily_digest"),
+    ({}, gov.P1, "daily_digest"),
+    ({}, 2, "NOT_A_TRIGGER"),
+], ids=["the engine off", "a P1", "the bare event"])
+def test_a_deterministic_text_writes_no_row(monkeypatch, settings, priority, trigger):
+    """What a row's `source` can be: `generated` or `fallback`. A deterministic
+    text asks no model and writes no attempt row (docs/MESSAGE_ENGINE.md,
+    decisions 4 and 8), so no row carries that word: production held 50
+    `generated`, 4 `fallback` and 4 failed calls without a source on
+    2026-11-11."""
+    from app.message_engine import composer
+    from app.message_engine.checks import Channel
+
+    monkeypatch.setattr(composer, "complete",
+                        lambda **_kw: (_ for _ in ()).throw(AssertionError("no model is asked")))
+    out = composer.compose(trigger=trigger, channel=Channel.IMESSAGE, priority=priority,
+                           facts={"median": 59}, lib=composer.library(), settings=_settings(**settings))
+    assert out.source == "deterministic"
+    with session_scope() as s:
+        assert s.query(MessageEngineAttempt).count() == 0
