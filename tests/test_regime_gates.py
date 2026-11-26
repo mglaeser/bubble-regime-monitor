@@ -14,8 +14,9 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
-from scripts.regime import authz_coverage, findings_gate, separation_check
+from scripts.regime import authz_coverage, findings_gate, mypy_pin, separation_check
 
 ROOT = Path(__file__).resolve().parents[1]
 GATES = ("findings_gate", "separation_check", "authz_coverage")
@@ -37,6 +38,108 @@ def test_gate_passes_against_the_real_repository(gate: str) -> None:
     out = subprocess.run([sys.executable, "-m", f"scripts.regime.{gate}"],
                          capture_output=True, text=True, cwd=ROOT, check=False)
     assert out.returncode == 0, f"{gate} blocked on the committed tree:\n{out.stdout}\n{out.stderr}"
+
+
+class TestMypyDepthPin:
+    """`.mypy-config.pinned`: changing `[tool.mypy]` fails the build until that
+    file is updated in the same commit.
+
+    The pin compares the table the TOML library parses, sub-tables included,
+    and the step names the file mypy reads. The pin has no `--selftest`: these
+    tests feed it.
+    """
+
+    OVERRIDE = '\n[[tool.mypy.overrides]]\nmodule = ["app.*"]\nignore_errors = true\n'
+
+    @staticmethod
+    def _tree(tmp_path: Path, pyproject: str, pinned: str | None = None) -> Path:
+        committed = (ROOT / ".mypy-config.pinned").read_text(encoding="utf-8")
+        (tmp_path / "pyproject.toml").write_text(pyproject, encoding="utf-8")
+        (tmp_path / ".mypy-config.pinned").write_text(
+            committed if pinned is None else pinned, encoding="utf-8")
+        return tmp_path
+
+    @staticmethod
+    def _pyproject() -> str:
+        return (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+
+    def test_the_committed_configuration_matches_the_pin(self):
+        assert mypy_pin.problems() == []
+        assert mypy_pin.main() == 0
+
+    def test_a_per_module_override_fails_the_pin(self, tmp_path, capsys):
+        root = self._tree(tmp_path, self._pyproject() + self.OVERRIDE)
+        assert mypy_pin.problems(root), "a per-module override passed the depth pin"
+        assert mypy_pin.main(root) == 1
+        assert "BLOCK" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("sub_table", ["", '[[tool.mypy.overrides]]\nmodule = ["app.*"]\n'],
+                             ids=["table", "override"])
+    def test_a_reordered_table_fails_the_pin(self, tmp_path, sub_table):
+        # mypy takes the later of two spellings of one option: the pinned table
+        # reports errors, the reordered one ignores them.
+        head = "[tool.mypy]\nstrict = true\n" + sub_table
+        pinned = head + "no_ignore_errors = false\nignore_errors = false\n"
+        reordered = head + "ignore_errors = false\nno_ignore_errors = false\n"
+        assert mypy_pin.problems(self._tree(tmp_path, reordered, pinned=pinned))
+
+    def test_a_value_of_another_type_fails_the_pin(self, tmp_path):
+        # Python calls `1.0` equal to `true`; mypy answers "Not a boolean" and
+        # checks without `strict`.
+        loosened = "[tool.mypy]\nstrict = 1.0\n"
+        assert mypy_pin.problems(self._tree(tmp_path, loosened, pinned="[tool.mypy]\nstrict = true\n"))
+
+    def test_a_file_the_toml_library_refuses_fails_the_pin(self, tmp_path, capsys):
+        # A bare CR is no line end in TOML, and text mode reads it as one.
+        # Measured with mypy 2.3.1: it prints the parse error and checks
+        # without the table, so without `strict`.
+        (tmp_path / "pyproject.toml").write_bytes(b"[tool.mypy]\rstrict = true\r")
+        (tmp_path / ".mypy-config.pinned").write_bytes(b"[tool.mypy]\nstrict = true\n")
+        assert mypy_pin.main(tmp_path) == 1
+        assert "BLOCK" in capsys.readouterr().err
+
+    TABLE = b"[tool.mypy]\nstrict = true\n"
+    NUMBER = b"[tool]\nmypy = 1\n"
+    ARRAY = b"[[tool.mypy]]\nstrict = true\n"
+    # tomllib parses it; printing an integer that long raises ValueError by default.
+    LONG = b"[tool.mypy]\nstrict = 0x" + b"f" * 4000 + b"\n"
+
+    @pytest.mark.parametrize(("pyproject", "pinned", "named"), [
+        (b"tool = []\n", TABLE, "pyproject.toml"),
+        (NUMBER, NUMBER, "pyproject.toml"),
+        (TABLE + b"\xff", TABLE, "pyproject.toml"),
+        (TABLE, None, ".mypy-config.pinned"),
+        (ARRAY, ARRAY, "pyproject.toml"),
+        (TABLE, LONG, ".mypy-config.pinned"),
+    ], ids=["tool-is-an-array", "the-same-number-in-both", "a-byte-that-is-not-utf-8",
+            "no-pin-file", "the-same-array-of-tables-in-both", "a-number-too-long-to-print"])
+    def test_anything_but_two_equal_tables_is_one_block_line(
+            self, tmp_path, capsys, pyproject, pinned, named):
+        # The pin passes on two equal tables and on nothing else: neither equal
+        # values that are no tables nor an exception get through.
+        (tmp_path / "pyproject.toml").write_bytes(pyproject)
+        if pinned is not None:
+            (tmp_path / ".mypy-config.pinned").write_bytes(pinned)
+        assert mypy_pin.main(tmp_path) == 1
+        printed = capsys.readouterr()
+        blocks = [line for line in printed.err.splitlines() if line.startswith("BLOCK")]
+        assert len(blocks) == 1 and named in blocks[0], printed.err
+        assert "Traceback" not in printed.out + printed.err
+
+    def test_the_type_check_step_runs_the_pin_and_names_the_config_file(self):
+        # A mypy.ini outranks pyproject.toml when mypy looks for its
+        # configuration, so the step names the file the pin compares. The pin
+        # runs before `set +e`, where a failing command still fails the step.
+        workflow = yaml.safe_load(
+            (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))
+        steps = [step for step in workflow["jobs"]["test"]["steps"]
+                 if step.get("name", "").startswith("Type-check")]
+        assert len(steps) == 1
+        lines = [line.strip() for line in steps[0]["run"].splitlines()]
+        assert "python -m scripts.regime.mypy_pin" in lines
+        assert lines.index("python -m scripts.regime.mypy_pin") < lines.index("set +e")
+        assert [line for line in lines if line.startswith("mypy ")] == [
+            "mypy --config-file pyproject.toml app > /tmp/mypy.txt 2>&1"]
 
 
 class TestFindingsGateComputesRatherThanAsserts:
