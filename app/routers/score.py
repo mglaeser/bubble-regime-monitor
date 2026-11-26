@@ -185,9 +185,10 @@ def get_history(
             q = q.where(Snapshot.computed_at < upper)
         if granularity != "raw":
             # The database finds the last snapshot of each UTC day or month, so
-            # that `limit` counts the days or months returned. strftime reads
-            # the UTC text the column stores (app/models.py:TZDateTime).
-            period = func.strftime("%Y-%m-%d" if granularity == "daily" else "%Y-%m", Snapshot.computed_at)
+            # that `limit` counts the days or months returned. The period is the
+            # head of the UTC text the column stores (app/models.py:TZDateTime):
+            # SQLite's date functions can round 23:59:59.9995 into the next day.
+            period = func.substr(Snapshot.computed_at, 1, 10 if granularity == "daily" else 7)
             last = func.max(Snapshot.computed_at)
             q = select(Snapshot).where(Snapshot.computed_at.in_(
                 q.with_only_columns(last).group_by(period).order_by(last.desc()).limit(limit)))
