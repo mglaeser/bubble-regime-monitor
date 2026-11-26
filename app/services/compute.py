@@ -24,7 +24,7 @@ from typing import Any
 from sqlalchemy import select
 
 from app import methodology as _M
-from app.alerts.calendars import is_trading_day
+from app.alerts.calendars import is_trading_day, trading_days_after
 from app.config import get_settings
 from app.db import session_scope
 from app.engine import judgment, legs
@@ -72,6 +72,16 @@ log = get_logger(__name__)
 # Freshness SLAs (days): loaded from the frozen artifact. s5=45 because the S5
 # primary (Fed EBP) is monthly; a stale indicator is excluded from coverage.
 FRESHNESS_SLA_DAYS: dict[str, int] = _M.as_dict("freshness_sla_days")
+
+# The readings a daily market feed delivers once per NYSE session, the ones with
+# the 3-day SLA: their SLA counts NYSE sessions since as_of, not calendar days.
+# Counted in calendar days, Friday's breadth is 4 days old on every Tuesday
+# until Monday's is stored (13:00 UTC), and the coverage gate reads a weekend
+# as an outage. The cost: a daily feed that really stops is stale once more
+# than three sessions have passed, two calendar days later across a weekend,
+# three across an exchange holiday too, never earlier. The numbers stay the
+# artifact's.
+SESSION_AGED: frozenset[str] = frozenset({"s2", "s3", "d1", "d4"})
 
 # v3.7.7/§2.3: the s5 t-2 lookup is a POSITIONAL index, not calendar-anchored.
 # Until the S5 v4 (C-01/C-02/C-03) lands, every computed s5 path carries this
@@ -129,6 +139,25 @@ def _age_days(as_of_iso: str | None) -> int | None:
         return None
 
 
+def _past_sla(indicator_id: str, as_of_iso: str | None, today: date) -> bool | None:
+    """Is a reading dated `as_of_iso` past its indicator's freshness SLA on `today`?
+
+    None when the date or the SLA is unknown. A reading dated after `today`
+    (clock skew, bad vintage) is past it (v3.7.3/O-06)."""
+    sla = FRESHNESS_SLA_DAYS.get(indicator_id)
+    if not as_of_iso or sla is None:
+        return None
+    try:
+        as_of = date.fromisoformat(as_of_iso[:10])
+    except ValueError:
+        return None
+    if as_of > today:
+        return True
+    if indicator_id in SESSION_AGED:
+        return trading_days_after(as_of, today) > sla
+    return (today - as_of).days > sla
+
+
 def _month_end_iso(yyyy_mm: str) -> str:
     """ISO date of the LAST day of a YYYY-MM month (leap-safe)."""
     y, m = int(yyyy_mm[:4]), int(yyyy_mm[5:7])
@@ -181,10 +210,17 @@ def _coverage_gate(indicators: dict[str, Any]) -> dict[str, Any]:
     obtained, each live indicator scaled by its quality in [0,1].
 
     A dropped OR stale indicator counts as fully lost weight; a low-quality one
-    (e.g. d1 measured from a partial constituent universe, quality=n/503) counts
-    as w*quality. A proxy substitution does not reduce quality. If >1/3 of a
-    block's nominal weight is lost the block is degraded (band suppressed) — so a
-    breadth reading from only a handful of names now correctly degrades Block D."""
+    (e.g. d1 measured from a partial constituent universe, quality = resolved /
+    current universe) counts as w*quality. A proxy substitution does not reduce
+    quality. If >1/3 of a block's nominal weight is lost the block is degraded
+    (band suppressed).
+
+    The quality discount alone cannot degrade Block D: d1 weighs 0.35, so that
+    would take a quality below 4.8% (fewer than 24 of 504 names), and breadth is
+    published from 25 names up (25 of 504: coverage 0.6674, not degraded). A
+    thin universe lowers the coverage figure and degrades the block only
+    together with weight lost elsewhere in it (33 of 503 names with d4 dropped:
+    0.473). A dropped or stale d1 degrades the block by itself (0.65)."""
     blocks: dict[str, Any] = {}
     degraded_any = False
     for block_id, prefix in (("S", "s"), ("D", "d")):
@@ -238,7 +274,7 @@ class RawInputs:
     semis_as_of: str | None = None
 
     gsadf_stat: float | None = None
-    gsadf_as_of: str | None = None   # last completed month of the QQQ series the test ran on
+    gsadf_as_of: str | None = None   # last month of the QQQ series GSADF ran on
     gsadf_cv90: float | None = None
     gsadf_cv95: float | None = None
     gsadf_note: str | None = None
@@ -341,13 +377,9 @@ class IndicatorOutput:
     @property
     def stale(self) -> bool | None:
         """True past the indicator's freshness SLA (or dated in the future);
-        None when age is unknown. A negative age (as_of in the future =
-        clock skew / bad vintage) is treated as stale/suspect (v3.7.3/O-06)."""
-        age = self.age_days
-        sla = FRESHNESS_SLA_DAYS.get(self.id)
-        if age is None or sla is None:
-            return None
-        return age > sla or age < 0
+        None when age is unknown. The SLA of a daily market reading counts
+        NYSE sessions, every other one calendar days (`SESSION_AGED`)."""
+        return _past_sla(self.id, self.as_of, datetime.now(UTC).date())
 
     def payload(self) -> dict[str, Any]:
         meta = REGISTRY[self.id]
@@ -397,7 +429,6 @@ class SnapshotData:
     fast_alarm: dict[str, Any]
     freshness: dict[str, str]
     coverage: dict[str, Any]
-    unknown_red_flags: list[str] = field(default_factory=list)  # v3.7.8/§24 (observability)
     ath_provenance: dict[str, Any] = field(default_factory=lambda: dict(ATH_PROVENANCE))  # PIN-F label
     # Typed alert contract (Stage 0) — derived from the values above, never a
     # second opinion on them. See app/engine/snapshot_contract.py.
@@ -447,6 +478,40 @@ def _track(raw: RawInputs, source: str, fn: Any) -> Any:
         return None
 
 
+def _track_closes(raw: RawInputs, source: str, canonical: str) -> Any:
+    """One daily price series through `_track`.
+
+    When every provider failed and the cache answered, the series is kept (it
+    is dated by its last bar, and that age is what the freshness SLA reads)
+    and the pull is recorded as the failure it was, with the chain's note.
+    The adapter's flag and note used to stop here: with Tiingo, Twelve Data
+    and Alpha Vantage all failing, GET /readyz and the status page listed the
+    price pulls as ok, HTTP 200, no note. The same case for HY OAS is
+    recorded this way already: FRED fails, the stored history is served, the
+    pull is not ok (below).
+
+    The note quotes the providers' errors. Provider error text can hold a
+    credential (Alpha Vantage's request URL carries its key) and GET /readyz
+    serves the note without authentication, so it passes `sanitize` like
+    every other gather failure.
+
+    Production shows no such outage: to 2026-11-10, 2452 price pulls, and the
+    provider health table holds one row, Tiingo with no failure. No stored
+    row and no score changes."""
+    from app.sources import prices as price_src
+
+    result = _track(raw, source, lambda: price_src.get_daily_closes(canonical))
+    # `fallback_used` on a price result means exactly this: no provider
+    # answered and the cache did (app/sources/prices.py). A provider further
+    # down the chain answering is a successful pull.
+    if result is not None and result.provenance.fallback_used:
+        raw.source_health[-1].update(   # the entry `_track` has just appended
+            ok=False, http_status=None, note=sanitize(result.provenance.note, limit=400))
+        log.warning("price_chain_served_stale_cache", source=source,
+                    as_of=result.provenance.as_of)
+    return result
+
+
 def gather_inputs() -> RawInputs:
     """Fetch all upstream sources with per-source circuit breakers.
 
@@ -489,11 +554,8 @@ def gather_inputs() -> RawInputs:
     # SPX->SPY); proxy substitutions are flagged in the note.
     from app.sources import prices as price_src
 
-    def _closes(canonical: str):
-        return price_src.get_daily_closes(canonical)
-
     # SPY (also the ATH gate) and QQQ.
-    spy = _track(raw, "price_SPY", lambda: _closes("SPY"))
+    spy = _track_closes(raw, "price_SPY", "SPY")
     if spy:
         raw.spy_daily = spy.value
         raw.spy_daily_closes = [c for _, c in spy.value]
@@ -505,17 +567,19 @@ def gather_inputs() -> RawInputs:
             pass
         closes = raw.spy_daily_closes
         raw.index_within_2pct_of_ath = closes[-1] >= _NEAR_ATH_FRAC * max(closes)
-    qqq = _track(raw, "price_QQQ", lambda: _closes("QQQ"))
+    qqq = _track_closes(raw, "price_QQQ", "QQQ")
     if qqq:
         raw.qqq_daily = qqq.value
         raw.qqq_daily_closes = [c for _, c in qqq.value]
 
     # SMH/SPY 2-yr run-up via the price chain (SOXX as SMH substitute).
-    semis = _track(raw, "price_SMH", lambda: _closes("SMH"))
+    semis = _track_closes(raw, "price_SMH", "SMH")
     if semis is None:
-        semis = _track(raw, "price_SOXX", lambda: _closes("SOXX"))
+        semis = _track_closes(raw, "price_SOXX", "SOXX")
         raw.semis_symbol = "SOXX"
         raw.semis_fallback = True
+    # Whichever answered, SMH or SOXX, feeds S3 through the fields below; the
+    # gather keeps no semis series of its own (RawInputs has no semis_daily).
     if semis:
         raw.semis_source = semis.provenance.source  # real provenance, e.g. "tiingo:SMH"
         try:
@@ -529,21 +593,68 @@ def gather_inputs() -> RawInputs:
     # NASDAQ100 free on the key this service already holds, from 1986 against the
     # proxy's 1999. Switching to it is a source substitution (PIN C, CONDITIONAL
     # HOLD), not made here.
-    # R subprocess degrades to the 0.25 floor.
-    ndx = _track(raw, "price_NDX", lambda: _closes("NDX"))
+    # R subprocess degrades to the contested/stale 0.25 floor.
+    ndx = _track_closes(raw, "price_NDX", "NDX")
     if ndx:
+        import math
+
         # ONE SERIES OR NO READING, PREPARED INSIDE ITS OWN BOUNDARY. The long
         # monthly history is fetched, cut to completed months and put into
         # logs by one tracked callable (_s4_series), as _ebp and _baa_spread
         # are below. When any of that fails S4 has no statistic this run, and
         # the mapping answers with its declared 0.25, state FLOOR, quality 0.0;
-        # no shorter series stands in (see _s4_months for what did, and why it
+        # no shorter series stands in (see _s4_series for what did, and why it
         # went). The gate on the daily series above is as it was: S4 has always
         # waited for it, and it has not failed (price_NDX: 613 of 613 health
         # rows ok, 2026-07-12 .. 2026-11-10).
-        s4_series = _track(raw, "price_NDX_monthly", lambda: _s4_series(today))
+        def _s4_series() -> tuple[list[float], str, str]:
+            """S4's input as one tracked source: the log prices R is handed (the last
+            gsadf.series_months_max completed months), the date of the last of them,
+            and the source note with how many completed months the history holds.
+
+            FETCHED AND DERIVED IN ONE CALLABLE, so `_track` covers both: the rule
+            `_ebp` and `_baa_spread` follow in gather_inputs. The fetch used to run
+            untracked and the logarithm in the gather body. math.log raises on a bar
+            <= 0, the adapter accepts any float, and nothing between the gather body
+            and the scheduler catches an exception: one such bar would have ended
+            every recompute without a snapshot until the vendor corrected it (the
+            2026-08 EBP date format did that for twelve days), where it should cost S4
+            alone, weight 0.07, its reading. No such bar was ever served. A history
+            with no completed month fails here the same way (no last row).
+
+            ONE SERIES OR NO READING. The test is calibrated on the long monthly
+            history: QQQ from 1999, T~330; the adapter refuses fewer than 100 rows, the
+            documented minimum (PSY tables start at T=100). When that fetch failed, the
+            months inside the daily cache stood in here: about 42 months from 893 daily
+            rows, exuber's minimum window then about 12 where the long history has 35
+            or 36, i.e. another statistic under the same name, published as COMPUTED at
+            quality 1.0 and deciding 0.05 or 0.25 (about 1.4 points of the score). A
+            length check would refuse that series every time (893 daily rows cannot
+            hold 100 months), so it is removed, not guarded. It never ran in production
+            (2026-07-15 .. 2026-11-10: 601 of 601 computed readings were fitted on
+            T=329..333, 0 of 615 notes say "short series"), so no stored reading
+            changes. A failed fetch now raises into the caller's boundary, and S4 gets
+            what the mapping declares for a statistic that could not be computed: 0.25,
+            state FLOOR, quality 0.0, which costs Block S the 0.07 of S4 (coverage
+            0.93 with the other four counted; the block degrades below two thirds).
+            """
+            # Completed months only. Tiingo's monthly series ends with the month
+            # in progress, under the label of that month's last business day
+            # (2026-11-30 on 2026-11-10): a date in the future, which reads as
+            # stale, and at each month turn a month of one day in the fit. The
+            # README changelog has the production numbers. `today` is the UTC
+            # date of this gather; the last completed month is at most 33 days
+            # old on any day of the next one (S4's SLA is 35).
+            gsadf_pairs = [(d, c) for d, c in price_src.fetch_tiingo_monthly("NDX")
+                           if d[:7] < today[:7]]
+            gsadf_monthly = [c for _, c in gsadf_pairs]
+            gsadf_src_note = f"Nasdaq-100 via QQQ proxy (Tiingo monthly 1999+, T={len(gsadf_monthly)})"
+            return ([math.log(v) for v in gsadf_monthly[-_M.get_path("gsadf", "series_months_max"):]],
+                    gsadf_pairs[-1][0], gsadf_src_note)
+
+        s4_series = _track(raw, "price_NDX_monthly", _s4_series)
         if s4_series:
-            gsadf_logs, raw.gsadf_as_of, gsadf_months = s4_series
+            gsadf_logs, raw.gsadf_as_of, gsadf_src_note = s4_series
             out = run_gsadf(gsadf_logs, timeout_s=get_settings().gsadf_timeout_s)
             if out:
                 raw.gsadf_stat, raw.gsadf_cv90, raw.gsadf_cv95 = out.gsadf, out.cv90, out.cv95
@@ -551,8 +662,7 @@ def gather_inputs() -> RawInputs:
                 raw.bsadf_cv95, raw.bsadf_argmax = out.bsadf_cv95, out.bsadf_argmax
                 raw.bsadf_n, raw.bsadf_n_finite = out.bsadf_n, out.bsadf_n_finite
                 raw.bsadf_cv_route = out.bsadf_cv_route
-                raw.gsadf_note = (f"Nasdaq-100 via QQQ proxy (Tiingo monthly 1999+, "
-                                  f"T={gsadf_months}) (cached MC CVs)")
+                raw.gsadf_note = f"{gsadf_src_note} (cached MC CVs)"
             else:
                 # Reason only — the "GSADF not computable this run" prefix is added
                 # once by the s4 note builder; do not repeat it here (was double-nested).
@@ -749,75 +859,6 @@ def scored_s4_statistic(raw: RawInputs) -> tuple[float | None, float | None, flo
     return raw.gsadf_stat, raw.gsadf_cv90, raw.gsadf_cv95
 
 
-def _s4_months(today: str) -> list[tuple[str, float]]:
-    """The month-end rows S4 is fitted on, oldest first.
-
-    COMPLETED MONTHS ONLY: a row is in the fit when its month is strictly
-    earlier than the month of `today`, the rule legs.month_end_faber uses.
-    `today` is the UTC date; the UTC month turns at 19:00 or 20:00 New York
-    time, after the close of the month's last session. Tiingo's monthly
-    resample ends with the month in progress: the latest daily close under the
-    label of that month's last business day (2026-11-30 on 2026-11-10). Fitted
-    and dated on that row, production 2026-07-11 .. 2026-11-10:
-      - the date lay in the future on 528 of 615 snapshots, so S4 read stale,
-        0.07 of Block S coverage counted as lost and 445 of 491 alert sidecars
-        were PARTIAL (period_label_future:s4);
-      - at each month turn a one-day month lowered the endpoint statistic
-        (-0.0425, -0.0146, -0.0413). On 2026-11-02 that crossed cv90 1.1393
-        (1.1684 -> 1.1271): S4 0.25 -> 0.05, point score 49.31 instead of
-        50.72. The critical values are simulated for equal steps.
-    On the stored series the completed-month reading differs on 43 snapshots,
-    all of November 2026: S4 0.05 -> 0.25, point score +1.37 .. +1.56 (the
-    latest 48.81 -> 50.21), no band threshold crossed. S4 then moves once a
-    month, with the first recompute of the next one.
-
-    A completed month is at most 33 days old on any day of the next one (SLA
-    35). Not checked here: that the vendor has printed the month's final close.
-    A feed that stops shows on S4's date when the SLA runs out, and on the
-    daily series of the same vendor within its own 3 days.
-
-    ONE SERIES OR NO READING. The test is calibrated on the long monthly
-    history: QQQ from 1999, T~330; the adapter refuses fewer than 100 rows, the
-    documented minimum (PSY tables start at T=100). When that fetch failed, the
-    months inside the daily cache stood in here: about 42 months from 893 daily
-    rows, exuber's minimum window then about 12 where the long history has 35
-    or 36, i.e. another statistic under the same name, published as COMPUTED at
-    quality 1.0 and deciding 0.05 or 0.25 (about 1.4 points of the score). A
-    length check would refuse that series every time (893 daily rows cannot
-    hold 100 months), so it is removed, not guarded. It never ran in production
-    (2026-07-15 .. 2026-11-10: 601 of 601 computed readings were fitted on
-    T=329..333, 0 of 615 notes say "short series"), so no stored reading
-    changes. A failed fetch now raises into the caller's boundary, and S4 gets
-    what the mapping declares for a statistic that could not be computed: 0.25,
-    state FLOOR, quality 0.0, which costs Block S the 0.07 of S4 (coverage
-    0.93 with the other four counted; the block degrades below two thirds).
-    """
-    from app.sources import prices as price_src  # local, as in gather_inputs
-
-    rows = price_src.fetch_tiingo_monthly("NDX")
-    return [(d, c) for d, c in rows if d[:7] < today[:7]]
-
-
-def _s4_series(today: str) -> tuple[list[float], str, int]:
-    """S4's input as one tracked source: the log prices R is handed (the last
-    gsadf.series_months_max completed months), the date of the last of them,
-    and how many completed months the history holds.
-
-    FETCHED AND DERIVED IN ONE CALLABLE, so `_track` covers both: the rule
-    `_ebp` and `_baa_spread` follow in gather_inputs. The fetch used to run
-    untracked and the logarithm in the gather body. math.log raises on a bar
-    <= 0, the adapter accepts any float, and nothing between the gather body
-    and the scheduler catches an exception: one such bar would have ended
-    every recompute without a snapshot until the vendor corrected it (the
-    2026-08 EBP date format did that for twelve days), where it should cost S4
-    alone, weight 0.07, its reading. No such bar was ever served. A history
-    with no completed month fails here the same way (no last row).
-    """
-    months = _s4_months(today)
-    tail = months[-_M.get_path("gsadf", "series_months_max"):]
-    return [math.log(close) for _, close in tail], months[-1][0], len(months)
-
-
 def _closed_months(daily: list[tuple[str, float]]) -> frozenset[str]:
     """Months whose LAST BAR is that month's last trading day.
 
@@ -885,6 +926,13 @@ def _feed_is_current(daily: list[tuple[str, float]], as_of_date: str | None) -> 
     return last_bar >= previous
 
 
+#: The Monte Carlo's sample count and seed: the frozen artifact's, read through
+#: app.methodology (this module's _M) like the frozen constants above, never
+#: the environment's (app/config.py says why they are no settings).
+MC_SAMPLES: int = _M.get_path("monte_carlo", "samples")
+MC_SEED: int = _M.get_path("monte_carlo", "seed")
+
+
 def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
                      mc_seed: int | None = None,
                      gsadf_contested: bool | None = None,
@@ -900,8 +948,12 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
     of the NEXT month arrives, which delays a month-end P1 by a day or more.
     """
     settings = get_settings()
-    n = mc_samples or settings.mc_samples
-    seed = mc_seed or settings.mc_seed
+    # mc_samples and mc_seed are for tests (fewer draws for speed). The
+    # recompute, the only path that stores a snapshot, passes neither, so a
+    # stored snapshot ran the artifact's seed and sample count (pinned:
+    # tests/test_frozen_methodology.py::test_the_recompute_passes_no_seed_and_no_sample_count).
+    n = mc_samples or MC_SAMPLES
+    seed = mc_seed or MC_SEED
     contested = settings.gsadf_contested if gsadf_contested is None else gsadf_contested
 
     indicators: dict[str, IndicatorOutput] = {}
@@ -971,10 +1023,8 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
                                            note="run-up unavailable; dropped, Block S renormalized")
 
     # ---- S4 GSADF ----
-    # Mapping: explosive p<0.05 non-contested -> 1.0; p<0.10 -> 0.5; a
-    # contested rejection, or a statistic that could not be computed -> 0.25;
-    # tested-and-not-explosive -> 0.05. Staleness is not part of the mapping: a
-    # stale S4 loses its weight in _coverage_gate, like every indicator.
+    # Mapping: explosive p<0.05 non-contested -> 1.0; p<0.10 -> 0.5;
+    # contested-or-stale-or-DATA-MISSING -> 0.25; tested-and-not-explosive -> 0.05.
     # asymmetric= is deliberately NOT bound to a setting: see app/config.py. It
     # defaults False, so this call is byte-equivalent to the pre-branch one.
     s4_stat, s4_cv90, s4_cv95 = scored_s4_statistic(raw)
@@ -992,7 +1042,7 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         and (s4_cv90 or 0.0) < (s4_cv95 or 0.0)
     if not _s4_ok:
         # v3.3.2 FLOOR semantics: the 0.25 stays in the aggregation (that is the
-        # documented contested-floor policy constant, unchanged), but quality=0.0
+        # documented contested/stale policy constant, unchanged), but quality=0.0
         # tells the coverage gate — and the reader — that NOTHING was measured
         # this run. A floored s4 must not report itself as a full-quality reading.
         s4_state, s4_quality = "FLOOR", 0.0
@@ -1208,8 +1258,8 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         # never reaches here; it takes the cached branch below, which reports
         # rollover as unknown.)
         # Rollover confirmation is CALENDAR-aware when dated months are available
-        # (v3.7.7/§3.1): on a publication gap the positional [-3:]/[-12:] windows
-        # straddle the hole and could flip the D2 multiplier (0.6<->1.0) from
+        # (v3.7.7/§3.1): on a publication gap the positional [-3:] window
+        # straddles the hole and could flip the D2 multiplier (0.6<->1.0) from
         # mis-spaced data. UNKNOWN (None) -> treat as NOT confirmed for the
         # multiplier, but say so honestly rather than asserting a rollover.
         if raw.margin_months and len(raw.margin_months) == len(raw.margin_balances):
@@ -1312,10 +1362,12 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         sub = d4_lppls.sub_score(raw.lppls_confidence)
         sub_d["d4"] = sub
         mc_in.d4_sub = sub
-        # value = LPPLS confidence at t2=today: the fraction of START-TIME
-        # windows (dt 30..750d) qualifying at the single scanned endpoint
-        # (Sornette et al. 2015 / Demirer et al. 2019). With one endpoint,
-        # value == n_qualifying / n_evaluated by construction.
+        # value = LPPLS confidence at t2 = the latest close: of the START-TIME
+        # windows whose fit is a positive bubble (b < 0), the fraction
+        # qualifying at the single scanned endpoint. value ==
+        # n_windows_qualifying / n_windows_positive (the library's pos_conf),
+        # not / n_windows_evaluated: see d4_lppls.compute_confidence (the
+        # window grid is in that module's header).
         bands = res.get("bands") or {}
         band_txt = ", ".join(
             f"{k}={v['conf']:.2f}(n={v['n']})" if v and v.get("conf") is not None
@@ -1344,10 +1396,20 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
             quality=0.0, state=state)
 
     # ---- V multiplier ----
-    # A non-finite/<=0 ratio now raises (v3.7.8/§9); an unknown OR invalid ratio
-    # degrades V to the frozen neutral multiplier 1.0 (unchanged rule), never a
-    # mislabelled "contango" from bad data.
-    v_state, v_mult = "contango", 1.0  # neutral default (unknown/invalid ratio)
+    # No usable ratio (none fetched, or one v_vix.state refuses, v3.7.8/§9): the
+    # frozen neutral multiplier 1.0 (unchanged rule: the run scores as a
+    # contango run does) and the state "unknown", the word
+    # fast_alarm.term_structure carries for the same run. Not "contango": that
+    # is a measured calm curve to /api/v1/score and to the digest, and to the
+    # alert rule vol.backwardation (resolution auto_on_inverse) it is the
+    # all-clear that closes an open episode as condition_false. "unknown" is
+    # no reading to an alert rule (app/alerts/sources.py, read_source), so an
+    # open episode is held until a ratio is measured again. Production has not
+    # met the case: source_health has the ratio on 615 of 615 recomputes
+    # (2026-07-11 to 2026-11-10), and the stored state equals
+    # fast_alarm.term_structure on all 615 snapshots, never "unknown". So no
+    # stored "contango" stands for a missing ratio, and no row is rewritten.
+    v_state, v_mult = "unknown", 1.0
     if raw.vix_ratio is not None:
         try:
             v_state = v_vix.state(raw.vix_ratio)
@@ -1379,19 +1441,10 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         index_within_2pct_of_ath=raw.index_within_2pct_of_ath,
     )
     mc_in.red_flags = red_flags
-
-    # v3.7.8/§24: observability for red flags whose INPUT is unknown this run.
-    # The frozen numerical rule is unchanged (unknown -> not-fired, red_flag_count
-    # untouched); this list just makes the epistemic gap visible to the reader.
-    unknown_red_flags: list[str] = []
-    if runup is None:
-        unknown_red_flags.append("semi_runup_ge_150pp")
-    if raw.hy_oas_bps is None or not raw.hy_oas_history_bps:
-        unknown_red_flags.append("hy_oas_widen_gt_100bps")
-    if raw.breadth_pct is None:
-        unknown_red_flags.append("breadth_lt_50_near_ath")
-    if not _s4_ok:
-        unknown_red_flags.append("gsadf_explosive_noncontested")
+    # Which of these flags had an unknown input is said once, per flag, by the
+    # typed contract persist_snapshot stores (build_red_flag_meta: the state
+    # UNKNOWN). The score API's unknown_red_flags reads that; no list is built
+    # here.
 
     if not sub_s or not sub_d:
         raise RuntimeError("an entire block is empty — cannot score (all sources down)")
@@ -1500,7 +1553,6 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         fast_alarm=alarm.as_dict(),
         freshness=freshness,
         coverage=coverage,
-        unknown_red_flags=unknown_red_flags,
         # Typed alert contract (Stage 0): the band decomposition the display
         # string above collapses. Derived by calling the SAME authoritative
         # band functions, from the SAME median — never a second computation.
@@ -1624,7 +1676,6 @@ def persist_snapshot(data: SnapshotData, raw: RawInputs) -> int:
             judgment_stale=call.stale,
             judgment_error=call.error_class,
             data_freshness={**data.freshness, "_coverage": data.coverage,
-                            "_unknown_red_flags": data.unknown_red_flags,
                             "_ath_provenance": data.ath_provenance},
             # RM-1: stamp the methodology actually in force in THIS process —
             # read from the loader, never re-stated by hand.

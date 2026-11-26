@@ -171,10 +171,9 @@ def test_the_long_history_is_what_is_fitted(only_the_nasdaq_series, monkeypatch)
 def test_no_code_path_derives_s4_months_from_the_daily_series():
     """The substitute is gone, not guarded: 893 daily rows cannot hold the
     100 months the test needs, so a length check would refuse it every time."""
-    assert list(inspect.signature(compute._s4_months).parameters) == ["today"]
-    for function in (compute.gather_inputs, compute._s4_months, compute._s4_series):
-        assert "ndx_daily" not in inspect.getsource(function)
-        assert "monthly_closes(ndx" not in inspect.getsource(function)
+    src = inspect.getsource(compute.gather_inputs)
+    assert "ndx_daily" not in src
+    assert "monthly_closes(ndx" not in src
 
 
 # ---- fetched and prepared inside one boundary --------------------------------
@@ -225,6 +224,7 @@ def test_the_monthly_pull_has_its_own_health_row(only_the_nasdaq_series, monkeyp
 def test_the_s4_series_is_prepared_inside_track():
     """Structural pin, in the style of tests/test_gather_error_boundary.py."""
     src = inspect.getsource(compute.gather_inputs)
-    assert '_track(raw, "price_NDX_monthly", lambda: _s4_series(today))' in src
-    assert "math.log" not in src
-    assert "fetch_tiingo_monthly" not in src
+    assert '_track(raw, "price_NDX_monthly", _s4_series)' in src
+    series = src[src.index("def _s4_series"):src.index('s4_series = _track(raw, "price_NDX_monthly"')]
+    assert "math.log" in series
+    assert "fetch_tiingo_monthly" in series
