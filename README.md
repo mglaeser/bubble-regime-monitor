@@ -28,7 +28,9 @@ Repository: [`mglaeser/bubble-regime-monitor`](https://github.com/mglaeser/bubbl
 git clone https://github.com/mglaeser/bubble-regime-monitor.git && cd bubble-regime-monitor && cp .env.example .env && podman-compose up -d
 ```
 
-> **API keys (v3.1).** As of v3.1, bubblegauge's price layer requires two free API keys. Sign up (free, ~1 minute each) at **https://www.tiingo.com** (`TIINGO_API_KEY`) and **https://twelvedata.com** (`TWELVE_DATA_API_KEY`) and place both in your `.env`. Tiingo is the primary source for ETF/equity prices; Twelve Data is the backup. Neither free tier serves raw stock-index levels, so the S&P 500 and Nasdaq-100 are represented by their ETF proxies (SPY and QQQ). For the Nasdaq-100, FRED serves the native index level free on the `FRED_API_KEY` this service already requires — `NASDAQ100`, 10,239 non-missing daily observations from 1986-01-02, against QQQ's start of 1999-03 (measured 2026-08-22). FRED's `SP500` is a rolling 10-year window and is the wrong instrument for the S&P proxy. Note the licence: FRED marks the Nasdaq OMX series copyright, personal use, redistribution by permission. The service does not read it since the S4 real-index shadow went (2026-09-28). An optional Alpha Vantage key (`ALPHAVANTAGE_API_KEY`, 25 requests/day) adds a thin emergency fallback for the four core tickers only.
+> **API keys (v3.1).** As of v3.1, bubblegauge's price layer requires two free API keys. Sign up (free, ~1 minute each) at **https://www.tiingo.com** (`TIINGO_API_KEY`) and **https://twelvedata.com** (`TWELVE_DATA_API_KEY`) and place both in your `.env`. Tiingo is the primary source for ETF/equity prices; Twelve Data is the backup. Neither free tier serves raw stock-index levels, so the S&P 500 and Nasdaq-100 are represented by their ETF proxies (SPY and QQQ). For the Nasdaq-100, FRED serves the native index level free on the `FRED_API_KEY` this service already requires — `NASDAQ100`, 10,239 non-missing daily observations from 1986-01-02, against QQQ's start of 1999-03 (measured 2026-08-22). FRED's `SP500` is a rolling 10-year window and is the wrong instrument for the S&P proxy. Note the licence: FRED marks the Nasdaq OMX series copyright, personal use, redistribution by permission. The service does not read it since the S4 real-index shadow went (2026-09-28). An optional Alpha Vantage key (`ALPHAVANTAGE_API_KEY`, 25 requests/day) adds a thin emergency fallback for the four core tickers only. Breadth (D1) needs a third free key, `POLYGON_API_KEY`: Polygon's grouped-daily endpoint is its only provider, and without the key D1 is dropped and block D renormalized on every recompute.
+
+In `.env`, a comment stands on its own line, never after a value. Podman's `--env-file` reader (compose's `env_file`, the Quadlet's `EnvironmentFile=`) takes everything after the first `=` as the value, so `SMS_DAILY_HOUR=8  # UTC hour` reaches the service as that whole string and it does not boot. `.env.example` and the blocks below are written that way.
 
 Rootless Podman notes: the `:Z` suffix on the `./data:/data` bind mount applies the SELinux label (required on Fedora/RHEL rootless Podman). For boot persistence: `podman generate systemd --new --name bubblegauge` (or a Quadlet `.container` file in `~/.config/containers/systemd/`) and `systemctl --user enable --now`.
 
@@ -98,7 +100,7 @@ Red-flag count 0 → override not fired. **Deterministic point score 52.43; MC m
 
 | Indicator | Primary source | Fallback chain | SLA |
 |-----------|---------------|----------------|-----|
-| CAPE (S1) | multpl scrape | shillerdata `ie_data.xls` | 35d |
+| CAPE (S1) | Shiller's `ie_data.xls`, at the link on shillerdata.com | multpl scrape | 35d |
 | Real 10-yr (S1) | FRED `DFII10` | none (FRED core) | 3d |
 | Concentration (S2) | SSGA SPY holdings XLSX (top-10 **holdings** sum, not a sector weight) | Slickcharts (the JPMAM guide is a cross-check by hand, not a tier) | 3d |
 | Semis run-up (S3) | Tiingo `SMH`/`SPY` | Twelve Data -> Alpha Vantage -> cache; SOXX substitute for SMH | 3d |
@@ -107,7 +109,7 @@ Red-flag count 0 → override not fired. **Deterministic point score 52.43; MC m
 | HY OAS (red flag 3; S5's last tier) | FRED `BAMLH0A0HYM2` (**truncated to rolling 3 yr since Apr 2026** — own `hy_oas_history` table, seeded on first boot, appended daily) | persisted history | 3d |
 | Breadth (D1) | S&P 500 constituents (SSGA) + Polygon grouped-daily closes, 200-DMA on read | none: D1 is dropped and its block renormalized | 3d |
 | Margin (D2) | FINRA XLSX (3–4-week publication lag) | none — cache & tolerate staleness | 75d |
-| Hyperscaler FCF (D3) | SEC EDGAR companyfacts (mandatory UA, ≤8 req/s self-cap) | total-revenue gate proxy | 100d |
+| Hyperscaler FCF (D3) | SEC EDGAR companyfacts (mandatory UA, ≤8 req/s self-cap) | none: an issuer without a reading is left out (quality n/5); with none left D3 is dropped and its block renormalized | 100d |
 | LPPLS (D4) | `lppls==0.6.24` (pinned; maintenance-inactive) | **drop + renormalize Block D** | 3d |
 | VIX curve (V) | CBOE delayed quotes | FRED `VIXCLS`/`VXVCLS` (FRED's series id for VIX3M) | 2d |
 
@@ -126,7 +128,7 @@ Base path `/api/v1`; every response is `{"data": ..., "meta": ...}` with the fiv
 | `GET /api/v1/meta/methodology` | Framework, references, falsification criteria, changelog |
 | `GET /api/v1/replay/evidence` | RM-1: per-snapshot methodology stamp + append-only outcome summary |
 | `GET /api/v1/content/dashboard` · `GET /api/v1/content/dynamic` | UI content as a resource (`docs/CONTENT_API.md`): static scientific text blocks (disclaimer, section intros, endpoint catalogue, taxonomy, empty-states) + dynamic slots with hard length/regex contracts (placeholders until generation lands) — frontends render content, they never define it |
-| `GET /api/v1/dashboard/feed` | Read-only feed for the companion dashboard (v3.4.0): 13 monthly series + 33 scalar metrics incl. CNN Fear & Greed (v3.7.0, non-scoring); per-item degradation; contract in `DASHBOARD_FEED_SPEC.md` |
+| `GET /api/v1/dashboard/feed` | Read-only feed for the companion dashboard (v3.4.0): 13 monthly series + 30 scalar metrics incl. CNN Fear & Greed (v3.7.0, non-scoring); per-item degradation; contract in `DASHBOARD_FEED_SPEC.md` |
 | `GET /api/v1/alerts/*` | Alert-system read surface: `overview`, `mechanisms[/{fingerprint}]`, `rules/{id}/instances`, `episodes[/{id}]`, `events`, `latest`, `deliveries[/{id}]`, `renders/{id}` (with the message text, `no-store`), `ruleset`, `silences`, `health`. Operator-only: every alert read takes `ADMIN_API_KEY` (X-API-Key) and nothing else, and fails closed (503) while that key is empty or the placeholder (owner decision D3a). The full pipeline (capture → evaluate → plan → render → dispatch) exists; the repo is **committed at Stage 3** (operator decision 2026-08-27) with passing replay evidence — the deployment sends only after the operator promotes the exact artifact AND sets `ALERTS_MODE=live` on the host; the CI replay gate is the evidence, and nothing at runtime re-reads it (owner decision D2d, `docs/ALERT_SYSTEM.md`) |
 | `POST`/`DELETE /api/v1/alerts/silences[/{id}]` | Silence a rule, instance or bucket (`ALERTS_WRITE_API_KEY`; `Idempotency-Key` honoured) |
 | `POST /api/v1/admin/alerts/evaluate` · `promote` · `recover` · `send-test` · `render` | Evaluate one captured sidecar (shadow by default); promote the validated artifacts on disk (reads no evidence: the CI replay gate is the evidence, owner decision D2d); sweep stale leases; queue an audited memberless TEST delivery through the real dispatcher; preview the reviewed test message's text (stores and sends nothing). No route retries an UNKNOWN delivery: it is terminal (owner decision D2f) (X-API-Key) |
@@ -179,10 +181,14 @@ Two transports can carry it, and **exactly one sends**. If both switches are on,
 
 ```dotenv
 IMESSAGE_ENABLED=true
-IMESSAGE_API_BASE_URL=https://messages.example.com   # origin only, no path
-IMESSAGE_API_KEY=imp_...                             # scoped key: messages:send, NOT admin
-IMESSAGE_RECIPIENT=+49151...                         # or an Apple-ID email
-SMS_DAILY_HOUR=8                                     # UTC hour (default 08:00)
+# origin only, no path
+IMESSAGE_API_BASE_URL=https://messages.example.com
+# scoped key: messages:send, NOT admin
+IMESSAGE_API_KEY=imp_...
+# or an Apple-ID email
+IMESSAGE_RECIPIENT=+49151...
+# UTC hour (default 08:00)
+SMS_DAILY_HOUR=8
 ```
 
 **The switch alone does nothing.** iMessage is selected only when the URL, key and recipient are *all* set. Turning it on with any of them blank leaves a working SMS digest sending over SMS rather than silently stopping it, and the incomplete state is reported at boot, on the health projection as `imessage_enabled_but_unconfigured`, and by `alerts preflight`.
@@ -199,11 +205,16 @@ Create a sipgate **Personal Access Token** with the `sessions:sms:write` scope, 
 
 ```dotenv
 SMS_ENABLED=true
-SIPGATE_TOKEN_ID=token-XXXX        # PAT id (Basic-auth username)
-SIPGATE_TOKEN=...                  # PAT secret (Basic-auth password)
-SIPGATE_SMS_ID=s0                  # your Web SMS extension
-SIPGATE_RECIPIENT=+49151...        # E.164
-SMS_DAILY_HOUR=8                   # UTC hour (default 08:00)
+# PAT id (Basic-auth username)
+SIPGATE_TOKEN_ID=token-XXXX
+# PAT secret (Basic-auth password)
+SIPGATE_TOKEN=...
+# your Web SMS extension
+SIPGATE_SMS_ID=s0
+# E.164
+SIPGATE_RECIPIENT=+49151...
+# UTC hour (default 08:00)
+SMS_DAILY_HOUR=8
 ```
 
 The engine-off digest is capped at 150 characters (`SMS_MAX_LEN`), inside one 160-septet GSM-7 segment, and ASCII-coerced so a stray Unicode character cannot halve the limit. The same cap applies over iMessage, where the proxy would accept 4000 Unicode code points, so that digest is identical on both transports. With the engine on, the digest is held to its channel instead: 150 GSM-7 septets over SMS, 350 characters over iMessage (`MESSAGE_ENGINE_IMESSAGE_MAX_CHARS`).
@@ -213,10 +224,14 @@ The engine-off digest is capped at 150 characters (`SMS_MAX_LEN`), inside one 16
 The digest tells you the score. This tells you when there is no new score to tell you about.
 
 ```dotenv
-FAILURE_ALERTS_ENABLED=true    # default; sends over whichever transport above is on
-FAILURE_ALERT_REPEAT_H=24      # the alarm repeats this often while the outage lasts
-FAILURE_ALERT_STATE_PATH=/data/failure-alert-state.json   # outage memory across restarts
-FAILURE_ALERT_STUCK_AFTER_H=4  # a run holding the lock this long is reported wedged
+# default; sends over whichever transport above is on
+FAILURE_ALERTS_ENABLED=true
+# the alarm repeats this often while the outage lasts
+FAILURE_ALERT_REPEAT_H=24
+# outage memory across restarts
+FAILURE_ALERT_STATE_PATH=/data/failure-alert-state.json
+# a run holding the lock this long is reported wedged
+FAILURE_ALERT_STUCK_AFTER_H=4
 ```
 
 Every recompute — scheduled or manual — reports its outcome. A run that raises, or that completes without producing a snapshot, sends one compressed message over the transport the digest uses:
@@ -303,7 +318,7 @@ Leaving de-risk sends no alert of its own: no rule covers a band move out of de-
 2. Score > 60 sustained through 24 months of > 10% annualized gains without a > 15% drawdown → **falsified**.
 3. Override fires and no > 20% drawdown within 12 months → **override falsified**.
 
-Outcomes are stored in the DB and exposed via `/api/v1/meta/methodology`.
+The service evaluates none of these. The operator judges them and records an outcome by hand (`POST /api/v1/admin/falsification`, append-only); recorded outcomes are exposed via `/api/v1/meta/methodology`. An empty list there means only that no outcome has been recorded; the list is a track record only from the tracking start date (`frozen_methodology.json`, `_meta.falsification_tracking_since`), if the operator has recorded one there.
 
 ## Changelog
 

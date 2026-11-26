@@ -1,5 +1,5 @@
 {
-  "content_version": 4,
+  "content_version": 5,
   "generated": "2026-08-29",
   "origin": "save-haven-monitor prose migration (shallow-frontend program, A1 ledger; verbatim extraction)",
   "blocks": {
@@ -1179,7 +1179,7 @@
       "kind": "map",
       "entries": {
         "plain": "When lenders are most relaxed, trouble tends to arrive about two years later. So the reading is how loosely credit was priced two years ago; it does not follow where spreads stand at the moment.",
-        "fire": "Two years ago credit risk was priced unusually cheaply (a low excess bond premium, the Fed's measure).",
+        "fire": "Two years ago credit risk was priced unusually cheaply.",
         "why": "Literature-grounded on López-Salido-Stein-Zakrajšek's finding that hot credit at t−2 precedes contraction at t."
       },
       "source": "src/bubblegauge.tsx:194-197"
@@ -1207,7 +1207,7 @@
       "kind": "map",
       "entries": {
         "plain": "Spending a fortune on data centers is only alarming if the revenue stops showing up.",
-        "fire": "Cloud revenue growth falls below 15% YoY while trailing free cash flow is negative; otherwise capped low.",
+        "fire": "A hyperscaler's total revenue growth falls below 15% YoY while its trailing free cash flow is negative; otherwise capped low.",
         "why": "Literature-grounded: railroads and fiber both had cash-flow troughs years before any peak — capex is only a bubble signal when it stops converting to revenue."
       },
       "source": "src/bubblegauge.tsx:206-209"
