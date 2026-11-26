@@ -897,15 +897,7 @@ def mark_sent(session: Session, delivery: AlertDelivery, *, now: datetime,
     for member in members:
         if member.episode_id not in represented:
             continue
-        member.delivered = True
-        state = session.get(
-            AlertInstanceNotificationState,
-            (delivery.mode, delivery.live_profile, member.instance_fingerprint))
-        if state is not None:
-            state.last_sent_at = now
-            state.next_notification_generation = max(
-                state.next_notification_generation, member.notification_generation + 1)
-            state.updated_at = now
+        mark_member_sent(session, delivery, member, now=now)
     if len(represented) != len(members):
         _event(
             session,
@@ -922,6 +914,21 @@ def mark_sent(session: Session, delivery: AlertDelivery, *, now: datetime,
         )
     _event(session, now, action="delivery_sent", delivery_id=delivery.delivery_id,
            detail=f"members={len(members)} represented={len(represented)}")
+
+
+def mark_member_sent(session: Session, delivery: AlertDelivery,
+                     member: AlertDeliveryMember, *, now: datetime) -> None:
+    """What a send at `now` records for one member: `delivered`, and the last
+    send and next generation in its instance's notification memory."""
+    member.delivered = True
+    state = session.get(
+        AlertInstanceNotificationState,
+        (delivery.mode, delivery.live_profile, member.instance_fingerprint))
+    if state is not None:
+        state.last_sent_at = now
+        state.next_notification_generation = max(
+            state.next_notification_generation, member.notification_generation + 1)
+        state.updated_at = now
 
 
 def mark_transient(session: Session, delivery: AlertDelivery, *, now: datetime,

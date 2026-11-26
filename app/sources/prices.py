@@ -37,6 +37,7 @@ from datetime import UTC, date, datetime, timedelta
 
 import httpx
 
+from app.alerts.calendars import trading_days_after
 from app.config import get_settings
 from app.logging_conf import get_logger
 from app.sources import Provenance, SourceError, SourceResult
@@ -48,7 +49,6 @@ INDEX_PROXIES = {"NDX": "QQQ", "SPX": "SPY"}  # the chain's free tiers serve no 
 
 FAIL_THRESHOLD = 3
 COOLDOWN = timedelta(hours=6)
-CACHE_SLA_DAYS = 3
 CACHE_MAX_ROWS = 900
 HISTORY_DAYS = 1300  # ~3.5 trading years: covers 2-3yr windows + SMA200
 
@@ -178,8 +178,11 @@ def parse_twelvedata(payload: dict, symbol: str, min_rows: int = 50) -> list[tup
     and pass min_rows=1.
 
     Error envelope: {"code":..., "message":..., "status":"error"} —
-    429 = credits exhausted (minute or day), 403 = symbol not on plan
-    (e.g. any index on free Basic)."""
+    429 = credits exhausted (minute or day) -> RateLimited; 401 and 403 ->
+    NotOnPlan. A symbol outside the plan does not have to come as 403: for
+    XAG/USD the provider sent code 404 with its plan message on 222 of 222
+    calls (the service log, 2026-10-05 to 2026-11-10), and a 404 is raised
+    as ProviderError."""
     if payload.get("status") == "error" or ("code" in payload and "values" not in payload):
         code = int(payload.get("code", 0) or 0)
         msg = str(payload.get("message", ""))[:200]
@@ -378,7 +381,8 @@ def _fetcher(name: str) -> Callable[[str], tuple[list[tuple[str, float]], str, b
 def get_daily_closes(canonical: str) -> SourceResult:
     """Daily closes for a canonical symbol via the full provider chain.
 
-    Cache within CACHE_SLA_DAYS short-circuits the network. Every failure
+    The cache answers without a fetch while no NYSE session whose UTC day is
+    over lies after its last bar (`trading_days_after`). Every failure
     feeds the provider health scorer; total failure serves the stale cache
     (flagged) or raises SourceError. The cache answers only for the
     instrument the chain reads now: a row cached from another one - a native
@@ -390,10 +394,10 @@ def get_daily_closes(canonical: str) -> SourceResult:
         cached = None
     if cached:
         rows, as_of, source = cached
-        age = (datetime.now(UTC).date() - date.fromisoformat(as_of)).days
-        if age <= CACHE_SLA_DAYS:
+        last_bar, today = date.fromisoformat(as_of), datetime.now(UTC).date()
+        if not trading_days_after(last_bar, today - timedelta(days=1)):
             return SourceResult(rows, Provenance(source=source, as_of=as_of,
-                                                 note=f"cache ({age}d old)"))
+                                                 note=f"cache ({(today - last_bar).days}d old)"))
 
     errors: list[str] = []
     for name in PROVIDER_ORDER:
