@@ -189,10 +189,6 @@ class Deadline:
                 f"evaluation exceeded its {self.budget_ms}ms budget at {where}"
             )
 
-    @property
-    def remaining_ms(self) -> int:
-        return max(0, int((self._deadline - time.monotonic()) * 1000))
-
 
 def evaluate_ruleset(
     *,
@@ -328,7 +324,6 @@ def run_evaluation(
             current=alert_input,
             previous=previous,
             history=tuple(history),
-            is_cold_start=previous is None,
         )
 
         deadline.check(f"ruleset:{current.rules_sha256[:12]}")
