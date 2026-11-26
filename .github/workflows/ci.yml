@@ -10,9 +10,10 @@ name: ci
 # same defect class as a decorative gate — it reads as control and is not.)
 #
 # ENFORCEMENT (this note is a claim about the repository, so it is kept true):
-# a ruleset on `main` marks `test (3.12)` and `image` REQUIRED, with no bypass
-# actors, and a direct push to main is rejected. That closes the open item this
-# note used to describe.
+# a ruleset on `main` marks `test (3.12)`, `image` and `independent-verify`
+# (the review panel's verdict, .github/workflows/independent-verify.yml)
+# REQUIRED, with no bypass actors, and a direct push to main is rejected. That
+# closes the open item this note used to describe.
 
 on:
   push:
@@ -105,19 +106,16 @@ jobs:
           # DEPTH is pinned separately, because the ratchet only ever blocks a
           # RISE -- so a config loosening lowers the count, passes, and then
           # invites lowering the ceiling to match, locking the loosening in.
-          # Same shape as the byte-identical .secrets.baseline: [tool.mypy] is
-          # pinned in .mypy-config.pinned, and changing it fails the build until
-          # that file is updated in the same commit, deliberately.
+          # scripts/regime/mypy_pin.py compares the [tool.mypy] table, as the
+          # TOML library parses it (sub-tables included), with the table in
+          # .mypy-config.pinned; changing it fails the build until that file is
+          # updated in the same commit, deliberately.
+          # A mypy.ini outranks pyproject.toml, so the step names the file.
+          # The pin runs before `set +e`: its failure fails the step.
         run: |
-          python -c "import pathlib,re; s=pathlib.Path('pyproject.toml').read_text(); m=re.search(r'(?ms)^\[tool\.mypy\].*?(?=^\[(?!tool\.mypy)|\Z)', s); pathlib.Path('/tmp/mypy-config.actual').write_text(m.group(0).rstrip()+chr(10) if m else 'MISSING')"
-          if ! diff -u <(grep -v '^#' .mypy-config.pinned | sed '/^$/d') /tmp/mypy-config.actual; then
-            echo "::error::[tool.mypy] no longer matches .mypy-config.pinned."
-            echo "::error::This gate counts errors; it cannot see strictness. Re-derive"
-            echo "::error::MYPY_CEILING under the new config and update both in one commit."
-            exit 1
-          fi
+          python -m scripts.regime.mypy_pin
           set +e
-          mypy app > /tmp/mypy.txt 2>&1
+          mypy --config-file pyproject.toml app > /tmp/mypy.txt 2>&1
           rc=$?
           set -e
           tail -1 /tmp/mypy.txt
