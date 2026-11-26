@@ -245,7 +245,8 @@ def refresh_breadth() -> dict[str, int]:
 def pct_above_200dma() -> SourceResult:
     """Percent of S&P 500 members with close > their own 200-day SMA.
 
-    RECOMPUTE PATH (no network): the Polygon daily_close cache (full universe,
+    RECOMPUTE PATH: one download, the SSGA constituent list (`sp500_symbols`);
+    the closes come from the Polygon daily_close cache (full universe,
     computed 200-DMA). Partial coverage is PUBLISHED with a provenance note +
     full-universe identification bounds (v3.7.8/B-05) plus structured metadata
     (B-06) rather than dropped. Raises SourceError without a Polygon key or

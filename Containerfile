@@ -75,4 +75,9 @@ RUN mkdir -p /data
 # built image.
 ENV TZ=UTC PYTHONUNBUFFERED=1 PYTHONPATH=/app
 EXPOSE 8000
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# --no-access-log: uvicorn's error log (startup, shutdown, the traceback of a
+# request or a boot that failed) is on; its access log would add a line per
+# request - 2,880 a day from the health check alone. The production journal of
+# 2026-10-05 to 2026-11-10 holds no request line either: Alembic's setup at
+# boot disabled this logger.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]
