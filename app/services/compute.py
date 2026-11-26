@@ -1780,7 +1780,7 @@ def write_judgment(snap_id: int, data: SnapshotData) -> None:
 
 def run_recompute() -> int | None:
     """Full recompute: gather -> compute -> persist -> alert capture ->
-    Parquet export -> feed -> judgment note.
+    feed -> judgment note.
 
     Returns the snapshot id, or None if scoring was impossible (an entire
     block empty). Never raises upstream failures."""
@@ -1805,12 +1805,6 @@ def run_recompute() -> int | None:
         on_snapshot_committed(snap_id)
     except Exception as exc:
         log.warning("alert_hook_failed", error=str(exc)[:300])
-    try:
-        from app.services.backfill import export_parquet
-
-        export_parquet(snap_id)
-    except Exception as exc:
-        log.warning("parquet_export_failed", error=str(exc))
     # Dashboard feed (v3.4.0): built strictly AFTER the score persists — a feed
     # failure can never affect scoring; the endpoint then serves the prior payload.
     try:
