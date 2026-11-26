@@ -9,6 +9,7 @@ capturing evidence is independent of whether alerting is switched on.
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
+from pathlib import Path
 
 import pytest
 
@@ -22,8 +23,9 @@ from app.alerts.registry import instance_fingerprint, unresolved_pins, validate_
 from app.redaction import sanitize
 from tests.conftest import register_promoted
 
-RULES_PATH = "config/alert_rules.v3.2.yaml"
-PHRASES_PATH = "config/alert_phrases.v3.5.json"
+ROOT = Path(__file__).resolve().parents[1]
+RULES_PATH = ROOT / "config/alert_rules.v3.2.yaml"
+PHRASES_PATH = ROOT / "config/alert_phrases.v3.5.json"
 
 
 # ---------------------------------------------------------------------------
@@ -696,7 +698,7 @@ def _persist_snapshot(isolated_db):
 
 
 def test_sidecar_capture_commits_when_alerts_disabled(isolated_db, monkeypatch):
-    """Evidence capture and notification mode are INDEPENDENT switches."""
+    """Evidence capture runs with the notification mode disabled."""
     monkeypatch.setenv("ALERT_INPUT_CAPTURE", "true")
     monkeypatch.setenv("ALERTS_MODE", "disabled")
     from app.config import get_settings
@@ -918,6 +920,37 @@ def test_an_inert_confirmation_basis_is_reported_not_silently_accepted(ruleset):
     # transition bases are NOT flagged: one transition is exactly what they mean
     assert not [w for w in inert if "authoritative_transition" in w]
     assert not [w for w in inert if "adjacent_snapshots" in w]
+
+
+def _flat(path: str) -> str:
+    """A repository file as one line: a sentence is found wherever it is wrapped."""
+    return " ".join((ROOT / path).read_text(encoding="utf-8").replace("#", " ").split())
+
+
+def test_the_document_states_the_loaders_counts(ruleset):
+    """docs/ALERT_SYSTEM.md (sections 4 and 5) and the loader's own comment say
+    how many rules a pin blocks, how many lack an input and how many declare a
+    basis nothing enforces. The numbers are the loader's on the shipped
+    ruleset, so a ruleset version that moves one fails here until the sentence
+    moves with it.
+    """
+    rules = ruleset.rules()
+    enabled = {r.rule_id for r in rules if r.enabled}
+    pinned = set(unresolved_pins(ruleset))
+    no_input = {r.rule_id for r in rules
+                if not r.enabled and r.runtime_readiness == "MISSING_INPUT"}
+    inert = {w.split(":", 1)[0] for w in ruleset.warnings
+             if "no candidate latch enforces it" in w}
+
+    document = _flat("docs/ALERT_SYSTEM.md")
+    assert (f"{len(pinned)} rules are currently blocked this way; {len(no_input)} are "
+            "disabled on inputs this service does not have "
+            f"(`runtime_readiness: MISSING_INPUT`), {len(pinned & no_input)} of them "
+            f"among the {len(pinned)}.") in document
+    written_this_way = f"{len(inert)} of the {len(rules)} shipped rules are written this way"
+    assert (f"{written_this_way} ({len(inert & enabled)} of the {len(enabled)} "
+            "enabled ones)") in document
+    assert written_this_way in _flat("app/alerts/registry.py")
 
 
 def test_live_mode_refuses_a_ruleset_that_was_never_promoted(isolated_db):
