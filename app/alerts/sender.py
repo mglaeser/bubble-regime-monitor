@@ -414,9 +414,8 @@ class ImessageSender:
         #
         # The outbox already owns exactly this identity: `dedupe_key` is stable
         # for one logical message and CHANGES when a reminder generation means
-        # a second send is intended. It is hashed rather than sent verbatim
-        # because it carries rule ids, which are ours and not the proxy's
-        # business.
+        # a second send is intended. The key on the wire is the delivery id,
+        # which is as stable and names no rule (below): nothing is hashed.
         #
         # With no key supplied, fall back to per-call randomness: an unkeyed
         # send is not made worse by being unkeyed, and silently reusing some

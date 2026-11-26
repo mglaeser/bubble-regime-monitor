@@ -10,9 +10,10 @@ rather than dropping the offending rule, because a silently-dropped rule is a
 mechanism that looks configured and never fires.
 
 Promotion is explicit. A last-known-good fallback NEVER escalates the mode: if
-the candidate is invalid the service keeps evaluating the promoted ruleset and
-reports `ops.rules_invalid`; if there is no valid ruleset at all it reports
-`ops.alerting_unavailable` and evaluates nothing.
+the candidate is invalid the service keeps evaluating the promoted ruleset,
+logs `alert_rules_invalid` and carries the reason into alert health
+(`fallback_reason`); if there is no valid ruleset at all it raises
+`AlertingUnavailable` and evaluates nothing (`artifacts.load_active`).
 """
 
 from __future__ import annotations
@@ -486,7 +487,7 @@ def validate_ruleset(
         # declaration is therefore inert — it reads as a control and is not —
         # and what actually limits repeat notifications is `cooldown_seconds`.
         #
-        # Warned, not rejected: 21 of the shipped rules are written this way and
+        # Warned, not rejected: 27 of the 90 shipped rules are written this way and
         # all carry a real cooldown, so this is a documentation defect in the
         # artifact rather than a broken rule. Rejecting would force a third of
         # the inventory to be rewritten to satisfy a naming problem.
