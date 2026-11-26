@@ -567,6 +567,7 @@ def test_the_edgar_request_carries_the_configured_contact(monkeypatch, leftover)
 
     monkeypatch.setattr(edgar, "fetch", fake_fetch)
     monkeypatch.setattr(edgar, "MIN_INTERVAL_S", 0.0)
+    monkeypatch.setattr(edgar, "_last_request", [0.0])
     monkeypatch.setenv("SEC_USER_AGENT", _CONTACT)
     if leftover is None:
         monkeypatch.delenv("SEC_EDGAR_UA", raising=False)
@@ -601,3 +602,24 @@ def test_without_a_contact_no_edgar_request_is_made_and_d3_is_dropped(monkeypatc
     assert step is None and "sec_edgar" in raw.gather_errors and sent == []
     raw.hyperscalers = None   # gather_inputs keeps a reading only from a step that returned one
     assert compute_snapshot(raw, mc_samples=2_000, mc_seed=1).indicators["d3"].dropped
+
+
+def test_a_contact_without_an_email_is_sent_as_the_operator_set_it(monkeypatch):
+    """Only an absent contact is refused; the form is the SEC's to judge."""
+    import app.sources.edgar as edgar
+    from app.config import Settings
+
+    sent: list[dict] = []
+
+    def fake_fetch(source, url, **kwargs):
+        sent.append(kwargs["headers"])
+        return _Response(payload={"facts": {}})
+
+    monkeypatch.setattr(edgar, "fetch", fake_fetch)
+    monkeypatch.setattr(edgar, "MIN_INTERVAL_S", 0.0)
+    monkeypatch.setattr(edgar, "_last_request", [0.0])
+    monkeypatch.setattr(edgar, "get_settings",
+                        lambda: Settings(_env_file=None, sec_user_agent="Example Research"))
+    with pytest.raises(SourceError, match="no hyperscaler facts"):   # the fake files nothing
+        edgar.hyperscaler_readings()
+    assert sent == [{"User-Agent": "Example Research"}] * len(edgar.CIKS)
