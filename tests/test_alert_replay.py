@@ -10,7 +10,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -644,6 +644,59 @@ def test_a_derisk_neighbour_settles_an_excursion(tmp_path, artifacts):
     summary = _run(tmp_path, artifacts, name="run.db", inputs=history)
     assert summary.transient_one_snapshot_band_p1 == 0
     assert summary.indeterminate_band_excursions == 0
+
+
+_FIRST_ENTRY = datetime(2026, 8, 15, 6, tzinfo=UTC)
+_AFTER_48_MONTHS = datetime(2030, 8, 15, 2, tzinfo=UTC)
+_24_MONTHS = timedelta(days=24 * 30.44)
+
+
+@pytest.mark.parametrize(("second_entry", "last_snapshot", "busiest"), [
+    pytest.param(_FIRST_ENTRY + timedelta(hours=12), None, 2, id="12 hours apart in one day"),
+    pytest.param(datetime(2028, 9, 15, 6, tzinfo=UTC), _AFTER_48_MONTHS, 1, id="25 months apart in 48"),
+    pytest.param(datetime(2028, 7, 15, 6, tzinfo=UTC), _AFTER_48_MONTHS, 2, id="23 months apart in 48"),
+    pytest.param(_FIRST_ENTRY + _24_MONTHS, _AFTER_48_MONTHS, 2, id="exactly 24 months apart"),
+    pytest.param(_FIRST_ENTRY + _24_MONTHS + timedelta(seconds=1), _AFTER_48_MONTHS, 1,
+                 id="24 months and one second apart"),
+])
+def test_the_gate_judges_the_busiest_24_months_of_one_snapshot_derisk_entries(
+        tmp_path, artifacts, second_entry, last_snapshot, busiest):
+    """config/alert_rules.v3.2.yaml, regime.band_to_derisk: "Keep it only while
+    replay shows <= 1 transient one-snapshot P1 per 24 months". A month is 30.44
+    days, and two entries exactly 24 of them apart lie in one window."""
+    moments = [(entry + timedelta(hours=offset), band) for entry in (_FIRST_ENTRY, second_entry)
+               for offset, band in ((-4, "trim"), (0, "de-risk"), (4, "trim"))]
+    if last_snapshot is not None:
+        moments.append((last_snapshot, "trim"))
+    history = [
+        make_input(identity=f"k{i}", computed_at=moment.isoformat(), effective=band, base=band,
+                   median=63.0 if band == "de-risk" else 52.0)
+        for i, (moment, band) in enumerate(moments)
+    ]
+    summary = _run(tmp_path, artifacts, name="keep.db", stage=1, inputs=history)
+    assert summary.failures == ([
+        "2 transient one-snapshot de-risk entries inside one window of 24 months; "
+        "regime.band_to_derisk is kept only while replay shows <= 1 per 24 months"]
+        if busiest > 1 else [])
+    assert (summary.transient_one_snapshot_band_p1,
+            summary.transient_one_snapshot_band_p1_busiest_24_months) == (2, busiest)
+
+
+@pytest.mark.parametrize(("span", "covered"), [
+    pytest.param(_24_MONTHS, True, id="exactly 24 months"),
+    pytest.param(_24_MONTHS - timedelta(seconds=1), False, id="24 months less one second"),
+    pytest.param(timedelta(days=730, hours=16), True, id="730 days and 16 hours"),
+])
+def test_a_history_of_one_whole_window_measures_the_keep_condition(tmp_path, artifacts, span, covered):
+    """A history whose last snapshot is at least 24 months of 30.44 days after its
+    first measures the keep condition, and one second less does not. Each of
+    these histories is stored as 23.98 months, its whole days divided by 30.44."""
+    history = [make_input(identity=f"c{i}", computed_at=moment.isoformat())
+               for i, moment in enumerate((_FIRST_ENTRY, _FIRST_ENTRY + span))]
+    summary = _run(tmp_path, artifacts, name="span.db", stage=1, inputs=history)
+    listed = [note for note in summary.not_measured if "transient_derisk_p1_rate" in note]
+    assert bool(listed) is not covered, listed
+    assert (summary.band_excursion_months, summary.band_excursion_covers_24_months) == (23.98, covered)
 
 
 # ---------------------------------------------------------------------------
