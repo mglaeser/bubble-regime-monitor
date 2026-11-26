@@ -63,10 +63,10 @@ ENV (same contract as the reference):
   VERIFIER_REQUIRED_APPROVER      required-approver model prefix (default gpt-5.6-sol)
   VERIFIER_MIN_OTHER_APPROVERS    independent corroborations required (default 1)
   VERIFIER_REQUIRE_KEY            fail closed without a key when true (hosted default)
-  VERIFIER_REQUIRE_DEFECT_LIST    a GREEN vote MUST carry a "defects" ledger (default
-                                  off; turn on only once the run logs show every
-                                  configured voice emitting the field, then it is on
-                                  for good — see docs/INDEPENDENT_REVIEW_PANEL.md)
+  VERIFIER_REQUIRE_DEFECT_LIST    a GREEN vote MUST carry a "defects" ledger (off by
+                                  default in this script; the hosted workflow sets it
+                                  to true — docs/INDEPENDENT_REVIEW_PANEL.md,
+                                  Mechanism, item 4)
 
 Usage:
   python scripts/independent_verify.py             verify the PR diff (exit != 0 on block)
@@ -808,8 +808,9 @@ def attest_consistency(votes: list[dict], models: list[str],
     AND supplies a substantive, distinct reason that helps attest_reasons pass.
 
     Found adversarially: a panelist returned refuted=false with a reason that
-    named two concrete defects. Fail-CLOSED — an inconsistent vote is discarded
-    as a parse failure, not resolved in favour of green.
+    named two concrete defects. Fail-CLOSED — one inconsistent green vote blocks
+    the run: this function returns ``block`` and ``main()`` exits 1 at the first
+    blocking gate.
 
     THE LADDER, per green vote, first hit wins, every rung fail-CLOSED:
       1. a ``defects`` ledger present but not a list of strings -> the schema
@@ -826,7 +827,7 @@ def attest_consistency(votes: list[dict], models: list[str],
       4. the vote's own prose names a defect word -> BLOCK.
 
     RUNG 4'S MATCH IS DELIBERATELY LITERAL, and stays that way. A green reason
-    saying "no fail-open" is discarded even though it asserts the OPPOSITE of a
+    saying "no fail-open" blocks the run even though it asserts the OPPOSITE of a
     defect, which cost a unanimous 3/3 approval on PR #64. The fix for that is
     upstream, in `build_system_prompt`: a green vote is asked to name code paths
     and no defect term at all, so the ambiguous phrasing is never produced.
