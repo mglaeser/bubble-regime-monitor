@@ -1272,3 +1272,81 @@ def test_unknown_at_a_full_window_does_not_erase_known_flap_history():
 
     assert after["states"] == before["states"] == known
     assert after["transitions"] == before["transitions"]
+
+
+# ---------------------------------------------------------------------------
+# an event rule fires for every occurrence (resolution policy single_shot)
+# ---------------------------------------------------------------------------
+
+
+def test_a_crossing_hold_follows_its_direction_and_only_the_two_holding_policies():
+    """Up is held at or above the level, down at or below it. A crossing that
+    resolves `auto_on_condition_false` stays an event that ends at the next
+    evaluation: tripwire.margin_rollover is the enabled rule of that kind."""
+    def rule(direction: str, policy: str) -> RuleSpec:
+        return _rule(
+            rule_id="test.cross", source_fields=["breadth_pct"],
+            condition={"kind": "crossing", "source": "breadth_pct",
+                       "direction": direction, "level": "tier"},
+            thresholds=[{"name": "tier", "value": 60.0, "unit": "percent",
+                         "attribution": "LIT"}],
+            confirmation_sources=["breadth_pct"], authoritative=False,
+            resolution={"policy": policy})
+
+    def truth(direction: str, policy: str, value: float | None, *, firing: bool = True):
+        before = make_input(identity="before", breadth=value)
+        return evaluate_rule(rule(direction, policy),
+                             _ctx(make_input(identity="now", breadth=value), before),
+                             currently_firing=firing).truth
+
+    for policy in ("single_shot", "auto_on_inverse"):
+        assert truth("up", policy, 70.0) is True
+        assert truth("up", policy, 60.0) is True
+        assert truth("up", policy, 59.9) is False
+        assert truth("down", policy, 50.0) is True
+        assert truth("down", policy, 60.0) is True
+        assert truth("down", policy, 60.1) is False
+        # Sitting beyond a level is not crossing it: no episode, no hold.
+        assert truth("up", policy, 70.0, firing=False) is False
+        # An unreadable value holds the episode as UNKNOWN, it does not end it.
+        assert truth("up", policy, None) is None
+    assert truth("up", "auto_on_condition_false", 70.0) is False
+    assert truth("down", "auto_on_condition_false", 50.0) is False
+
+
+def test_two_all_clears_five_days_apart_both_plan_a_message(isolated_db, monkeypatch):
+    """The real engine and database: the breadth flag is on, clears, comes
+    back five days later and clears again. Each clearing is an episode with a
+    planned message; the first episode ended when the flag came back."""
+    from sqlalchemy import select
+
+    from app.alerts.models import AlertDeliveryMember, AlertEpisode
+    from app.db import session_scope
+
+    # `_artifacts()` reads config/ relative to the working directory, so work
+    # from the repository root that this file names.
+    monkeypatch.chdir(Path(__file__).resolve().parents[1])
+    artifacts = _artifacts()
+    start = datetime(2026, 8, 17, 2, 0, tzinfo=UTC)
+    activated: dict[int, list[str]] = {}
+    for slot, flag in [(0, True), (1, False), (2, False), (33, True), (34, False),
+                       (35, False)]:
+        at = start + timedelta(hours=4 * slot)
+        current = make_input(identity=f"clear-{slot}", computed_at=at.isoformat(),
+                             rf4=flag, rf4_period=at.date().isoformat())
+        _store_input(current, at)
+        outcome = _run(current, artifacts, now=at + timedelta(minutes=2))
+        assert outcome.status == "COMMITTED"
+        activated[slot] = [d.rule_id for d in outcome.decisions if d.activate_episode]
+
+    assert "tripwire.rf4_all_clear" in activated[1]
+    assert "tripwire.rf4_all_clear" in activated[34], "the second all-clear did not fire"
+    assert "tripwire.rf4_all_clear" not in activated[2] + activated[33] + activated[35]
+    with session_scope() as session:
+        episodes = [(row.episode_status, row.is_open) for row in session.execute(
+            select(AlertEpisode).where(AlertEpisode.rule_id == "tripwire.rf4_all_clear")
+            .order_by(AlertEpisode.opened_at)).scalars().all()]
+        members = session.execute(select(AlertDeliveryMember).where(
+            AlertDeliveryMember.rule_id == "tripwire.rf4_all_clear")).scalars().all()
+        assert episodes == [(EpisodeStatus.RESOLVED, False), (EpisodeStatus.FIRING, True)]
+        assert len(members) == 2

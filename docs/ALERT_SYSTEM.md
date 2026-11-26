@@ -214,6 +214,18 @@ Faber legs, 30 on the release-driven rules. If a source flip-flops inside one
 period, the condition re-fires and the cooldown is the only thing standing
 between that and a second message.
 
+When a condition can fire again is decided by the rule's `resolution.policy`.
+Under `auto_on_inverse` and `single_shot` the episode of a transition or a
+crossing lasts while the state it reported lasts (the flag stays off, the leg
+stays in, the run-up stays at or above its tier) and ends with it, and the
+rule fires again at the next occurrence. A P2 still held for quiet hours when
+an evaluation reads that state as over is dropped as `RESOLVED_BEFORE_SEND`
+(section 11e). A condition that names no lasting state, the `delta` of
+`constellation.falsification_event`, ends at the first false evaluation. An
+episode stored open under the earlier reading, in which a `single_shot`
+episode never ended, needs no migration: from the next evaluation on it, too,
+lasts while its state lasts and ends with it, without a message.
+
 The loader emits a warning naming each such rule and the cooldown carrying the
 weight, because the failure mode this documents is a reader trusting an
 enforcement that is not happening. It is a warning rather than a rejection: the
@@ -908,6 +920,13 @@ rule's cooldown is no longer planned. Deliveries planned `13 -> 10`, P1
 unchanged caps, the 168h mean `8.0 -> 6.0`, `held_quiet` `3 -> 1`,
 `held_budget` `2 -> 1`, `SUPERSEDED` `4 -> 3` and `COOLDOWN` `0 -> 4`. No
 verdict moved.
+
+A `single_shot` episode ending with its state (section 5) moved Stages 3 and
+4: episodes opened `20 -> 22`, activated `19 -> 21`, resolved `17 -> 19`. The
+two new episodes are the arc's second `tripwire.rf4_all_clear` and second
+`legs.faber_spy_back_in`, each 20 h after the first and inside its 48 h
+cooldown, so neither plans a message and `COOLDOWN` goes `4 -> 6`. No verdict
+moved.
 
 `tests/fixtures/alert_replay_history.json` declares the **arc** — twenty
 recompute slots through hold → trim → de-risk → recovery, with two blind slots
