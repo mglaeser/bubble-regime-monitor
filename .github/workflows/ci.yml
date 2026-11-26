@@ -10,9 +10,10 @@ name: ci
 # same defect class as a decorative gate — it reads as control and is not.)
 #
 # ENFORCEMENT (this note is a claim about the repository, so it is kept true):
-# a ruleset on `main` marks `test (3.12)` and `image` REQUIRED, with no bypass
-# actors, and a direct push to main is rejected. That closes the open item this
-# note used to describe.
+# a ruleset on `main` marks `test (3.12)`, `image` and `independent-verify`
+# (the review panel's verdict, .github/workflows/independent-verify.yml)
+# REQUIRED, with no bypass actors, and a direct push to main is rejected. That
+# closes the open item this note used to describe.
 
 on:
   push:
@@ -93,7 +94,12 @@ jobs:
           # (app/services/compute.py, `_track_closes` replaced it).
           # 115 -> 114: the Monte Carlo settings went from app/config.py, and
           # the no-any-return of the helper that read their defaults with them.
-          MYPY_CEILING: "114"
+          # 114 -> 113: the dashboard feed's ETF fallback for a failed spot quote
+          # went (a spot key carries the spot quote or nothing), and with it a
+          # function without a return type.
+          # 113 -> 112: the history route reduces to days and months in SQL; the
+          # two untyped period lambdas of its Python reduction went.
+          MYPY_CEILING: "112"
           # The floor constrains REACH, not DEPTH: it proves mypy READ the tree.
           # It does NOT make a low count mean "little is wrong" -- an earlier
           # version of this comment claimed that, and it is false. Measured:
@@ -105,19 +111,16 @@ jobs:
           # DEPTH is pinned separately, because the ratchet only ever blocks a
           # RISE -- so a config loosening lowers the count, passes, and then
           # invites lowering the ceiling to match, locking the loosening in.
-          # Same shape as the byte-identical .secrets.baseline: [tool.mypy] is
-          # pinned in .mypy-config.pinned, and changing it fails the build until
-          # that file is updated in the same commit, deliberately.
+          # scripts/regime/mypy_pin.py compares the [tool.mypy] table, as the
+          # TOML library parses it (sub-tables included), with the table in
+          # .mypy-config.pinned; changing it fails the build until that file is
+          # updated in the same commit, deliberately.
+          # A mypy.ini outranks pyproject.toml, so the step names the file.
+          # The pin runs before `set +e`: its failure fails the step.
         run: |
-          python -c "import pathlib,re; s=pathlib.Path('pyproject.toml').read_text(); m=re.search(r'(?ms)^\[tool\.mypy\].*?(?=^\[(?!tool\.mypy)|\Z)', s); pathlib.Path('/tmp/mypy-config.actual').write_text(m.group(0).rstrip()+chr(10) if m else 'MISSING')"
-          if ! diff -u <(grep -v '^#' .mypy-config.pinned | sed '/^$/d') /tmp/mypy-config.actual; then
-            echo "::error::[tool.mypy] no longer matches .mypy-config.pinned."
-            echo "::error::This gate counts errors; it cannot see strictness. Re-derive"
-            echo "::error::MYPY_CEILING under the new config and update both in one commit."
-            exit 1
-          fi
+          python -m scripts.regime.mypy_pin
           set +e
-          mypy app > /tmp/mypy.txt 2>&1
+          mypy --config-file pyproject.toml app > /tmp/mypy.txt 2>&1
           rc=$?
           set -e
           tail -1 /tmp/mypy.txt
@@ -214,33 +217,16 @@ jobs:
         run: |
           python -m scripts.regime.authz_coverage --selftest
           python -m scripts.regime.authz_coverage
-      - name: Regime — findings ledger (report during remediation)
-        # Deliberately the reporting mode, not --strict: 4 STOP-SHIP and 11
-        # BLOCKER-1 findings are open and being worked. --strict turns on in
-        # WP9 once they reach zero. A gate that can never pass is a gate
-        # someone deletes under pressure; this one states the tally instead.
+      - name: Regime — findings ledger (report only)
+        # The tally of the 2026-07 audit's findings ledger
+        # (audit/03-findings.json), reported: it blocks nothing. The step fails
+        # when the selftest fails or the ledger cannot be read.
         run: python -m scripts.regime.findings_gate --selftest && python -m scripts.regime.findings_gate
 
-  deploy-admission-proof:
-    # A job whose GREEN CONDITION IS THE REFUSAL. It proves the deploy gate
-    # actually fails closed, rather than trusting that it would — the failure
-    # mode being guarded against is an admission check that silently starts
-    # returning 0 and is never noticed because nothing ever exercises it.
-    runs-on: ubuntu-24.04
-    steps:
-      # v4.4.0
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-      # v5.6.0
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
-        with:
-          python-version: "3.12"
-      - name: Deploy admission MUST refuse while production_eligible is false
-        run: |
-          if python -m scripts.regime.findings_gate --admission; then
-            echo "::error::Admission was GRANTED while blocking findings are open."
-            exit 1
-          fi
-          echo "Admission correctly refused (fail-closed)."
+  # The job deploy-admission-proof stood here. It ran `findings_gate
+  # --admission` and was green when that refused. It gated nothing:
+  # deploy/release.sh, which releases main, does not call the mode
+  # (scripts/regime/findings_gate.py).
 
   image:
     runs-on: ubuntu-24.04
