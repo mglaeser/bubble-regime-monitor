@@ -1070,7 +1070,7 @@
       "kind": "map",
       "entries": {
         "hold": "Hold — structural risk is present but not acute. No action indicated by the trend rule.",
-        "trim": "Trim — fragility is elevated. Consider easing risk if the trend rule confirms.",
+        "trim": "Trim — fragility is elevated. The trend rule is the trigger.",
         "de-risk": "De-risk — fragility is high or a hard override has fired. The trend rule is now the thing to watch.",
         "suppressed": "Band withheld right now — too many inputs for one block are unavailable, so the action band is withheld rather than guessed; the score is still published.",
         "suppressed (block degraded)": "Band withheld right now — too many inputs for one block are unavailable, so the action band is withheld rather than guessed; the score is still published.",
@@ -1468,22 +1468,22 @@
         {
           "band": "de-risk",
           "trend_broken": "yes",
-          "template": "De-risk now — {names} has broken trend."
+          "template": "Band de-risk — {names} has broken trend."
         },
         {
           "band": "de-risk",
           "trend_broken": "no",
-          "template": "De-risk is warranted; the trigger has not fired."
+          "template": "Band de-risk; the trigger has not fired."
         },
         {
           "band": "trim",
           "trend_broken": "yes",
-          "template": "Trim now — the trigger has fired on {names}."
+          "template": "Band trim — the trigger has fired on {names}."
         },
         {
           "band": "trim",
           "trend_broken": "no",
-          "template": "Trim is warranted — but nothing forces action today."
+          "template": "Band trim; the trigger has not fired."
         },
         {
           "band": "hold",
