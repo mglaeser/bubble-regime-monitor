@@ -228,7 +228,8 @@ class Settings(BaseSettings):
     # operator can widen them without a code change (Q42).
     message_engine_min_interval_s: int = 300     # floor between two model calls
     message_engine_breaker_strikes: int = 5      # failed calls in a row -> cooldown
-    message_engine_breaker_cooldown_s: int = 86400   # no call for this long after them
+    # Half a day (a day until 2026-11-25): the next morning's digest is the probe.
+    message_engine_breaker_cooldown_s: int = 43200   # no call for this long after them
 
     # Volume cap (ruling Q40). At the cap the evergreen fallback is used and
     # the exhaustion is reported in the next digest — never a dropped message.
