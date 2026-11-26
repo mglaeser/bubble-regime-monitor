@@ -63,7 +63,7 @@ from app.indicators import (
 from app.logging_conf import get_logger
 from app.models import HyOasHistory, Snapshot, SourceHealth
 from app.redaction import sanitize
-from app.references import REGISTRY
+from app.references import REGISTRY, SOURCE_REGISTRY
 
 log = get_logger(__name__)
 
@@ -76,7 +76,7 @@ FRESHNESS_SLA_DAYS: dict[str, int] = _M.as_dict("freshness_sla_days")
 # The readings a daily market feed delivers once per NYSE session, the ones with
 # the 3-day SLA: their SLA counts NYSE sessions since as_of, not calendar days.
 # Counted in calendar days, Friday's breadth is 4 days old on every Tuesday
-# until Monday's is stored (13:00 UTC), and the coverage gate reads a weekend
+# until Monday's is stored, and the coverage gate reads a weekend
 # as an outage. The cost: a daily feed that really stops is stale once more
 # than three sessions have passed, two calendar days later across a weekend,
 # three across an exchange holiday too, never earlier. The numbers stay the
@@ -139,13 +139,14 @@ def _age_days(as_of_iso: str | None) -> int | None:
         return None
 
 
-def _past_sla(indicator_id: str, as_of_iso: str | None, today: date) -> bool | None:
-    """Is a reading dated `as_of_iso` past its indicator's freshness SLA on `today`?
+def _older_than(as_of_iso: str | None, limit: int, today: date, *,
+                in_sessions: bool) -> bool | None:
+    """Is a reading dated `as_of_iso` more than `limit` days old on `today`,
+    counted in NYSE sessions or in calendar days?
 
-    None when the date or the SLA is unknown. A reading dated after `today`
-    (clock skew, bad vintage) is past it (v3.7.3/O-06)."""
-    sla = FRESHNESS_SLA_DAYS.get(indicator_id)
-    if not as_of_iso or sla is None:
+    None when the date is unknown. A reading dated after `today` (clock skew,
+    bad vintage) counts as older (v3.7.3/O-06)."""
+    if not as_of_iso:
         return None
     try:
         as_of = date.fromisoformat(as_of_iso[:10])
@@ -153,9 +154,25 @@ def _past_sla(indicator_id: str, as_of_iso: str | None, today: date) -> bool | N
         return None
     if as_of > today:
         return True
-    if indicator_id in SESSION_AGED:
-        return trading_days_after(as_of, today) > sla
-    return (today - as_of).days > sla
+    age = trading_days_after(as_of, today) if in_sessions else (today - as_of).days
+    return age > limit
+
+
+def _past_sla(indicator_id: str, as_of_iso: str | None, today: date) -> bool | None:
+    """Is a reading dated `as_of_iso` past its indicator's freshness SLA on `today`?
+
+    None when the date or the SLA is unknown."""
+    sla = FRESHNESS_SLA_DAYS.get(indicator_id)
+    if sla is None:
+        return None
+    return _older_than(as_of_iso, sla, today, in_sessions=indicator_id in SESSION_AGED)
+
+
+# Red flag 3 reads FRED's daily HY OAS (BAMLH0A0HYM2), whichever tier S5 is
+# scored on, so its record carries that reading's own freshness: the SLA of the
+# registry row that documents the series, counted in NYSE sessions.
+HY_OAS_SLA_DAYS: int = next(
+    spec.sla_days for spec in SOURCE_REGISTRY if spec.key == "fred_hyoas")
 
 
 def _month_end_iso(yyyy_mm: str) -> str:
@@ -1193,8 +1210,10 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         # FIDELITY quality 0.3 (v3.3.2): right construct family (a market credit
         # spread) but the FRED-truncated 3yr window makes its percentile
         # regime-limited — the weakest usable tier of the s5 chain.
+        # fallback_used is True, as on the proxy tier above: the chain is EBP,
+        # then the proxy, then this tier.
         indicators["s5"] = IndicatorOutput("s5", oas_t2, sub, False,
-                                           "fred_BAMLH0A0HYM2", False, note=s5_note,
+                                           "fred_BAMLH0A0HYM2", True, note=s5_note,
                                            as_of=raw.hy_oas_as_of, quality=0.3,
                                            extra=_s5_extra(
                                                "fred_BAMLH0A0HYM2", sub,
@@ -1653,7 +1672,10 @@ def persist_snapshot(data: SnapshotData, raw: RawInputs) -> int:
         hy_oas_bps=raw.hy_oas_bps,
         hy_oas_tight_bps=data.hy_oas_tight_bps,
         hy_oas_as_of=raw.hy_oas_as_of,
-        hy_oas_stale=_ind_stale("s5"),
+        # The spread's own age on the day the record is stamped with, not S5's
+        # state: see HY_OAS_SLA_DAYS.
+        hy_oas_stale=_older_than(raw.hy_oas_as_of, HY_OAS_SLA_DAYS, now.date(),
+                                 in_sessions=True),
         breadth_pct=raw.breadth_pct,
         breadth_as_of=raw.breadth_as_of,
         breadth_stale=_ind_stale("d1"),

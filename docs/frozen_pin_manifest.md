@@ -234,7 +234,8 @@ Source: `compute.py`, `d4_lppls.py`.
 
 - Never HTTP 500 on data failure: fall back down the chain, or drop the indicator and renormalize its block, always with a provenance note (guardrail #5).
 - Drop + renormalize over present keys (`aggregate.py:renormalize`; raises if a block empties → recompute returns None, no 500).
-- d4 FLOOR / s4 FLOOR: row stays in payload with `quality=0.0`; the value is EXCLUDED from the geometric mean (block renormalizes). `VALID_ZERO` (a genuine 0) ENTERS the aggregation.
+- d4 FLOOR: row stays in payload with `quality=0.0`; the value is EXCLUDED from the geometric mean (Block D renormalizes). `VALID_ZERO` (a genuine 0) ENTERS the aggregation.
+- s4 FLOOR: row stays in payload with `quality=0.0` and KEEPS 0.25 (`SUB_CONTESTED_OR_STALE`) in the geometric mean of Block S, labelled `imputation: missing_to_contested_floor` (AGENTS.md rule 4).
 - s5 chain: EBP (≥24 mo) → BAA-DGS10 proxy (≥24 mo) → HY-OAS 3yr → drop.
 - d2: a reference month at most 75 days old → YoY + rollover from the file, or, when the file cannot be read or lacks the month a year back, the stored reading of the latest month computed from it (rollover unknown); else drop.
 
