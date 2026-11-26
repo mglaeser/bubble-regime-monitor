@@ -1259,15 +1259,29 @@ KNOWN_ISSUES: list[dict[str, str]] = [
      "detail": "If the price chain falls through to Alpha Vantage, closes are split/dividend "
      "unadjusted (acceptable for short-window ETF math; flagged in provenance).",
      "ref": "sources.prices"},
-    {"id": "gsadf-wb-cv", "severity": "info", "category": "calibration",
-     "title": "GSADF now uses extended history + wild-bootstrap CVs (verify on host)",
-     "detail": "v3.3.0 feeds an extended Tiingo monthly history (QQQ from 1999, T~329, past the "
-     "PSY T=100 tabulation floor) and switched exuber to wild-bootstrap critical values "
-     "(radf_wb_cv, Harvey et al. 2016; robust to the serial-correlation oversizing of "
-     "Pedersen-Schutte 2020). s4 is still capped at the contested 0.25, so this does not move "
-     "the headline — it only makes the displayed statistic honest. The R path degrades to the "
-     "0.25 floor if exuber errors; smoke-test on the host after deploy.",
-     "ref": "indicator s4"},
+    # The "gsadf-wb-cv" entry that stood here is deleted: it described
+    # wild-bootstrap critical values, and r/gsadf.R computes cached Monte Carlo
+    # ones (radf_mc_cv, as the v3.3.1 changelog entry says).
+    {"id": "s5-positional-lag", "severity": "warn", "category": "documented-deviation",
+     "title": "S5 reads 'two years ago' by counting observations, not by the calendar",
+     "detail": "The t-2yr lookup steps back a fixed number of observations (24 monthly ones on "
+     "the excess-bond-premium and Baa-proxy tiers, 504 daily rows on the HY-OAS tier; the "
+     "oldest one when a history is shorter), so a gap in a series shifts the horizon and the "
+     "tiers do not mean the same two years. Every computed S5 payload says so: s5_lag = "
+     "provisional_positional, known_defects C-01, C-02, C-03. Calendar anchoring would move "
+     "the score; by operator decision it waits for S5 v4 and production S5 stays positional "
+     "(docs/PINS_DECISION_MEMO.md, H).",
+     "ref": "indicator s5"},
+    {"id": "ath-window-high", "severity": "info", "category": "data-substitution",
+     "title": "Red flag 4 measures 'near the all-time high' against the high of the price window",
+     "detail": "The high is the maximum of the SPY closes the price layer returns (on the "
+     "primary provider dividend-adjusted and about 3.5 years long), not the all-time high of "
+     "the S&P 500 price index, which is the intended basis (docs/PINS_DECISION_MEMO.md, F): a "
+     "window that no longer contains the record high understates it. Until an approved "
+     "long-history source exists every snapshot labels the basis: _ath_provenance ath_basis = "
+     "adjusted_spy_provider_window_max, ath_history_complete = false (operator decision "
+     "PIN-F, 2026-07-23).",
+     "ref": "red flag 4"},
 ]
 
 
