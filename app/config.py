@@ -38,14 +38,13 @@ class Settings(BaseSettings):
     admin_api_key: str = "change-me-to-a-long-random-string"
     read_endpoints_public: bool = True
 
-    # SEC EDGAR etiquette (MANDATORY, format: "Name email").
-    # SEC_EDGAR_UA is the v3.1 name; SEC_USER_AGENT remains accepted.
-    sec_user_agent: str = "bubblegauge-monitor admin@example.com"
-    sec_edgar_ua: str = ""
-
-    @property
-    def effective_sec_ua(self) -> str:
-        return self.sec_edgar_ua or self.sec_user_agent
+    # SEC EDGAR etiquette (MANDATORY, format: "Name email"): the contact every
+    # companyfacts request carries, D3's one source. One setting, the name the
+    # template offers. SEC_EDGAR_UA, a second name that won when it was set,
+    # went: no backward compatibility (the owner's ruling of 2026-09-20,
+    # AGENTS.md). A leftover SEC_EDGAR_UA changes nothing and is reported
+    # (RETIRED_ENV_KEYS below).
+    sec_user_agent: str = ""
 
     # The SMS transport, the sipgate REST API v2 (POST /sessions/sms), for the
     # daily digest, the failure alarm and the alerts when iMessage is not
@@ -381,6 +380,10 @@ RETIRED_ENV_KEYS: dict[str, str] = {
              "the sample count of frozen_methodology.json (monte_carlo.seed, "
              "monte_carlo.samples) whatever the environment says, so remove this key")
        for key in ("MC_SAMPLES", "MC_SEED")},
+    "SEC_EDGAR_UA": (
+        "removed as the second name of the SEC contact (no backward compatibility, the "
+        "owner's ruling of 2026-09-20): SEC_USER_AGENT alone names it, so put the contact "
+        "there and remove this key"),
 }
 
 

@@ -278,3 +278,29 @@ def test_every_public_read_answers_429_after_sixty_requests(client, monkeypatch)
     finally:
         limiter.reset()
     assert not_limited == {}, f"public reads without the 60/minute limit: {not_limited}"
+
+
+def test_no_route_description_promises_backward_compatibility(client):
+    """AGENTS.md: "compatibility shims (none are kept: the owner ruled on
+    2026-09-20 that there is no backward compatibility anywhere)". A route's
+    description is part of the served contract (/openapi.json), and none of
+    them promises a caller of an older version that it keeps working. One did:
+    POST /api/v1/admin/send-sms called its path "kept as /send-sms so existing
+    operator scripts and bookmarks keep working", and the README said the same
+    of it. The route has one path and no alias; the path stays, the promise
+    went."""
+    import re
+    from pathlib import Path
+
+    promise = re.compile(r"keeps? working|backwards?[- ]compat", re.IGNORECASE)
+    described = {
+        f"{method.upper()} {path}": operation.get("description") or ""
+        for path, item in client.app.openapi()["paths"].items()
+        for method, operation in item.items() if isinstance(operation, dict)
+    }
+    assert "POST /api/v1/admin/send-sms" in described
+    assert [name for name, text in described.items() if promise.search(text)] == []
+
+    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
+    assert [line[:120] for line in readme.splitlines()
+            if "/admin/send-sms" in line and promise.search(line)] == []
