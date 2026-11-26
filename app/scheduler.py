@@ -70,12 +70,6 @@ def _alert_retention_job() -> None:
     job()   # never raises
 
 
-def _db_backup_job() -> None:
-    from app.jobs.db_backup import job
-
-    job()   # never raises
-
-
 def _stuck_watchdog_job() -> None:
     # THE WATCHDOG NEEDS ITS OWN CLOCK. `run_recompute_guarded` reports a wedged
     # run from its single-flight skip branch, and that branch is unreachable in
@@ -168,15 +162,6 @@ def start() -> BackgroundScheduler:
                            CronTrigger(hour=3, minute=25, timezone="UTC"),
                            id="alert_retention", replace_existing=True,
                            coalesce=True, misfire_grace_time=21600, max_instances=1)
-        # A copy of the database every day (app/jobs/db_backup.py): SQLite's
-        # online backup, the newest seven kept. After the retention sweep, off
-        # the recompute hours, and on a minute none of the half-hourly jobs
-        # above fires on (:05/:35, :10/:40, :15/:45). The copy only reads, and
-        # under WAL a reader blocks no writer.
-        _scheduler.add_job(_db_backup_job,
-                           CronTrigger(hour=3, minute=50, timezone="UTC"),
-                           id="db_backup", replace_existing=True,
-                           coalesce=True, misfire_grace_time=21600, max_instances=1)
         digest_schedule = "disabled"
         # Gated on the selected TRANSPORT (Settings.daily_digest_transport):
         # iMessage when enabled and configured, else sipgate when SMS_ENABLED
@@ -232,7 +217,6 @@ def start() -> BackgroundScheduler:
                  alert_recovery="every 30min (:15/:45)",
                  alert_watchdog="every 30min (:10/:40), plus host timer",
                  alert_retention="daily 03:25 UTC",
-                 db_backup="daily 03:50 UTC",
                  stuck_watchdog="every 30min (:05/:35)",
                  alert_dispatch=f"every {max(20, settings.alerts_dispatch_poll_s)}s "
                                f"(mode={settings.alerts_mode})")
