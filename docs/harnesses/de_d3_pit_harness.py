@@ -17,7 +17,7 @@ Grid evaluated at each quarterly evaluation date:
                       vs transform_then_avg (bounded issuer stress first)
 
 Per combination: D3 availability, D3 sub-score (gate OFF assumed: cap 0.30 —
-the historical gate needs segment-revenue vintages, reported separately),
+the gate's growth leg, the group's total revenue, is not replayed here),
 D-block coverage effect, leave-one-issuer-out sensitivity, and the audit flag
 "distress made LESS alarming vs baseline".
 
