@@ -6,8 +6,10 @@ gather's own contract is "A source failure never raises out of here".
 
 from __future__ import annotations
 
+from datetime import date, timedelta
+
 from app.services import compute
-from app.sources import SourceError
+from app.sources import Provenance, SourceError, SourceResult
 
 
 def _seams():
@@ -39,20 +41,44 @@ def _raises(*_args, **_kwargs):
     raise SourceError("simulated outage")
 
 
+def _prices_down(canonical, *_args, **_kwargs):
+    if canonical != "NDX":
+        raise SourceError("simulated outage")
+    from app.indicators import d4_lppls
+
+    rows = [((date(2024, 1, 1) + timedelta(days=i)).isoformat(), 100.0 + i)
+            for i in range(d4_lppls.MIN_CLOSES)]
+    return SourceResult(rows, Provenance(source="cache", as_of=rows[-1][0], fallback_used=True,
+                                         note="all providers failed; serving stale cache"))
+
+
 #: An adapter raises `SourceError`. The two subprocess runners report their own
 #: failure instead: r/gsadf.R's as None (app/engine/gsadf_runner.py), the LPPLS
-#: fit's as a FLOOR result (app/indicators/d4_lppls.py).
+#: fit's as a FLOOR result (app/indicators/d4_lppls.py). The price chain fails
+#: for every series and serves a stale cache for NDX alone, flagged as a
+#: fallback (app/sources/prices.py), so the steps that need NDX's daily closes
+#: run too.
 _REPORTS_ITS_OWN_FAILURE = {
     "gsadf": lambda *_a, **_k: None,
     "lppls": lambda closes, *_a, **_k: {
         "state": "FLOOR", "value": None, "quality": 0.0, "n_windows_evaluated": 0,
         "n_windows_positive": 0, "n_windows_qualifying": 0, "n_closes": len(closes),
         "window": None, "bands": None, "reason": "simulated outage"},
+    "price": _prices_down,
 }
 
 
 def test_every_upstream_down_never_raises(isolated_db, monkeypatch):
+    calls = dict.fromkeys(_seams(), 0)
     for name, (module, attribute) in _seams().items():
-        monkeypatch.setattr(module, attribute, _REPORTS_ITS_OWN_FAILURE.get(name, _raises))
+        fail = _REPORTS_ITS_OWN_FAILURE.get(name, _raises)
+
+        def _down(*args, _name=name, _fail=fail, **kwargs):
+            calls[_name] += 1
+            return _fail(*args, **kwargs)
+
+        monkeypatch.setattr(module, attribute, _down)
     raw = compute.gather_inputs()
     assert not any(entry["ok"] for entry in raw.source_health)
+    # Every upstream was asked: a gather that returned early passes the line above.
+    assert [name for name, n in calls.items() if not n] == []

@@ -36,10 +36,12 @@ def _snapshots() -> int:
 @pytest.mark.parametrize("failing", sorted(STEPS))
 def test_a_failing_step_after_the_commit_does_not_cost_the_snapshot(isolated_db, monkeypatch, failing):
     monkeypatch.setattr(compute, "gather_inputs", make_golden_raw_inputs)
-    reached = []
+    seen = {}
     for name, (module, attribute) in STEPS.items():
         def _step(*_a, _name=name, **_k):
-            reached.append(_name)
+            # What a fresh session sees, a committed row only. Kept, not asserted
+            # here: the boundary under test would swallow the AssertionError.
+            seen[_name] = _snapshots()
             if _name == failing:
                 raise RuntimeError(f"{_name} exploded")
 
@@ -47,7 +49,8 @@ def test_a_failing_step_after_the_commit_does_not_cost_the_snapshot(isolated_db,
 
     snap_id = compute.run_recompute()                   # must not raise
 
-    assert set(reached) == set(STEPS)                   # the failure did not stop the other step
+    # Each step ran after the commit, and the failure did not stop the other.
+    assert seen == dict.fromkeys(STEPS, 1)
     assert _snapshots() == 1
     with session_scope() as session:
         assert session.get(Snapshot, snap_id) is not None
