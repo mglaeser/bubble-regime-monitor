@@ -361,7 +361,7 @@ class RawInputs:
     lppls_as_of: str | None = None
 
     vix_ratio: float | None = None
-    vix_ratio_source: str = "cboe_delayed"
+    vix_ratio_source: str = "fred_vix_ratio"
     vix_ratio_fallback: bool = False
     vix_as_of: str | None = None
     vix_level: float | None = None

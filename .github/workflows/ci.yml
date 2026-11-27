@@ -99,7 +99,9 @@ jobs:
           # function without a return type.
           # 113 -> 112: the history route reduces to days and months in SQL; the
           # two untyped period lambdas of its Python reduction went.
-          MYPY_CEILING: "112"
+          # 112 -> 108: the ratio's CBOE branch went (app/sources/vix.py, whose
+          # `vix` and `vix3m` held floats there and SourceResults below it).
+          MYPY_CEILING: "108"
           # The floor constrains REACH, not DEPTH: it proves mypy READ the tree.
           # It does NOT make a low count mean "little is wrong" -- an earlier
           # version of this comment claimed that, and it is false. Measured:

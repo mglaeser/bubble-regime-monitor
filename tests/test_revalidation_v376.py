@@ -143,7 +143,7 @@ def _patch_vix_to_fred(monkeypatch, vix_date, vix3m_date):
     def _boom(*a, **k):
         raise SourceError("upstream down")
 
-    monkeypatch.setattr(vixmod, "_cboe_last", _boom)     # cboe primary
+    monkeypatch.setattr(vixmod, "_cboe_last", _boom)     # CBOE refuses: the ratio is FRED's alone
 
     def _fred(series_id):
         d, v = {"VIXCLS": (vix_date, 18.0), "VXVCLS": (vix3m_date, 20.0)}[series_id]
