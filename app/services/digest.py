@@ -52,11 +52,11 @@ WEEK_AGO = (timedelta(hours=166), timedelta(hours=174))
 
 
 def _number(value: object, digits: int | None = None) -> float | None:
-    """`value` rounded - to a whole number when `digits` is None - or None
-    when it is no finite number."""
+    """`value` rounded - to the headline's whole points when `digits` is None
+    - or None when it is no finite number."""
     if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value):
         return None
-    return round(value) if digits is None else round(value, digits)
+    return headline(value) if digits is None else round(value, digits)
 
 
 def _sub_scores(block: dict[str, Any] | None, ids: tuple[str, ...]) -> dict[str, object]:
@@ -193,8 +193,8 @@ def digest_facts(snap: Snapshot, *, day: Snapshot | None = None,
         "action_band": snap.action_band,
         "override_fired": bool(snap.override_fired),
         "override_suffix": " OVERRIDE" if snap.override_fired else "",
-        "iqr_lo": round(snap.iqr_lo),
-        "iqr_hi": round(snap.iqr_hi),
+        "iqr_lo": headline(snap.iqr_lo),
+        "iqr_hi": headline(snap.iqr_hi),
         "red_flag_count": snap.red_flag_count,
         "red_flag_total": RED_FLAG_TOTAL,
         "spy_trend": _trend(snap, "SPY"),

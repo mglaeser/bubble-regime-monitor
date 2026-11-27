@@ -116,7 +116,7 @@ def generate(median: float, iqr: tuple[float, float], band: str,
     # or enum the monitor computes: it stays out of the prompt (AGENTS.md ground rule 1).
     alarm = {key: value for key, value in fast_alarm.items() if key != "vrp_as_of"}
     prompt = PROMPT_TEMPLATE.format(
-        median=headline(median), iqr_lo=round(iqr[0]), iqr_hi=round(iqr[1]), band=band,
+        median=headline(median), iqr_lo=headline(iqr[0]), iqr_hi=headline(iqr[1]), band=band,
         s_scores=s_scores, d_scores=d_scores, v=v,
         red_flag_detail=red_flag_detail, override=override,
         spy_state=spy_state, qqq_state=qqq_state, fast_alarm=alarm,

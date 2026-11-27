@@ -55,6 +55,6 @@ def deterministic_report(snap: Snapshot, limit: int) -> str:
     qqq = trend.get("QQQ", {}).get("faber_10mo", "?")
     override = " OVERRIDE" if snap.override_fired else ""
     core = (f"bubblegauge {headline(snap.median)}/100 {snap.action_band}{override}. "
-            f"range {round(snap.iqr_lo)}-{round(snap.iqr_hi)}. "
+            f"range {headline(snap.iqr_lo)}-{headline(snap.iqr_hi)}. "
             f"SPY {spy}, QQQ {qqq}. Flags {snap.red_flag_count}/4.")
     return _clip_to_sms(core, limit)

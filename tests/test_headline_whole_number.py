@@ -15,6 +15,7 @@ from app import methodology as _M
 from app.db import session_scope
 from app.engine import judgment
 from app.engine.aggregate import action_band, headline
+from app.engine.sms_report import deterministic_report
 from app.models import Snapshot
 from app.services import digest
 
@@ -90,3 +91,18 @@ def test_the_judgment_is_told_the_same_headline(monkeypatch):
     monkeypatch.setattr(judgment, "run_completion", lambda prompt: prompts.append(prompt) or "A note.")
     judgment.generate(59.698, (57.6, 61.5), "trim", {}, {}, 1.0, {}, False, "IN", "IN", {})
     assert "Headline: 59 out of 100" in prompts[0]
+
+
+def test_a_median_inside_its_range_is_shown_inside_it(monkeypatch):
+    """Median 48.9 in the range 48.6 to 52.3: with the ends rounded to the
+    nearest the digest read "48/100 trim. range 49-52."."""
+    snap = _snapshot(48.9)
+    snap.iqr_lo, snap.iqr_hi, snap.band5, snap.band95 = 48.6, 52.3, 48.55, 55.0
+    assert "48/100 trim. range 48-52." in deterministic_report(snap, 320)
+    facts = digest.digest_facts(snap)
+    assert facts["iqr_lo"] <= facts["median"] <= facts["iqr_hi"]
+    assert facts["range_lo"] <= facts["median"] <= facts["range_hi"]
+    prompts: list[str] = []
+    monkeypatch.setattr(judgment, "run_completion", lambda prompt: prompts.append(prompt) or "A note.")
+    judgment.generate(48.9, (48.6, 52.3), "trim", {}, {}, 1.0, {}, False, "IN", "IN", {})
+    assert "Headline: 48 out of 100 (rough range 48-52)" in prompts[0]

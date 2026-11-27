@@ -72,7 +72,7 @@ class TestWhatTheApiServes:
             "rf1_distance", "rf2_distance", "rf3_distance", "rf4_distance", "spy_distance_pct",
             "qqq_distance_pct", "vol_state", "vol_multiplier", "fragility_block", "timing_block",
             "s1_value", "s2_value", "s3_value", "d1_value", "d2_value", "data_degraded")} == {
-            "range_lo": 56, "range_hi": 66, "trim_line": 45, "derisk_line": 60, "trim_line_gap": 15,
+            "range_lo": 55, "range_hi": 65, "trim_line": 45, "derisk_line": 60, "trim_line_gap": 15,
             "derisk_line_gap": 0, "override_required": 3, "override_floor": 70, "rf1_active": False,
             "rf2_active": False, "rf3_active": False, "rf4_active": True, "rf1_distance": -0.06,
             "rf2_distance": -38.93, "rf3_distance": -35.0, "rf4_distance": -8.2, "spy_distance_pct": 5.2,

@@ -221,7 +221,9 @@ def headline(median: float) -> int:
     59.5 up: on 47 of the 615 production snapshots up to 2026-11-10 and in 7
     of the 54 daily digests sent. The price: 59.7 reads 59, one lower than the
     nearest whole number on 286 of those snapshots, and the golden median
-    (52.5605) reads 52 where it read 53.
+    (52.5605) reads 52 where it read 53. The ends of a range shown beside it as
+    whole numbers go through this function too: the floor is monotonic, so a
+    median inside its range is shown inside it.
     """
     return math.floor(median)
 
