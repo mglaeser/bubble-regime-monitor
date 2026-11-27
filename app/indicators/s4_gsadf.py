@@ -116,8 +116,11 @@ SUB_CONTESTED_OR_STALE: float = _M.get_path("indicators", "s4", "sub_contested_o
 SUB_NULL: float = _M.get_path("indicators", "s4", "sub_null")
 
 
+# `asymmetric` is keyword-only, so an argument in the place `stale` held fails
+# loudly; no caller passes `stale` (no backward compatibility, the owner's
+# ruling in AGENTS.md).
 def sub_score(stat: float | None, cv90: float | None, cv95: float | None,
-              contested: bool, asymmetric: bool = False) -> float:
+              contested: bool, *, asymmetric: bool = False) -> float:
     """Map a right-tailed statistic against its simulated finite-sample CVs.
 
     `stat`/`cv90`/`cv95` must be the pair the library pairs: the endpoint BSADF

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import math
 
+import pytest
+
 from app.config import Settings
 from app.indicators.s4_gsadf import sub_score
 
@@ -84,6 +86,11 @@ class TestAsymmetricContested:
         just_over = LIVE_CV90 + 1e-9
         assert sub_score(just_under, LIVE_CV90, LIVE_CV95, contested=True, asymmetric=True) == 0.05
         assert sub_score(just_over, LIVE_CV90, LIVE_CV95, contested=True, asymmetric=True) == 0.25
+
+    def test_a_fifth_positional_argument_fails_loudly(self):
+        # The fifth place was `stale`'s; it must not bind to `asymmetric`.
+        with pytest.raises(TypeError):
+            sub_score(0.0, 1.0, 2.0, True, True)
 
     def test_degenerate_inputs_still_floor(self):
         assert sub_score(None, None, None, contested=True, asymmetric=True) == 0.25
