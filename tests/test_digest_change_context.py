@@ -66,6 +66,8 @@ def _entry() -> dict:
 
 class TestWhatTheApiServes:
     def test_the_digest_carries_what_the_score_api_serves(self):
+        # The median is 60.51 and the headline its whole points, 60: the gaps
+        # to the lines are 15 and 0.
         facts = digest.digest_facts(_snapshot())
         assert {name: facts[name] for name in (
             "range_lo", "range_hi", "trim_line", "derisk_line", "trim_line_gap", "derisk_line_gap",
@@ -73,8 +75,8 @@ class TestWhatTheApiServes:
             "rf3_state", "rf4_state", "rf1_distance", "rf2_distance", "rf3_distance", "rf4_distance", "spy_distance_pct",
             "qqq_distance_pct", "vol_state", "vol_multiplier", "fragility_block", "timing_block",
             "s1_value", "s2_value", "s3_value", "d1_value", "d2_value", "data_degraded")} == {
-            "range_lo": 56, "range_hi": 66, "trim_line": 45, "derisk_line": 60, "trim_line_gap": 16,
-            "derisk_line_gap": 1, "override_required": 3, "override_fireable": 3, "override_floor": 70,
+            "range_lo": 55, "range_hi": 65, "trim_line": 45, "derisk_line": 60, "trim_line_gap": 15,
+            "derisk_line_gap": 0, "override_required": 3, "override_fireable": 3, "override_floor": 70,
             "rf1_state": "BLOCKED", "rf2_state": "INACTIVE", "rf3_state": "INACTIVE", "rf4_state": "ACTIVE",
             "rf1_distance": -0.06,
             "rf2_distance": -38.93, "rf3_distance": -35.0, "rf4_distance": -8.2, "spy_distance_pct": 5.2,
@@ -184,14 +186,16 @@ class TestTheChange:
                         d1=0.8, rf4=False, qqq="OUT", red_flag_count=0)
         week = _snapshot(computed_at=T0 - timedelta(days=7), median=55.2, action_band="trim", red_flag_count=0)
         facts = digest.digest_facts(_snapshot(), day=day, week=week)
+        # Each change is the difference of the headlines shown: 60 (median
+        # 60.51) against 57 (57.4) and 55 (55.2).
         assert {name: value for name, value in facts.items() if "_1d_" in name or "_7d_" in name} == {
-            "median_1d_ago": 57, "median_1d_change": 4, "band_1d_ago": "trim", "override_fired_1d_ago": False,
+            "median_1d_ago": 57, "median_1d_change": 3, "band_1d_ago": "trim", "override_fired_1d_ago": False,
             "red_flag_count_1d_ago": 0, "rf1_state_1d_ago": "BLOCKED", "rf2_state_1d_ago": "INACTIVE",
             "rf3_state_1d_ago": "INACTIVE", "rf4_state_1d_ago": "INACTIVE", "spy_trend_1d_ago": "IN",
             "qqq_trend_1d_ago": "OUT", "vol_state_1d_ago": "contango", "vol_multiplier_1d_ago": 1.0,
             "s1_1d_change": 0.03, "s2_1d_change": 0.0, "s3_1d_change": 0.0,
             "s4_1d_change": 0.0, "s5_1d_change": 0.0, "d1_1d_change": 0.08, "d2_1d_change": 0.0,
-            "d3_1d_change": 0.0, "d4_1d_change": 0.0, "median_7d_ago": 55, "median_7d_change": 6,
+            "d3_1d_change": 0.0, "d4_1d_change": 0.0, "median_7d_ago": 55, "median_7d_change": 5,
             "band_7d_ago": "trim", "red_flag_count_7d_ago": 0}
 
     def test_a_changed_volatility_term_structure_is_carried(self):
@@ -236,7 +240,7 @@ class TestTheChange:
         composer.compose(trigger="daily_digest", channel=Channel.IMESSAGE, priority=3, facts=facts,
                          lib=composer.library(), settings=Settings(_env_file=None, message_engine_enabled=True))
         numbers = prompts[0].split("ALL NUMBERS (name = value):\n")[1].split("\n\n")[0]
-        assert "median = 61" in numbers and not any(f"  {name} = " in numbers for name in changes)
+        assert "median = 60" in numbers and not any(f"  {name} = " in numbers for name in changes)
 
     def test_the_digest_compares_with_yesterdays_and_last_weeks_same_slot(self, monkeypatch):
         """Six slots a day, each landing minutes after its hour: a day

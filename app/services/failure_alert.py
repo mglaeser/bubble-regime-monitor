@@ -37,8 +37,8 @@ rollback to such an image while an announced outage is open drops that
 outage's all-clear. No release rolls back on its own (docs/AUTO_DEPLOY.md):
 a rollback is the operator's, by hand.
 
-It never raises: every path returns a status dict, because the caller is the
-scheduler's only worker thread.
+It never raises: every path returns a status dict, because the caller is a
+scheduler job or the manual refresh's thread.
 """
 
 from __future__ import annotations

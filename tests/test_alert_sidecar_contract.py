@@ -454,7 +454,7 @@ def _rf4_meta(*, breadth, near_ath_available, near_ath_state):
         semi_runup_pp=None, semis_as_of=None, semis_stale=None,
         hy_oas_bps=None, hy_oas_tight_bps=None, hy_oas_as_of=None, hy_oas_stale=None,
         breadth_pct=breadth, breadth_as_of="2026-08-20", breadth_stale=False,
-        near_ath_available=near_ath_available, near_ath_state=near_ath_state,
+        near_ath_available=near_ath_available,
     )["flags"]["rf4"]
 
 
@@ -503,7 +503,6 @@ def test_an_unobservable_rf4_does_not_inflate_the_fireable_universe():
             hy_oas_bps=None, hy_oas_tight_bps=None, hy_oas_as_of=None, hy_oas_stale=None,
             breadth_pct=44.0, breadth_as_of="2026-08-20", breadth_stale=False,
             near_ath_available=available,
-            near_ath_state=False if available else None,
         )["override_fireable_universe_count"]
 
     assert universe(False) < universe(True), (
@@ -953,9 +952,7 @@ def _weekday_prices(start: date, end: date, *, initial: float) -> list[tuple[str
     return prices
 
 
-def test_real_compute_output_survives_the_full_sidecar_source_boundary(
-    isolated_db, monkeypatch,
-):
+def test_real_compute_output_survives_the_full_sidecar_source_boundary(isolated_db):
     """Pin the integration boundary that synthetic AlertInputs cannot prove.
 
     Every value below starts in ``RawInputs``, passes through the real scoring
@@ -967,19 +964,10 @@ def test_real_compute_output_survives_the_full_sidecar_source_boundary(
     from app.alerts.models import AlertInputSnapshot
     from app.alerts.sources import read_source
     from app.db import session_scope
-    from app.engine.judgment import JudgmentCall
     from app.models import FalsificationOutcome
     from app.services import compute
     from app.services.alert_integration import capture_alert_input
     from tests.conftest import make_golden_raw_inputs
-
-    monkeypatch.setattr(
-        compute.judgment,
-        "generate",
-        lambda *_args, **_kwargs: JudgmentCall(
-            text="Deterministic integration-test judgment.", stale=False
-        ),
-    )
 
     raw = make_golden_raw_inputs()
     prices = _weekday_prices(date(2024, 1, 2), date(2026, 7, 31), initial=400.0)

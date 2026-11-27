@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app import methodology as _M
 from app.config import configured_environment, get_settings, near_miss_env_keys
 from app.db import session_scope
+from app.engine.aggregate import headline
 from app.engine.sms_report import deterministic_report
 from app.logging_conf import get_logger
 from app.message_engine import gate
@@ -51,11 +52,11 @@ WEEK_AGO = (timedelta(hours=166), timedelta(hours=174))
 
 
 def _number(value: object, digits: int | None = None) -> float | None:
-    """`value` rounded - to a whole number when `digits` is None - or None
-    when it is no finite number."""
+    """`value` rounded - to the headline's whole points when `digits` is None
+    - or None when it is no finite number."""
     if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value):
         return None
-    return round(value) if digits is None else round(value, digits)
+    return headline(value) if digits is None else round(value, digits)
 
 
 def _sub_scores(block: dict[str, Any] | None, ids: tuple[str, ...]) -> dict[str, object]:
@@ -111,7 +112,7 @@ def _readings(snap: Snapshot) -> dict[str, object]:
     (governance forbids firing) apart and counts the flags that can fire
     (snapshot_contract.RedFlagFact). A snapshot older than the contract has
     no state and no count: both are None, a dash in DATA."""
-    median = round(snap.median)
+    median = headline(snap.median)
     flags = _flags(snap)
     trend = snap.trend_states or {}
     indicators = _indicators(snap)
@@ -159,8 +160,8 @@ def _a_day_earlier(snap: Snapshot, then: Snapshot | None) -> dict[str, object]:
     then_subs = {**_sub_scores(then.block_s, SUB_SCORES["s"]), **_sub_scores(then.block_d, SUB_SCORES["d"])}
     flags = _flags(then)
     return {
-        "median_1d_ago": round(then.median),
-        "median_1d_change": round(snap.median) - round(then.median),
+        "median_1d_ago": headline(then.median),
+        "median_1d_change": headline(snap.median) - headline(then.median),
         "band_1d_ago": then.action_band,
         "override_fired_1d_ago": bool(then.override_fired),
         "red_flag_count_1d_ago": then.red_flag_count,
@@ -179,8 +180,8 @@ def _a_week_earlier(snap: Snapshot, then: Snapshot | None) -> dict[str, object]:
     if then is None:
         return {"median_7d_ago": None, "median_7d_change": None, "band_7d_ago": None,
                 "red_flag_count_7d_ago": None}
-    return {"median_7d_ago": round(then.median),
-            "median_7d_change": round(snap.median) - round(then.median),
+    return {"median_7d_ago": headline(then.median),
+            "median_7d_change": headline(snap.median) - headline(then.median),
             "band_7d_ago": then.action_band,
             "red_flag_count_7d_ago": then.red_flag_count}
 
@@ -202,13 +203,13 @@ def digest_facts(snap: Snapshot, *, day: Snapshot | None = None,
     from app.services.engine_delivery import RED_FLAG_TOTAL, SCORE_SCALE_MAX
 
     return {
-        "median": round(snap.median),
+        "median": headline(snap.median),
         "score_scale_max": SCORE_SCALE_MAX,
         "action_band": snap.action_band,
         "override_fired": bool(snap.override_fired),
         "override_suffix": " OVERRIDE" if snap.override_fired else "",
-        "iqr_lo": round(snap.iqr_lo),
-        "iqr_hi": round(snap.iqr_hi),
+        "iqr_lo": headline(snap.iqr_lo),
+        "iqr_hi": headline(snap.iqr_hi),
         "red_flag_count": snap.red_flag_count,
         "red_flag_total": RED_FLAG_TOTAL,
         "spy_trend": _trend(snap, "SPY"),

@@ -11,7 +11,8 @@ WHAT/HOW/WHY/references/caveats: see app.references.REGISTRY["s4"]; summary:
 
     WHICH STATISTIC (frozen_methodology.json gsadf.statistic). The scored
     statistic is the BSADF at the LAST observation, compared against the last
-    row of the simulated BSADF CV matrix — not the GSADF sup over all
+    row of the simulated BSADF CV matrix (exuber's date-stamping values: the
+    SADF critical value for the sample size) — not the GSADF sup over all
     endpoints. GSADF answers "was there ever an explosive episode anywhere in
     this window?"; it stays rejected for as long as the episode remains in
     sample. BubbleGauge reports a CURRENT regime, so it must read the endpoint.
@@ -37,8 +38,9 @@ WHAT/HOW/WHY/references/caveats: see app.references.REGISTRY["s4"]; summary:
     invariant to that choice. The mapping below is statistic-agnostic;
     compute.py selects which statistic and which CV pair it receives.
 
-    Mapping: stat > cv95 AND non-contested -> 1.0; > cv90 -> 0.5;
-    contested-or-stale-or-DATA-MISSING -> 0.25; tested-and-not-explosive -> 0.05.
+    Mapping: stat > cv95 AND non-contested -> 1.0; > cv90 -> 0.5; a contested
+    rejection, or a statistic that could not be computed -> 0.25;
+    tested-and-not-explosive -> 0.05.
     The 0.05 floor is ONLY for a successfully executed test that finds no
     explosiveness; if R/Rscript is unavailable or the series is missing, the
     contested/stale floor 0.25 applies with a provenance note (never crash).
@@ -46,8 +48,9 @@ WHAT/HOW/WHY/references/caveats: see app.references.REGISTRY["s4"]; summary:
 CAVEAT (verbatim): The CONTESTED flag is currently permanent because of
 Chen-Chen-Huang (2026): under hump-shaped GPT fundamentals the test
 spuriously rejects 93-100% of the time. We expose the binary decision plus
-the p-value (per the ASA p-value statement, Wasserstein & Lazar 2016) rather
-than pretending to a graded posterior we cannot honestly calibrate.
+the statistic and its 90% and 95% critical values (no p-value is computed;
+cf. the ASA p-value statement, Wasserstein & Lazar 2016) rather than
+pretending to a graded posterior we cannot honestly calibrate.
 
 EPISTEMIC GUARDRAILS: the five, verbatim, are in app/references.py.
 """
@@ -113,30 +116,35 @@ SUB_CONTESTED_OR_STALE: float = _M.get_path("indicators", "s4", "sub_contested_o
 SUB_NULL: float = _M.get_path("indicators", "s4", "sub_null")
 
 
+# `asymmetric` is keyword-only, so an argument in the place `stale` held fails
+# loudly; no caller passes `stale` (no backward compatibility, the owner's
+# ruling in AGENTS.md).
 def sub_score(stat: float | None, cv90: float | None, cv95: float | None,
-              contested: bool, stale: bool = False, asymmetric: bool = False) -> float:
+              contested: bool, *, asymmetric: bool = False) -> float:
     """Map a right-tailed statistic against its simulated finite-sample CVs.
 
-    `stat`/`cv90`/`cv95` must be the SAME family: the endpoint BSADF against the
-    endpoint BSADF CVs (the scored path), or the GSADF sup against the GSADF CVs.
-    Mixing them compares a statistic to the wrong null distribution.
+    `stat`/`cv90`/`cv95` must be the pair the library pairs: the endpoint BSADF
+    with the last row of exuber's date-stamping critical values (the scored
+    path; that row is the SADF critical value for the sample size, see REGISTRY
+    s4), or the GSADF sup with the GSADF critical values. Never the endpoint
+    against the sup's values or the reverse.
 
-    contested-or-stale caps the sub-score at 0.25 regardless of the statistic
-    (controlled by the manual GSADF_CONTESTED config flag). Data-missing also
+    Contested caps the sub-score at 0.25 (the manual GSADF_CONTESTED config
+    flag; with `asymmetric` only a rejection, see below). Data-missing also
     floors at 0.25: the 0.05 floor is reserved for a successfully executed
     test that finds no explosiveness."""
     # Require a finite statistic AND both CVs finite and correctly ordered
     # (cv90 < cv95) — a NaN/inf or a missing/degenerate CV must floor at the
     # contested 0.25, never fall through to a comparison (v3.7.4/G-04).
+    # A `stale` argument that returned the same 0.25 after this guard is
+    # deleted, not wired (AGENTS.md: delete before you add): the scoring call
+    # in compute_snapshot does not pass it, and of 615 production readings
+    # (2026-07-11 to 2026-11-10) none was older than the 35-day SLA.
     import math
 
     if (stat is None or cv95 is None or cv90 is None
             or not (math.isfinite(stat) and math.isfinite(cv90) and math.isfinite(cv95))
             or cv90 >= cv95):
-        return SUB_CONTESTED_OR_STALE
-    if stale:
-        # Staleness is about DATA AGE, not about the test's size properties, so
-        # the asymmetry below does not apply to it.
         return SUB_CONTESTED_OR_STALE
     if contested:
         # ASYMMETRIC CONTESTED — SHIPPED since v4.1 (gsadf.contested_rule =
@@ -164,15 +172,15 @@ def sub_score(stat: float | None, cv90: float | None, cv95: float | None,
         # rejecting and still fails to reject, that is stronger evidence of no
         # explosiveness, not weaker. Capping a non-rejection at 0.25 therefore
         # discards the one reading the critique gives most reason to trust --
-        # and, at the live statistic, RAISES the sub-score above what the test
-        # returned (0.25 against SUB_NULL 0.05), so the "conservative cap" is
-        # currently a floor that pushes the headline UP.
+        # and RAISES the sub-score above what the test returned (0.25 against
+        # SUB_NULL 0.05), so for a non-rejection the "conservative cap" is a
+        # floor that pushes the headline UP.
         #
         # With this on: a rejection is still capped (the critique bites there);
         # a non-rejection passes through at SUB_NULL. Enabling it was
         # score-shifting and went through the ceremony (v4.1, 2026-08-23):
-        # version bump, artifact re-pin, measured delta recorded -- live
-        # headline 53.30 -> 51.82 at the reading of the day, action band
+        # version bump, artifact re-pin, measured delta recorded -- 53.30 ->
+        # 51.82 on the golden raw inputs with the July statistic, action band
         # unchanged. Setting contested_rule = "symmetric" restores the cap.
         #
         # Residual, stated: a non-rejection can also mean LOW POWER rather than

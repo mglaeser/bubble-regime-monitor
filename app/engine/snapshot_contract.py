@@ -131,8 +131,11 @@ class RedFlagFact:
     `fireable` answers "could this flag have contributed to the override on this
     run?" — false when its input was unavailable (data) or when governance
     structurally blocks it (e.g. the GSADF flag while the statistic is
-    contested). `distance_to_threshold` is signed: negative means below the
-    firing threshold.
+    contested). `distance_to_threshold` is the reading minus the threshold, and
+    its sign does not mean the same for every flag: rf1 to rf3 fire above their
+    threshold (rf2 from it on), so a negative distance is their calm side; rf4
+    fires with breadth BELOW 50 % (and the index near its high), so a negative
+    distance is its firing side.
     """
 
     flag_id: str
@@ -195,13 +198,13 @@ def build_red_flag_meta(
     breadth_as_of: str | None,
     breadth_stale: bool | None,
     near_ath_available: bool = False,
-    near_ath_state: bool | None = None,
 ) -> dict[str, Any]:
     """Build the typed red-flag contract for one snapshot.
 
     Callers pass the same inputs the frozen `evaluate_red_flags` consumed, plus
     per-source provenance. Nothing here re-decides whether a flag fired: the
-    booleans come from the already-evaluated `red_flags`.
+    booleans come from the already-evaluated `red_flags`. That is why rf4's
+    near-ATH leg enters as its availability alone.
     """
     values = red_flags.as_dict()
 
@@ -277,13 +280,3 @@ def build_red_flag_meta(
         "override_fireable_universe_count": sum(1 for f in facts.values() if f.fireable),
         "override_fired": bool(red_flags.override_fired),
     }
-
-
-def fireable_universe_count(red_flag_meta: dict[str, Any]) -> int:
-    """Read the persisted fireable universe. Never recomputed by a consumer."""
-    return int(red_flag_meta.get("override_fireable_universe_count", 0))
-
-
-def required_flag_count(red_flag_meta: dict[str, Any]) -> int:
-    """Read the persisted override requirement. Never hardcoded by a consumer."""
-    return int(red_flag_meta.get("override_required_count", 0))

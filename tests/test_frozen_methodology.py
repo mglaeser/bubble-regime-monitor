@@ -54,10 +54,11 @@ from app import methodology as M
 #               measurement is offline; on the fitted 360-month tail the sup
 #               does NOT reject. Disclosed. Wording only; tree unchanged.
 #   4a7fd45c... v4.1-s4-asymmetric-contested: adds gsadf.contested_rule =
-#               "asymmetric". SCORE-SHIFTING — the first in this line. Live
-#               headline 53.30 -> 51.82 (s4 0.25 -> 0.05); action band unchanged
-#               at 'trim'. The golden stays 52.43 only because its fixture
-#               supplies no GSADF input and floors under either rule.
+#               "asymmetric". SCORE-SHIFTING — the first in this line. Point
+#               score on the golden raw inputs with the July statistic 53.30 ->
+#               51.82 (s4 0.25 -> 0.05); action band unchanged at 'trim'. The
+#               golden stays 52.43 only because its fixture supplies no GSADF
+#               input and floors under either rule.
 #   70dcbcc7... v4.1 record correction: the note quoted the CPI-deflated
 #               SHADOW endpoint (0.7562, 34% margin) as the live reading. The
 #               SCORED instrument is nominal: 1.1315 vs cv90 1.1393, a 0.7%
@@ -164,6 +165,8 @@ def test_indicator_constants_are_the_artifact():
     assert d3_hyperscaler_fcf.GATE_OFF_CAP == M.get_path("indicators", "d3", "gate_off_cap")
     assert d4_lppls.FILTER_CONDITIONS == M.as_dict("indicators", "d4", "filter_conditions")
     assert d4_lppls.MIN_CLOSES == M.get_path("indicators", "d4", "min_closes")
+    # the LPPLS fit has no seed of its own: it draws from the one frozen seed
+    assert d4_lppls.LPPLS_SEED == M.get_path("monte_carlo", "seed")
     assert v_vix.MULTIPLIERS == M.as_dict("indicators", "v", "multipliers")
 
 
@@ -206,8 +209,6 @@ def test_freshness_and_coverage_are_the_artifact():
 #   compute.py      0.5 x1 / 0.3 x1  quality.s5_baa_dgs10 / quality.s5_hy_oas tier literals
 #   aggregate.py    0.5 x2   aggregation.alpha_baseline (combine/deterministic_score defaults)
 #   d4_lppls.py     0.5 x1   quality.d4_partial (_quality shortened-scan tier)
-#   d1_breadth.py   50.0 x1  red_flags.breadth_lt_pct — in red_flag_breadth(), which is
-#                            TEST-ONLY (production uses aggregate's wired constant)
 #
 # COINCIDENTAL COLLISIONS (same value, unrelated semantics — not defects):
 #   compute.py 4.0/5.0: round(x, 4) precisions, YYYY-MM slice indices, smooth=5
@@ -229,7 +230,6 @@ KNOWN_COLLISIONS: dict[tuple[str, float], int] = {
     ("app/engine/montecarlo.py", 25.0): 1,
     ("app/engine/montecarlo.py", 75.0): 1,
     ("app/engine/montecarlo.py", 95.0): 1,
-    ("app/indicators/d1_breadth.py", 50.0): 1,
     ("app/indicators/d2_margin.py", 3.0): 4,
     ("app/indicators/d2_margin.py", 4.0): 2,
     ("app/indicators/d2_margin.py", 5.0): 2,

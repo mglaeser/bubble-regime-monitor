@@ -302,8 +302,17 @@ class CandidateTTLSpec(BaseModel):
 
 
 class ResolutionSpec(BaseModel):
-    """How an episode ends. `auto_on_inverse` resolves when the triggering
-    transition reverses; `manual` never self-resolves."""
+    """How an episode ends, after which the instance fires again at the next
+    occurrence.
+
+    Once it fires, a crossing episode lasts while the value stays where it
+    crossed to and ends when it is back, under each of the three policies that
+    end an episode. For every other condition:
+    `auto_on_condition_false`: at the first evaluation whose condition is false.
+    `auto_on_inverse` and `single_shot`: a transition episode lasts while the
+    state it led to lasts (the flag stays off, the leg stays in) and ends when
+    that state ends; any other condition ends at the first false evaluation.
+    `manual` never self-resolves."""
 
     model_config = ConfigDict(extra="forbid")
 

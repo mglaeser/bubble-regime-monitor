@@ -892,6 +892,37 @@ def test_evaluation_commits_and_opens_an_episode(isolated_db):
     assert episodes[0].is_open is True
 
 
+@pytest.mark.parametrize("budget_ms,status", [(1500, "COMMITTED"), (-1, "TIMED_OUT")])
+def test_an_evaluation_row_records_when_it_finished(isolated_db, monkeypatch, budget_ms, status):
+    """`finished_at` is when the run ended: its start plus what it took."""
+    from types import SimpleNamespace
+
+    from app.alerts import engine
+    from app.alerts.models import AlertEvaluation
+    from app.db import session_scope
+
+    # The engine's clock: 10.0 s when the run starts and when its deadline is
+    # set, 750 ms later at every reading after that.
+    readings = iter([10.0, 10.0])
+    monkeypatch.setattr(
+        engine, "time", SimpleNamespace(monotonic=lambda: next(readings, 10.75)))
+    artifacts = _artifacts()
+    alert_input = make_input(identity="finished")
+    _store_input(alert_input, NOW)
+    with session_scope() as session:
+        register_promoted(session, artifacts, now=NOW)
+
+    outcome = engine.run_evaluation(
+        session_scope, alert_input=alert_input, current=artifacts.ruleset,
+        mode="shadow", live_profile="default", now=NOW, budget_ms=budget_ms)
+
+    assert outcome.status == status
+    with session_scope() as session:
+        row = session.get(AlertEvaluation, outcome.evaluation_id)
+        assert row.duration_ms == 750
+        assert row.finished_at - row.started_at == timedelta(milliseconds=750)
+
+
 def test_evaluation_idempotency(isolated_db):
     artifacts = _artifacts()
     inp = make_input(identity="i1", effective="trim")
@@ -1241,3 +1272,218 @@ def test_unknown_at_a_full_window_does_not_erase_known_flap_history():
 
     assert after["states"] == before["states"] == known
     assert after["transitions"] == before["transitions"]
+
+
+# ---------------------------------------------------------------------------
+# an event rule fires for every occurrence (resolution policy single_shot)
+# ---------------------------------------------------------------------------
+
+
+def test_a_crossing_hold_follows_its_direction_under_every_policy():
+    """Up is held at or above the level, down at or below it, whatever the
+    policy: under `auto_on_condition_false` too, the policy of
+    tripwire.margin_rollover."""
+    def rule(direction: str, policy: str) -> RuleSpec:
+        return _rule(
+            rule_id="test.cross", source_fields=["breadth_pct"],
+            condition={"kind": "crossing", "source": "breadth_pct",
+                       "direction": direction, "level": "tier"},
+            thresholds=[{"name": "tier", "value": 60.0, "unit": "percent",
+                         "attribution": "LIT"}],
+            confirmation_sources=["breadth_pct"], authoritative=False,
+            resolution={"policy": policy})
+
+    def truth(direction: str, policy: str, value: float | None, *, firing: bool = True):
+        before = make_input(identity="before", breadth=value)
+        return evaluate_rule(rule(direction, policy),
+                             _ctx(make_input(identity="now", breadth=value), before),
+                             currently_firing=firing).truth
+
+    for policy in ("single_shot", "auto_on_inverse", "auto_on_condition_false", "manual"):
+        assert truth("up", policy, 70.0) is True
+        assert truth("up", policy, 60.0) is True
+        assert truth("up", policy, 59.9) is False
+        assert truth("down", policy, 50.0) is True
+        assert truth("down", policy, 60.0) is True
+        assert truth("down", policy, 60.1) is False
+        # Sitting beyond a level is not crossing it: no episode, no hold.
+        assert truth("up", policy, 70.0, firing=False) is False
+        # An unreadable value holds the episode as UNKNOWN, it does not end it.
+        assert truth("up", policy, None) is None
+
+
+# ---------------------------------------------------------------------------
+# tripwire.margin_rollover: "FINRA margin-debt rollover multiplier turns"
+#
+# README, "Alert, P2": held outside 07:00-22:00 Europe/Berlin, then sent.
+# docs/ALERT_SYSTEM.md 11e: a member is dropped when its condition has
+# cleared. A multiplier that still reads 1.0 has not cleared.
+# ---------------------------------------------------------------------------
+
+ROLLOVER = "tripwire.margin_rollover"
+
+
+def rollover_input(identity: str, at: datetime, multiplier: float,
+                   month: str = "2026-10") -> AlertInput:
+    """An input whose FINRA rollover multiplier (d2) reads `multiplier`."""
+    base = make_input(identity=identity, computed_at=at.isoformat())
+    evidence = EvidenceModel(**build_evidence(
+        obs.DOMAIN_MARGIN, multiplier, observed_at=at.isoformat(), unit="multiplier",
+        source_id="d2", period_start=month, period_end=month,
+        data_state="FRESH",
+    ).as_dict())
+    return base.model_copy(update={"indicators": [*base.indicators, evidence]})
+
+
+def _through_the_night(turned_at: datetime, after: list[float]
+                       ) -> tuple[list[str], list[str], str | None]:
+    """The multiplier reads 0.6, turns to 1.0 at the slot `turned_at`, and
+    reads `after` at the slots that follow. Each slot is evaluated two minutes
+    past the hour by the real engine; the real dispatcher passes a minute
+    after every evaluation and five seconds after the quiet-hours hold ends.
+
+    Returns the Berlin times at which a pass sent, the bodies sent, and the
+    drop reason of the rule's planned member.
+    """
+    from zoneinfo import ZoneInfo
+
+    from sqlalchemy import select
+
+    from app.alerts.dispatcher import dispatch_once
+    from app.alerts.enums import Priority
+    from app.alerts.models import AlertDelivery, AlertDeliveryMember, AlertRender
+    from app.alerts.quiet_hours import release_time_for
+    from app.db import session_scope
+
+    artifacts = _artifacts()
+    readings = [(turned_at - timedelta(hours=4), 0.6, "2026-09"), (turned_at, 1.0, "2026-10")]
+    readings += [(turned_at + timedelta(hours=4 * (k + 1)), value, "2026-10")
+                 for k, value in enumerate(after)]
+    hold_ends = release_time_for(Priority.P2, turned_at + timedelta(minutes=2))
+    moments = [(at + timedelta(minutes=2), "evaluate", i) for i, (at, _, _) in enumerate(readings)]
+    moments += [(at + timedelta(minutes=3), "dispatch", 0) for at, _, _ in readings]
+    moments += [(hold_ends + timedelta(seconds=5), "dispatch", 0)]
+    sent_at: list[str] = []
+    for moment, what, i in sorted(moments):
+        if what == "evaluate":
+            at, value, month = readings[i]
+            alert_input = rollover_input(f"rollover-{i}", at, value, month)
+            _store_input(alert_input, at)
+            _run(alert_input, artifacts, now=moment)
+        elif dispatch_once(session_scope, phrase_set=artifacts.phrase_set, mode="shadow",
+                           live_profile="default", now=moment).sent:
+            sent_at.append(f"{moment.astimezone(ZoneInfo('Europe/Berlin')):%H:%M}")
+    with session_scope() as session:
+        bodies = [row.final_message for row in session.execute(select(AlertRender)).scalars()]
+        member = session.execute(
+            select(AlertDeliveryMember).join(
+                AlertDelivery, AlertDelivery.delivery_id == AlertDeliveryMember.delivery_id)
+            .where(AlertDeliveryMember.rule_id == ROLLOVER)).scalars().one()
+        return sent_at, bodies, member.drop_reason
+
+
+# The 22:00 UTC slot ingests the release, on CET and on CEST: its message goes
+# out at 07:00 Berlin.
+ROLLOVER_SLOTS = [
+    ("2026-11-16T22:00", "07:00"),      # Berlin on CET
+    ("2026-07-13T22:00", "07:00"),      # Berlin on CEST
+]
+
+
+@pytest.mark.parametrize("slot, sent_in_berlin", ROLLOVER_SLOTS,
+                         ids=[slot for slot, _ in ROLLOVER_SLOTS])
+def test_a_margin_rollover_ingested_at_the_22_00_utc_slot_reaches_the_owner(
+        isolated_db, monkeypatch, slot, sent_in_berlin):
+    """A P2 planned at the 22:00 UTC slot waits for 07:00 Berlin, and the
+    multiplier still reads 1.0 then: the message goes out."""
+    # `_artifacts()` reads config/ relative to the working directory, so work
+    # from the repository root that this file names.
+    monkeypatch.chdir(Path(__file__).resolve().parents[1])
+    sent_at, bodies, dropped = _through_the_night(
+        datetime.fromisoformat(slot).replace(tzinfo=UTC), after=[1.0, 1.0, 1.0])
+    assert (sent_at, dropped) == ([sent_in_berlin], None)
+    assert bodies == ["Margin-Rollover erkannt (1.0). Naechste Pruefung bei Release."]
+
+
+def test_two_all_clears_five_days_apart_both_plan_a_message(isolated_db, monkeypatch):
+    """The real engine and database: the breadth flag is on, clears, comes
+    back five days later and clears again. Each clearing is an episode with a
+    planned message; the first episode ended when the flag came back."""
+    from sqlalchemy import select
+
+    from app.alerts.models import AlertDeliveryMember, AlertEpisode
+    from app.db import session_scope
+
+    # `_artifacts()` reads config/ relative to the working directory, so work
+    # from the repository root that this file names.
+    monkeypatch.chdir(Path(__file__).resolve().parents[1])
+    artifacts = _artifacts()
+    start = datetime(2026, 8, 17, 2, 0, tzinfo=UTC)
+    activated: dict[int, list[str]] = {}
+    for slot, flag in [(0, True), (1, False), (2, False), (33, True), (34, False),
+                       (35, False)]:
+        at = start + timedelta(hours=4 * slot)
+        current = make_input(identity=f"clear-{slot}", computed_at=at.isoformat(),
+                             rf4=flag, rf4_period=at.date().isoformat())
+        _store_input(current, at)
+        outcome = _run(current, artifacts, now=at + timedelta(minutes=2))
+        assert outcome.status == "COMMITTED"
+        activated[slot] = [d.rule_id for d in outcome.decisions if d.activate_episode]
+
+    assert "tripwire.rf4_all_clear" in activated[1]
+    assert "tripwire.rf4_all_clear" in activated[34], "the second all-clear did not fire"
+    assert "tripwire.rf4_all_clear" not in activated[2] + activated[33] + activated[35]
+    with session_scope() as session:
+        episodes = [(row.episode_status, row.is_open) for row in session.execute(
+            select(AlertEpisode).where(AlertEpisode.rule_id == "tripwire.rf4_all_clear")
+            .order_by(AlertEpisode.opened_at)).scalars().all()]
+        members = session.execute(select(AlertDeliveryMember).where(
+            AlertDeliveryMember.rule_id == "tripwire.rf4_all_clear")).scalars().all()
+        assert episodes == [(EpisodeStatus.RESOLVED, False), (EpisodeStatus.FIRING, True)]
+        assert len(members) == 2
+
+
+# ---------------------------------------------------------------------------
+# degraded data: a fact of the snapshot under evaluation is still a fact
+# ---------------------------------------------------------------------------
+
+
+def _slot(i: int) -> datetime:
+    return datetime(2026, 8, 17, 2, 0, tzinfo=UTC) + timedelta(hours=4 * i)
+
+
+def _slot_input(i: int, **kw) -> AlertInput:
+    return make_input(identity=f"slot-{i}", computed_at=_slot(i).isoformat(), **kw)
+
+
+def _rules_about_degraded_data():
+    """Each rule on the input its title describes."""
+    before = _slot_input(0, effective="de-risk", base="de-risk", point=50.0)
+    suppressed = _slot_input(1, effective="suppressed", base="trim", degraded=True,
+                             suppressed=True, point=51.0)
+    override_wins = _slot_input(1, effective="de-risk", base="de-risk", degraded=True,
+                                suppressed=False, override=True)
+    flag_input_lost = suppressed.model_copy(
+        update={"override_fireable_universe_count": 2})      # the override needs 3
+    return [
+        # "Base band changed while coverage suppression is active"
+        ("regime.base_band_moved_while_suppressed", suppressed, before),
+        # "Coverage degradation is real and unmitigated"
+        ("constellation.coverage_degradation_real", suppressed, before),
+        # "False alarm likely": the point score rises on degraded data
+        ("constellation.false_alarm_likely", suppressed, before),
+        # "Data degraded without a suppressed decision"
+        ("ops.coverage_degraded_info", override_wins, before),
+        # "A red-flag input was unavailable this run", here while suppressed
+        ("ops.rf_input_unavailable", flag_input_lost, before),
+    ]
+
+
+@pytest.mark.parametrize("rule_id,now,before", _rules_about_degraded_data(),
+                         ids=[case[0] for case in _rules_about_degraded_data()])
+def test_a_rule_about_degraded_data_fires_on_degraded_data(rule_id, now, before):
+    rule = _artifacts().ruleset.rule(rule_id)
+    assert rule is not None and rule.enabled
+    assert now.data_degraded is True
+    outcome = evaluate_rule(rule, _ctx(now, before))
+    assert outcome.truth is True, outcome.reasons

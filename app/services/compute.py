@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 
 from app import methodology as _M
 from app.alerts.calendars import is_trading_day, trading_days_after
@@ -63,7 +63,7 @@ from app.indicators import (
 from app.logging_conf import get_logger
 from app.models import HyOasHistory, Snapshot, SourceHealth
 from app.redaction import sanitize
-from app.references import REGISTRY
+from app.references import REGISTRY, SOURCE_REGISTRY
 
 log = get_logger(__name__)
 
@@ -76,7 +76,7 @@ FRESHNESS_SLA_DAYS: dict[str, int] = _M.as_dict("freshness_sla_days")
 # The readings a daily market feed delivers once per NYSE session, the ones with
 # the 3-day SLA: their SLA counts NYSE sessions since as_of, not calendar days.
 # Counted in calendar days, Friday's breadth is 4 days old on every Tuesday
-# until Monday's is stored (13:00 UTC), and the coverage gate reads a weekend
+# until Monday's is stored, and the coverage gate reads a weekend
 # as an outage. The cost: a daily feed that really stops is stale once more
 # than three sessions have passed, two calendar days later across a weekend,
 # three across an exchange holiday too, never earlier. The numbers stay the
@@ -139,13 +139,14 @@ def _age_days(as_of_iso: str | None) -> int | None:
         return None
 
 
-def _past_sla(indicator_id: str, as_of_iso: str | None, today: date) -> bool | None:
-    """Is a reading dated `as_of_iso` past its indicator's freshness SLA on `today`?
+def _older_than(as_of_iso: str | None, limit: int, today: date, *,
+                in_sessions: bool) -> bool | None:
+    """Is a reading dated `as_of_iso` more than `limit` days old on `today`,
+    counted in NYSE sessions or in calendar days?
 
-    None when the date or the SLA is unknown. A reading dated after `today`
-    (clock skew, bad vintage) is past it (v3.7.3/O-06)."""
-    sla = FRESHNESS_SLA_DAYS.get(indicator_id)
-    if not as_of_iso or sla is None:
+    None when the date is unknown. A reading dated after `today` (clock skew,
+    bad vintage) counts as older (v3.7.3/O-06)."""
+    if not as_of_iso:
         return None
     try:
         as_of = date.fromisoformat(as_of_iso[:10])
@@ -153,15 +154,49 @@ def _past_sla(indicator_id: str, as_of_iso: str | None, today: date) -> bool | N
         return None
     if as_of > today:
         return True
-    if indicator_id in SESSION_AGED:
-        return trading_days_after(as_of, today) > sla
-    return (today - as_of).days > sla
+    age = trading_days_after(as_of, today) if in_sessions else (today - as_of).days
+    return age > limit
+
+
+def _past_sla(indicator_id: str, as_of_iso: str | None, today: date) -> bool | None:
+    """Is a reading dated `as_of_iso` past its indicator's freshness SLA on `today`?
+
+    None when the date or the SLA is unknown."""
+    sla = FRESHNESS_SLA_DAYS.get(indicator_id)
+    if sla is None:
+        return None
+    return _older_than(as_of_iso, sla, today, in_sessions=indicator_id in SESSION_AGED)
+
+
+# Red flag 3 reads FRED's daily HY OAS (BAMLH0A0HYM2), whichever tier S5 is
+# scored on, so its record carries that reading's own freshness: the SLA of the
+# registry row that documents the series, counted in NYSE sessions.
+HY_OAS_SLA_DAYS: int = next(
+    spec.sla_days for spec in SOURCE_REGISTRY if spec.key == "fred_hyoas")
 
 
 def _month_end_iso(yyyy_mm: str) -> str:
     """ISO date of the LAST day of a YYYY-MM month (leap-safe)."""
     y, m = int(yyyy_mm[:4]), int(yyyy_mm[5:7])
     return f"{y:04d}-{m:02d}-{calendar.monthrange(y, m)[1]:02d}"
+
+
+def _month_end_of(as_of: Any) -> str | None:
+    """ISO date of the last day of `as_of`'s month when date.fromisoformat reads it; else None."""
+    try:
+        return _month_end_iso(date.fromisoformat(as_of).isoformat()[:7])
+    except (TypeError, ValueError):
+        return None
+
+
+def _ended_month(as_of: Any, today: date) -> bool:
+    """Is `as_of` a calendar date written YYYY-MM-DD (date.fromisoformat reads
+    it and isoformat writes it back unchanged) whose month has ended by `today`?"""
+    try:
+        return (date.fromisoformat(as_of).isoformat() == as_of
+                and date.fromisoformat(_month_end_iso(as_of[:7])) <= today)
+    except (TypeError, ValueError):
+        return False
 
 
 def _month_gaps(months: list[str]) -> list[str]:
@@ -259,7 +294,6 @@ class RawInputs:
     cape_history: list[float] | None = None
 
     real10y_decimal: float | None = None
-    real10y_as_of: str | None = None
 
     top10_pct: float | None = None
     top10_source: str = "ssga_spy_xlsx"
@@ -287,7 +321,7 @@ class RawInputs:
     bsadf_argmax: int | None = None   # 1-based index of the sup within the sequence
     bsadf_n: int | None = None
     bsadf_n_finite: int | None = None  # < bsadf_n means the history has holes
-    bsadf_cv_route: str | None = None  # "bsadf_cv" | "augment_join" | "unavailable"
+    bsadf_cv_route: str | None = None  # "bsadf_cv" | "unavailable": r/gsadf.R has one route
 
     hy_oas_bps: float | None = None
     hy_oas_history_bps: list[float] | None = None
@@ -307,13 +341,13 @@ class RawInputs:
     breadth_pct: float | None = None
     breadth_n: int | None = None   # constituents resolved on the common date
     breadth_universe: int | None = None  # current-universe denominator (v3.7.8/B-06)
-    breadth_source: str = "constituents+twelvedata"
+    # the one breadth source (app/sources/breadth.py); a run without a reading names it too
+    breadth_source: str = "constituents+polygon"
     breadth_note: str | None = None
     breadth_as_of: str | None = None
 
     margin_balances: list[float] | None = None
     margin_months: list[str] | None = None   # parallel YYYY-MM for calendar YoY (C-07)
-    margin_note: str | None = None
     margin_as_of: str | None = None
 
     hyperscalers: list[d3_hyperscaler_fcf.HyperscalerReading] | None = None
@@ -322,14 +356,16 @@ class RawInputs:
 
     lppls_confidence: float | None = None
     lppls_result: dict | None = None   # tri-state {state, value, n_windows_*, n_closes}
-    lppls_note: str | None = None
     lppls_as_of: str | None = None
 
     vix_ratio: float | None = None
-    vix_ratio_source: str = "cboe_delayed"
-    vix_ratio_fallback: bool = False
+    vix_ratio_source: str = "fred_vix_ratio"
     vix_as_of: str | None = None
     vix_level: float | None = None
+    # The level is FRED's VIXCLS close first, the CBOE quote as the fallback
+    # (vix.vix_level); the date is FRED's observation date, None for the quote.
+    vix_level_source: str = "fred_VIXCLS"
+    vix_level_as_of: str | None = None
     skew: float | None = None
 
     spy_daily_closes: list[float] | None = None
@@ -339,8 +375,9 @@ class RawInputs:
 
     index_within_2pct_of_ath: bool = False
 
-    # last good (non-dropped) D2 reading from a prior snapshot, for the
-    # margin >90d staleness guard: {"value", "sub_score", "timestamp"}
+    # D2's stored reading of the latest readable month computed from FINRA's
+    # file (never a cached one), with that month as the row stores it:
+    # {"value", "sub_score", "as_of"} (last_finra_reading)
     margin_cached: dict[str, Any] | None = None
 
     source_health: list[dict[str, Any]] = field(default_factory=list)
@@ -512,6 +549,42 @@ def _track_closes(raw: RawInputs, source: str, canonical: str) -> Any:
     return result
 
 
+def last_finra_reading() -> dict[str, Any] | None:
+    """D2's stored reading of the latest readable reference month that was
+    computed from FINRA's file, with that month as the row stores it.
+
+    A cached reading is stored with fallback_used, so it is never read back:
+    the reading served is one the file gave, and its age keeps counting from
+    that file's reference month. Without the filter each cached row after
+    the first cited the cached row before it.
+
+    The month is the stored payload's own as_of (block_d.indicators.d2);
+    indicator_readings stores no reference month. It is readable when it is
+    a calendar date written YYYY-MM-DD of a month that has ended by today
+    (_ended_month: Python decides, not SQLite's date functions). The rows come
+    in the order of the month's text, the newer first within a month, and the
+    first readable one is chosen, so a row without a readable month cannot
+    hide another. compute_snapshot then serves the reading or drops D2 by the
+    month's age."""
+    from app.models import IndicatorReading
+
+    as_of = func.json_extract(Snapshot.block_d, "$.indicators.d2.as_of")
+    today = datetime.now(UTC).date()
+    with session_scope() as session:
+        rows = session.execute(
+            select(IndicatorReading.value, IndicatorReading.sub_score, as_of)
+            .join(Snapshot, IndicatorReading.snapshot_id == Snapshot.id)
+            .where(IndicatorReading.indicator_id == "d2",
+                   IndicatorReading.dropped.is_(False),
+                   IndicatorReading.fallback_used.is_(False),
+                   IndicatorReading.sub_score.is_not(None))
+            .order_by(func.substr(as_of, 1, 7).desc(), IndicatorReading.timestamp.desc()))
+        for value, sub_score, month in rows:
+            if _ended_month(month, today):
+                return {"value": value, "sub_score": sub_score, "as_of": month}
+    return None
+
+
 def gather_inputs() -> RawInputs:
     """Fetch all upstream sources with per-source circuit breakers.
 
@@ -542,7 +615,6 @@ def gather_inputs() -> RawInputs:
     r = _track(raw, "fred_DFII10", lambda: fred_src.latest("DFII10"))
     if r:
         raw.real10y_decimal = r.value / 100.0
-        raw.real10y_as_of = r.provenance.as_of
 
     r = _track(raw, "ssga_spy_xlsx", ssga_src.top10_concentration)
     if r:
@@ -599,31 +671,43 @@ def gather_inputs() -> RawInputs:
         import math
 
         # GSADF needs a long monthly history to calibrate (PSY tables start at
-        # T=100); fetch QQQ monthly from 1999 (T~329), falling back to the
-        # shorter recompute series if the long fetch is unavailable.
-        try:
-            gsadf_pairs = price_src.fetch_tiingo_monthly("NDX")
+        # T=100); fetch QQQ monthly from 1999 (T~329). The fetch, the cut to
+        # completed months and the logarithms run inside `_track`, like `_ebp`
+        # below: when one of them fails, S4 has no statistic this run and no
+        # shorter series stands in.
+        def _s4_series() -> tuple[list[float], str, str]:
+            # Completed months only. Tiingo's monthly series ends with the month
+            # in progress, under the label of that month's last business day
+            # (2026-11-30 on 2026-11-10): a date in the future, which reads as
+            # stale, and at each month turn a month of one day in the fit. The
+            # README changelog has the production numbers. `today` is the UTC
+            # date of this gather; the last completed month is at most 33 days
+            # old on any day of the next one (S4's SLA is 35).
+            gsadf_pairs = [(d, c) for d, c in price_src.fetch_tiingo_monthly("NDX")
+                           if d[:7] < today[:7]]
             gsadf_monthly = [c for _, c in gsadf_pairs]
-            raw.gsadf_as_of = gsadf_pairs[-1][0] if gsadf_pairs else None
             gsadf_src_note = f"Nasdaq-100 via QQQ proxy (Tiingo monthly 1999+, T={len(gsadf_monthly)})"
-        except Exception as exc:
-            gsadf_monthly = legs.monthly_closes(ndx.value)
-            raw.gsadf_as_of = ndx.provenance.as_of
-            gsadf_src_note = (f"Nasdaq-100 via QQQ proxy (short series T={len(gsadf_monthly)}; "
-                              f"long history unavailable: {str(exc)[:80]})")
-        out = run_gsadf([math.log(v) for v in gsadf_monthly[-_M.get_path("gsadf", "series_months_max"):]],
-                        timeout_s=get_settings().gsadf_timeout_s)
-        if out:
-            raw.gsadf_stat, raw.gsadf_cv90, raw.gsadf_cv95 = out.gsadf, out.cv90, out.cv95
-            raw.bsadf_stat, raw.bsadf_cv90 = out.bsadf, out.bsadf_cv90
-            raw.bsadf_cv95, raw.bsadf_argmax = out.bsadf_cv95, out.bsadf_argmax
-            raw.bsadf_n, raw.bsadf_n_finite = out.bsadf_n, out.bsadf_n_finite
-            raw.bsadf_cv_route = out.bsadf_cv_route
-            raw.gsadf_note = f"{gsadf_src_note} (cached MC CVs)"
+            return ([math.log(v) for v in gsadf_monthly[-_M.get_path("gsadf", "series_months_max"):]],
+                    gsadf_pairs[-1][0], gsadf_src_note)
+
+        s4_series = _track(raw, "price_NDX_monthly", _s4_series)
+        if s4_series:
+            gsadf_logs, raw.gsadf_as_of, gsadf_src_note = s4_series
+            out = run_gsadf(gsadf_logs, timeout_s=get_settings().gsadf_timeout_s)
+            if out:
+                raw.gsadf_stat, raw.gsadf_cv90, raw.gsadf_cv95 = out.gsadf, out.cv90, out.cv95
+                raw.bsadf_stat, raw.bsadf_cv90 = out.bsadf, out.bsadf_cv90
+                raw.bsadf_cv95, raw.bsadf_argmax = out.bsadf_cv95, out.bsadf_argmax
+                raw.bsadf_n, raw.bsadf_n_finite = out.bsadf_n, out.bsadf_n_finite
+                raw.bsadf_cv_route = out.bsadf_cv_route
+                raw.gsadf_note = f"{gsadf_src_note} (cached MC CVs)"
+            else:
+                # Reason only — the "GSADF not computable this run" prefix is added
+                # once by the s4 note builder; do not repeat it here (was double-nested).
+                raw.gsadf_note = "R/exuber unavailable or the fit failed"
         else:
-            # Reason only — the "GSADF not computable this run" prefix is added
-            # once by the s4 note builder; do not repeat it here (was double-nested).
-            raw.gsadf_note = "R/exuber unavailable or the fit failed"
+            cause = raw.gather_errors.get("price_NDX_monthly", "unknown cause")
+            raw.gsadf_note = f"long monthly history unavailable: {cause[:80]}"
     else:
         raw.gsadf_note = "no Nasdaq-100/QQQ series this run"
 
@@ -725,19 +809,7 @@ def gather_inputs() -> RawInputs:
         raw.margin_balances = r.value
         raw.margin_months = getattr(r, "months", None)   # for calendar YoY (C-07)
         raw.margin_as_of = r.provenance.as_of
-    from app.models import IndicatorReading
-
-    with session_scope() as session:
-        cached_d2 = session.execute(
-            select(IndicatorReading)
-            .where(IndicatorReading.indicator_id == "d2",
-                   IndicatorReading.dropped.is_(False),
-                   IndicatorReading.sub_score.is_not(None))
-            .order_by(IndicatorReading.timestamp.desc()).limit(1)
-        ).scalars().first()
-        if cached_d2:
-            raw.margin_cached = {"value": cached_d2.value, "sub_score": cached_d2.sub_score,
-                                 "timestamp": cached_d2.timestamp.isoformat()}
+    raw.margin_cached = last_finra_reading()
 
     r = _track(raw, "sec_edgar", edgar_src.hyperscaler_readings)
     if r:
@@ -773,15 +845,13 @@ def gather_inputs() -> RawInputs:
     if r is not None:
         raw.lppls_confidence = r["value"]
         raw.lppls_as_of = ndx.provenance.as_of if ndx else today
-    else:
-        cause = raw.gather_errors.get("lppls", "unknown cause")
-        raw.lppls_note = f"LPPLS floored ({cause}); excluded from Block D, which renormalizes"
+    # A failed fit needs no note of its own here: the dropped d4 row words one
+    # from lppls_result's reason or gather_errors["lppls"] (compute_snapshot, D4).
 
     r = _track(raw, "vix_term_structure", vix_src.term_structure_ratio)
     if r:
         raw.vix_ratio = r.value
         raw.vix_ratio_source = r.provenance.source
-        raw.vix_ratio_fallback = r.provenance.fallback_used
         # v3.7.8/§9: never fabricate `today` — an unknown source date stays None
         # (unverified), consistent with the breadth/EBP provenance policy. V is a
         # multiplier, not a coverage-gated block indicator, so this is display-only.
@@ -789,6 +859,8 @@ def gather_inputs() -> RawInputs:
     r = _track(raw, "vix_level", vix_src.vix_level)
     if r:
         raw.vix_level = r.value
+        raw.vix_level_source = r.provenance.source
+        raw.vix_level_as_of = r.provenance.as_of
     r = _track(raw, "cboe_skew", vix_src.skew_level)
     if r:
         raw.skew = r.value
@@ -889,13 +961,18 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
                      mc_seed: int | None = None,
                      gsadf_contested: bool | None = None,
                      as_of_date: str | None = None) -> SnapshotData:
-    """PURE scoring pipeline: raw inputs -> snapshot data. Never raises on
+    """Scoring pipeline: raw inputs -> snapshot data. Never raises on
     missing sources; drops indicators and renormalizes instead.
+
+    Not pure: the same raw inputs give a different snapshot on another day,
+    because the age of every reading (the freshness map and, through the
+    freshness SLAs, the coverage gate) and D2's 75-day branch are measured
+    against the wall clock.
 
     `as_of_date` (ISO) is the day the caller is evaluating on, used ONLY to
     decide whether a price feed's last month has ended. It is optional and
-    defaults to the newest bar's own month, so the function stays pure and
-    reproducible for fixtures and replay; production passes the real date
+    defaults to the newest bar's own month, so that this one decision is the
+    same whenever a fixture or a replay runs; production passes the real date
     because without it a completed month is not recognised until the first bar
     of the NEXT month arrives, which delays a month-end P1 by a day or more.
     """
@@ -975,10 +1052,12 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
                                            note="run-up unavailable; dropped, Block S renormalized")
 
     # ---- S4 GSADF ----
-    # Mapping: explosive p<0.05 non-contested -> 1.0; p<0.10 -> 0.5;
-    # contested-or-stale-or-DATA-MISSING -> 0.25; tested-and-not-explosive -> 0.05.
+    # Mapping: stat > cv95 non-contested -> 1.0; > cv90 -> 0.5; a contested
+    # rejection, or a statistic that could not be computed -> 0.25;
+    # tested-and-not-explosive -> 0.05.
     # asymmetric= is deliberately NOT bound to a setting: see app/config.py. It
-    # defaults False, so this call is byte-equivalent to the pre-branch one.
+    # is the frozen gsadf.contested_rule, "asymmetric" since v4.1, so this
+    # call passes True (the parameter's own default is False).
     s4_stat, s4_cv90, s4_cv95 = scored_s4_statistic(raw)
     # v4.1 contested rule, also an import-time constant.
     s4_asym = s4_gsadf.ASYMMETRIC_CONTESTED
@@ -998,15 +1077,10 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         # tells the coverage gate — and the reader — that NOTHING was measured
         # this run. A floored s4 must not report itself as a full-quality reading.
         s4_state, s4_quality = "FLOOR", 0.0
-        # FLOOR must actually floor the SCORE, not just the label. s4_sub was
-        # computed and published above; before v4.1 `not _s4_ok` was
-        # character-equivalent to sub_score's own data-missing guard, so FLOOR
-        # implied 0.25 by construction and nothing had to re-assert it. Adding
-        # `s4_asym is not None` broke that equivalence: an unrecognised rule
-        # reaches here with a finite, ordered, fully scorable triple, and the
-        # branch was publishing whatever sub_score returned for it -- measured,
-        # 1.0 on a non-contested rejection, headline bit-identical to the run
-        # under a recognised rule. That is failing OPEN while reporting FLOOR.
+        # FLOOR must actually floor the SCORE, not just the label. `not _s4_ok`
+        # is the same test as sub_score's own data-missing guard, so s4_sub is
+        # 0.25 here already; the three lines below state it where the state is
+        # set.
         s4_sub = s4_gsadf.SUB_CONTESTED_OR_STALE
         sub_s["s4"] = s4_sub
         mc_in.s4_sub = s4_sub
@@ -1014,12 +1088,10 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         # "GSADF not computable" was true by construction; since v4.0 _s4_ok gates
         # the ENDPOINT triple, so this branch is reachable with a perfectly good
         # sup sitting in the same payload under extra.s4_statistic.gsadf_sup.
-        _which_stat = s4_gsadf.SCORED_STATISTIC
-        # None means the artifact could not identify the rule at all; say that
-        # rather than printing "None" at the reader.
-        _floor_lab = ({"bsadf_endpoint": "BSADF@endpoint",
-                       "gsadf_sup": "GSADF sup"}.get(_which_stat, _which_stat)
-                      if _which_stat is not None else "unidentified — artifact unreadable")
+        # SCORED_STATISTIC is one of these two keys: s4_gsadf refuses to import
+        # on an absent or unrecognised value.
+        _floor_lab = {"bsadf_endpoint": "BSADF@endpoint",
+                      "gsadf_sup": "GSADF sup"}[s4_gsadf.SCORED_STATISTIC]
         s4_note = (f"s4 scored statistic ({_floor_lab}) not computable this run; "
                    "contested/stale floor applied")
         if raw.gsadf_note:
@@ -1050,11 +1122,10 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
             "bsadf_endpoint": ("BSADF@endpoint", raw.bsadf_stat, raw.bsadf_cv90),
             "gsadf_sup": ("GSADF sup", raw.gsadf_stat, raw.gsadf_cv90),
         }
-        # Non-raising read: unreachable with an absent key today (the selector
-        # floors first), but the guardrail is that a config fault never 500s.
-        _stat_key = s4_gsadf.SCORED_STATISTIC
-        _scored_family = _families.pop(_stat_key, None) if _stat_key is not None else None
-        if _scored_family is not None and None not in _scored_family[1:]:
+        # SCORED_STATISTIC is one of the two keys: s4_gsadf refuses to import on
+        # anything else.
+        _scored_family = _families.pop(s4_gsadf.SCORED_STATISTIC)
+        if None not in _scored_family[1:]:
             _lab, _st, _cv = _scored_family
             s4_note += f"; scored {_lab} {_st:.4f} (cv90 {_cv:.4f})"
         for _lab, _st, _cv in _families.values():
@@ -1115,7 +1186,8 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
                                                "fed_ebp", sub,
                                                raw_value=ebp_t2_persisted, raw_unit="pp"))
     elif raw.baa_spread_history_bps and len(raw.baa_spread_history_bps) >= 24:
-        # PREFERRED: long-history percentile on the BAA-DGS10 proxy (monthly),
+        # SECOND TIER, taken only without the EBP above (quality 0.5):
+        # long-history percentile on the BAA-DGS10 proxy (monthly),
         # LSSZ t-2yr lag (24 months). HY OAS is FRED-truncated to 3yr, so its
         # own percentile is regime-limited; the Baa spread goes back to 1997.
         spread_t2 = s5_credit.t_minus_2_value(raw.baa_spread_history_bps, lag_obs=24)
@@ -1151,8 +1223,10 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         # FIDELITY quality 0.3 (v3.3.2): right construct family (a market credit
         # spread) but the FRED-truncated 3yr window makes its percentile
         # regime-limited — the weakest usable tier of the s5 chain.
+        # fallback_used is True, as on the proxy tier above: the chain is EBP,
+        # then the proxy, then this tier.
         indicators["s5"] = IndicatorOutput("s5", oas_t2, sub, False,
-                                           "fred_BAMLH0A0HYM2", False, note=s5_note,
+                                           "fred_BAMLH0A0HYM2", True, note=s5_note,
                                            as_of=raw.hy_oas_as_of, quality=0.3,
                                            extra=_s5_extra(
                                                "fred_BAMLH0A0HYM2", sub,
@@ -1199,16 +1273,20 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
                 margin_yoy = d2_margin.yoy_pct(raw.margin_balances)
         except ValueError as exc:
             log.warning("margin_yoy_calendar_gap", error=str(exc)[:120])
-    # FINRA SLA: 75 days tolerates one skipped monthly publication (series
-    # posts ~3 weeks after month-end). Beyond that, never compute a YoY.
+    # FINRA SLA: 75 days from the reference month-end (the series posts ~3
+    # weeks after month-end). One skipped publication is generally NOT
+    # covered: the file after it arrives 73 to 82 days after the month in
+    # hand ended, and D2 is dropped until it does. Beyond the SLA, never
+    # compute a YoY.
     if margin_yoy is not None and (margin_age is None or margin_age <= 75):
         yoy = margin_yoy
         # Within the FINRA SLA (75 days) the rollover confirmation is asserted
         # normally. FINRA posts monthly ~3 weeks after month-end, so the FRESHEST
         # possible reading is routinely ~45-75 days old — a ~71-day age is as
-        # current as the series ever gets, NOT stale. (Data older than the SLA
-        # never reaches here; it takes the cached branch below, which reports
-        # rollover as unknown.)
+        # current as the series ever gets, NOT stale. (A file older than the SLA
+        # never reaches here: below, D2 is served from a stored reading only
+        # while that reading's own month is inside the SLA, and dropped
+        # otherwise.)
         # Rollover confirmation is CALENDAR-aware when dated months are available
         # (v3.7.7/§3.1): on a publication gap the positional [-3:] window
         # straddles the hole and could flip the D2 multiplier (0.6<->1.0) from
@@ -1226,8 +1304,6 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         note = ("rollover confirmed" if rolled_state is True else
                 "rollover unknown (calendar gap); mult=0.6" if rolled_state is None else
                 "no rollover; mult=0.6")
-        if raw.margin_note:
-            note = f"{raw.margin_note}; {note}"
         indicators["d2"] = IndicatorOutput(
             "d2", yoy, sub, False, "finra_xlsx", False,
             note=note, as_of=raw.margin_as_of,
@@ -1242,28 +1318,50 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
                    "rollover_assertable": rolled_state is not None,
                    "multiplier": d2_margin.multiplier(rolled),
                    "release_period": raw.margin_as_of})
-    elif raw.margin_cached is not None:
-        # Guard (a): data older than 90 days (or missing) never feeds a YoY
-        # across a broken window — serve the last good cached reading.
+    elif (raw.margin_cached is not None
+          and (cached_as_of := _month_end_of(raw.margin_cached.get("as_of"))) is not None
+          and (cached_age := _age_days(cached_as_of)) is not None
+          and 0 <= cached_age <= FRESHNESS_SLA_DAYS["d2"]):
+        # FINRA's file could not be read, or it lacks the month a year back:
+        # serve the stored reading of the latest month computed from the file
+        # (last_finra_reading), while that month is inside the SLA (the same test
+        # as IndicatorOutput.stale). It is a tier of the fallback chain
+        # (AGENTS.md rule 3), not a placeholder (rule 4): the service computed
+        # it from the file, it keeps its month, and it ends with the SLA.
+        # Its date is the reading's, not the failed fetch's: with as_of None
+        # the coverage gate cannot count it as fresh, and Block D coverage
+        # reads 0.87 instead of 1.0 although the month is weeks old.
+        # The date is the last day of the reading's month, whatever day the
+        # stored row carries: rows stored while the reader dated a month by
+        # its first day (production: 2026-05-01, 2026-06-01) would otherwise
+        # leave the SLA about a month early.
         sub = float(raw.margin_cached["sub_score"])
         sub_d["d2"] = sub
         mc_in.d2_sub = sub
-        reason = (f"reference month {raw.margin_as_of} older than 75d SLA"
-                  if margin_age is not None and margin_age > 75 else "margin statistics unavailable")
         indicators["d2"] = IndicatorOutput(
             "d2", raw.margin_cached.get("value"), sub, False, "finra_xlsx (cached)", True,
-            note=f"{reason}; serving cached reading from {raw.margin_cached['timestamp']}; "
-                 "rollover: unknown",
-            as_of=raw.margin_as_of,
+            note=f"margin statistics unavailable; serving the reading of reference month "
+                 f"{cached_as_of}; rollover: unknown",
+            as_of=cached_as_of,
             # A cached reading says so in prose already; say it in a field too.
             extra={"yoy_pct": raw.margin_cached.get("value"),
                    "rollover_state": None,
                    "rollover_assertable": False,
                    "multiplier": None,
-                   "release_period": raw.margin_as_of})
+                   "release_period": cached_as_of})
     else:
+        # Margin debt older than its SLA is not scored, from the file or from a
+        # stored reading: D2 is dropped and Block D renormalized, the rule the
+        # gate above applies to the file.
+        # The numeric move: none while the file gives a reading. On the day a
+        # stored reading passes the SLA the headline steps as when any
+        # indicator is dropped: replayed on the stored series (605 snapshots,
+        # 2026-07-14 .. 2026-11-10, point score) by -1.68 to +3.37 points
+        # (median +2.10), and the band word changes on 130 of them.
+        reason = (f"reference month {raw.margin_as_of} older than 75d SLA"
+                  if margin_age is not None and margin_age > 75 else "margin statistics unavailable")
         indicators["d2"] = IndicatorOutput("d2", None, None, True, "finra_xlsx", False,
-                                           note="margin statistics unavailable, no cached reading; "
+                                           note=f"{reason}, no reading inside the SLA; "
                                                 "dropped (no true fallback)")
 
     # ---- D3 hyperscaler FCF ----
@@ -1475,7 +1573,9 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         ts_state = v_vix.state(raw.vix_ratio) if raw.vix_ratio is not None else "unknown"
     except ValueError:
         ts_state = "unknown"   # v3.7.8/§9: invalid ratio -> unknown, never mislabelled
-    alarm = legs.fast_alarm(ts_state, raw.vix_level, raw.spy_daily_closes, raw.skew)
+    alarm = legs.fast_alarm(ts_state, raw.vix_level,
+                            legs.closes_through(raw.spy_daily, raw.vix_level_as_of),
+                            raw.skew, vrp_as_of=raw.vix_level_as_of)
 
     freshness: dict[str, str] = {}
     for ind in indicators.values():
@@ -1534,23 +1634,12 @@ def persist_snapshot(data: SnapshotData, raw: RawInputs) -> int:
     settings = get_settings()
     now = datetime.now(UTC)
 
-    # judgment call (degrades gracefully; never blocks the recompute)
     with session_scope() as session:
         last = session.execute(
             select(Snapshot).order_by(Snapshot.computed_at.desc(), Snapshot.id.desc()).limit(1)
         ).scalars().first()
         last_text = last.judgment_call if last else None
         prev_snapshot_id = last.id if last else None
-
-    s_scores = {k: v.sub_score for k, v in data.indicators.items() if k.startswith("s")}
-    d_scores = {k: v.sub_score for k, v in data.indicators.items() if k.startswith("d")}
-    call = judgment.generate(
-        data.median, data.iqr, data.action_band, s_scores, d_scores, data.v_multiplier,
-        data.red_flags.as_dict(), data.override_fired,
-        data.trend_states.get("SPY", {}).get("faber_10mo", "unknown"),
-        data.trend_states.get("QQQ", {}).get("faber_10mo", "unknown"),
-        data.fast_alarm, last_successful=last_text,
-    )
 
     # ---- typed alert contract (Stage 0). NON-SCORING, post-hoc, pure. -------
     # Built here (not in compute_snapshot) so `observed_at` is the SAME instant
@@ -1585,14 +1674,16 @@ def persist_snapshot(data: SnapshotData, raw: RawInputs) -> int:
         hy_oas_bps=raw.hy_oas_bps,
         hy_oas_tight_bps=data.hy_oas_tight_bps,
         hy_oas_as_of=raw.hy_oas_as_of,
-        hy_oas_stale=_ind_stale("s5"),
+        # The spread's own age on the day the record is stamped with, not S5's
+        # state: see HY_OAS_SLA_DAYS.
+        hy_oas_stale=_older_than(raw.hy_oas_as_of, HY_OAS_SLA_DAYS, now.date(),
+                                 in_sessions=True),
         breadth_pct=raw.breadth_pct,
         breadth_as_of=raw.breadth_as_of,
         breadth_stale=_ind_stale("d1"),
         # The near-ATH leg is only OBSERVED when the SPY series arrived; the
         # field itself defaults to False and cannot tell the two apart.
         near_ath_available=bool(raw.spy_daily_closes),
-        near_ath_state=(raw.index_within_2pct_of_ath if raw.spy_daily_closes else None),
     )
     band_state = data.band_state
 
@@ -1624,9 +1715,11 @@ def persist_snapshot(data: SnapshotData, raw: RawInputs) -> int:
             block_d=block_d_payload,
             trend_states=data.trend_states,
             fast_alarm=data.fast_alarm,
-            judgment_call=call.text,
-            judgment_stale=call.stale,
-            judgment_error=call.error_class,
+            # Until write_judgment replaces it, GET /api/v1/score and the
+            # status page serve this as what it is: the previous note, stale.
+            judgment_call=last_text,
+            judgment_stale=True,
+            judgment_error=None,
             data_freshness={**data.freshness, "_coverage": data.coverage,
                             "_ath_provenance": data.ath_provenance},
             # RM-1: stamp the methodology actually in force in THIS process —
@@ -1665,8 +1758,33 @@ def persist_snapshot(data: SnapshotData, raw: RawInputs) -> int:
     return snap_id
 
 
+def write_judgment(snap_id: int, data: SnapshotData) -> None:
+    """Ask the gateway for the note and write it onto the committed snapshot.
+
+    The model call sits inside no transaction. On a failed call the row gets
+    the previous snapshot's note as it stands then (none for the first
+    snapshot), stale, and the error class (app.engine.judgment)."""
+    s_scores = {k: v.sub_score for k, v in data.indicators.items() if k.startswith("s")}
+    d_scores = {k: v.sub_score for k, v in data.indicators.items() if k.startswith("d")}
+    call = judgment.generate(
+        data.median, data.iqr, data.action_band, s_scores, d_scores, data.v_multiplier,
+        data.red_flags.as_dict(), data.override_fired,
+        data.trend_states.get("SPY", {}).get("faber_10mo", "unknown"),
+        data.trend_states.get("QQQ", {}).get("faber_10mo", "unknown"),
+        data.fast_alarm,
+    )
+    with session_scope() as session:
+        text = call.text
+        if call.stale:  # the call failed: the fallback is read now, when it is used
+            prev = session.get_one(Snapshot, snap_id).prev_snapshot_id
+            text = session.scalar(select(Snapshot.judgment_call).where(Snapshot.id == prev))
+        session.execute(update(Snapshot).where(Snapshot.id == snap_id).values(
+            judgment_call=text, judgment_stale=call.stale, judgment_error=call.error_class))
+
+
 def run_recompute() -> int | None:
-    """Full recompute: gather -> compute -> persist -> Parquet export.
+    """Full recompute: gather -> compute -> persist -> alert capture ->
+    feed -> judgment note.
 
     Returns the snapshot id, or None if scoring was impossible (an entire
     block empty). Never raises upstream failures."""
@@ -1679,12 +1797,18 @@ def run_recompute() -> int | None:
         log.error("recompute_impossible", error=str(exc))
         return None
     snap_id = persist_snapshot(data, raw)
+    # Alert system: directly after the snapshot commits, before anything that
+    # waits on a disk or a network. The capture is the one step of a run that
+    # nothing makes up for: a snapshot without its sidecar is a hole in the
+    # replay record (app/services/alert_integration.py). Its own transaction
+    # and its own exception boundary: it cannot delay, alter or roll back the
+    # snapshot.
     try:
-        from app.services.backfill import export_parquet
+        from app.services.alert_integration import on_snapshot_committed
 
-        export_parquet(snap_id)
+        on_snapshot_committed(snap_id)
     except Exception as exc:
-        log.warning("parquet_export_failed", error=str(exc))
+        log.warning("alert_hook_failed", error=str(exc)[:300])
     # Dashboard feed (v3.4.0): built strictly AFTER the score persists — a feed
     # failure can never affect scoring; the endpoint then serves the prior payload.
     try:
@@ -1693,15 +1817,11 @@ def run_recompute() -> int | None:
         build_and_persist_feed(raw, data)
     except Exception as exc:
         log.warning("dashboard_feed_failed", error=str(exc)[:300])
-    # Alert system: strictly AFTER the snapshot commits, in its own transaction
-    # and its own exception boundary. It cannot delay, alter or roll back the
-    # snapshot — the whole system is off by default and does nothing here until
-    # an operator enables capture.
+    # The judgment note last: the one model call of the run, onto the committed
+    # snapshot. Nothing above waits for it.
     try:
-        from app.services.alert_integration import on_snapshot_committed
-
-        on_snapshot_committed(snap_id)
+        write_judgment(snap_id, data)
     except Exception as exc:
-        log.warning("alert_hook_failed", error=str(exc)[:300])
+        log.warning("judgment_write_failed", error=sanitize(exc, limit=300))
     log.info("recompute_done", snapshot_id=snap_id, median=data.median, band=data.action_band)
     return snap_id
