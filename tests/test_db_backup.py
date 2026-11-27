@@ -123,6 +123,33 @@ def test_a_failed_run_leaves_the_previous_copy_and_nothing_else(db, source, refu
     assert _copy_holds(db.parent / "backups" / db.name) == [("2023-07-11", 412.0)]
 
 
+def test_a_damaged_source_leaves_the_previous_copy_byte_for_byte(db):
+    from app.db import get_engine, reset_engine
+    from app.jobs import db_backup
+
+    _write(date(2023, 7, 11), 412.0)
+    db_backup.run_once()
+    copy = db.parent / "backups" / db.name
+    before = copy.read_bytes()
+    with get_engine().connect() as conn:
+        root = conn.execute(text("SELECT rootpage FROM sqlite_master WHERE name = 'hy_oas_history'")).scalar_one()
+        size = conn.execute(text("PRAGMA page_size")).scalar_one()
+        conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
+    reset_engine()
+    # One byte inside the table's page: the row's key no longer matches its index.
+    data = bytearray(db.read_bytes())
+    data[data.find(b"2023-07-11", (root - 1) * size, root * size) + 9] = ord("2")
+    db.write_bytes(bytes(data))
+    with closing(sqlite3.connect(f"{db.as_uri()}?mode=ro", uri=True)) as conn:
+        assert conn.execute("PRAGMA integrity_check").fetchall() != [("ok",)]
+
+    with pytest.raises(RuntimeError):
+        db_backup.run_once()
+
+    assert _names(copy.parent) == [copy.name]          # the run's own file is gone
+    assert copy.read_bytes() == before                 # the previous copy, byte for byte
+
+
 @pytest.mark.parametrize("uri", [False, True], ids=["double-slash-path", "sqlite-uri"])
 def test_the_database_is_named_by_its_path(db, monkeypatch, uri):
     from app.config import get_settings

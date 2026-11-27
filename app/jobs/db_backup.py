@@ -48,6 +48,7 @@ def run_once() -> dict[str, Any]:
         with (closing(sqlite3.connect(f"{source.as_uri()}?mode=ro", uri=True)) as src,
               closing(sqlite3.connect(staging)) as dst):
             src.backup(dst)
+            # The backup copies pages as they are, a damaged one included.
             verdict = dst.execute("PRAGMA integrity_check").fetchall()
             versioned = dst.execute("SELECT 1 FROM sqlite_master WHERE type = 'table'"
                                     " AND name = 'alembic_version'").fetchone()
