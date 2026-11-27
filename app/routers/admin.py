@@ -162,9 +162,11 @@ def run_recompute_guarded() -> None:
     status_code=202,
     summary="Start a full recompute in the background (X-API-Key required)",
     description=(
-        "Returns immediately with 202. The recompute takes minutes (breadth sweep, "
-        "GSADF simulation, LPPLS). Poll GET /api/v1/admin/refresh/status or GET "
-        "/api/v1/score for the result. At most one recompute runs at a time."
+        # The breadth sweep is not part of it: that is a scheduler job of its
+        # own (app/scheduler.py), and the recompute reads the cache it fills.
+        "Returns immediately with 202. The recompute takes minutes (the LPPLS fit, "
+        "the GSADF test, the model's note). Poll GET /api/v1/admin/refresh/status or "
+        "GET /api/v1/score for the result. At most one recompute runs at a time."
     ),
 )
 def refresh(_: None = Depends(require_admin_key)) -> dict[str, Any]:
@@ -196,8 +198,7 @@ def refresh_status(_: None = Depends(require_admin_key)) -> dict[str, Any]:
                  "scheduled run. Either way it needs admission (docs/MESSAGE_ENGINE.md "
                  "decision 5): without it nothing is sent, and the response is the "
                  "refusal with its blockers. The response names the transport that "
-                 "actually carried it. Path kept as /send-sms so existing operator "
-                 "scripts and bookmarks keep working."),
+                 "actually carried it."),
 )
 def send_sms_now(_: None = Depends(require_admin_key)) -> dict[str, Any]:
     from app.services.digest import send_daily_digest

@@ -15,7 +15,8 @@ Implement all"). Per-workstream delivery:
   `Snapshot.methodology_sha256/_version`), append-only `falsification_outcomes`
   (DB triggers via migration AND model DDL), `POST /api/v1/admin/falsification`,
   `GET /api/v1/replay/evidence`.
-- **RM-2 SHIPPED** — `GET /api/v1/replay/sufficiency`: distinct trading days
+- **RM-2 SHIPPED** — `GET /api/v1/replay/sufficiency` (removed with the
+  unscored shadows, owner decision D4, 2026-09-28): distinct trading days
   overall + per S5 tier vs the ≥60-day gate; per-tier adequacy deliberately
   unpinned. Snapshots are never pruned (no retention job exists), so the
   comparison window accumulates by default.
