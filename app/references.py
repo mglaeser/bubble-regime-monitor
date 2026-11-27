@@ -1066,8 +1066,13 @@ CHANGELOG: list[dict[str, str]] = [
     },
     {
         "version": "v3.9.0",
-        "score": "SCORE-SHIFTING at v4.1 — live headline 53.30 -> 51.82 (delta -1.48); action band "
-        "UNCHANGED at 'trim'. The golden fixture stays 52.43 ONLY because it supplies no GSADF "
+        "score": "SCORE-SHIFTING at v4.1 — measured for the release on the test suite's golden raw "
+        "inputs with the 2026-07 statistic put in (endpoint 1.1315 against cv90 1.1393): point "
+        "score 53.30 -> 51.82 (delta -1.48); action band UNCHANGED at 'trim'; neither number was "
+        "the production headline at release. In production the release did not move s4: the first "
+        "v3.9.0 snapshot (2026-08-23 22:02 UTC) scored the endpoint at 1.2681 against cv90 1.1425, "
+        "a contested rejection, so s4 stayed 0.25, and the median read 51.51 after 51.41. "
+        "The golden fixture stays 52.43 ONLY because it supplies no GSADF "
         "input and floors under either rule — that is a property of the fixture, not evidence of "
         "score-neutrality. THE FALL IS A POLICY CORRECTION, NOT MARKET IMPROVEMENT: the contested "
         "cap sat ABOVE what the test returned, so it was a floor pushing the headline UP.",
@@ -1079,10 +1084,11 @@ CHANGELOG: list[dict[str, str]] = [
         "gsadf.contested_rule='asymmetric' releases a contested NON-rejection to 0.05 while a "
         "contested REJECTION stays capped at 0.25, because Chen et al. (2026) establish SIZE "
         "distortion, which bounds false positives and says nothing against a non-rejection. "
-        "CAVEATS OF RECORD: on the SCORED (nominal) instrument the live endpoint is 1.1315 against "
-        "cv90 1.1393 — a non-rejection by 0.7 percent of the critical value, so one data revision "
-        "moves 1.48 points; and Chen et al. measure the SUPREMUM, so endpoint-level size distortion "
-        "is ASSUMED, not shown. Both are recorded in the frozen artifact.",
+        "CAVEATS OF RECORD: on the SCORED (nominal) instrument the endpoint measured for the "
+        "release (2026-07) was 1.1315 against cv90 1.1393 — a non-rejection by 0.7 percent of the "
+        "critical value, so one data revision moves about 1.5 points; and Chen et al. measure the "
+        "SUPREMUM, so endpoint-level size distortion is ASSUMED, not shown. Both are recorded in "
+        "the frozen artifact.",
     },
 ]
 
