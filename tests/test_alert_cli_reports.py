@@ -84,6 +84,13 @@ def test_the_weekly_digest_command_is_gone():
         build_alert_parser().parse_args(["digest", "--window", "2026-W33", "--dry-run"])
 
 
+def test_alerts_evaluate_has_no_shadow_flag():
+    """README, the operator table: `bubblegauge alerts evaluate` "always runs
+    in shadow". So the command takes no mode option."""
+    with pytest.raises(SystemExit):
+        build_alert_parser().parse_args(["evaluate", "--input-identity", "x", "--shadow"])
+
+
 def _persist_inputs(inputs) -> None:
     from app.db import session_scope
 

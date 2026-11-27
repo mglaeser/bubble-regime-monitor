@@ -391,7 +391,7 @@ bubblegauge alerts preflight                  # pre-stage checks
 bubblegauge alerts ruleset                    # active ruleset summary
 bubblegauge alerts health
 bubblegauge alerts pending                    # open episodes
-bubblegauge alerts evaluate --input-identity ID [--shadow]
+bubblegauge alerts evaluate --input-identity ID   # always shadow
 bubblegauge alerts explain --evaluation-id ID
 bubblegauge alerts recover-evaluations --once
 bubblegauge alerts recover-leases --once
@@ -544,7 +544,7 @@ completion timestamp no more than ten hours old. Disabled mode explicitly
 reports the evaluator as not required.
 
 The health projection also reports the latest and p95 evaluation duration, P1
-enqueue-to-provider-attempt p95, rolling LLM cap/call/fallback evidence,
+enqueue-to-provider-attempt p95,
 missing typed sidecars, overdue or malformed outbox holds, the UNKNOWN
 deliveries, SQLite WAL/foreign-key/busy-timeout/RETURNING
 capabilities, the Alembic revision, required partial indexes and immutability
@@ -576,7 +576,7 @@ reason instead of pretending to evaluate.
 ```bash
 # rendered message BODIES
 ALERTS_MESSAGE_RETENTION_DAYS=400
-# the audit trail
+# the rows of alert_event
 ALERTS_METADATA_RETENTION_DAYS=800
 python -m app.alerts.cli retention [--dry-run]
 ```
@@ -593,6 +593,8 @@ with one that permits *exactly* the transition `final_message -> ''` at the
 same moment `body_redacted_at` goes from NULL to set. A rewrite still aborts, a
 second redaction still aborts, and `gsm7_septets` is left alone so the length
 of what was sent stays auditable after the text is gone.
+
+The long sweep deletes rows of `alert_event` and of no other table.
 
 Two things are never swept: a body whose delivery is not yet terminal (a retry
 could still reuse that exact render), and events belonging to an open episode
