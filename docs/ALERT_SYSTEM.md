@@ -214,6 +214,18 @@ Faber legs, 30 on the release-driven rules. If a source flip-flops inside one
 period, the condition re-fires and the cooldown is the only thing standing
 between that and a second message.
 
+When a condition can fire again is decided by the rule's `resolution.policy`.
+Under `auto_on_inverse` and `single_shot` the episode of a transition or a
+crossing lasts while the state it reported lasts (the flag stays off, the leg
+stays in, the run-up stays at or above its tier) and ends with it, and the
+rule fires again at the next occurrence. A P2 still held for quiet hours when
+an evaluation reads that state as over is dropped as `RESOLVED_BEFORE_SEND`
+(section 11e). A condition that names no lasting state, the `delta` of
+`constellation.falsification_event`, ends at the first false evaluation. An
+episode stored open under the earlier reading, in which a `single_shot`
+episode never ended, needs no migration: from the next evaluation on it, too,
+lasts while its state lasts and ends with it, without a message.
+
 The loader emits a warning naming each such rule and the cooldown carrying the
 weight, because the failure mode this documents is a reader trusting an
 enforcement that is not happening. It is a warning rather than a rejection: the
@@ -266,10 +278,12 @@ the same triggers on the `create_all` path. The guarantee must not depend on
 which bootstrap ran; `tests/test_migrations.py::test_migrations_match_models`
 checks the schemas match.
 
-`busy_timeout` is now set (`ALERTS_BUSY_TIMEOUT_MS`, default 5000). The alert
-system adds a second and third writer to what was a single-writer service;
-without it SQLite returns `SQLITE_BUSY` immediately on contention — a lost
-alert plan rather than a slower one.
+`busy_timeout` is set explicitly (`ALERTS_BUSY_TIMEOUT_MS`, default 5000 ms,
+the value Python's sqlite3 driver would also use). The alert system adds a
+second and third writer to what was a single-writer service: a writer that
+finds the lock held waits that long for it, and the wait is this service's
+setting rather than the driver's. At 0 SQLite returns `SQLITE_BUSY` at once on
+contention — a lost alert plan rather than a slower one.
 
 ---
 
@@ -278,8 +292,10 @@ alert plan rather than a slower one.
 Two switches:
 
 ```bash
-ALERT_INPUT_CAPTURE=true    # persist the point-in-time sidecar  (Stage 1: ON)
-ALERTS_MODE=disabled        # disabled | shadow | live           (Stage 1: off)
+# persist the point-in-time sidecar (Stage 1: ON)
+ALERT_INPUT_CAPTURE=true
+# disabled | shadow | live (Stage 1: off)
+ALERTS_MODE=disabled
 ```
 
 Capture runs with alerting fully disabled — that is how Stage 1 collects replay
@@ -324,8 +340,10 @@ stop capture: the sidecars are exactly what an operator needs to diagnose the
 ruleset that failed, and a lost sidecar can never be backfilled.
 
 ```bash
-ALERTS_WRITE_API_KEY=         # silences
-ADMIN_API_KEY=                # alert reads (render text included), promotion, evaluation, recovery
+# silences
+ALERTS_WRITE_API_KEY=
+# alert reads (render text included), promotion, evaluation, recovery
+ADMIN_API_KEY=
 ```
 
 Two scopes. **The alert reads are operator-only** (owner decision D3a,
@@ -556,8 +574,10 @@ reason instead of pretending to evaluate.
 ## 11a. Retention: two horizons
 
 ```bash
-ALERTS_MESSAGE_RETENTION_DAYS=400    # rendered message BODIES
-ALERTS_METADATA_RETENTION_DAYS=800   # the audit trail
+# rendered message BODIES
+ALERTS_MESSAGE_RETENTION_DAYS=400
+# the audit trail
+ALERTS_METADATA_RETENTION_DAYS=800
 python -m app.alerts.cli retention [--dry-run]
 ```
 
@@ -671,6 +691,10 @@ takes over now"):
   `structure.s3_tier_150` are named IN the catalogue as known Tier-A coverage
   gaps — must-never-miss rules with no staged arc yet — so their absence
   reads as outstanding evidence work, not demotion.
+  The candidate selection that preceded the freeze (2026-08-24, eight rules
+  in two tiers) is in the history of `docs/MANDATORY_EVENTS_PROPOSAL.md`; the
+  file is deleted, because its banner still said that no event was approved
+  or frozen.
 * **`active_stage` committed to 3** in the same decision. Committing the stage
   is still not delivery: the deployment sends only after the operator promotes
   the exact artifact through the evidence-gated service and sets
@@ -788,6 +812,21 @@ trigger's (17.4) — otherwise the member renders from trigger facts with
 `CONTEXT_STALE`, because mixing numbers computed two different ways into one
 comparison is worse than admitting staleness.
 
+The current view is the newest sidecar of the trigger's origin at send time (a
+recompute's for a market alert, the watchdog's for the recompute-outage
+alert), whatever its eligibility: the evaluator decides on `PARTIAL` inputs,
+and the message about a decision is worded from what was decided on. A
+`NOT_EVALUABLE` newest sidecar makes the context stale; no older one stands in
+for it (`app/alerts/repository.py` `load_latest_compatible_input`,
+tests/test_alert_current_context.py).
+
+A fact a compatible current sidecar lacks (an indicator the recompute dropped)
+is the trigger's, also with `CONTEXT_STALE`; the render does not fail for it
+(`app/alerts/render_context.py` `build_member_context`,
+tests/test_alert_fact_fallback.py). A stale member carries no material-change
+clause, whichever way it became stale: the ruleset validator proves the stale
+and the material-change caveats each alone to fit one message, not both.
+
 Only the shipped phrase set, v3.5, is kept (owner ruling 3): v3.2-v3.4 and the
 single-language form were kept only for compatibility. A registry still keeps
 the bytes of every set it registered - immutable audit data, never changed -
@@ -831,6 +870,12 @@ Three properties are structural rather than a matter of care:
   wall-clock duration. Two runs of the same history produce byte-identical
   JSON.
 
+A replay sends nothing, so before each evaluation it takes every planned alert
+released by then as sent at its release time: the members the dispatcher's
+`outbox.revalidate_members` keeps then, each through the step
+`outbox.mark_sent` takes for a member it sends. A rule's cooldown and its
+reminders run from that time. A hold by budget is not modelled.
+
 `--stage N` gates the rules at a rollout stage other than the committed one.
 That is the reason replay exists: the evidence for advancing to stage N is what
 stage N *would have done* over real history, and that cannot be gathered by
@@ -841,8 +886,8 @@ stage.
 
 ### The committed evidence
 
-`docs/alert-stage1-gate.json` is a replay of a synthetic history at stages 1,
-3, and 4. CI regenerates it and fails on any difference:
+`docs/alert-stage1-gate.json` is a replay of a synthetic history at stages 1
+and 3. CI regenerates it and fails on any difference:
 
 ```bash
 python -m scripts.export_alert_stage1_gate           # write
@@ -883,6 +928,35 @@ moved.
 
 Owner decision D2a (2026-10-03) removes the summary's `digest_items` with the
 weekly digest. It was 0 in every run, and no other number moved.
+
+Replay-summary schema `4 -> 5` adds
+`transient_one_snapshot_band_p1_busiest_24_months`: the largest number of
+transient one-snapshot entries into de-risk inside any one window of 24 months
+of 30.44 days, both edges of the window included, and
+`band_excursion_covers_24_months`: whether `window_last` is at least one such
+window after `window_first`. The verdict fails when that largest number is
+above the cap of `regime.band_to_derisk`'s keep condition, one per 24 months.
+
+Taking a planned alert as sent moved Stages 3 and 4: a repeat inside its
+rule's cooldown is no longer planned. Deliveries planned `13 -> 10`, P1
+`5 -> 4`, the non-P1 maxima `5 -> 3` per 24h and `8 -> 6` per 168h against the
+unchanged caps, the 168h mean `8.0 -> 6.0`, `held_quiet` `3 -> 1`,
+`held_budget` `2 -> 1`, `SUPERSEDED` `4 -> 3` and `COOLDOWN` `0 -> 4`. No
+verdict moved.
+
+A `single_shot` episode ending with its state (section 5) moved Stages 3 and
+4: episodes opened `20 -> 22`, activated `19 -> 21`, resolved `17 -> 19`. The
+two new episodes are the arc's second `tripwire.rf4_all_clear` and second
+`legs.faber_spy_back_in`, each 20 h after the first and inside its 48 h
+cooldown, so neither plans a message and `COOLDOWN` goes `4 -> 6`. No verdict
+moved.
+
+The stage-4 run left the file; the runs of stages 1 and 3, the bound hashes,
+the history and the catalogue kept their bytes. Stage 4 was the legacy
+daily-digest cutover, deleted with its switch (owner decision D2c, section
+11), and its run repeated the stage-3 run in every field but
+`evaluated_at_stage` and the note of a forward-looking replay. `--stage 4`
+remains a stage the command line can replay, like any other.
 
 `tests/fixtures/alert_replay_history.json` declares the **arc** — twenty
 recompute slots through hold → trim → de-risk → recovery, with two blind slots
