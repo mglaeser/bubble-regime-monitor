@@ -391,7 +391,7 @@ bubblegauge alerts preflight                  # pre-stage checks
 bubblegauge alerts ruleset                    # active ruleset summary
 bubblegauge alerts health
 bubblegauge alerts pending                    # open episodes
-bubblegauge alerts evaluate --input-identity ID [--shadow]
+bubblegauge alerts evaluate --input-identity ID   # always shadow
 bubblegauge alerts explain --evaluation-id ID
 bubblegauge alerts recover-evaluations --once
 bubblegauge alerts recover-leases --once
