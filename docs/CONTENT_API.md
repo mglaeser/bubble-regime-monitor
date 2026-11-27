@@ -82,7 +82,7 @@ and stays `generated`). The status page implements it (`.dyn.generated`,
 
 ```
 GET /api/v1/content/dashboard   static blocks {slug: {kind, text|items|entries}}
-GET /api/v1/content/dynamic     dynamic slots {slug: {text, source, provenance, updated_at, purpose, as_of, constraints, writer}} + marker
+GET /api/v1/content/dynamic     dynamic slots {slug: {text, source, provenance, updated_at, purpose, as_of, constraints}} + marker
 ```
 
 v1 completeness is the full code-anchored manifest (`app/content_manifest.py`):
@@ -107,6 +107,9 @@ stamp; the reviewed allowlist lives in `test_dated_editorial_carries_as_of`.
 - `source` on a dynamic slot is `placeholder` for every slot; `generated` and
   `fallback` are the values a generator would serve under the identical shape,
   and no generator exists.
+- A dynamic slot no longer carries `writer` (`model` | `data`): the key left
+  v1 without a deprecation period, as the owner ruled out backward
+  compatibility (AGENTS.md).
 
 ## 3 · Decisions & trade-offs
 

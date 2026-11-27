@@ -280,13 +280,14 @@ def evaluate_state(
                 decision.reasons.append("candidate_reverted_before_confirmation")
             _clear_candidate(decision)
         elif prior == ConditionState.FIRING:
-            if rule.resolution.policy in ("auto_on_inverse", "auto_on_condition_false"):
+            if rule.resolution.policy == "manual":
+                # A manual episode never ends by itself (rulespec.ResolutionSpec).
+                decision.condition_state = ConditionState.FIRING
+            else:
+                # Every other policy ends the episode here, single_shot too, so
+                # the next occurrence opens a new one.
                 decision.resolve_episode = True
                 decision.reasons.append("condition_false")
-            else:
-                # single_shot / manual episodes do not self-resolve; the
-                # condition simply reads NORMAL again.
-                decision.condition_state = ConditionState.FIRING
         return decision
 
     # ---- condition is TRUE ---------------------------------------------

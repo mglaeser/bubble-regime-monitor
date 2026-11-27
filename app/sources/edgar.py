@@ -77,7 +77,12 @@ def _companyfacts(cik: str) -> dict[str, Any]:
     if wait > 0:
         time.sleep(wait)
     settings = get_settings()
-    resp = fetch("sec_edgar", BASE.format(cik=cik), headers={"User-Agent": settings.effective_sec_ua})
+    # Only an absent contact is refused here, as there is nothing to send; its
+    # form ("Name email") is the SEC's to judge, a contact the SEC refuses comes
+    # back as an EDGAR error, and with no issuer read D3 is dropped.
+    if not settings.sec_user_agent:
+        raise SourceError("EDGAR: SEC_USER_AGENT is empty, so no request is made")
+    resp = fetch("sec_edgar", BASE.format(cik=cik), headers={"User-Agent": settings.sec_user_agent})
     _last_request[0] = time.monotonic()
     return resp.json()
 
@@ -137,13 +142,14 @@ def annual_yoy(facts_list: list[Fact]) -> float | None:
 
 
 def hyperscaler_readings() -> SourceResult:
-    """TTM capex/OCF + revenue-growth proxy per hyperscaler.
+    """TTM capex/OCF and total-revenue growth per hyperscaler.
 
-    Cloud-segment revenue via XBRL segment tags is best-effort; when it is
-    unavailable, total revenue growth is the conservative gate proxy (noted
-    in provenance)."""
+    The gate's growth leg is the group's total revenue between its last two
+    fiscal years (REVENUE_TAGS). companyfacts carries the facts of the whole
+    filer and no segment figures, so no cloud-segment growth is read; the
+    provenance note names what was read."""
     readings: list[HyperscalerReading] = []
-    proxy_used = False
+    growth_read = False
     latest_as_of: date | None = None
     for ticker, cik in CIKS.items():
         try:
@@ -156,17 +162,16 @@ def hyperscaler_readings() -> SourceResult:
             continue
         ocf_ttm, as_of = ocf
         rev_yoy = annual_yoy(duration_facts(facts, REVENUE_TAGS))
-        proxy_used = proxy_used or rev_yoy is not None
+        growth_read = growth_read or rev_yoy is not None
         latest_as_of = max(latest_as_of, as_of) if latest_as_of else as_of
         readings.append(HyperscalerReading(
             ticker=ticker,
             capex_ocf_ttm=capex[0] / ocf_ttm,
-            cloud_revenue_yoy_pct=rev_yoy,
+            revenue_yoy_pct=rev_yoy,
             ttm_fcf=ocf_ttm - capex[0],
-            revenue_proxy_used=rev_yoy is not None,
         ))
     if not readings:
         raise SourceError("EDGAR: no hyperscaler facts retrievable")
-    note = "total-revenue growth used as conservative gate proxy" if proxy_used else None
+    note = "gate growth: total revenue, last two fiscal years" if growth_read else None
     return SourceResult(readings, Provenance(source="sec_edgar", note=note,
                                              as_of=latest_as_of.isoformat() if latest_as_of else None))

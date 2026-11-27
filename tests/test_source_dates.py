@@ -1,7 +1,7 @@
 """S1 and S2 are dated by their source (`as_of`, app/schemas.py: the "ISO date
 of the underlying reading (not the fetch time)"). The fragments are hand-made
 after the recorded downloads: multpl's page and SSGA's workbook of 2026-11-14,
-Shiller's two spreadsheets of 2026-11-26 (the holdings and the January rows
+Shiller's spreadsheet of 2026-11-26 (the holdings and the January rows
 invented)."""
 
 from __future__ import annotations
@@ -61,16 +61,14 @@ def test_multpls_value_is_dated_by_its_stamp(monkeypatch, stamp, run_day, as_of)
 
 
 CURRENT = [[2026.09, 7669.41, 40.27], [2026.1, 7726.69, 40.12], [2026.11, 7619.38, 39.37]]
-OLD = [[2024.08, 5478.21, 35.01], [2024.09, 5520.07, 35.23]]   # the sheet that ends at 2024.09
+SHILLER_PAGE = '<a href="https://img1.wsimg.com/ie_data.xls">ie_data.xls</a>'   # the page links the sheet
 
 
 @pytest.mark.parametrize(("rows", "note", "run_day", "reading"), [
     (CURRENT, "Nov price is Nov 12th close", "2026-11-26", (39.37, "2026-11-12")),
-    (OLD, "Sept price is Sept 4th close", "2026-11-26", (35.23, "2024-09-04")),
     (CURRENT, None, "2026-11-26", (40.12, "2026-10-31")),                           # October is 2026.1
     (CURRENT, "Oct price is Oct 12th close", "2026-11-26", (40.12, "2026-10-31")),  # another month's
     (CURRENT, "Nov price is Nov 31st close", "2026-11-26", (40.12, "2026-10-31")),  # no such day
-    (CURRENT, "Nov price is Nov 12th close", "2026-10-20", (40.12, None)),          # a month after the run's
     ([[2025.12, 6845.5, 39.4], [2026.01, 6903.3, 39.5]], "Jan price is Jan 9th close", "2026-01-20",
      (39.5, "2026-01-09")),
 ])
@@ -78,8 +76,8 @@ def test_shillers_reading_is_its_dated_close_or_its_last_completed_month(monkeyp
     _run_on(monkeypatch, run_day)
     sheet = _workbook("Data", [[], ["Robert J. Shiller"], [], [], [], [], [], ["Date", "P", "CAPE"], *rows,
                                [None, note]])
-    # multpl's page is empty, so the reading comes from the sheet.
-    monkeypatch.setattr(cape, "fetch", lambda source, url, **kwargs: _Response(content=sheet))
+    # Shiller's page and the sheet it links answer, so the reading comes from the sheet.
+    monkeypatch.setattr(cape, "fetch", lambda source, url, **kwargs: _Response(text=SHILLER_PAGE, content=sheet))
     result = cape.current_cape()
     assert (result.value, result.provenance.as_of) == reading
 

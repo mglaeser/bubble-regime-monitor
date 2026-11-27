@@ -453,6 +453,40 @@ proper seeded-`Pool`-initializer wrapper (fixed `workers`, re-probed for
 bit-stability) as its own v4 workstream, or formally adopt and document D4
 non-determinism. Bring the chosen path back for approval before any implementation.
 
+### Resolution (2026-11): the forked worker is seeded
+
+The probe's measurement stands: a seed set in the parent does nothing. Two
+statements above do not. CPython does re-seed the stdlib `random` from the OS
+in every forked child (`random.py` registers
+`os.register_at_fork(after_in_child=_inst.seed)`); that re-seed, not the Pool,
+is why the parent seed had no effect at any worker count. And seeding the
+worker needs neither a wrapper around the package nor a patch of it: a hook
+registered with `os.register_at_fork(after_in_child=lambda: random.seed(seed))`
+before `mp_compute_nested_fits` runs in the worker the package forks, after
+CPython's own re-seed. `workers` is 1 and the scan is one task, so one worker
+draws every starting point in a fixed order. `app/indicators/d4_lppls.py` does
+this with the frozen `monte_carlo.seed` (20260711), and
+`tests/test_d4_reproducible.py` pins that two recomputes of the same closes
+give the same result.
+
+**Repeated runs, before and after.** Production configuration (window 750, 144
+fits, `workers` 1); input: production's 750 QQQ closes ending 2026-11-09; every
+run its own process (`python -m app.indicators.d4_lppls`); measured 2026-11-11.
+
+| Run | D4 | qualifying / positive windows |
+|---|---|---|
+| unseeded 1 | 0.2080 | 26 / 125 |
+| unseeded 2 | 0.1818 | 22 / 121 |
+| unseeded 3 | 0.1597 | 19 / 119 |
+| unseeded 4 | 0.2080 | 26 / 125 |
+| unseeded 5 | 0.2033 | 25 / 123 |
+| unseeded 6 | 0.1935 | 24 / 124 |
+| **seeded** 1, 2 and 3 | 0.1626 | 20 / 123; the result line is byte-identical in all three |
+
+The seeded Pool path equals the seeded single-process reference
+(`random.seed(seed)` + `compute_nested_fits`, no Pool) in 144 of 144 fits, bit
+for bit in tc, m, a, b and c.
+
 ---
 
 ## 7. S5-v4 design specification and dual-report test plan (PIN H)

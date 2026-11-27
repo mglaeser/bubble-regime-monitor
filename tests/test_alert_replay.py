@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import itertools
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -57,11 +59,9 @@ def _history() -> list:
     ]
 
 
-def _run(tmp_path, artifacts, *, name="replay.db", stage=3, inputs=None,
-         events=None) -> ReplaySummary:
+def _run(tmp_path, artifacts, *, stage=3, inputs=None, events=None) -> ReplaySummary:
     config = ReplayConfig(
         source_db_url="sqlite:///unused-by-this-call",
-        state_db_path=tmp_path / name,
         evaluate_at_stage=stage,
         mandatory_events_path=events,
     )
@@ -107,8 +107,8 @@ def test_two_replays_of_the_same_history_are_byte_identical(tmp_path, artifacts)
     Byte-identical rather than merely equal: the artifact is committed as
     evidence, so a diff in it has to mean a diff in behaviour.
     """
-    first = _run(tmp_path, artifacts, name="a.db").to_json()
-    second = _run(tmp_path, artifacts, name="b.db").to_json()
+    first = _run(tmp_path, artifacts).to_json()
+    second = _run(tmp_path, artifacts).to_json()
     assert first == second
 
 
@@ -138,6 +138,28 @@ def test_replay_derives_time_from_the_input_not_from_the_clock(tmp_path, artifac
     assert summary.window_last == "2026-08-15T14:00:00+00:00"
 
 
+def test_a_slow_host_does_not_change_a_replay(tmp_path, artifacts, monkeypatch):
+    """`now` comes from each input's own `computed_at`, never from a clock
+    (docs/ALERT_SYSTEM.md, section 12, "It is deterministic")."""
+    from app.alerts import engine
+    from app.alerts.errors import EvaluationDeadlineExceeded
+    from app.config import Settings
+
+    quiet = _run(tmp_path, artifacts)
+    # Every look at the engine's clock is 25 hours later. Replacing the
+    # engine's `time` name keeps the stepping clock away from SQLAlchemy.
+    ticks = itertools.count(step=25 * 3600.0)
+    monkeypatch.setattr(engine, "time", SimpleNamespace(monotonic=lambda: next(ticks)))
+    slow = _run(tmp_path, artifacts)
+
+    assert slow.evaluations_timed_out == 0
+    assert slow.to_json() == quiet.to_json()
+    # The service's own evaluations keep their budget: under this clock its
+    # default times out.
+    with pytest.raises(EvaluationDeadlineExceeded):
+        engine.Deadline(Settings.model_fields["alerts_eval_budget_ms"].default).check("live")
+
+
 # ---------------------------------------------------------------------------
 # isolation — a replay may not reach production, or a provider
 # ---------------------------------------------------------------------------
@@ -161,18 +183,39 @@ def test_replay_writes_to_its_own_database_and_never_the_app_one(
             assert count == 0, f"replay wrote {model.__name__} rows into production"
 
 
-def test_replay_state_database_is_recreated_not_appended(tmp_path, artifacts):
-    """Re-running into the same path must not accumulate — that is what makes
-    a second run comparable to the first rather than a superset of it."""
-    state = tmp_path / "shared.db"
-    config = ReplayConfig(source_db_url="sqlite:///unused",
-                          state_db_path=state, evaluate_at_stage=3)
-    first = run_replay(config=config, ruleset=artifacts.ruleset,
-                       phrase_set=artifacts.phrase_set, inputs=_history())
-    second = run_replay(config=config, ruleset=artifacts.ruleset,
-                        phrase_set=artifacts.phrase_set, inputs=_history())
-    assert first.episodes_opened == second.episodes_opened
-    assert first.to_json() == second.to_json()
+def test_a_replay_takes_no_state_path_and_leaves_no_state_behind(
+        tmp_path, artifacts, isolated_db, monkeypatch):
+    """A file at the path `dryrun --state-db` names keeps its bytes, also with a
+    sidecar in the source to replay; a replay keeps its state in a temporary
+    directory of its own, which is gone when the run ends."""
+    import tempfile
+    from contextlib import suppress
+
+    from app.alerts import cli
+    from app.alerts.models import AlertInputSnapshot
+    from app.db import session_scope
+
+    now = datetime(2026, 8, 15, 10, 0, tzinfo=UTC)
+    record = make_input(identity="s1", computed_at=now.isoformat())
+    with session_scope() as session:
+        session.add(AlertInputSnapshot(
+            input_identity=record.input_identity, snapshot_id=None, origin="RECOMPUTE",
+            built_at=now, computed_at=now,
+            alert_input_schema_version=record.schema_version,
+            methodology_version=None, methodology_sha256=None, reconstructed=False,
+            evaluation_eligibility="EVALUABLE", ineligibility_reasons=[],
+            payload=json.dumps(record.model_dump(mode="json")), payload_sha256="x"))
+    kept = tmp_path / "kept.db"
+    kept.write_bytes(b"not the replay's")
+    with suppress(SystemExit):
+        cli.main(["dryrun", "--state-db", str(kept)])
+    assert kept.read_bytes() == b"not the replay's"
+
+    root = tmp_path / "temp"
+    root.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(root))
+    assert _run(tmp_path, artifacts).evaluations_committed > 0
+    assert list(root.iterdir()) == []
 
 
 def test_replay_module_cannot_reach_a_provider_or_a_transport():
@@ -201,15 +244,20 @@ def test_replay_never_dispatches(tmp_path, artifacts):
     assert summary.mode == str(Mode.DRYRUN)
 
 
-def test_replay_uses_the_dryrun_state_namespace(tmp_path, artifacts):
-    """Shadow and live state must never see a replay's episodes."""
+def test_replay_uses_the_dryrun_state_namespace(tmp_path, artifacts, monkeypatch):
+    """Shadow and live state must never see a replay's episodes. The replay's
+    temporary directory is this test's own, kept after the run to be read."""
+    from contextlib import nullcontext
+
     from sqlalchemy import create_engine, select
     from sqlalchemy.orm import sessionmaker
 
+    from app.alerts import replay
     from app.alerts.models import AlertEpisode
 
-    state = tmp_path / "ns.db"
-    _run(tmp_path, artifacts, name="ns.db")
+    monkeypatch.setattr(replay, "TemporaryDirectory", lambda: nullcontext(str(tmp_path)))
+    state = tmp_path / "replay.db"
+    _run(tmp_path, artifacts)
     engine = create_engine(f"sqlite:///{state}", future=True)
     session = sessionmaker(bind=engine)()
     try:
@@ -407,7 +455,6 @@ def test_an_empty_mandatory_catalogue_reports_zero_not_full_recall(tmp_path, art
     stage1 = _run(
         tmp_path,
         artifacts,
-        name="empty-stage1.db",
         stage=1,
         events=catalogue,
     )
@@ -431,7 +478,7 @@ def test_mandatory_event_recall_requires_timely_rule_and_priority_match(
 def test_mandatory_event_detected_after_slot_limit_is_a_miss(tmp_path, artifacts):
     catalogue = _catalogue(
         tmp_path, [_mandatory_event(max_detection_slots=0)], name="late.json")
-    summary = _run(tmp_path, artifacts, name="late.db", events=catalogue)
+    summary = _run(tmp_path, artifacts, events=catalogue)
 
     assert summary.detection_times_slots == {"band-entry": 1}
     assert summary.mandatory_event_detected == 0
@@ -451,9 +498,7 @@ def test_mandatory_event_outside_window_or_at_wrong_priority_is_a_miss(
     event = _mandatory_event(**overrides)
     catalogue = _catalogue(
         tmp_path, [event], name=f"miss-{event['expected_priority']}.json")
-    summary = _run(
-        tmp_path, artifacts, name=f"miss-{event['expected_priority']}.db",
-        events=catalogue)
+    summary = _run(tmp_path, artifacts, events=catalogue)
 
     assert summary.mandatory_event_detected == 0
     assert summary.detection_times_slots == {}
@@ -476,7 +521,7 @@ def test_not_evaluable_is_scoped_to_each_mandatory_event_window(tmp_path, artifa
     )
     catalogue = _catalogue(tmp_path, [_mandatory_event(), blind], name="local.json")
     summary = _run(
-        tmp_path, artifacts, name="local.db", inputs=history, events=catalogue)
+        tmp_path, artifacts, inputs=history, events=catalogue)
 
     assert summary.mandatory_event_total == 2
     assert summary.mandatory_event_not_evaluable == 1
@@ -499,7 +544,7 @@ def test_all_mandatory_events_not_evaluable_reports_recall_unmeasured(
     )
     catalogue = _catalogue(tmp_path, [event], name="all-blind.json")
     summary = _run(
-        tmp_path, artifacts, name="all-blind.db", inputs=history,
+        tmp_path, artifacts, inputs=history,
         events=catalogue)
 
     assert summary.mandatory_event_not_evaluable == 1
@@ -575,9 +620,15 @@ def test_restamping_a_stage_rehashes_the_ruleset(artifacts):
 
 def test_stage_gating_still_binds_inside_a_replay(tmp_path, artifacts):
     """Replay can ask about another stage; it cannot ignore staging."""
-    at_one = _run(tmp_path, artifacts, name="s1.db", stage=1)
-    at_three = _run(tmp_path, artifacts, name="s3.db", stage=3)
-    assert at_one.episodes_by_rule == {}
+    at_one = _run(tmp_path, artifacts, stage=1)
+    at_three = _run(tmp_path, artifacts, stage=3)
+    # The history ends on a degraded slot, and the two stage-1 rules about
+    # degraded data fire on it. Nothing gated to a later stage may.
+    stage_one = {rule.rule_id for rule in artifacts.ruleset.active_rules(1)}
+    assert set(at_one.episodes_by_rule) == {
+        "constellation.false_alarm_likely", "ops.coverage_degraded_info"}
+    assert set(at_one.episodes_by_rule) <= stage_one
+    assert "regime.band_to_derisk" not in stage_one
     assert "regime.band_to_derisk" in at_three.episodes_by_rule
 
 
@@ -594,7 +645,7 @@ def test_an_unknown_snapshot_does_not_resolve_an_episode(tmp_path, artifacts):
     # The last input is degraded/UNKNOWN. It must not have closed anything as
     # RESOLVED on the strength of not knowing.
     only_unknown_resolved = summary.episodes_resolved
-    without_blind = _run(tmp_path, artifacts, name="nb.db", inputs=history[:-1])
+    without_blind = _run(tmp_path, artifacts, inputs=history[:-1])
     assert only_unknown_resolved == without_blind.episodes_resolved
 
 
@@ -624,7 +675,7 @@ def test_a_blind_neighbour_does_not_make_an_excursion_transient(tmp_path, artifa
 
     history = [at(2, "trim"), at(6, "de-risk"), at(10, None), at(14, "de-risk"),
                at(18, "trim")]
-    summary = _run(tmp_path, artifacts, name="exc.db", inputs=history)
+    summary = _run(tmp_path, artifacts, inputs=history)
     # index 1: neighbours trim / UNKNOWN -> indeterminate
     # index 3: neighbours UNKNOWN / trim -> indeterminate
     assert summary.transient_one_snapshot_band_p1 == 0
@@ -641,7 +692,7 @@ def test_a_derisk_neighbour_settles_an_excursion(tmp_path, artifacts):
 
     history = [at(2, "trim"), at(6, "de-risk"), at(10, "de-risk"), at(14, None),
                at(18, "trim")]
-    summary = _run(tmp_path, artifacts, name="run.db", inputs=history)
+    summary = _run(tmp_path, artifacts, inputs=history)
     assert summary.transient_one_snapshot_band_p1 == 0
     assert summary.indeterminate_band_excursions == 0
 
@@ -673,7 +724,7 @@ def test_the_gate_judges_the_busiest_24_months_of_one_snapshot_derisk_entries(
                    median=63.0 if band == "de-risk" else 52.0)
         for i, (moment, band) in enumerate(moments)
     ]
-    summary = _run(tmp_path, artifacts, name="keep.db", stage=1, inputs=history)
+    summary = _run(tmp_path, artifacts, stage=1, inputs=history)
     assert summary.failures == ([
         "2 transient one-snapshot de-risk entries inside one window of 24 months; "
         "regime.band_to_derisk is kept only while replay shows <= 1 per 24 months"]
@@ -693,10 +744,50 @@ def test_a_history_of_one_whole_window_measures_the_keep_condition(tmp_path, art
     these histories is stored as 23.98 months, its whole days divided by 30.44."""
     history = [make_input(identity=f"c{i}", computed_at=moment.isoformat())
                for i, moment in enumerate((_FIRST_ENTRY, _FIRST_ENTRY + span))]
-    summary = _run(tmp_path, artifacts, name="span.db", stage=1, inputs=history)
+    summary = _run(tmp_path, artifacts, stage=1, inputs=history)
     listed = [note for note in summary.not_measured if "transient_derisk_p1_rate" in note]
     assert bool(listed) is not covered, listed
     assert (summary.band_excursion_months, summary.band_excursion_covers_24_months) == (23.98, covered)
+
+
+def _band_arc(states: list[str]) -> list:
+    """One input every four hours from 2026-08-17 06:00 UTC, one band each."""
+    start = datetime(2026, 8, 17, 6, tzinfo=UTC)
+    return [make_input(identity=f"arc-{index}", computed_at=(start + timedelta(hours=4 * index)).isoformat(),
+                       effective=state, base=state, median=64.0 if state == "de-risk" else 52.0)
+            for index, state in enumerate(states)]
+
+
+def test_a_replay_runs_the_cooldown_from_the_release_of_the_alert(tmp_path, artifacts):
+    """De-risk at 4 h, 24 h and 52 h. The P1 released at 4 h starts the rule's
+    48 h cooldown, so the entry at 24 h is suppressed and the one at 52 h is
+    planned (`planner._cooldown_active`)."""
+    assert artifacts.ruleset.rule("regime.band_to_derisk").cooldown_seconds == 48 * 3600
+    summary = _run(tmp_path, artifacts, inputs=_band_arc(
+        ["de-risk" if index in (1, 6, 13) else "trim" for index in range(14)]))
+    assert summary.episodes_by_rule["regime.band_to_derisk"] == 3
+    assert (summary.p1_total, summary.suppressions_by_reason.get("COOLDOWN")) == (2, 1)
+
+
+def test_a_replay_plans_the_one_reminder_of_a_condition_that_lasts(tmp_path, artifacts):
+    """De-risk from 4 h to 108 h: the P1, and 48 h after it the one reminder
+    the rule allows; the reminder counts for its episode, so none follows at 100 h."""
+    policy = artifacts.ruleset.rule("regime.band_to_derisk").reminder_policy
+    assert (policy.after_seconds, policy.max_reminders) == (48 * 3600, 1)
+    summary = _run(tmp_path, artifacts, inputs=_band_arc(["trim"] + ["de-risk"] * 27))
+    assert summary.deliveries_by_kind == {"INITIAL": 1, "REMINDER": 1}
+
+
+def test_a_replay_takes_no_member_as_sent_that_the_dispatcher_drops(tmp_path, artifacts):
+    """Hold to trim at 22:00 UTC (00:00 in Berlin: the P2 waits for 07:00), back to
+    hold at 02:00, trim again at 06:00. At the release the dispatcher drops the
+    first, its episode over (`outbox.revalidate_members`), so no cooldown starts
+    and the second is planned."""
+    rule = artifacts.ruleset.rule("regime.band_hold_to_trim")
+    assert (rule.priority, rule.cooldown_seconds) == (2, 24 * 3600)
+    summary = _run(tmp_path, artifacts, inputs=_band_arc(["hold"] * 4 + ["trim", "hold", "trim"]))
+    assert summary.episodes_by_rule["regime.band_hold_to_trim"] == 2
+    assert (summary.deliveries_planned, summary.suppressions_by_reason.get("COOLDOWN")) == (3, None)
 
 
 # ---------------------------------------------------------------------------
@@ -865,7 +956,7 @@ def test_grouping_is_reversible_and_full_fidelity():
 # ---------------------------------------------------------------------------
 
 
-def test_loading_source_inputs_leaves_the_source_untouched(tmp_path, isolated_db):
+def test_loading_source_inputs_leaves_the_source_untouched(isolated_db):
     """A replay opens its own engine over the source and only selects."""
     from app.alerts.models import AlertInputSnapshot
     from app.config import get_settings
@@ -884,15 +975,14 @@ def test_loading_source_inputs_leaves_the_source_untouched(tmp_path, isolated_db
 
     db_url = get_settings().db_url
     before = Path(db_url.replace("sqlite:///", "")).stat().st_mtime_ns
-    loaded = load_source_inputs(ReplayConfig(source_db_url=db_url,
-                                             state_db_path=tmp_path / "s.db"))
+    loaded = load_source_inputs(ReplayConfig(source_db_url=db_url))
     after = Path(db_url.replace("sqlite:///", "")).stat().st_mtime_ns
 
     assert [r.input_identity for r in loaded] == ["s1"]
     assert before == after, "reading the source must not modify it"
 
 
-def test_the_window_filters_by_the_inputs_own_time(tmp_path, isolated_db):
+def test_the_window_filters_by_the_inputs_own_time(isolated_db):
     """`--from`/`--to` select history, not rows that happened to be written."""
     from app.alerts.models import AlertInputSnapshot
     from app.config import get_settings
@@ -912,7 +1002,7 @@ def test_the_window_filters_by_the_inputs_own_time(tmp_path, isolated_db):
                 payload_sha256=f"x{index}"))
 
     loaded = load_source_inputs(ReplayConfig(
-        source_db_url=get_settings().db_url, state_db_path=tmp_path / "w.db",
+        source_db_url=get_settings().db_url,
         from_moment=datetime(2026, 8, 11, tzinfo=UTC),
         to_moment=datetime(2026, 8, 13, tzinfo=UTC)))
     assert [r.input_identity for r in loaded] == ["w1"]
@@ -940,19 +1030,15 @@ def test_the_cli_dryrun_command_exists_and_is_read_only():
     """The operator surface has to expose the gate, and expose it as a dry run."""
     from app.alerts.cli import build_parser
 
-    args = build_parser().parse_args(["dryrun", "--state-db", "/tmp/x.db",
-                                      "--stage", "3"])
+    args = build_parser().parse_args(["dryrun", "--stage", "3"])
     assert args.command == "dryrun"
     assert args.stage == 3
-    assert args.state_db == "/tmp/x.db"
 
 
 def test_the_replay_script_forwards_to_the_cli():
     from scripts.alert_replay import build_parser
 
-    args = build_parser().parse_args(["--state-db", "/tmp/x.db", "--from",
-                                      "2026-01-01T00:00:00+00:00"])
-    assert args.state_db == "/tmp/x.db"
+    args = build_parser().parse_args(["--from", "2026-01-01T00:00:00+00:00"])
     assert args.from_moment == "2026-01-01T00:00:00+00:00"
 
 
@@ -991,18 +1077,26 @@ def test_the_committed_stage_is_not_one_whose_replay_failed():
         "or lower the stage — do not ship a stage its own replay refuses.")
 
 
-def test_the_artifact_carries_evidence_for_the_stage_the_cutover_targets():
-    """Stage 4 is where the cutover goes, so its evidence is produced here.
+def test_the_gate_replays_stage_1_and_the_committed_stage_and_no_deleted_stage():
+    """The gate replays stage 1 and stage 3, and no stage 4.
 
-    Without it the Stage 4 decision would have had to generate its own evidence
-    by hand on the day, and the absence would have surfaced at exactly the
-    wrong moment.
+    Stage 4 was the legacy daily-digest cutover, deleted with its switch (owner
+    decision D2c, 2026-10-02; the rollout table in docs/ALERT_SYSTEM.md). A rule
+    active at one of stages 3 and 4 and not the other would make a stage-4
+    replay evidence of its own, and this fails then. The paths are the
+    script's own, so the test reads the file the script writes.
     """
-    payload = json.loads(Path("docs/alert-stage1-gate.json").read_text(encoding="utf-8"))
-    assert "stage_4" in payload["runs"], sorted(payload["runs"])
-    stage4 = payload["runs"]["stage_4"]
-    assert stage4["evaluated_at_stage"] == 4
-    assert stage4["passed"] is (stage4["failures"] == [])
+    from scripts import export_alert_stage1_gate as gate
+
+    payload = json.loads(gate.ARTIFACT.read_text(encoding="utf-8"))
+    assert sorted(payload["runs"]) == ["stage_1", "stage_3"]
+    assert gate.STAGES == (1, 3)
+
+    ruleset = validate_from_disk(rules_path=gate.RULES, phrase_path=gate.PHRASES,
+                                 service_version="3.8.0").ruleset
+    at_stage_3 = [rule.rule_id for rule in ruleset.active_rules(3)]
+    at_stage_4 = [rule.rule_id for rule in ruleset.active_rules(4)]
+    assert at_stage_3 and at_stage_3 == at_stage_4
 
 
 def test_the_ci_replay_gate_is_the_evidence_and_it_blocks():

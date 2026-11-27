@@ -30,23 +30,20 @@ KEY = "NOTAREALKEY12345"       # pragma: allowlist secret
 
 @pytest.fixture()
 def gather(isolated_db, monkeypatch):
-    """`gather_inputs` with only the price pulls live.
+    """`gather_inputs` with only the daily price pulls live.
 
-    Every other source is switched off at `_track`, the gather's one
-    chokepoint, and the two calls the Nasdaq-100 step makes outside it
-    (Tiingo's monthly history, the R subprocess) answer as unavailable: no
-    network, no engine. Returns the inputs and the health entry per source."""
+    Every other source, the monthly history among them, is switched off at
+    `_track`, the gather's one chokepoint, and the R subprocess answers as
+    unavailable: no network, no engine. Returns the inputs and the health
+    entry per source."""
     track = compute._track
 
     def prices_only(raw, source, fn):
-        return track(raw, source, fn) if source.startswith("price_") else None
-
-    def no_monthly_history(*args, **kwargs):
-        raise prices.ProviderNotConfigured("tiingo: no key in this test")
+        daily = source.startswith("price_") and source != "price_NDX_monthly"
+        return track(raw, source, fn) if daily else None
 
     monkeypatch.setattr(compute, "_track", prices_only)
     monkeypatch.setattr(compute, "run_gsadf", lambda *args, **kwargs: None)
-    monkeypatch.setattr(prices, "fetch_tiingo_monthly", no_monthly_history)
 
     def run():
         raw = compute.gather_inputs()

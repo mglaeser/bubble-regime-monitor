@@ -1,5 +1,5 @@
 """Dashboard feed (v3.4.0): read-only current-values feed for the companion
-"Crisis Winners" dashboard (crash.klee.me). See DASHBOARD_FEED_SPEC.md.
+"Crisis Winners" dashboard (ai-bubble.fyi). See DASHBOARD_FEED_SPEC.md.
 
 DESIGN CONTRACT (dashboard-side sign-off, 2026-07-15; decisions 1A/2A/3A/4B/5A;
 v3.7.0 additive delta: +fear_greed series & metric — see spec section 7):
@@ -123,7 +123,12 @@ SLA_MONTHLY_BAR = 35  # TD 1month bars are DATED AT MONTH START (live capture:
                       # so a 7d SLA would flag the freshest bar stale
 SLA_CAPE = 45
 SLA_FINRA = 75
-SLA_QUARTERLY = 120  # Z.1 MMF assets
+# Z.1 MMF assets. FRED dates a quarter at its first day and the Z.1 release
+# comes about 10 weeks after the quarter ends, so the newest quarter is about
+# 163 days old on the day it appears and about 255 on the day the next release
+# replaces it. 290 = that and five weeks of a late release: stale says a release
+# was missed.
+SLA_QUARTERLY = 290
 
 
 def _series_item(key: str, name: str, kind: str, unit: str, source: str,
@@ -384,9 +389,14 @@ def build_feed(raw: Any, data: Any) -> dict[str, Any]:
         detail={"state": d4.state, "bands": lp.get("bands"),
                 "n_windows_qualifying": lp.get("n_windows_qualifying"),
                 "n_windows_positive": lp.get("n_windows_positive")})
-    m["vix_level"] = _scalar(raw.vix_level, "level", raw.vix_as_of, "cboe", sla_days=2)
+    # raw.vix_as_of is the date of the VIX / VIX3M ratio. The level is published
+    # with the source and the date of its own reading, SKEW's quote undated, and
+    # the level and the ratio age as daily market series: Friday's close read on
+    # Monday is 3 days old.
+    m["vix_level"] = _scalar(raw.vix_level, "level", raw.vix_level_as_of,
+                             raw.vix_level_source, sla_days=SLA_DAILY)
     m["vix_term_ratio"] = _scalar(data.v_ratio, "ratio", raw.vix_as_of,
-                                  raw.vix_ratio_source, sla_days=2,
+                                  raw.vix_ratio_source, sla_days=SLA_DAILY,
                                   detail={"state": data.v_state})
     m["vix_term_state"] = _scalar(None, "categorical", raw.vix_as_of,
                                   raw.vix_ratio_source,
@@ -394,9 +404,12 @@ def build_feed(raw: Any, data: Any) -> dict[str, Any]:
                                   detail={"state": data.v_state},
                                   available=data.v_ratio is not None)
     fa = data.fast_alarm or {}
+    # The VRP is that level's close against SPY's closes through the same day
+    # (legs.closes_through): it names the level's source and carries that day.
     m["vrp"] = _scalar(fa.get("vrp"), fa.get("vrp_units", "annualized_variance_pts_pct2"),
-                       raw.vix_as_of, "cboe+spy_realized", sla_days=2)
-    m["skew"] = _scalar(raw.skew, "level", raw.vix_as_of, "cboe", sla_days=2)
+                       fa.get("vrp_as_of"), f"{raw.vix_level_source}+spy_realized",
+                       sla_days=SLA_DAILY)
+    m["skew"] = _scalar(raw.skew, "level", None, "cboe")
     qqq_last = _last_pair(raw.qqq_daily or [])
     m["qqq_close"] = _scalar(qqq_last[1] if qqq_last else None, "USD",
                              qqq_last[0] if qqq_last else None, "price_chain:QQQ",
@@ -472,7 +485,8 @@ def build_feed(raw: Any, data: Any) -> dict[str, Any]:
     m["ust10y_yield_pct"] = _fred_scalar_from(fred_cache.get("DGS10"), "pct", "DGS10", SLA_DAILY)
     m["tbill3m_yield_pct"] = _fred_scalar_from(fred_cache.get("DTB3"), "pct", "DTB3", SLA_DAILY)
 
-    # MMF assets (decision 5A): quarterly Z.1, honestly ~1 quarter stale.
+    # MMF assets (decision 5A): quarterly Z.1; `stale` turns true only past
+    # SLA_QUARTERLY, when a release was missed.
     try:
         mmf = _fred_series("MMMFFAQ027S")
         m["mmf_total_assets_usd"] = _fred_scalar_from(

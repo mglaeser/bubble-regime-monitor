@@ -18,8 +18,10 @@ from typing import Any
 
 from sqlalchemy import select
 
+from app.alerts.watchdog import evaluate_outage
 from app.config import get_settings
 from app.db import session_scope
+from app.engine.aggregate import headline
 from app.engine.recompute_slots import schedule_display
 from app.models import DashboardFeed, ProviderHealth, Snapshot, SourceHealth
 from app.references import (
@@ -206,6 +208,14 @@ def _science_audit(snap: Snapshot | None, sources: list[dict[str, Any]],
                       "detail": "Trigger POST /api/v1/admin/refresh or wait for the 4-hourly "
                                 "(02/06/10/14/18/22 UTC) schedule.", "ref": "scheduler"})
     else:
+        # What is old is decided by the outage alert's own condition.
+        outage = evaluate_outage(last_snapshot_at=snap.computed_at, now=datetime.now(UTC))
+        if outage.firing:
+            flags.append({"id": "snapshot-old", "severity": "error", "category": "service-state",
+                          "title": "The snapshot is old: no recompute has replaced it",
+                          "detail": f"Computed {_iso(snap.computed_at)}; {outage.missed_slots} scheduled "
+                                    "recomputes have passed since without a new snapshot. Every number "
+                                    "here is that old.", "ref": "scheduler"})
         coverage = (snap.data_freshness or {}).get("_coverage", {})
         for block_id in ("S", "D"):
             if isinstance(coverage.get(block_id), dict) and coverage[block_id].get("degraded"):
@@ -269,7 +279,7 @@ def build_status() -> dict[str, Any]:
         if snap is not None:
             snap_summary = {
                 "computed_at": _iso(snap.computed_at),
-                "headline_median": round(snap.median), "point_score": round(snap.point_score, 2),
+                "headline_median": headline(snap.median), "point_score": round(snap.point_score, 2),
                 "iqr": [round(snap.iqr_lo, 2), round(snap.iqr_hi, 2)],
                 "band_5_95": [round(snap.band5, 2), round(snap.band95, 2)],
                 "action_band": snap.action_band, "override_fired": snap.override_fired,

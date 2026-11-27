@@ -97,7 +97,9 @@ jobs:
           # 114 -> 113: the dashboard feed's ETF fallback for a failed spot quote
           # went (a spot key carries the spot quote or nothing), and with it a
           # function without a return type.
-          MYPY_CEILING: "113"
+          # 113 -> 112: the history route reduces to days and months in SQL; the
+          # two untyped period lambdas of its Python reduction went.
+          MYPY_CEILING: "112"
           # The floor constrains REACH, not DEPTH: it proves mypy READ the tree.
           # It does NOT make a low count mean "little is wrong" -- an earlier
           # version of this comment claimed that, and it is false. Measured:
