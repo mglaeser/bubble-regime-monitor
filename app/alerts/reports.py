@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from app.alerts import observation as obs
 from app.alerts.dto import AlertInput, EvidenceModel
+from app.alerts.enum_contract import canonical_execution_leg_state
 from app.alerts.enums import DataState, InputOrigin, TransportStatus
 from app.alerts.models import (
     AlertDelivery,
@@ -230,7 +231,9 @@ def _faber_value(item: AlertInput, domain: str) -> str | None:
     if evidence is None or evidence.value is None \
             or evidence.data_state == DataState.MISSING:
         return None
-    return str(evidence.value)
+    # The canonical state, not the stored spelling: a sidecar may hold the word
+    # as "IN" or as "in", and a change of letter case is no transition.
+    return canonical_execution_leg_state("faber", evidence.value)
 
 
 def _rf_value(item: AlertInput, flag_id: str) -> bool | None:
@@ -304,6 +307,8 @@ def transition_statistics(session: Session) -> dict[str, Any]:
         if "DATA_QUALITY_GUARD" in (episode.suppression_reasons or [])
     )
 
+    # A gap is a TYPED snapshot without its sidecar, as reconcile_sidecars
+    # counts it; a snapshot from before the typed contract is not one.
     sidecar_gaps = session.execute(
         select(func.count(Snapshot.id))
         .select_from(Snapshot)
@@ -311,7 +316,10 @@ def transition_statistics(session: Session) -> dict[str, Any]:
             AlertInputSnapshot,
             AlertInputSnapshot.snapshot_id == Snapshot.id,
         )
-        .where(AlertInputSnapshot.input_identity.is_(None))
+        .where(
+            AlertInputSnapshot.input_identity.is_(None),
+            Snapshot.alert_contract_version.is_not(None),
+        )
     ).scalar_one()
     evaluation_statuses = Counter(
         str(status) for status in session.execute(
