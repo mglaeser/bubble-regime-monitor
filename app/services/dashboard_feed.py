@@ -389,9 +389,14 @@ def build_feed(raw: Any, data: Any) -> dict[str, Any]:
         detail={"state": d4.state, "bands": lp.get("bands"),
                 "n_windows_qualifying": lp.get("n_windows_qualifying"),
                 "n_windows_positive": lp.get("n_windows_positive")})
-    m["vix_level"] = _scalar(raw.vix_level, "level", raw.vix_as_of, "cboe", sla_days=2)
+    # raw.vix_as_of is the date of the VIX / VIX3M ratio. The level is published
+    # with the source and the date of its own reading, SKEW's quote undated, and
+    # the level and the ratio age as daily market series: Friday's close read on
+    # Monday is 3 days old.
+    m["vix_level"] = _scalar(raw.vix_level, "level", raw.vix_level_as_of,
+                             raw.vix_level_source, sla_days=SLA_DAILY)
     m["vix_term_ratio"] = _scalar(data.v_ratio, "ratio", raw.vix_as_of,
-                                  raw.vix_ratio_source, sla_days=2,
+                                  raw.vix_ratio_source, sla_days=SLA_DAILY,
                                   detail={"state": data.v_state})
     m["vix_term_state"] = _scalar(None, "categorical", raw.vix_as_of,
                                   raw.vix_ratio_source,
@@ -399,9 +404,11 @@ def build_feed(raw: Any, data: Any) -> dict[str, Any]:
                                   detail={"state": data.v_state},
                                   available=data.v_ratio is not None)
     fa = data.fast_alarm or {}
+    # The VRP is computed from that level and SPY's closes, so it names the
+    # level's source and takes the date of neither.
     m["vrp"] = _scalar(fa.get("vrp"), fa.get("vrp_units", "annualized_variance_pts_pct2"),
-                       raw.vix_as_of, "cboe+spy_realized", sla_days=2)
-    m["skew"] = _scalar(raw.skew, "level", raw.vix_as_of, "cboe", sla_days=2)
+                       None, f"{raw.vix_level_source}+spy_realized")
+    m["skew"] = _scalar(raw.skew, "level", None, "cboe")
     qqq_last = _last_pair(raw.qqq_daily or [])
     m["qqq_close"] = _scalar(qqq_last[1] if qqq_last else None, "USD",
                              qqq_last[0] if qqq_last else None, "price_chain:QQQ",
