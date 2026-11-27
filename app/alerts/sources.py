@@ -103,7 +103,13 @@ def _snapshot_value(
         observation_domain_id=domain,
         value=value,
         available=True,
-        data_state=DataState.STALE if inp.data_degraded else DataState.FRESH,
+        # FRESH on a degraded snapshot too. The value is read from the snapshot
+        # under evaluation, so it has no age: `same_snapshot`, the freshness
+        # requirement every rule that holds one of these sources declares for
+        # it, holds by construction. Degradation is a fact of its own
+        # (`data_degraded`), and a rule that must not act on degraded data names
+        # it in its condition, as the Faber P1 does (`data_degraded == false`).
+        data_state=DataState.FRESH,
         economic_observation_key=obs.economic_observation_key(
             domain, period_start=period, period_end=period),
         observed_at=inp.computed_at,

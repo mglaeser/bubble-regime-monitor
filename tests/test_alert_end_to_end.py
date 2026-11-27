@@ -814,8 +814,8 @@ def test_render_time_status_covers_all_four_outcomes(isolated_db):
     assert render_time_status(condition_state="FIRING", resolved=False,
                               materially_changed=False) == "STILL_FIRING"
 
-    # and the dispatcher actually consults it now — U-02 recorded this helper
-    # as having no callers, which meant 17.5 was implemented and unenforced
+    # and the dispatcher actually consults it now — it was once recorded as
+    # having no callers, which meant 17.5 was implemented and unenforced
     import inspect
 
     from app.alerts import dispatcher
