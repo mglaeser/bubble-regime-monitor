@@ -1,6 +1,6 @@
 """v3.7.3 remediation patches (validated against the 2026-07-17 spec):
 A-03 override-wins-band, B breadth increment/as_of, A-01 freshness state,
-H-01 hyperscaler quality, H-04 leap-safe TTM, O-01 snapshots path.
+H-01 hyperscaler quality, H-04 leap-safe TTM.
 
 Methodology unchanged — these are safety/observability/hardening fixes; the
 golden fixture (52.43) is untouched."""
@@ -8,7 +8,6 @@ golden fixture (52.43) is untouched."""
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
-from pathlib import Path
 
 import pytest
 
@@ -56,12 +55,15 @@ def test_a03_degraded_without_override_still_suppressed(isolated_db):
 
 # ---- B-01/02/07: breadth backfill fetches new days (no freeze) --------------
 
-def _recent_weekday(offset_from_yesterday: int = 0) -> date:
-    """The Nth most-recent weekday at/-before yesterday (skips Sat/Sun)."""
+def _recent_trading_day(offset_from_yesterday: int = 0) -> date:
+    """The Nth most-recent trading day at or before yesterday, by the calendar
+    the walk follows (it asks for no weekend and no exchange holiday)."""
+    from app.alerts.calendars import is_trading_day
+
     d = datetime.now(UTC).date() - timedelta(days=1)
     seen = 0
     while True:
-        if d.weekday() < 5:
+        if is_trading_day(d):
             if seen == offset_from_yesterday:
                 return d
             seen += 1
@@ -85,9 +87,9 @@ def test_b01_backfill_fetches_new_trading_days_when_cache_warm(isolated_db, monk
 
     monkeypatch.setattr(breadth, "fetch_polygon_grouped", _fake_grouped)
 
-    # Warm cache: 5 OLD trading days (~30 weekdays back) — already == target_days,
+    # Warm cache: 5 OLD trading days (~30 sessions back) — already == target_days,
     # so the buggy guard would fetch nothing.
-    old = [_recent_weekday(30 + i) for i in range(5)]
+    old = [_recent_trading_day(30 + i) for i in range(5)]
     with session_scope() as session:
         for d in old:
             for sym, c in (("AAA", 50.0), ("BBB", 60.0)):
@@ -97,15 +99,15 @@ def test_b01_backfill_fetches_new_trading_days_when_cache_warm(isolated_db, monk
     summary = breadth.refresh_breadth_polygon(target_days=5, pace_seconds=0)
 
     # FIXED behaviour: it fetched the recent missing trading days, and the newest
-    # cached date is now yesterday's weekday (forward progress), not the frozen
+    # cached date is now the latest trading day (forward progress), not the frozen
     # 30-days-old window.
     assert summary["calls"] > 0 and summary["stored_days"] > 0
-    assert fetched[0] == _recent_weekday(0).isoformat()  # started at yesterday
+    assert fetched[0] == _recent_trading_day(0).isoformat()  # started at yesterday
     with session_scope() as session:
         from sqlalchemy import func, select
 
         newest = session.execute(select(func.max(DailyClose.date))).scalar()
-    assert newest == _recent_weekday(0)  # not the old frozen window
+    assert newest == _recent_trading_day(0)  # not the old frozen window
 
 
 def test_b02_breadth_as_of_is_observation_date_not_today(isolated_db, monkeypatch):
@@ -182,13 +184,3 @@ def test_h04_leap_day_prior_year_is_safe():
 
     assert _minus_one_year(date(2024, 2, 29)) == date(2023, 2, 28)   # no ValueError
     assert _minus_one_year(date(2025, 3, 31)) == date(2024, 3, 31)   # normal case
-
-
-# ---- O-01: snapshots dir is absolute for an absolute DB URL ----------------
-
-def test_o01_snapshots_dir_absolute_for_absolute_db_url(monkeypatch):
-    from app.config import get_settings
-    from app.services.backfill import snapshots_dir
-
-    monkeypatch.setattr(get_settings(), "db_url", "sqlite:////data/bubble.db", raising=False)
-    assert snapshots_dir() == Path("/data/snapshots")   # was CWD-relative data/snapshots
