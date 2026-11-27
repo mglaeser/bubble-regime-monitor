@@ -1279,10 +1279,10 @@ def test_unknown_at_a_full_window_does_not_erase_known_flap_history():
 # ---------------------------------------------------------------------------
 
 
-def test_a_crossing_hold_follows_its_direction_and_only_the_two_holding_policies():
-    """Up is held at or above the level, down at or below it. A crossing that
-    resolves `auto_on_condition_false` stays an event that ends at the next
-    evaluation: tripwire.margin_rollover is the enabled rule of that kind."""
+def test_a_crossing_hold_follows_its_direction_under_every_policy():
+    """Up is held at or above the level, down at or below it, whatever the
+    policy: under `auto_on_condition_false` too, the policy of
+    tripwire.margin_rollover."""
     def rule(direction: str, policy: str) -> RuleSpec:
         return _rule(
             rule_id="test.cross", source_fields=["breadth_pct"],
@@ -1299,7 +1299,7 @@ def test_a_crossing_hold_follows_its_direction_and_only_the_two_holding_policies
                              _ctx(make_input(identity="now", breadth=value), before),
                              currently_firing=firing).truth
 
-    for policy in ("single_shot", "auto_on_inverse"):
+    for policy in ("single_shot", "auto_on_inverse", "auto_on_condition_false", "manual"):
         assert truth("up", policy, 70.0) is True
         assert truth("up", policy, 60.0) is True
         assert truth("up", policy, 59.9) is False
@@ -1310,8 +1310,99 @@ def test_a_crossing_hold_follows_its_direction_and_only_the_two_holding_policies
         assert truth("up", policy, 70.0, firing=False) is False
         # An unreadable value holds the episode as UNKNOWN, it does not end it.
         assert truth("up", policy, None) is None
-    assert truth("up", "auto_on_condition_false", 70.0) is False
-    assert truth("down", "auto_on_condition_false", 50.0) is False
+
+
+# ---------------------------------------------------------------------------
+# tripwire.margin_rollover: "FINRA margin-debt rollover multiplier turns"
+#
+# README, "Alert, P2": held outside 07:00-22:00 Europe/Berlin, then sent.
+# docs/ALERT_SYSTEM.md 11e: a member is dropped when its condition has
+# cleared. A multiplier that still reads 1.0 has not cleared.
+# ---------------------------------------------------------------------------
+
+ROLLOVER = "tripwire.margin_rollover"
+
+
+def rollover_input(identity: str, at: datetime, multiplier: float,
+                   month: str = "2026-10") -> AlertInput:
+    """An input whose FINRA rollover multiplier (d2) reads `multiplier`."""
+    base = make_input(identity=identity, computed_at=at.isoformat())
+    evidence = EvidenceModel(**build_evidence(
+        obs.DOMAIN_MARGIN, multiplier, observed_at=at.isoformat(), unit="multiplier",
+        source_id="d2", period_start=month, period_end=month,
+        data_state="FRESH",
+    ).as_dict())
+    return base.model_copy(update={"indicators": [*base.indicators, evidence]})
+
+
+def _through_the_night(turned_at: datetime, after: list[float]
+                       ) -> tuple[list[str], list[str], str | None]:
+    """The multiplier reads 0.6, turns to 1.0 at the slot `turned_at`, and
+    reads `after` at the slots that follow. Each slot is evaluated two minutes
+    past the hour by the real engine; the real dispatcher passes a minute
+    after every evaluation and five seconds after the quiet-hours hold ends.
+
+    Returns the Berlin times at which a pass sent, the bodies sent, and the
+    drop reason of the rule's planned member.
+    """
+    from zoneinfo import ZoneInfo
+
+    from sqlalchemy import select
+
+    from app.alerts.dispatcher import dispatch_once
+    from app.alerts.enums import Priority
+    from app.alerts.models import AlertDelivery, AlertDeliveryMember, AlertRender
+    from app.alerts.quiet_hours import release_time_for
+    from app.db import session_scope
+
+    artifacts = _artifacts()
+    readings = [(turned_at - timedelta(hours=4), 0.6, "2026-09"), (turned_at, 1.0, "2026-10")]
+    readings += [(turned_at + timedelta(hours=4 * (k + 1)), value, "2026-10")
+                 for k, value in enumerate(after)]
+    hold_ends = release_time_for(Priority.P2, turned_at + timedelta(minutes=2))
+    moments = [(at + timedelta(minutes=2), "evaluate", i) for i, (at, _, _) in enumerate(readings)]
+    moments += [(at + timedelta(minutes=3), "dispatch", 0) for at, _, _ in readings]
+    moments += [(hold_ends + timedelta(seconds=5), "dispatch", 0)]
+    sent_at: list[str] = []
+    for moment, what, i in sorted(moments):
+        if what == "evaluate":
+            at, value, month = readings[i]
+            alert_input = rollover_input(f"rollover-{i}", at, value, month)
+            _store_input(alert_input, at)
+            _run(alert_input, artifacts, now=moment)
+        elif dispatch_once(session_scope, phrase_set=artifacts.phrase_set, mode="shadow",
+                           live_profile="default", now=moment).sent:
+            sent_at.append(f"{moment.astimezone(ZoneInfo('Europe/Berlin')):%H:%M}")
+    with session_scope() as session:
+        bodies = [row.final_message for row in session.execute(select(AlertRender)).scalars()]
+        member = session.execute(
+            select(AlertDeliveryMember).join(
+                AlertDelivery, AlertDelivery.delivery_id == AlertDeliveryMember.delivery_id)
+            .where(AlertDeliveryMember.rule_id == ROLLOVER)).scalars().one()
+        return sent_at, bodies, member.drop_reason
+
+
+# The 22:00 UTC slot ingests the release, on CET and on CEST: its message goes
+# out at 07:00 Berlin.
+ROLLOVER_SLOTS = [
+    ("2026-11-16T22:00", "07:00"),      # Berlin on CET
+    ("2026-07-13T22:00", "07:00"),      # Berlin on CEST
+]
+
+
+@pytest.mark.parametrize("slot, sent_in_berlin", ROLLOVER_SLOTS,
+                         ids=[slot for slot, _ in ROLLOVER_SLOTS])
+def test_a_margin_rollover_ingested_at_the_22_00_utc_slot_reaches_the_owner(
+        isolated_db, monkeypatch, slot, sent_in_berlin):
+    """A P2 planned at the 22:00 UTC slot waits for 07:00 Berlin, and the
+    multiplier still reads 1.0 then: the message goes out."""
+    # `_artifacts()` reads config/ relative to the working directory, so work
+    # from the repository root that this file names.
+    monkeypatch.chdir(Path(__file__).resolve().parents[1])
+    sent_at, bodies, dropped = _through_the_night(
+        datetime.fromisoformat(slot).replace(tzinfo=UTC), after=[1.0, 1.0, 1.0])
+    assert (sent_at, dropped) == ([sent_in_berlin], None)
+    assert bodies == ["Margin-Rollover erkannt (1.0). Naechste Pruefung bei Release."]
 
 
 def test_two_all_clears_five_days_apart_both_plan_a_message(isolated_db, monkeypatch):

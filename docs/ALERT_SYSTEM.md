@@ -215,9 +215,10 @@ period, the condition re-fires and the cooldown is the only thing standing
 between that and a second message.
 
 When a condition can fire again is decided by the rule's `resolution.policy`.
-Under `auto_on_inverse` and `single_shot` the episode of a transition or a
-crossing lasts while the state it reported lasts (the flag stays off, the leg
-stays in, the run-up stays at or above its tier) and ends with it, and the
+Under `auto_on_inverse` and `single_shot` the episode of a transition, and
+under every policy but `manual` the episode of a crossing, lasts while the
+state it reported lasts (the flag stays off, the leg stays in, the run-up
+stays at or above its tier) and ends with it, and the
 rule fires again at the next occurrence. A P2 still held for quiet hours when
 an evaluation reads that state as over is dropped as `RESOLVED_BEFORE_SEND`
 (section 11e). A condition that names no lasting state, the `delta` of

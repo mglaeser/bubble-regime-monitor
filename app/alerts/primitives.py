@@ -376,8 +376,8 @@ def evaluate_condition(node: Condition, ctx: EvaluationContext, rule: RuleSpec,
         return ConditionOutcome(truth=False, status=EvaluationStatus.DISABLED,
                                 reasons=[f"structurally dark: {node.reason}"])
     # `single_shot` holds as `auto_on_inverse` does: while firing, a transition
-    # or crossing stays true as long as the state it led to lasts (the flag
-    # stays off, the leg stays in, the value stays where it crossed to).
+    # stays true as long as the state it led to lasts (the flag stays off, the
+    # leg stays in). A crossing is held under every policy (below).
     hold_inverse_target = (
         currently_firing and rule.resolution.policy in ("auto_on_inverse", "single_shot")
     )
@@ -394,7 +394,10 @@ def evaluate_condition(node: Condition, ctx: EvaluationContext, rule: RuleSpec,
     if isinstance(node, RangeCondition):
         return _eval_range(node, ctx, thresholds)
     if isinstance(node, CrossingCondition):
-        return _eval_crossing(node, ctx, thresholds, hold_target=hold_inverse_target)
+        # A crossing names its lasting state itself: the value is where it
+        # crossed to. So it is held under every policy, `auto_on_condition_false`
+        # included.
+        return _eval_crossing(node, ctx, thresholds, hold_target=currently_firing)
     if isinstance(node, DeltaCondition):
         return _eval_delta(node, ctx, thresholds)
     if isinstance(node, CountCondition):
