@@ -212,6 +212,22 @@ def action_band(score: float) -> str:
     return "hold"
 
 
+def headline(median: float) -> int:
+    """The whole number shown for the median: the whole points it has reached.
+
+    The band lines are whole numbers and a band begins "at or above" its line
+    (action_band), so this number is at or above a line exactly when the
+    median is. The nearest whole number read 60 beside the band "trim" from
+    59.5 up: on 47 of the 615 production snapshots up to 2026-11-10 and in 7
+    of the 54 daily digests sent. The price: 59.7 reads 59, one lower than the
+    nearest whole number on 286 of those snapshots, and the golden median
+    (52.5605) reads 52 where it read 53. The ends of a range shown beside it as
+    whole numbers go through this function too: the floor is monotonic, so a
+    median inside its range is shown inside it.
+    """
+    return math.floor(median)
+
+
 def action_band_with_override(score: float, red_flags: RedFlags) -> str:
     if red_flags.override_fired:
         return "de-risk"
