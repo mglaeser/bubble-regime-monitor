@@ -391,7 +391,6 @@ def validate_ruleset(
     methodology_version: str,
     methodology_manifest_sha256: str,
     service_version: str,
-    available_calibrations: frozenset[str] = frozenset(),
 ) -> ValidatedRuleset:
     """Parse, validate and hash a candidate ruleset. Raises `RulesetInvalid`.
 
@@ -428,7 +427,8 @@ def validate_ruleset(
         _check_sources(rule, problems)
         _check_condition_shapes(rule, problems)
         _check_confirmation_semantics(rule, problems)
-        if rule.calibration_id and rule.enabled and rule.calibration_id not in available_calibrations:
+        if rule.calibration_id and rule.enabled:
+            # Rollout stage 6 (EWMA / CUSUM) is not built, so no calibration artifact is available.
             problems.append(
                 f"{rule.rule_id}: enabled but calibration artifact "
                 f"{rule.calibration_id!r} is not available"

@@ -9,11 +9,12 @@ WHAT/HOW/WHY/references/caveats: see app.references.REGISTRY["s3"]; summary:
     runup < 100 pp         -> deterministic clip(0.30*runup/100, 0, 0.30)
 
 CAVEAT (verbatim): The 53%/80% crash frequencies are Fama-French-49
-industry-level base rates, NOT calibrated to this specific AI episode. The
-whole-market Magnificent-7 basket does not currently meet the run-up
-threshold (~0 pp net two-year run-up), so the indicator is deliberately
-scoped to semiconductors only; applying the GSY threshold to the broad index
-would understate the signal because the mega-caps are already the market.
+industry-level base rates, NOT calibrated to this specific AI episode. When
+the indicator was scoped (July 2026) the whole-market Magnificent-7 basket
+did not meet the run-up threshold (~0 pp net two-year run-up; the service
+does not recompute that figure), so the indicator is deliberately scoped to
+semiconductors only; applying the GSY threshold to the broad index would
+understate the signal because the mega-caps are already the market.
 
 EPISTEMIC GUARDRAILS: the five, verbatim, are in app/references.py.
 """
