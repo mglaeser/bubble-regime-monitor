@@ -674,7 +674,15 @@ def gather_inputs() -> RawInputs:
         # T=100); fetch QQQ monthly from 1999 (T~329), falling back to the
         # shorter recompute series if the long fetch is unavailable.
         try:
-            gsadf_pairs = price_src.fetch_tiingo_monthly("NDX")
+            # Completed months only. Tiingo's monthly series ends with the month
+            # in progress, under the label of that month's last business day
+            # (2026-11-30 on 2026-11-10): a date in the future, which reads as
+            # stale, and at each month turn a month of one day in the fit. The
+            # README changelog has the production numbers. `today` is the UTC
+            # date of this gather; the last completed month is at most 33 days
+            # old on any day of the next one (S4's SLA is 35).
+            gsadf_pairs = [(d, c) for d, c in price_src.fetch_tiingo_monthly("NDX")
+                           if d[:7] < today[:7]]
             gsadf_monthly = [c for _, c in gsadf_pairs]
             raw.gsadf_as_of = gsadf_pairs[-1][0] if gsadf_pairs else None
             gsadf_src_note = f"Nasdaq-100 via QQQ proxy (Tiingo monthly 1999+, T={len(gsadf_monthly)})"
