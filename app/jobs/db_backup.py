@@ -6,24 +6,23 @@ S5's history before that window exists only here, as do the snapshots, the
 alert sidecars and episodes, and the falsification record. Nothing rolls a
 migration back (docs/AUTO_DEPLOY.md).
 
-So `run_once` copies the file with SQLite's online backup
-(`sqlite3.Connection.backup`): a consistent copy taken while the service
-writes - a reader under WAL, it blocks no writer, and it holds what was
-committed when it began. The newest KEEP copies stay, beside the database in
-`backups/`.
+So `run_once` keeps one checked copy of the file, `backups/<name>` beside it,
+made with SQLite's online backup (`sqlite3.Connection.backup`): a consistent
+copy taken while the service writes - a reader under WAL, it blocks no writer,
+and it holds what was committed when it began. Older copies are for the host's
+own backup tool to keep.
 """
 
 from __future__ import annotations
 
-import glob
 import os
 import sqlite3
+import tempfile
 from contextlib import closing
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
 
+from sqlalchemy import util
 from sqlalchemy.engine import make_url
 
 from app.config import get_settings
@@ -31,44 +30,34 @@ from app.logging_conf import get_logger
 
 log = get_logger(__name__)
 
-KEEP = 7
 
-
-def run_once(*, now: datetime | None = None) -> dict[str, Any]:
+def run_once() -> dict[str, Any]:
     url = make_url(get_settings().db_url)
-    if url.get_backend_name() != "sqlite" or not url.database or url.database == ":memory:":
-        return {"status": "skipped", "reason": "not a SQLite file"}
-    source = Path(url.database)
-    directory = source.parent / "backups"
-    directory.mkdir(exist_ok=True)
-    day = (now or datetime.now(UTC)).strftime("%Y-%m-%d")
-    copy = directory / f"{source.stem}-{day}.db"
-    # The copy in progress has one name, whatever the day, and gets a copy's
-    # name only when it is whole and checked. What a killed run left under
-    # that name goes first.
-    partial = directory / f"{source.stem}.partial"
-    partial.unlink(missing_ok=True)
+    if (url.get_backend_name() != "sqlite" or util.asbool(url.query.get("uri", False))
+            or not url.database or url.database == ":memory:"):
+        raise ValueError("DB_URL names no SQLite database file by its path")
+    source = Path(url.database).absolute()
+    copy = source.parent / "backups" / source.name
+    copy.parent.mkdir(exist_ok=True)
+    # This run's own file: a unique name, mode 0600. It becomes the copy only
+    # when it is whole and checked.
+    fd, staging = tempfile.mkstemp(dir=copy.parent, prefix=f".{source.name}.", suffix=".tmp")
+    os.close(fd)
     try:
-        # Read-only and by URI: a source that is not there is an error, never a
-        # new empty database that would then be "backed up". Quoted: the path
-        # is data, and a "#" or "%" in it would otherwise be URI syntax.
-        with (closing(sqlite3.connect(f"file:{quote(str(source))}?mode=ro", uri=True)) as src,
-              closing(sqlite3.connect(partial)) as dst):
+        # Read-only: a source that is not there is an error, never a new empty database.
+        with (closing(sqlite3.connect(f"{source.as_uri()}?mode=ro", uri=True)) as src,
+              closing(sqlite3.connect(staging)) as dst):
             src.backup(dst)
-            # The backup copies pages as they are, a damaged one included.
-            verdict = dst.execute("PRAGMA quick_check").fetchone()[0]
-        if verdict != "ok":
-            raise RuntimeError(f"the copy fails quick_check: {verdict}")
-        os.replace(partial, copy)
+            verdict = dst.execute("PRAGMA integrity_check").fetchall()
+            versioned = dst.execute("SELECT 1 FROM sqlite_master WHERE type = 'table'"
+                                    " AND name = 'alembic_version'").fetchone()
+        if verdict != [("ok",)] or versioned is None:
+            raise RuntimeError(f"the copy fails its check: integrity_check {verdict[:3]}, "
+                               f"alembic_version {'present' if versioned else 'missing'}")
+        os.replace(staging, copy)
     finally:
-        partial.unlink(missing_ok=True)   # a failed run keeps no half of a copy
-    size = copy.stat().st_size
-    # Only after a good copy stands: the oldest go, never the last good one.
-    # Escaped: the name is data here too, and a "[" in it is no pattern.
-    copies = sorted(directory.glob(f"{glob.escape(source.stem)}-????-??-??.db"))
-    for old in copies[:-KEEP]:
-        old.unlink()
-    return {"status": "ok", "copy": copy.name, "bytes": size, "kept": min(len(copies), KEEP)}
+        Path(staging).unlink(missing_ok=True)   # a failed run removes its own file; the previous copy stands
+    return {"status": "ok", "copy": str(copy), "bytes": copy.stat().st_size}
 
 
 def job() -> None:
