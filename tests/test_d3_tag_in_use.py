@@ -19,8 +19,8 @@ r = 1.3.
 
 - The gate stays off: the sub-score is min(base, 0.30) and the cap binds from a
   mean of 0.65, so it stays 0.30 and the headline does not move.
-- The gate fires (any issuer, read under today's tags, with total revenue
-  growth below 15 % and TTM OCF - capex below 0): the sub-score goes from 0.30
+- The gate fires (any issuer with total revenue growth below 15 % over its
+  last two fiscal years and TTM OCF - capex below 0): the sub-score goes from 0.30
   to 1.00 at a mean of 1.0 or more and the headline rises by 8.2 to 10.6
   points, 9.6 on average (the 471 snapshots since 2026-08-23 replayed through
   monte_carlo; 322 of the 437 medians in trim then lie in de-risk). The last
@@ -161,3 +161,21 @@ def test_the_point_in_time_harness_reads_the_tag_filed_as_of_its_date():
         edgar.CAPEX_TAGS[1]: filed([("2025-01-01", "2025-12-31", 1.0, "2026-02-06")]),
     }}}
     assert harness._pit_ttm(both, edgar.CAPEX_TAGS, date(2026, 6, 30)) == pytest.approx(130e9)
+    # It reads what production reads: the USD facts, and a value it cannot read is skipped.
+    usd = filed([("2025-01-01", "2025-12-31", 130e9, "2026-02-06")])
+    eur_only_later = {"units": {"EUR": filed([("2025-01-01", "2025-12-31", 99e9, "2026-02-06"),
+                                              ("2026-01-01", "2026-03-31", 25e9, "2026-05-01")])["units"]["USD"]}}
+    unreadable = filed([("2025-01-01", "2025-12-31", "n/a", "2026-02-06")])
+    for other in (eur_only_later, unreadable):   # was 99e9's tag, and ValueError
+        facts = {"facts": {"us-gaap": {edgar.CAPEX_TAGS[0]: usd, edgar.CAPEX_TAGS[1]: other}}}
+        assert harness._pit_ttm(facts, edgar.CAPEX_TAGS, date(2026, 6, 30)) == pytest.approx(130e9)
+
+
+def test_the_growth_is_the_last_two_fiscal_years_under_whichever_tag_holds_them(monkeypatch):
+    """A revenue tag taken up in a 10-Q holds quarters only; the last two fiscal
+    years stand under the issuer's other tag."""
+    took_up_in_a_10q = {"facts": {"us-gaap": {**STEADY["facts"]["us-gaap"],
+        edgar.REVENUE_TAGS[0]: _usd([("2026-01-01", "2026-03-31", 170e9), ("2026-04-01", "2026-06-30", 175e9)]),
+        edgar.REVENUE_TAGS[1]: REVENUE_TODAY}}}
+    (reading,) = _readings(monkeypatch, {"X": took_up_in_a_10q}).value
+    assert reading.revenue_yoy_pct == pytest.approx(10.0)   # was None

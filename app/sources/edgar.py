@@ -127,6 +127,16 @@ def duration_facts(facts: dict[str, Any], tags: list[str]) -> list[Fact]:
     return newest
 
 
+def all_periods(facts: dict[str, Any], tags: list[str]) -> list[Fact]:
+    """The USD duration facts of every candidate tag, one per period, oldest
+    first; on a period two tags report, the tag duration_facts reads wins, else
+    the earlier in the list. The gate's revenue growth is the issuer's last two
+    fiscal years, under whichever of its tags holds them."""
+    by_period = {(f.start, f.end): f for tag in reversed(tags) for f in duration_facts(facts, [tag])}
+    by_period.update({(f.start, f.end): f for f in duration_facts(facts, tags)})
+    return sorted(by_period.values(), key=lambda f: (f.end, f.duration))
+
+
 def ttm(facts_list: list[Fact]) -> tuple[float, date] | None:
     """(TTM value, as-of date) via annual + YTD differencing."""
     annuals = [f for f in facts_list if 350 <= f.duration <= 380]
@@ -181,7 +191,7 @@ def hyperscaler_readings() -> SourceResult:
         if ocf is None or capex is None or ocf[0] <= 0 or capex[1] != ocf[1]:
             continue
         ocf_ttm, as_of = ocf
-        rev_yoy = annual_yoy(duration_facts(facts, REVENUE_TAGS))
+        rev_yoy = annual_yoy(all_periods(facts, REVENUE_TAGS))
         growth_read = growth_read or rev_yoy is not None
         latest_as_of = max(latest_as_of, as_of) if latest_as_of else as_of
         readings.append(HyperscalerReading(

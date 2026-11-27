@@ -37,27 +37,21 @@ OCF_POLICIES = ("D0_DROP", "D1_DROP_AND_DEBIT_QUALITY", "D2_DISTRESS_FLAG_ONLY",
                 "D3_SATURATED_BASE", "D4_DROP_ENTIRE_D3", "D5_TWO_COMPONENT")
 
 
+def _filed_by(row: dict, as_of: date) -> bool:
+    try:
+        return date.fromisoformat(row["filed"]) <= as_of and date.fromisoformat(row["end"]) <= as_of
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
 def _pit_ttm(facts: dict, tags: list[str], as_of: date) -> float | None:
     """TTM sum of the newest four non-overlapping quarterly duration values
-    with filed <= as_of (annual values used when quarters are unavailable)."""
-    rows: list[tuple[date, date, float]] = []
-    for tag in tags:
-        found = []
-        for unit_rows in (facts.get("facts", {}).get("us-gaap", {})
-                          .get(tag, {}).get("units", {}) or {}).values():
-            for r in unit_rows:
-                try:
-                    filed = date.fromisoformat(r["filed"])
-                    start = date.fromisoformat(r["start"])
-                    end = date.fromisoformat(r["end"])
-                except (KeyError, ValueError):
-                    continue
-                if filed <= as_of and end <= as_of:
-                    found.append((start, end, float(r["val"])))
-        # The tag the issuer filed under as of that date, as in
-        # edgar.duration_facts: the newest fact decides, the list order a tie.
-        if found and (not rows or max(r[1] for r in found) > max(r[1] for r in rows)):
-            rows = found
+    with filed <= as_of (annual values used when quarters are unavailable),
+    under the tag production reads among them (edgar.duration_facts)."""
+    usgaap = facts.get("facts", {}).get("us-gaap", {})
+    filed = {tag: {"units": {"USD": [r for r in usgaap.get(tag, {}).get("units", {}).get("USD", [])
+                                     if _filed_by(r, as_of)]}} for tag in tags}
+    rows = [(f.start, f.end, f.val) for f in edgar.duration_facts({"facts": {"us-gaap": filed}}, tags)]
     if not rows:
         return None
     rows.sort(key=lambda r: r[1])
