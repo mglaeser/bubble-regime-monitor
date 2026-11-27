@@ -228,6 +228,47 @@ def test_the_cli_refuses_the_apps_own_database_as_state(isolated_db, capsys):
     assert isolated_db.read_bytes() == before
 
 
+def _evaluations_in(path: Path) -> int:
+    import sqlite3
+    from contextlib import closing
+
+    with closing(sqlite3.connect(path)) as db:
+        return db.execute("SELECT count(*) FROM alert_evaluation").fetchone()[0]
+
+
+def test_a_question_mark_in_the_state_path_is_part_of_the_file_name(tmp_path, artifacts):
+    """The state path `x.db?` is the file the replay writes, not the database
+    x.db with a query: x.db beside it is left byte for byte."""
+    import sqlite3
+    from contextlib import closing
+
+    beside = tmp_path / "x.db"
+    with closing(sqlite3.connect(beside)) as db:
+        db.execute("CREATE TABLE marker (x)")
+        db.commit()
+    before = beside.read_bytes()
+
+    summary = _run(tmp_path, artifacts, name="x.db?")
+
+    assert beside.read_bytes() == before
+    assert summary.evaluations_committed > 0
+    assert _evaluations_in(tmp_path / "x.db?") == summary.evaluations_committed
+
+
+def test_a_relative_memory_state_path_is_a_file_the_replay_writes(
+        tmp_path, artifacts, monkeypatch):
+    """`:memory:` relative to the working directory names a file there, not
+    SQLite's in-memory database: the replay's evaluations are in that file."""
+    monkeypatch.chdir(tmp_path)
+    summary = run_replay(
+        config=ReplayConfig(source_db_url="sqlite:///unused", state_db_path=Path(":memory:"),
+                            evaluate_at_stage=3),
+        ruleset=artifacts.ruleset, phrase_set=artifacts.phrase_set, inputs=_history())
+
+    assert summary.evaluations_committed > 0
+    assert _evaluations_in(tmp_path / ":memory:") == summary.evaluations_committed
+
+
 def test_replay_module_cannot_reach_a_provider_or_a_transport():
     """Structural, not behavioural: the import graph itself has no way out.
 

@@ -35,7 +35,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import create_engine, select
+from sqlalchemy import URL, create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.alerts.budgets import BUDGETED_KINDS, LIMITS
@@ -262,11 +262,18 @@ def _isolated_session_factory(state_db_path: Path):
 
     from app.models import Base
 
+    state_db_path = state_db_path.absolute()
     state_db_path.parent.mkdir(parents=True, exist_ok=True)
     # Created here, exclusively: a path that exists raises FileExistsError and
     # is left as it is, whatever it is. A replay deletes no file it is given.
+    # Another local process could swap this entry before the open below; that
+    # is not defended, as AGENTS.md removes defences against what a
+    # single-tenant deployment cannot meet.
     state_db_path.touch(exist_ok=False)
-    engine = create_engine(f"sqlite:///{state_db_path}", future=True,
+    # A URL object, not a string SQLAlchemy parses: the absolute path is the
+    # database's file name whole, so a '?' in it is no query and ':memory:' no
+    # in-memory database.
+    engine = create_engine(URL.create("sqlite", database=str(state_db_path)), future=True,
                            connect_args={"check_same_thread": False})
 
     from sqlalchemy import event as sa_event

@@ -13,7 +13,8 @@ Exit codes are the gate:
 
     0   the replay ran and every check passed
     1   the replay ran and a check FAILED, the artifacts are invalid, or
-        `--state-db` names a path that exists (it is created, never replaced)
+        `--state-db` names a path that exists or cannot be created (it is
+        created, never replaced)
 
 Nothing here can send: `app.alerts.replay` imports no provider and runs in
 `dryrun` mode, whose state lives in its own namespace.
