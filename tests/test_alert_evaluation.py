@@ -1350,3 +1350,49 @@ def test_two_all_clears_five_days_apart_both_plan_a_message(isolated_db, monkeyp
             AlertDeliveryMember.rule_id == "tripwire.rf4_all_clear")).scalars().all()
         assert episodes == [(EpisodeStatus.RESOLVED, False), (EpisodeStatus.FIRING, True)]
         assert len(members) == 2
+
+
+# ---------------------------------------------------------------------------
+# degraded data: a fact of the snapshot under evaluation is still a fact
+# ---------------------------------------------------------------------------
+
+
+def _slot(i: int) -> datetime:
+    return datetime(2026, 8, 17, 2, 0, tzinfo=UTC) + timedelta(hours=4 * i)
+
+
+def _slot_input(i: int, **kw) -> AlertInput:
+    return make_input(identity=f"slot-{i}", computed_at=_slot(i).isoformat(), **kw)
+
+
+def _rules_about_degraded_data():
+    """Each rule on the input its title describes."""
+    before = _slot_input(0, effective="de-risk", base="de-risk", point=50.0)
+    suppressed = _slot_input(1, effective="suppressed", base="trim", degraded=True,
+                             suppressed=True, point=51.0)
+    override_wins = _slot_input(1, effective="de-risk", base="de-risk", degraded=True,
+                                suppressed=False, override=True)
+    flag_input_lost = suppressed.model_copy(
+        update={"override_fireable_universe_count": 2})      # the override needs 3
+    return [
+        # "Base band changed while coverage suppression is active"
+        ("regime.base_band_moved_while_suppressed", suppressed, before),
+        # "Coverage degradation is real and unmitigated"
+        ("constellation.coverage_degradation_real", suppressed, before),
+        # "False alarm likely": the point score rises on degraded data
+        ("constellation.false_alarm_likely", suppressed, before),
+        # "Data degraded without a suppressed decision"
+        ("ops.coverage_degraded_info", override_wins, before),
+        # "A red-flag input was unavailable this run", here while suppressed
+        ("ops.rf_input_unavailable", flag_input_lost, before),
+    ]
+
+
+@pytest.mark.parametrize("rule_id,now,before", _rules_about_degraded_data(),
+                         ids=[case[0] for case in _rules_about_degraded_data()])
+def test_a_rule_about_degraded_data_fires_on_degraded_data(rule_id, now, before):
+    rule = _artifacts().ruleset.rule(rule_id)
+    assert rule is not None and rule.enabled
+    assert now.data_degraded is True
+    outcome = evaluate_rule(rule, _ctx(now, before))
+    assert outcome.truth is True, outcome.reasons
