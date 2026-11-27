@@ -1,9 +1,9 @@
 """Dashboard feed (v3.4.0): read-only current-values feed for the companion
-"Crisis Winners" dashboard (crash.klee.me). See DASHBOARD_FEED_SPEC.md.
+"Crisis Winners" dashboard (ai-bubble.fyi). See DASHBOARD_FEED_SPEC.md.
 
 DESIGN CONTRACT (dashboard-side sign-off, 2026-07-15; decisions 1A/2A/3A/4B/5A;
 v3.7.0 additive delta: +fear_greed series & metric — see spec section 7):
-  * 13 monthly series + 33 scalar metrics; keys name the CONCEPT (gold, btc,
+  * 13 monthly series + 30 scalar metrics; keys name the CONCEPT (gold, btc,
     ust10y_tr) — sources/proxies live in name/source/note, never in the key.
   * Every series: EXACTLY 61 monthly points (t-60..t0), last close of month,
     raw values (the client rebases), LEFT-PADDED with explicit nulls when
@@ -123,7 +123,12 @@ SLA_MONTHLY_BAR = 35  # TD 1month bars are DATED AT MONTH START (live capture:
                       # so a 7d SLA would flag the freshest bar stale
 SLA_CAPE = 45
 SLA_FINRA = 75
-SLA_QUARTERLY = 120  # Z.1 MMF assets
+# Z.1 MMF assets. FRED dates a quarter at its first day and the Z.1 release
+# comes about 10 weeks after the quarter ends, so the newest quarter is about
+# 163 days old on the day it appears and about 255 on the day the next release
+# replaces it. 290 = that and five weeks of a late release: stale says a release
+# was missed.
+SLA_QUARTERLY = 290
 
 
 def _series_item(key: str, name: str, kind: str, unit: str, source: str,
@@ -213,14 +218,29 @@ METRIC_KEYS = [
     "hy_oas_bps", "hy_oas_52w_change_bps", "pct_above_200dma", "margin_debt_yoy_pct",
     "gsadf", "lppls_confidence",
     "vix_level", "vix_term_state", "vix_term_ratio", "vrp", "skew",
-    "qqq_close", "spy_close", "ndx_close",
-    "gold_spot", "silver_spot", "gold_silver_ratio", "gold_ttm_pct",
+    "qqq_close", "spy_close",
+    "gold_spot", "gold_ttm_pct",
     "btc_spot", "btc_ath", "btc_drawdown_pct",
     "usd_broad_index_level", "usd_broad_index_ytd_pct", "usdjpy", "usdchf",
     "ust10y_yield_pct", "tbill3m_yield_pct",
     "mmf_total_assets_usd",
     "fear_greed",  # v3.7.0 additive
 ]
+
+GOLD_SPOT_SOURCE = "twelvedata:XAU/USD"
+
+
+def to_contract(payload: dict[str, Any]) -> dict[str, Any]:
+    """A stored payload as the feed endpoint reads it: the metric keys of
+    METRIC_KEYS and no others, and `gold_spot` only from the spot quote. A row
+    an older build stored can hold keys that have left the contract and, under
+    `gold_spot`, the GLD close it fell back to on a failed quote."""
+    metrics = {k: v for k, v in (payload.get("metrics") or {}).items() if k in METRIC_KEYS}
+    gold = metrics.get("gold_spot")
+    if isinstance(gold, dict) and gold.get("source") != GOLD_SPOT_SOURCE:
+        metrics["gold_spot"] = _unavailable(
+            "USD", GOLD_SPOT_SOURCE, "source failed: the stored item was not the quote")
+    return {**payload, "metrics": metrics}
 
 
 def _fred_scalar_from(pairs: list[tuple[str, float]] | None, unit: str, series_id: str,
@@ -343,7 +363,7 @@ def build_feed(raw: Any, data: Any) -> dict[str, Any]:
     # with that state reported a regime nothing had measured. Until s4 scored the
     # endpoint the two were the same number, so the pairing was correct by
     # construction — the same invariant lppls_confidence still holds below.
-    # The metric key stays "gsadf" (METRIC_KEYS is the 33-key contract); the
+    # The metric key stays "gsadf" (METRIC_KEYS is the contract); the
     # unscored sup remains visible under detail so nothing is lost.
     # The configured family is a methodology constant, so it is known even on a
     # run where s4 produced nothing. Reading it from the run's extra published
@@ -397,8 +417,6 @@ def build_feed(raw: Any, data: Any) -> dict[str, Any]:
     m["spy_close"] = _scalar(spy_last[1] if spy_last else None, "USD",
                              spy_last[0] if spy_last else None, "price_chain:SPY",
                              sla_days=SLA_DAILY)
-    m["ndx_close"] = _unavailable("index", "none",
-                                  "no free raw NASDAQ-100 index source; use qqq_close (ETF proxy)")
 
     # ---- metrics: fresh TD scalars (decisions 1A/3A), each degradable ----
     def _fresh_or(symbol: str, unit: str, fallback) -> dict[str, Any]:
@@ -408,46 +426,18 @@ def build_feed(raw: Any, data: Any) -> dict[str, Any]:
             log.warning("dashboard_fresh_scalar_failed", symbol=symbol, error=str(exc)[:160])
             return fallback(str(exc)[:120])
 
-    def _etf_fallback(series_key: str, label: str):
-        def _fb(err: str) -> dict[str, Any]:
-            s = series[series_key]
-            pts = [p for p in s["points"] if p["value"] is not None]
-            if not pts:
-                return _unavailable("USD", s["source"], f"spot failed ({err}); no ETF fallback")
-            return _scalar(pts[-1]["value"], "USD", s["as_of"], s["source"],
-                           sla_days=SLA_DAILY,
-                           note=f"{label} ETF close proxy - NOT spot (spot source failed)")
-        return _fb
-
     def _fred_fx_fallback(sid: str, unit: str):
         def _fb(err: str) -> dict[str, Any]:
             return _fred_scalar_from(fred_cache.get(sid), unit, sid, SLA_FRED_FX,
                                      note=f"FRED H.10 fallback (fresh source failed: {err})")
         return _fb
 
-    m["gold_spot"] = _fresh_or("XAU/USD", "USD", _etf_fallback("gold", "GLD"))
-    m["silver_spot"] = _fresh_or("XAG/USD", "USD", _etf_fallback("silver", "SLV"))
+    # A spot key carries the spot quote or nothing (decision 1A as amended,
+    # DASHBOARD_FEED_SPEC.md): an ETF close is a price per fund share, not per ounce.
+    m["gold_spot"] = _fresh_or("XAU/USD", "USD", lambda err: _unavailable(
+        "USD", GOLD_SPOT_SOURCE, f"source failed: {err}"))
     m["usdjpy"] = _fresh_or("USD/JPY", "JPY-per-USD", _fred_fx_fallback("DEXJPUS", "JPY-per-USD"))
     m["usdchf"] = _fresh_or("USD/CHF", "CHF-per-USD", _fred_fx_fallback("DEXSZUS", "CHF-per-USD"))
-
-    gs, ss = m["gold_spot"], m["silver_spot"]
-    if gs["available"] and ss["available"] and ss["value"]:
-        gold_is_spot = gs["source"].startswith("twelvedata")
-        silver_is_spot = ss["source"].startswith("twelvedata")
-        if gold_is_spot and silver_is_spot:
-            spot_basis = "spot"
-        elif gold_is_spot or silver_is_spot:
-            # live reality on the free tier: XAU/USD is included, XAG/USD needs
-            # a paid TD plan -> gold=spot / silver=SLV close (see source field)
-            spot_basis = "mixed - one leg spot, one leg ETF close (see source)"
-        else:
-            spot_basis = "ETF-close proxy"
-        m["gold_silver_ratio"] = _scalar(round(gs["value"] / ss["value"], 2), "ratio",
-                                         min(gs["as_of"] or "", ss["as_of"] or "") or None,
-                                         f"{gs['source']}/{ss['source']}", sla_days=SLA_DAILY,
-                                         note=f"basis: {spot_basis}")
-    else:
-        m["gold_silver_ratio"] = _unavailable("ratio", "derived", "needs both gold and silver")
 
     gold_pts = [p["value"] for p in series["gold"]["points"]]
     ttm = None
@@ -494,7 +484,8 @@ def build_feed(raw: Any, data: Any) -> dict[str, Any]:
     m["ust10y_yield_pct"] = _fred_scalar_from(fred_cache.get("DGS10"), "pct", "DGS10", SLA_DAILY)
     m["tbill3m_yield_pct"] = _fred_scalar_from(fred_cache.get("DTB3"), "pct", "DTB3", SLA_DAILY)
 
-    # MMF assets (decision 5A): quarterly Z.1, honestly ~1 quarter stale.
+    # MMF assets (decision 5A): quarterly Z.1; `stale` turns true only past
+    # SLA_QUARTERLY, when a release was missed.
     try:
         mmf = _fred_series("MMMFFAQ027S")
         m["mmf_total_assets_usd"] = _fred_scalar_from(
