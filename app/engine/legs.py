@@ -15,7 +15,8 @@ honest expectation is drawdown reduction, not return enhancement. See also
 Moskowitz, Ooi & Pedersen (2012, JFE) and Huang, Li, Wang & Zhou (2020, JFE).
 
 Leg 3 — Fast Alarm: (a) VIX term-structure state; (b) Variance Risk Premium
-VRP = VIX^2 - RealizedVariance_21d(SPY), annualized, flag if VRP <= 0;
+VRP = VIX^2 - RealizedVariance_21d(SPY), annualized, flag if VRP <= 0, both
+legs of one session (closes_through);
 (c) CBOE SKEW level. CAVEAT: app.references.LEG_CAVEATS["skew"] (no forward
 predictive value in the top 5% of the cited sample, above ~131; that level
 is no extreme in 2026) -> LABEL: COINCIDENT CONTEXT ONLY.
@@ -227,41 +228,62 @@ def variance_risk_premium(vix_level: float, daily_spy_closes: list[float]) -> fl
     return (iv - rv) * 1e4
 
 
-# VRP is annualized VIX^2 - realized variance, expressed in variance points
-# (pct^2); empirical readings run roughly single digits to low tens. Values
-# outside this band signal a units/data error rather than a real regime.
+# The VRP is annualised implied less annualised realised variance, in percent
+# squared: a VIX of 16 against 10 % realised volatility reads 256 - 100 = 156.
 VRP_UNITS = "annualized_variance_pts_pct2"
-VRP_SANE_LO, VRP_SANE_HI = -50.0, 150.0
 
 
 @dataclass
 class FastAlarm:
+    """The VRP carries no sanity band: `vrp_sane`'s -50..150 was set for readings
+    that "run roughly single digits to low tens", the size of the VRP divided by 12
+    (production's median, 153.6, is 12.8 so divided), and on the annualised value
+    it called 320 of the 605 production readings to 2026-11-10 a units or data
+    error, the median and all six readings with the flag set among them."""
+
     term_structure: str
     vrp: float | None
-    vrp_flag: bool
+    vrp_flag: bool | None
     skew: float | None
     skew_label: str = "coincident context only"
+    vrp_as_of: str | None = None   # the session both legs of the VRP close on
 
     def as_dict(self) -> dict[str, object]:
         return {
             "term_structure": self.term_structure,
             "vrp": self.vrp,
+            "vrp_as_of": self.vrp_as_of,
             "vrp_units": VRP_UNITS,
             "vrp_flag": self.vrp_flag,
-            "vrp_sane": self.vrp is None or VRP_SANE_LO <= self.vrp <= VRP_SANE_HI,
             "skew": self.skew,
             "skew_label": self.skew_label,
         }
 
 
+def closes_through(daily: list[tuple[str, float]] | None, day: str | None) -> list[float] | None:
+    """The closes up to and including the bar dated `day`, or None when there
+    is no day or the series has no bar on it: never the nearest other day's."""
+    if not daily or not day:
+        return None
+    for i in range(len(daily) - 1, -1, -1):
+        if daily[i][0][:10] == day[:10]:
+            return [close for _, close in daily[: i + 1]]
+    return None
+
+
 def fast_alarm(term_structure_state: str, vix_level: float | None,
-               daily_spy_closes: list[float] | None, skew: float | None) -> FastAlarm:
+               daily_spy_closes: list[float] | None, skew: float | None,
+               vrp_as_of: str | None = None) -> FastAlarm:
+    """`daily_spy_closes` are SPY's closes through the day `vix_level` closed
+    on (closes_through), and `vrp_as_of` is that day. Without the day there is
+    no premium and no flag: both are None."""
     vrp: float | None = None
-    if vix_level is not None and daily_spy_closes:
+    if vix_level is not None and daily_spy_closes and vrp_as_of:
         vrp = variance_risk_premium(vix_level, daily_spy_closes)
     return FastAlarm(
         term_structure=term_structure_state,
         vrp=round(vrp, 2) if vrp is not None else None,
-        vrp_flag=vrp is not None and vrp <= 0.0,
+        vrp_flag=(vrp <= 0.0) if vrp is not None else None,
         skew=skew,
+        vrp_as_of=vrp_as_of[:10] if vrp is not None and vrp_as_of else None,
     )

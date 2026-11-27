@@ -1584,7 +1584,9 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         ts_state = v_vix.state(raw.vix_ratio) if raw.vix_ratio is not None else "unknown"
     except ValueError:
         ts_state = "unknown"   # v3.7.8/§9: invalid ratio -> unknown, never mislabelled
-    alarm = legs.fast_alarm(ts_state, raw.vix_level, raw.spy_daily_closes, raw.skew)
+    alarm = legs.fast_alarm(ts_state, raw.vix_level,
+                            legs.closes_through(raw.spy_daily, raw.vix_level_as_of),
+                            raw.skew, vrp_as_of=raw.vix_level_as_of)
 
     freshness: dict[str, str] = {}
     for ind in indicators.values():
