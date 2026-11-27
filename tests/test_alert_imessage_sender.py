@@ -48,7 +48,6 @@ def test_an_accepted_send_operation_is_the_only_confirmed_success(monkeypatch):
     result = ImessageSender(_client(handler)).send("Stufe de-risk erreicht.",
                                                    recipient_ref="default")
     assert result.outcome == SenderOutcome.CONFIRMED_SUCCESS
-    assert result.provider_correlation_id == "op-123"
     assert sent["auth"].startswith("Bearer ")
     assert sent["idem"], "the proxy contract requires an idempotency key"
 
@@ -400,13 +399,22 @@ def test_only_failures_that_wrote_nothing_are_auto_retryable(monkeypatch, exc,
     assert result.request_started is not retryable
 
 
-def test_a_correlation_id_is_redacted_like_any_other_proxy_string(monkeypatch):
-    """It is server-controlled text that lands on the delivery row.
-
-    A correlation id has no business carrying a recipient, but that is a
-    statement about the proxy's intent rather than a property this code can
-    rely on.
+def test_a_send_result_does_not_carry_the_proxys_operation_id(monkeypatch):
+    """The proxy's operation id is not among a send result's fields. It was
+    returned as `provider_correlation_id`, redacted because it "lands on the
+    delivery row", and the column was NULL on 21 of 21 sent rows in production
+    (read-only, 2026-11-11). So the field is gone, and with it the redaction
+    test that stood here: an id that is not returned is not in the result,
+    whatever the proxy puts into it.
     """
+    import dataclasses
+
+    from app.alerts.sender import SendResult
+
+    assert {f.name for f in dataclasses.fields(SendResult)} == {
+        "outcome", "http_status", "error_code", "error_message_redacted",
+        "request_started"}
+
     _configured(monkeypatch)
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -416,10 +424,8 @@ def test_a_correlation_id_is_redacted_like_any_other_proxy_string(monkeypatch):
 
     result = ImessageSender(_client(handler)).send("x", recipient_ref="default")
     assert result.outcome == SenderOutcome.CONFIRMED_SUCCESS
-    correlation = result.provider_correlation_id or ""
-    assert "someone@icloud.com" not in correlation
-    assert "+4915100000000" not in correlation
-    assert len(correlation) <= 128
+    assert "someone@icloud.com" not in repr(result)
+    assert "+4915100000000" not in repr(result)
 
 
 @pytest.mark.parametrize("status", [301, 302, 307, 308])

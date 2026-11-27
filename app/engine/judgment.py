@@ -26,6 +26,10 @@ from app.redaction import sanitize
 
 log = get_logger(__name__)
 
+# The gauges are named in the template's own words: one line per indicator of the
+# registry's S and D blocks, the plain-word form of what app/references.py says it
+# measures (tests/test_judgment_prompt.py holds that each has its line). The names are
+# template text, not a field (AGENTS.md ground rule 1).
 PROMPT_TEMPLATE = """You are writing a one-line note for a research bubble-regime monitor, for a
 COMPLETE NON-EXPERT with no finance background — write it so a smart 15-year-old
 could follow it.
@@ -45,8 +49,19 @@ Rules:
 
 Readings (context for you — do NOT quote these codes or labels back to the reader):
 Headline: {median} out of 100 (rough range {iqr_lo}-{iqr_hi}); status: {band}.
+Each gauge below reads from 0 to 1; the higher, the more bubble-like. None means no reading today.
 "How deep a fall could be" gauges: {s_scores}.
-"Is a turn near" gauges: {d_scores}. Fear-gauge multiplier: {v}.
+  s1 = how pricey shares are compared with their own history and with interest rates
+  s2 = how much of the market's value sits in its ten biggest companies
+  s3 = how far chip makers' shares have outrun the rest of the market over two years
+  s4 = a statistical test for tech and chip share prices climbing at an ever faster, runaway pace (prone to false alarms)
+  s5 = how little extra interest lenders asked of risky companies about two years ago (very relaxed lending then reads high)
+"Is a turn near" gauges: {d_scores}.
+  d1 = how few companies are still climbing (many climbing together reads low)
+  d2 = people borrowing money to buy shares: how fast that borrowing has grown in a year, and whether it has fallen two months running
+  d3 = how much of their incoming cash the biggest cloud companies spend on building out (kept low unless that spending has stopped turning into sales growth and spare cash)
+  d4 = a pattern test for tech share prices speeding up toward a breaking point (prone to early and false alarms)
+Fear-gauge multiplier: {v} (above 1.0 = near-term fear has risen close to or above longer-term fear, which scales the combined "turn near" reading up).
 Warning flags tripped: {red_flag_detail}. Emergency override tripped: {override}.
 Long-term trend (still in the market?): SPY {spy_state}, QQQ {qqq_state}.
 Fast fear signals: {fast_alarm}.
@@ -79,9 +94,9 @@ def _clean_completion(text: str, limit: int = 300) -> str:
 def run_completion(prompt: str) -> str:
     """Run the one configured gateway route; return raw text or raise safely.
 
-    Shared by the judgment call and the daily digest. There is deliberately no
+    Used by the judgment call alone (`generate`, below). There is deliberately no
     application-side model fallback list: the configured gateway route owns
-    provider failover, while callers retain their deterministic/stale fallback.
+    provider failover, while the caller keeps its stale fallback.
     """
     from app.llm_gateway import complete
 

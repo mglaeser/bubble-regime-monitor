@@ -1,5 +1,5 @@
 """GET /api/v1/dashboard/feed — cached current-values feed for the companion
-"Crisis Winners" dashboard (crash.klee.me). Contract: DASHBOARD_FEED_SPEC.md.
+"Crisis Winners" dashboard (ai-bubble.fyi). Contract: DASHBOARD_FEED_SPEC.md.
 
 Semantics (dashboard-side sign-off 2026-07-15):
   * cheap cached read of the payload built with the scheduled (4-hourly)
@@ -23,6 +23,7 @@ from app.config import get_settings
 from app.db import session_scope
 from app.models import DashboardFeed
 from app.security import READ_RATE_LIMIT, limiter, require_read_access
+from app.services.dashboard_feed import to_contract
 
 router = APIRouter(prefix="/api/v1/dashboard", tags=["dashboard"])
 
@@ -31,7 +32,7 @@ _SECTIONS = ("series", "metrics")
 
 @router.get(
     "/feed",
-    summary="Dashboard feed: 12 monthly series (61 points, t-60..t0) + 34 scalar metrics",
+    summary="Dashboard feed: monthly series (61 points, t-60..t0) and scalar metrics",
     description=(
         "Read-only current-values feed for the companion dashboard. Series carry exactly "
         "61 monthly points (explicit nulls, never interpolated; client rebases); every "
@@ -53,7 +54,9 @@ def get_feed(request: Request, response: Response,
             raise HTTPException(status_code=503,
                                 detail="no dashboard feed computed yet; retry after the "
                                        "first snapshot recompute")
-        payload: dict[str, Any] = json.loads(row.payload)
+        # The newest row may be older than the contract (no build since a
+        # deploy, or a build that failed): it is served through the contract.
+        payload: dict[str, Any] = to_contract(json.loads(row.payload))
         computed_at = row.computed_at.isoformat()
 
     # ?sections= filter (unknown section names are ignored, never a 4xx)

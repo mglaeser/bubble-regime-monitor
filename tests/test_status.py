@@ -237,3 +237,39 @@ class TestCompletenessFixes:
             snap.judgment_error = None
         body = client.get("/api/v1/status").json()
         assert any(f["id"] == "judgment-stale" for f in body["science_audit"]["flags"])
+
+
+class TestSnapshotAge:
+    """README, failure alarm: recomputes failed for twelve days and "the
+    science audit counted zero errors". The audit flags a snapshot that is old
+    by the outage alert's own condition, evaluate_outage."""
+
+    @staticmethod
+    def _flags_with_a_snapshot_computed(client, hours_ago: float) -> tuple[dict, dict[str, dict]]:
+        from datetime import timedelta
+
+        from sqlalchemy import update
+
+        from app.db import session_scope
+        from app.models import Snapshot
+        from app.services.compute import compute_snapshot, persist_snapshot
+        from tests.conftest import make_golden_raw_inputs
+
+        raw = make_golden_raw_inputs()
+        persist_snapshot(compute_snapshot(raw, mc_samples=2_000, mc_seed=1), raw)
+        with session_scope() as session:
+            session.execute(update(Snapshot).values(
+                computed_at=datetime.now(UTC) - timedelta(hours=hours_ago)))
+        body = client.get("/api/v1/status").json()
+        return body, {f["id"]: f for f in body["science_audit"]["flags"]}
+
+    def test_a_snapshot_sixty_hours_old_is_flagged_as_an_error(self, client):
+        body, flags = self._flags_with_a_snapshot_computed(client, 60)
+        flag = flags["snapshot-old"]
+        assert flag["severity"] == "error" and flag["category"] == "service-state"
+        assert body["snapshot"]["computed_at"] in flag["detail"]
+
+    def test_a_snapshot_inside_the_schedule_is_not_flagged(self, client):
+        # Five hours hold at most two slots, and the second is then at most an
+        # hour old: inside the alert's 90-minute grace at any time of day.
+        assert "snapshot-old" not in self._flags_with_a_snapshot_computed(client, 5)[1]
