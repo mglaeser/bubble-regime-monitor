@@ -29,8 +29,6 @@ from app.security import require_admin_key, require_alerts_write
 log = get_logger(__name__)
 router = APIRouter(prefix="/api/v1", tags=["alerts-admin"])
 
-IDEMPOTENCY_TTL_HOURS = 24
-
 
 class SilenceRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -132,8 +130,7 @@ def create_silence(
             session.add(ApiIdempotencyRecord(
                 idempotency_key=idempotency_key, route=route,
                 request_sha256=sha256_of(payload), response_ref=silence_id,
-                status_code=201, created_at=now,
-                expires_at=now + timedelta(hours=IDEMPOTENCY_TTL_HOURS),
+                created_at=now,
             ))
     log.info("alert_silence_created", silence_id=silence_id,
              matcher_kind=body.matcher_kind)
