@@ -1,8 +1,9 @@
 """The reviewed phrase set: the only text that may ever reach a phone.
 
-The model selects CODES. This module owns what each code says, which numeric
-slots it is allowed to carry, and whether the result can physically fit in one
-SMS. Nothing assembles a sentence that is not made of fragments from here.
+A rule names CODES; no model takes part (owner decision D2b). This module owns
+what each code says, which numeric slots it is allowed to carry, and whether
+the result can physically fit in one SMS. Nothing assembles a sentence that is
+not made of fragments from here.
 
 Fitting is handled by OMITTING whole reviewed fragments in a defined priority
 order — never by cutting one in half. A required caveat is never omitted: if

@@ -10,9 +10,10 @@ rather than dropping the offending rule, because a silently-dropped rule is a
 mechanism that looks configured and never fires.
 
 Promotion is explicit. A last-known-good fallback NEVER escalates the mode: if
-the candidate is invalid the service keeps evaluating the promoted ruleset and
-reports `ops.rules_invalid`; if there is no valid ruleset at all it reports
-`ops.alerting_unavailable` and evaluates nothing.
+the candidate is invalid the service keeps evaluating the promoted ruleset,
+logs `alert_rules_invalid` and carries the reason into alert health
+(`fallback_reason`); if there is no valid ruleset at all it raises
+`AlertingUnavailable` and evaluates nothing (`artifacts.load_active`).
 """
 
 from __future__ import annotations
@@ -390,7 +391,6 @@ def validate_ruleset(
     methodology_version: str,
     methodology_manifest_sha256: str,
     service_version: str,
-    available_calibrations: frozenset[str] = frozenset(),
 ) -> ValidatedRuleset:
     """Parse, validate and hash a candidate ruleset. Raises `RulesetInvalid`.
 
@@ -427,7 +427,8 @@ def validate_ruleset(
         _check_sources(rule, problems)
         _check_condition_shapes(rule, problems)
         _check_confirmation_semantics(rule, problems)
-        if rule.calibration_id and rule.enabled and rule.calibration_id not in available_calibrations:
+        if rule.calibration_id and rule.enabled:
+            # Rollout stage 6 (EWMA / CUSUM) is not built, so no calibration artifact is available.
             problems.append(
                 f"{rule.rule_id}: enabled but calibration artifact "
                 f"{rule.calibration_id!r} is not available"
@@ -486,7 +487,7 @@ def validate_ruleset(
         # declaration is therefore inert — it reads as a control and is not —
         # and what actually limits repeat notifications is `cooldown_seconds`.
         #
-        # Warned, not rejected: 21 of the shipped rules are written this way and
+        # Warned, not rejected: 27 of the 90 shipped rules are written this way and
         # all carry a real cooldown, so this is a documentation defect in the
         # artifact rather than a broken rule. Rejecting would force a third of
         # the inventory to be rewritten to satisfy a naming problem.

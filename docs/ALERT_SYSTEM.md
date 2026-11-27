@@ -157,8 +157,9 @@ silently-dropped rule is a mechanism that looks configured and never fires):
 
 A threshold with `value: null` and `attribution: PIN` is unresolved. The rule
 stays disabled and the API reports `value: null` plus `unresolved_reason` —
-**never** the literal string `"<PIN>"` in a numeric field. Sixteen rules are
-currently blocked this way; five more on inputs this service does not have.
+**never** the literal string `"<PIN>"` in a numeric field. 16 rules are
+currently blocked this way; 30 are disabled on inputs this service does not
+have (`runtime_readiness: MISSING_INPUT`), 4 of them among the 16.
 
 ---
 
@@ -203,14 +204,28 @@ readings of one period are counted once, so the rule confirms only on a
 genuinely new period.
 
 **At `count: 1` there is no candidate.** The rule fires on the transition
-itself and the basis is never consulted. Twenty-one of the shipped rules are
-written this way, including every Faber leg and both s3 tiers.
+itself and the basis is never consulted. 27 of the 90 shipped rules are
+written this way (9 of the 29 enabled ones), including every Faber leg and
+both s3 tiers.
 
 So for those rules the declaration describes intent, not enforcement, and what
 actually limits a repeat notification is `cooldown_seconds` — 2 days on the
 Faber legs, 30 on the release-driven rules. If a source flip-flops inside one
 period, the condition re-fires and the cooldown is the only thing standing
 between that and a second message.
+
+When a condition can fire again is decided by the rule's `resolution.policy`.
+Under `auto_on_inverse` and `single_shot` the episode of a transition, and
+under every policy but `manual` the episode of a crossing, lasts while the
+state it reported lasts (the flag stays off, the leg stays in, the run-up
+stays at or above its tier) and ends with it, and the
+rule fires again at the next occurrence. A P2 still held for quiet hours when
+an evaluation reads that state as over is dropped as `RESOLVED_BEFORE_SEND`
+(section 11e). A condition that names no lasting state, the `delta` of
+`constellation.falsification_event`, ends at the first false evaluation. An
+episode stored open under the earlier reading, in which a `single_shot`
+episode never ended, needs no migration: from the next evaluation on it, too,
+lasts while its state lasts and ends with it, without a message.
 
 The loader emits a warning naming each such rule and the cooldown carrying the
 weight, because the failure mode this documents is a reader trusting an
@@ -234,10 +249,12 @@ currently ask for, and should not be added without deciding that it should.
 | P4 | API / log only | n/a | none | n/a |
 
 Quiet hours use IANA rules, so the release time moves with DST; exactly 22:00
-is held. The non-P1 budget is 2 per rolling 168h in quiet regimes, hard-capped
-at 5/24h and 8/168h (`app/alerts/budgets.py` `LIMITS`). **P1 is never held by
-either** — enforced by the ruleset loader *and* by a CHECK constraint on
-`alert_delivery`, so a future planner bug cannot even persist the mistake.
+is held. The non-P1 budget is two caps, 5 per rolling 24h and 8 per rolling
+168h (`app/alerts/budgets.py` `LIMITS`). The 2 per 168h beside them is the
+quiet-regime target and holds no send: `check_budget` reads the caps only.
+**P1 is never held by either** — enforced by the ruleset loader *and* by a
+CHECK constraint on `alert_delivery`, so a future planner bug cannot even
+persist the mistake.
 
 ---
 
@@ -262,20 +279,24 @@ the same triggers on the `create_all` path. The guarantee must not depend on
 which bootstrap ran; `tests/test_migrations.py::test_migrations_match_models`
 checks the schemas match.
 
-`busy_timeout` is now set (`ALERTS_BUSY_TIMEOUT_MS`, default 5000). The alert
-system adds a second and third writer to what was a single-writer service;
-without it SQLite returns `SQLITE_BUSY` immediately on contention — a lost
-alert plan rather than a slower one.
+`busy_timeout` is set explicitly (`ALERTS_BUSY_TIMEOUT_MS`, default 5000 ms,
+the value Python's sqlite3 driver would also use). The alert system adds a
+second and third writer to what was a single-writer service: a writer that
+finds the lock held waits that long for it, and the wait is this service's
+setting rather than the driver's. At 0 SQLite returns `SQLITE_BUSY` at once on
+contention — a lost alert plan rather than a slower one.
 
 ---
 
 ## 8. Configuration
 
-Two **independent** switches:
+Two switches:
 
 ```bash
-ALERT_INPUT_CAPTURE=true    # persist the point-in-time sidecar  (Stage 1: ON)
-ALERTS_MODE=disabled        # disabled | shadow | live           (Stage 1: off)
+# persist the point-in-time sidecar (Stage 1: ON)
+ALERT_INPUT_CAPTURE=true
+# disabled | shadow | live (Stage 1: off)
+ALERTS_MODE=disabled
 ```
 
 Capture runs with alerting fully disabled — that is how Stage 1 collects replay
@@ -284,6 +305,10 @@ stage inert: no sidecars means nothing to replay, while still claiming the
 stage had been reached. Capture writes one immutable evidence row per recompute
 in its own transaction; it calls no provider, alters no score and cannot roll
 back a snapshot.
+
+They are not symmetric. Capture runs without alerting, but an evaluation reads
+the captured input: with `ALERT_INPUT_CAPTURE=false`, `ALERTS_MODE=shadow` or
+`live` evaluates no recompute and logs `alert_evaluation_skipped` at each one.
 
 `MESSAGE_LANGUAGE` (`en` | `de`; unset, each artifact speaks its own language)
 selects the language of every operator message. A phrase set may carry more than one language —
@@ -316,8 +341,10 @@ stop capture: the sidecars are exactly what an operator needs to diagnose the
 ruleset that failed, and a lost sidecar can never be backfilled.
 
 ```bash
-ALERTS_WRITE_API_KEY=         # silences
-ADMIN_API_KEY=                # alert reads (render text included), promotion, evaluation, recovery
+# silences
+ALERTS_WRITE_API_KEY=
+# alert reads (render text included), promotion, evaluation, recovery
+ADMIN_API_KEY=
 ```
 
 Two scopes. **The alert reads are operator-only** (owner decision D3a,
@@ -347,8 +374,10 @@ projection names it and is `degraded` at best. Turning the alert system on
 never changes the digest's transport, and a digest without one is named by the
 alert health projection ("the daily digest has no transport").
 
-Volume, lease, retention and LLM settings live in `app/config.py`; each has a
-safe default. Alert phrasing has no model path: configuring the runtime
+Lease, retention and LLM settings live in `app/config.py`; each has a
+safe default. The volume caps are not settings: they are the constant
+`app/alerts/budgets.py` `LIMITS` (owner decision D2d).
+Alert phrasing has no model path: configuring the runtime
 gateway activates only the judgment/digest paths. Configuration alone never
 grants delivery permission: live mode runs only the promoted artifact, and
 promoting it is an operator action.
@@ -363,7 +392,7 @@ bubblegauge alerts preflight                  # pre-stage checks
 bubblegauge alerts ruleset                    # active ruleset summary
 bubblegauge alerts health
 bubblegauge alerts pending                    # open episodes
-bubblegauge alerts evaluate --input-identity ID [--shadow]
+bubblegauge alerts evaluate --input-identity ID   # always shadow
 bubblegauge alerts explain --evaluation-id ID
 bubblegauge alerts recover-evaluations --once
 bubblegauge alerts recover-leases --once
@@ -516,7 +545,7 @@ completion timestamp no more than ten hours old. Disabled mode explicitly
 reports the evaluator as not required.
 
 The health projection also reports the latest and p95 evaluation duration, P1
-enqueue-to-provider-attempt p95, rolling LLM cap/call/fallback evidence,
+enqueue-to-provider-attempt p95,
 missing typed sidecars, overdue or malformed outbox holds, the UNKNOWN
 deliveries, SQLite WAL/foreign-key/busy-timeout/RETURNING
 capabilities, the Alembic revision, required partial indexes and immutability
@@ -546,8 +575,10 @@ reason instead of pretending to evaluate.
 ## 11a. Retention: two horizons
 
 ```bash
-ALERTS_MESSAGE_RETENTION_DAYS=400    # rendered message BODIES
-ALERTS_METADATA_RETENTION_DAYS=800   # the audit trail
+# rendered message BODIES
+ALERTS_MESSAGE_RETENTION_DAYS=400
+# the rows of alert_event
+ALERTS_METADATA_RETENTION_DAYS=800
 python -m app.alerts.cli retention [--dry-run]
 ```
 
@@ -563,6 +594,8 @@ with one that permits *exactly* the transition `final_message -> ''` at the
 same moment `body_redacted_at` goes from NULL to set. A rewrite still aborts, a
 second redaction still aborts, and `gsm7_septets` is left alone so the length
 of what was sent stays auditable after the text is gone.
+
+The long sweep deletes rows of `alert_event` and of no other table.
 
 Two things are never swept: a body whose delivery is not yet terminal (a retry
 could still reuse that exact render), and events belonging to an open episode
@@ -651,7 +684,8 @@ mandatory-event catalogue. Both were held open as operator decisions rather
 than absorbed, and on 2026-08-27 the operator made them ("I want that it
 takes over now"):
 
-* **Caps raised 3→5 / 6→8**, recorded in `app/config.py` beside the values.
+* **Caps raised 3→5 / 6→8**, recorded beside the values
+  (`app/alerts/budgets.py` `LIMITS`, a constant since owner decision D2d).
   The quiet-regime target stays 2. The evidence artifact records the limits
   each verdict used, and admission refuses caps the evidence never saw — so
   the raise is bound into the gate, not slipped past it.
@@ -660,6 +694,10 @@ takes over now"):
   `structure.s3_tier_150` are named IN the catalogue as known Tier-A coverage
   gaps — must-never-miss rules with no staged arc yet — so their absence
   reads as outstanding evidence work, not demotion.
+  The candidate selection that preceded the freeze (2026-08-24, eight rules
+  in two tiers) is in the history of `docs/MANDATORY_EVENTS_PROPOSAL.md`; the
+  file is deleted, because its banner still said that no event was approved
+  or frozen.
 * **`active_stage` committed to 3** in the same decision. Committing the stage
   is still not delivery: the deployment sends only after the operator promotes
   the exact artifact through the evidence-gated service and sets
@@ -777,6 +815,21 @@ trigger's (17.4) — otherwise the member renders from trigger facts with
 `CONTEXT_STALE`, because mixing numbers computed two different ways into one
 comparison is worse than admitting staleness.
 
+The current view is the newest sidecar of the trigger's origin at send time (a
+recompute's for a market alert, the watchdog's for the recompute-outage
+alert), whatever its eligibility: the evaluator decides on `PARTIAL` inputs,
+and the message about a decision is worded from what was decided on. A
+`NOT_EVALUABLE` newest sidecar makes the context stale; no older one stands in
+for it (`app/alerts/repository.py` `load_latest_compatible_input`,
+tests/test_alert_current_context.py).
+
+A fact a compatible current sidecar lacks (an indicator the recompute dropped)
+is the trigger's, also with `CONTEXT_STALE`; the render does not fail for it
+(`app/alerts/render_context.py` `build_member_context`,
+tests/test_alert_fact_fallback.py). A stale member carries no material-change
+clause, whichever way it became stale: the ruleset validator proves the stale
+and the material-change caveats each alone to fit one message, not both.
+
 Only the shipped phrase set, v3.5, is kept (owner ruling 3): v3.2-v3.4 and the
 single-language form were kept only for compatibility. A registry still keeps
 the bytes of every set it registered - immutable audit data, never changed -
@@ -793,9 +846,9 @@ v3.2.2 - with nothing queued under it (read-only, 2026-10-04).
 Stage 1's gate is *deterministic replay; no PII; no scoring regression*.
 
 ```bash
-python -m scripts.alert_replay --state-db /tmp/replay.db          # committed stage
-python -m scripts.alert_replay --state-db /tmp/replay.db --stage 3 --out report.json
-python -m app.alerts.cli dryrun --state-db /tmp/replay.db --from 2026-01-01
+python -m scripts.alert_replay                              # committed stage
+python -m scripts.alert_replay --stage 3 --out report.json
+python -m app.alerts.cli dryrun --from 2026-01-01
 ```
 
 Exit 0 means every check the run could make held; exit 1 means one failed, or
@@ -816,6 +869,12 @@ Three properties are structural rather than a matter of care:
   wall-clock duration. Two runs of the same history produce byte-identical
   JSON.
 
+A replay sends nothing, so before each evaluation it takes every planned alert
+released by then as sent at its release time: the members the dispatcher's
+`outbox.revalidate_members` keeps then, each through the step
+`outbox.mark_sent` takes for a member it sends. A rule's cooldown and its
+reminders run from that time. A hold by budget is not modelled.
+
 `--stage N` gates the rules at a rollout stage other than the committed one.
 That is the reason replay exists: the evidence for advancing to stage N is what
 stage N *would have done* over real history, and that cannot be gathered by
@@ -826,8 +885,8 @@ stage.
 
 ### The committed evidence
 
-`docs/alert-stage1-gate.json` is a replay of a synthetic history at stages 1,
-3, and 4. CI regenerates it and fails on any difference:
+`docs/alert-stage1-gate.json` is a replay of a synthetic history at stages 1
+and 3. CI regenerates it and fails on any difference:
 
 ```bash
 python -m scripts.export_alert_stage1_gate           # write
@@ -869,6 +928,35 @@ moved.
 Owner decision D2a (2026-10-03) removes the summary's `digest_items` with the
 weekly digest. It was 0 in every run, and no other number moved.
 
+Replay-summary schema `4 -> 5` adds
+`transient_one_snapshot_band_p1_busiest_24_months`: the largest number of
+transient one-snapshot entries into de-risk inside any one window of 24 months
+of 30.44 days, both edges of the window included, and
+`band_excursion_covers_24_months`: whether `window_last` is at least one such
+window after `window_first`. The verdict fails when that largest number is
+above the cap of `regime.band_to_derisk`'s keep condition, one per 24 months.
+
+Taking a planned alert as sent moved Stages 3 and 4: a repeat inside its
+rule's cooldown is no longer planned. Deliveries planned `13 -> 10`, P1
+`5 -> 4`, the non-P1 maxima `5 -> 3` per 24h and `8 -> 6` per 168h against the
+unchanged caps, the 168h mean `8.0 -> 6.0`, `held_quiet` `3 -> 1`,
+`held_budget` `2 -> 1`, `SUPERSEDED` `4 -> 3` and `COOLDOWN` `0 -> 4`. No
+verdict moved.
+
+A `single_shot` episode ending with its state (section 5) moved Stages 3 and
+4: episodes opened `20 -> 22`, activated `19 -> 21`, resolved `17 -> 19`. The
+two new episodes are the arc's second `tripwire.rf4_all_clear` and second
+`legs.faber_spy_back_in`, each 20 h after the first and inside its 48 h
+cooldown, so neither plans a message and `COOLDOWN` goes `4 -> 6`. No verdict
+moved.
+
+The stage-4 run left the file; the runs of stages 1 and 3, the bound hashes,
+the history and the catalogue kept their bytes. Stage 4 was the legacy
+daily-digest cutover, deleted with its switch (owner decision D2c, section
+11), and its run repeated the stage-3 run in every field but
+`evaluated_at_stage` and the note of a forward-looking replay. `--stage 4`
+remains a stage the command line can replay, like any other.
+
 `tests/fixtures/alert_replay_history.json` declares the **arc** — twenty
 recompute slots through hold → trim → de-risk → recovery, with two blind slots
 (one inside a firing episode) and one transient single-snapshot excursion —
@@ -888,9 +976,12 @@ summaries still omit bare digests, and the *Alert artifacts* CI step
 independently validates the files.
 
 The history establishes regression coverage, **not** recall. Recall is a Stage
-2 question and needs `config/alert_mandatory_events.v3.2.json`, which ships
-empty on purpose: inventing historical windows would manufacture a recall
-number nothing measured, the same failure mode as inventing a `[PIN]`.
+2 question and needs `config/alert_mandatory_events.v3.2.json`. It shipped
+empty until 2026-08-27 — inventing historical windows would manufacture a
+recall number nothing measured, the same failure mode as inventing a `[PIN]` —
+and has been frozen since with the entries the coverage history stages
+(section 11b): pipeline recall, 5 of 5 in the committed gate, not a
+market-history figure.
 
 Supplying a catalogue is an evidence-bearing action, so replay fails closed on
 a missing file, invalid JSON, malformed envelope, duplicate or unsafe event
@@ -900,7 +991,7 @@ limit, missing field, or extra event field. A non-empty catalogue must declare
 expected priority, inside that event's own UTC window, and no later than its
 declared recompute-slot allowance. `NOT_EVALUABLE` is decided per event window,
 not copied from a run-wide missing-input count. If every event window is blind,
-or the deliberately empty shipped catalogue is used, recall remains explicitly
+or a catalogue is empty, recall remains explicitly
 UNMEASURED. Stage 1 reports that honestly and remains eligible; a Stage 2+
 replay fails unless the shipped catalogue is non-empty, frozen and detected at
 100% across its evaluable events, and the artifact binds the catalogue's bytes,
@@ -919,8 +1010,9 @@ buy/sell instructions or guaranteed outcomes — phrase validation applies the
 honesty lint to every fragment in every language, and the final renderer
 applies the same lint to the body before anything can reach a wire. Denying
 the noun ("keine Wahrscheinlichkeit", "not a probability") is the one honest
-use of it and passes; the same stem anywhere else does not. A model may only
-select reviewed codes.
+use of it and passes; the same stem anywhere else does not. No model takes
+part: the alert system has no model path (owner decision D2b,
+`tests/test_alert_delivery.py::test_the_alert_system_has_no_model_path`).
 
 Exactly-once SMS delivery is not promised. Ambiguous delivery outcomes are made
 visible and handled conservatively rather than retried into duplicates.

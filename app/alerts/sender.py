@@ -73,7 +73,6 @@ class SendResult:
     http_status: int | None = None
     error_code: str | None = None
     error_message_redacted: str | None = None
-    provider_correlation_id: str | None = None
     request_started: bool = False
 
     @property
@@ -414,9 +413,8 @@ class ImessageSender:
         #
         # The outbox already owns exactly this identity: `dedupe_key` is stable
         # for one logical message and CHANGES when a reminder generation means
-        # a second send is intended. It is hashed rather than sent verbatim
-        # because it carries rule ids, which are ours and not the proxy's
-        # business.
+        # a second send is intended. The key on the wire is the delivery id,
+        # which is as stable and names no rule (below): nothing is hashed.
         #
         # With no key supplied, fall back to per-call randomness: an unkeyed
         # send is not made worse by being unkeyed, and silently reusing some
@@ -479,8 +477,7 @@ def _classify_imessage_response(response: httpx.Response, accepted_id: Any) -> S
     """
     status = response.status_code
     if status == 202:
-        operation_id = accepted_id(response)
-        if operation_id is None:
+        if accepted_id(response) is None:
             # Tightening the status without checking the body is half a
             # control: a gateway answering 202 to everything passes trivially.
             return SendResult(
@@ -489,15 +486,13 @@ def _classify_imessage_response(response: httpx.Response, accepted_id: Any) -> S
                 error_message_redacted="202 carried no accepted SendOperation",
                 request_started=True,
             )
-        # The operation id is SERVER-CONTROLLED text that gets persisted on the
-        # delivery row, so it goes through the same redaction as any other
-        # string the proxy hands us. A correlation id has no business carrying
-        # a recipient or a credential, but "has no business" is a statement
-        # about the proxy's intent, not a property this code can rely on — and
-        # a misconfigured or hostile one echoing the destination would put it
-        # somewhere nothing ever looks again.
+        # The operation id proves that the body is an accepted SendOperation,
+        # and is not kept. It used to be returned, redacted because it "gets
+        # persisted on the delivery row", and
+        # `alert_delivery.provider_correlation_id` was NULL on 21 of 21 sent
+        # rows in production (read-only, 2026-11-11). A value that is not
+        # returned needs no redaction.
         return SendResult(outcome=SenderOutcome.CONFIRMED_SUCCESS, http_status=status,
-                          provider_correlation_id=sanitize(operation_id, limit=128),
                           request_started=True)
 
     if 200 <= status < 300:

@@ -10,7 +10,8 @@ here rather than a matter of care:
   walking the import graph, so the guarantee cannot be quietly lost.
 
   **It cannot touch production state.** Everything is applied into an ISOLATED
-  database. The source database is opened read-only and only sidecars are read
+  database, in a temporary directory the replay creates for the run and removes
+  at its end. The source database is opened read-only and only sidecars are read
   out of it; no episode, evaluation, delivery or state row in production is
   created, updated or deleted by a replay.
 
@@ -20,8 +21,8 @@ here rather than a matter of care:
   summary contains no ULID, no timestamp-of-run and no wall-clock duration.
   Determinism is the Stage 1 gate, so it is asserted, not assumed.
 
-Nothing here can send. The sender is `NullSender` by construction and the mode
-is `DRYRUN`, which is its own state namespace.
+Nothing here can send. No sender and no dispatcher is built, and the mode is
+`DRYRUN`, which is its own state namespace.
 """
 
 from __future__ import annotations
@@ -29,12 +30,15 @@ from __future__ import annotations
 import json
 import re
 from collections import Counter
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
-from sqlalchemy import create_engine, select
+from sqlalchemy import URL, create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.alerts.budgets import BUDGETED_KINDS, LIMITS
@@ -59,11 +63,19 @@ log = get_logger(__name__)
 #: be told apart from one produced by a different harness. 3: unknown_blocks
 #: and p1_bypasses_of_unknown went with the replanning block (owner decision
 #: D2f). 4: digest_items went with the weekly digest (owner decision D2a).
-REPLAY_SCHEMA_VERSION = 4
+#: 5: transient_one_snapshot_band_p1_busiest_24_months and
+#: band_excursion_covers_24_months were added.
+REPLAY_SCHEMA_VERSION = 5
 
 #: Rolling windows the load report uses.
 WINDOW_24H = timedelta(hours=24)
 WINDOW_168H = timedelta(hours=168)
+
+#: regime.band_to_derisk (config/alert_rules.v3.2.yaml): "Keep it only while
+#: replay shows <= 1 transient one-snapshot P1 per 24 months".
+TRANSIENT_DERISK_P1_CAP = 1
+#: Those 24 months, at 30.44 days a month.
+WINDOW_24_MONTHS = timedelta(days=24 * 30.44)
 
 _MANDATORY_EVENT_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 _MANDATORY_EVENT_FIELDS = frozenset({
@@ -85,10 +97,9 @@ _MANDATORY_EVENT_FIELDS = frozenset({
 
 @dataclass(frozen=True)
 class ReplayConfig:
-    """What to replay, and where to put the state it produces."""
+    """What to replay."""
 
     source_db_url: str
-    state_db_path: Path
     from_moment: datetime | None = None
     to_moment: datetime | None = None
     live_profile: str = "replay"
@@ -151,6 +162,10 @@ class ReplaySummary:
     deliveries_sent: int = 0
     deliveries_by_kind: dict[str, int] = field(default_factory=dict)
     held_quiet: int = 0
+    #: A replay marks no delivery SENT, so no planned row leaves the budget
+    #: count the way a sent row does in production, when its window passes:
+    #: this can count holds production would not make. `_decide`, which makes
+    #: the verdict, does not read it.
     held_budget: int = 0
     held_grouping: int = 0
     cancelled_superseded: int = 0
@@ -174,10 +189,14 @@ class ReplaySummary:
 
     # -- governance metrics ----------------------------------------------
     transient_one_snapshot_band_p1: int = 0
+    #: The most of those entries that any one window of 24 months holds.
+    transient_one_snapshot_band_p1_busiest_24_months: int = 0
     #: De-risk slots whose neighbours were blind, so "transient" cannot be
     #: decided either way. Reported, never folded into the count above.
     indeterminate_band_excursions: int = 0
     band_excursion_months: float = 0.0
+    #: True when window_last is at least WINDOW_24_MONTHS after window_first.
+    band_excursion_covers_24_months: bool = False
     detection_times_slots: dict[str, int] = field(default_factory=dict)
     mandatory_event_total: int = 0
     mandatory_event_detected: int = 0
@@ -241,14 +260,9 @@ def _isolated_session_factory(state_db_path: Path):
     Deliberately not `app.db.session_scope`: a replay that could reach the live
     engine would be one refactor away from writing episodes into it.
     """
-    from contextlib import contextmanager
-
     from app.models import Base
 
-    state_db_path.parent.mkdir(parents=True, exist_ok=True)
-    if state_db_path.exists():
-        state_db_path.unlink()
-    engine = create_engine(f"sqlite:///{state_db_path}", future=True,
+    engine = create_engine(URL.create("sqlite", database=str(state_db_path)), future=True,
                            connect_args={"check_same_thread": False})
 
     from sqlalchemy import event as sa_event
@@ -276,6 +290,18 @@ def _isolated_session_factory(state_db_path: Path):
             session.close()
 
     return scope, engine
+
+
+@contextmanager
+def _isolated_state() -> Iterator[Any]:
+    """The replay's state, in a temporary directory of its own: created for the
+    run, and removed with its database when the block ends."""
+    with TemporaryDirectory() as state_dir:
+        scope, engine = _isolated_session_factory(Path(state_dir) / "replay.db")
+        try:
+            yield scope
+        finally:
+            engine.dispose()
 
 
 def load_source_inputs(config: ReplayConfig) -> list[AlertInput]:
@@ -520,10 +546,9 @@ def run_replay(
         summary.failures.append("no_inputs")
         return summary
 
-    scope, engine = _isolated_session_factory(config.state_db_path)
-    try:
+    with _isolated_state() as scope:
         # Seed the isolated database with the artifacts and the sidecars, so a
-        # replay is fully self-contained and can be re-run from its state DB.
+        # replay is fully self-contained.
         # Registered, never promoted: replay needs the bytes readable, and
         # promotion is an operator's act.
         with scope() as session:
@@ -567,6 +592,8 @@ def run_replay(
                 # NOT_EVALUABLE is reported, never counted as a detection.
                 continue
 
+            with scope() as session:
+                _take_released_alerts_as_sent(session, now=_moment_of(alert_input))
             outcome = run_evaluation(
                 scope,
                 alert_input=alert_input,
@@ -574,6 +601,11 @@ def run_replay(
                 mode=Mode.DRYRUN,
                 live_profile=config.live_profile,
                 now=_moment_of(alert_input),
+                # No deadline: a replay's result must not depend on the host's
+                # clock, and a replay runs offline (the dryrun command, the gate
+                # script, tests), while the service's own evaluations keep their
+                # budget (ALERTS_EVAL_BUDGET_MS, 1,500 ms by default).
+                budget_ms=None,
             )
             if outcome.status == EvaluationRunStatus.COMMITTED:
                 summary.evaluations_committed += 1
@@ -593,8 +625,6 @@ def run_replay(
             _collect_deliveries(session, summary)
             _collect_band_excursions(summary, records)
             activated_episodes = _activated_episodes(session)
-    finally:
-        engine.dispose()
 
     _collect_mandatory_events(
         mandatory_events,
@@ -604,6 +634,27 @@ def run_replay(
     )
     _decide(summary)
     return summary
+
+
+def _take_released_alerts_as_sent(session: Session, *, now: datetime) -> None:
+    """Take each planned alert released by `now` as sent at its release time:
+    the members the dispatcher's `outbox.revalidate_members` keeps then, each
+    through the step `outbox.mark_sent` takes for a member it sends. The
+    delivery row is left as it is, so nothing reaches SENT; a hold by budget is
+    not modelled."""
+    from app.alerts.models import AlertDelivery, AlertDeliveryMember
+    from app.alerts.outbox import mark_member_sent, revalidate_members
+
+    waiting = select(AlertDeliveryMember.delivery_id).where(
+        AlertDeliveryMember.dropped_at.is_(None), AlertDeliveryMember.delivered.is_(False))
+    for delivery in session.execute(
+        select(AlertDelivery).where(AlertDelivery.delivery_id.in_(waiting))
+        .order_by(AlertDelivery.not_before)
+    ).scalars().all():
+        released = delivery.not_before
+        if released is not None and released <= now:
+            for member in revalidate_members(session, delivery, now=released):
+                mark_member_sent(session, delivery, member, now=released)
 
 
 def _collect_episodes(session: Session, summary: ReplaySummary,
@@ -712,6 +763,7 @@ def _collect_band_excursions(summary: ReplaySummary,
     """
     states = [r.effective_action_state for r in records]
     transient = 0
+    moments: list[datetime] = []
     indeterminate = 0
     for i in range(1, len(states) - 1):
         if states[i] != BAND_DERISK:
@@ -725,12 +777,17 @@ def _collect_band_excursions(summary: ReplaySummary,
             indeterminate += 1
         else:
             transient += 1
+            moments.append(_moment_of(records[i]))
     summary.transient_one_snapshot_band_p1 = transient
     summary.indeterminate_band_excursions = indeterminate
 
     if len(records) >= 2:
         span = _moment_of(records[-1]) - _moment_of(records[0])
         summary.band_excursion_months = round(span.days / 30.44, 2)
+        summary.band_excursion_covers_24_months = span >= WINDOW_24_MONTHS
+    # Both edges of a window count: entries exactly its length apart share it.
+    summary.transient_one_snapshot_band_p1_busiest_24_months = _max_in_window(
+        moments, WINDOW_24_MONTHS)
 
 
 def _activated_episodes(session: Session) -> list[ActivatedEpisode]:
@@ -959,7 +1016,14 @@ def _decide(summary: ReplaySummary) -> None:
                 f"{evaluable_events - summary.mandatory_event_detected} of "
                 f"{evaluable_events} evaluable event(s)"
             )
-    if summary.band_excursion_months < 24.0:
+    busiest = summary.transient_one_snapshot_band_p1_busiest_24_months
+    if busiest > TRANSIENT_DERISK_P1_CAP:
+        # A breach inside one window stands on a history of any length.
+        failures.append(
+            f"{busiest} transient one-snapshot de-risk entries inside one window of "
+            "24 months; regime.band_to_derisk is kept only while replay shows <= "
+            f"{TRANSIENT_DERISK_P1_CAP} per 24 months")
+    if not summary.band_excursion_covers_24_months:
         unmeasured.append(
             f"transient_derisk_p1_rate — the window spans "
             f"{summary.band_excursion_months} months; the target is stated per "

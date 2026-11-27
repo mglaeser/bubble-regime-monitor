@@ -157,7 +157,7 @@ def test_health_reports_mode_artifacts_and_sqlite(client):
     assert str(payload["sqlite"]["journal_mode"]).lower() == "wal"
     assert payload["sqlite"]["returning"]["insert"] is True
     assert payload["sqlite"]["returning"]["update"] is True
-    assert payload["schema"]["revision"] == "0026"
+    assert payload["schema"]["revision"] == "0028"
     assert payload["schema"]["quick_check"] == "ok"
     assert payload["schema"]["foreign_key_violations"] == 0
     assert payload["schema"]["missing_required_triggers"] == []
@@ -1508,9 +1508,8 @@ def test_health_says_out_loud_when_the_watchdog_has_never_run(client):
     """An absent heartbeat is the loudest failure, and it used to be the quietest.
 
     The watchdog records liveness on every run, and health lists the heartbeats
-    that EXIST. So a watchdog that has never run once — because its systemd
-    timer was never installed on the host, which is the recorded state of this
-    deployment — produced no row, and no row rendered as nothing at all.
+    that EXIST. So a watchdog that has never run once produced no row, and no
+    row rendered as nothing at all.
 
     Absence of a monitor must read as a fault, not as silence. This is the same
     property the notifier enforces at the transport layer, one level up.
