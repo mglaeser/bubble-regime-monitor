@@ -112,7 +112,7 @@ def test_the_override_needs_all_three_other_flags_while_s4_is_contested():
         semi_runup_pp=200.0, semis_as_of="2026-11-10", semis_stale=False,
         hy_oas_bps=500.0, hy_oas_tight_bps=300.0, hy_oas_as_of="2026-11-10", hy_oas_stale=False,
         breadth_pct=40.0, breadth_as_of="2026-11-10", breadth_stale=False,
-        near_ath_available=True, near_ath_state=True)
+        near_ath_available=True)
     assert meta["flags"]["rf1"]["state"] == FLAG_BLOCKED
     assert (meta["override_required_count"], meta["override_fireable_universe_count"]) == (3, 3)
 

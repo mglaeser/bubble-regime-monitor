@@ -84,10 +84,6 @@ class TestS5:
         # 267 is above exactly 1 of 4 observations -> percentile 0.25... inverted
         assert s5_credit.sub_score(267.0, history) == pytest.approx(0.75)
 
-    def test_tights_red_flag(self):
-        assert s5_credit.widened_gt_100bps_above_3yr_tights(380.0, [250.0, 260.0])
-        assert not s5_credit.widened_gt_100bps_above_3yr_tights(267.0, [250.0, 260.0])
-
 
 class TestD1:
     def test_fixture_value(self):
@@ -99,11 +95,6 @@ class TestD1:
         assert d1_breadth.compute(90.0) == 0.05
         assert d1_breadth.compute(95.0) == 0.05
         assert d1_breadth.compute(10.0) == 1.0
-
-    def test_red_flag(self):
-        assert d1_breadth.red_flag_breadth(49.0, True)
-        assert not d1_breadth.red_flag_breadth(49.0, False)
-        assert not d1_breadth.red_flag_breadth(56.0, True)
 
 
 class TestD2:

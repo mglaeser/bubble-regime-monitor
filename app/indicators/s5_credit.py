@@ -56,10 +56,3 @@ def sub_score_t2(history_bps: list[float], lag_obs: int = LAG_OBS_2YR) -> float:
     a PREDICTIVE, lagged relationship, so the current fragility reflects the
     t-2 spread, NOT the contemporaneous one (which the code previously used)."""
     return sub_score(t_minus_2_value(history_bps, lag_obs), history_bps)
-
-
-def widened_gt_100bps_above_3yr_tights(oas_bps: float, history_bps_3yr: list[float]) -> bool:
-    """Red-flag #3: HY OAS widened > 100 bps above its trailing 3-yr tights."""
-    if not history_bps_3yr:
-        return False
-    return (oas_bps - min(history_bps_3yr)) > 100.0

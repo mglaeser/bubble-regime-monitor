@@ -63,6 +63,14 @@ def test_single_source_down_drops_and_renormalizes(isolated_db, monkeypatch, kil
     assert {field: getattr(seen["inputs"], field) for field in mc_fields} == dict.fromkeys(mc_fields)
 
 
+def test_a_dropped_d1_names_the_provider_that_exists(isolated_db):
+    raw = make_golden_raw_inputs()
+    raw.breadth_pct = None
+    d1 = _compute(raw).indicators["d1"]
+    assert d1.dropped is True
+    assert d1.data_source == "constituents+polygon"
+
+
 def test_gsadf_unavailable_floors_at_contested_level(isolated_db):
     raw = make_golden_raw_inputs()
     raw.gsadf_stat = raw.gsadf_cv90 = raw.gsadf_cv95 = None
