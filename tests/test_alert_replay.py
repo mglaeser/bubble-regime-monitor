@@ -269,6 +269,30 @@ def test_a_relative_memory_state_path_is_a_file_the_replay_writes(
     assert _evaluations_in(tmp_path / ":memory:") == summary.evaluations_committed
 
 
+def test_a_symlink_and_a_dotdot_in_the_state_path_name_the_file_the_os_reaches(
+        tmp_path, artifacts):
+    """`link/../data/x.db`, with link pointing into elsewhere/inner: the replay
+    writes elsewhere/data/x.db, which the operating system reaches through the
+    link, and data/x.db, which a lexical `..` would name, keeps its bytes."""
+    import sqlite3
+    from contextlib import closing
+
+    (tmp_path / "data").mkdir()
+    existing = tmp_path / "data" / "x.db"
+    with closing(sqlite3.connect(existing)) as db:
+        db.execute("CREATE TABLE marker (x)")
+        db.commit()
+    before = existing.read_bytes()
+    (tmp_path / "elsewhere" / "inner").mkdir(parents=True)
+    (tmp_path / "link").symlink_to(tmp_path / "elsewhere" / "inner")
+
+    summary = _run(tmp_path, artifacts, name="link/../data/x.db")
+
+    assert existing.read_bytes() == before
+    assert summary.evaluations_committed > 0
+    assert _evaluations_in(tmp_path / "elsewhere" / "data" / "x.db") == summary.evaluations_committed
+
+
 def test_replay_module_cannot_reach_a_provider_or_a_transport():
     """Structural, not behavioural: the import graph itself has no way out.
 

@@ -28,6 +28,7 @@ Nothing here can send. No sender and no dispatcher is built, and the mode is
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections import Counter
 from dataclasses import dataclass, field
@@ -262,7 +263,9 @@ def _isolated_session_factory(state_db_path: Path):
 
     from app.models import Base
 
-    state_db_path = state_db_path.absolute()
+    # One canonical path serves the exclusive create and SQLite's open alike,
+    # so the two name the same file even through a symlink or a `..`.
+    state_db_path = Path(os.path.realpath(state_db_path))
     state_db_path.parent.mkdir(parents=True, exist_ok=True)
     # Created here, exclusively: a path that exists raises FileExistsError and
     # is left as it is, whatever it is. A replay deletes no file it is given.
@@ -270,7 +273,7 @@ def _isolated_session_factory(state_db_path: Path):
     # is not defended, as AGENTS.md removes defences against what a
     # single-tenant deployment cannot meet.
     state_db_path.touch(exist_ok=False)
-    # A URL object, not a string SQLAlchemy parses: the absolute path is the
+    # A URL object, not a string SQLAlchemy parses: the canonical path is the
     # database's file name whole, so a '?' in it is no query and ':memory:' no
     # in-memory database.
     engine = create_engine(URL.create("sqlite", database=str(state_db_path)), future=True,
