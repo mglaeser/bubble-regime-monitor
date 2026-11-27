@@ -598,12 +598,12 @@ REGISTRY: dict[str, Methodology] = {
             "weighted sub-score. Label: LAGGING CONFIRMATION."
         ),
         how=(
-            "Compute ratio = VIX / VIX3M (CBOE delayed quotes, or FRED's daily closes "
-            "VIXCLS / VXVCLS, FRED's series id for VIX3M). "
+            "Compute ratio = VIX / VIX3M from FRED's daily closes VIXCLS / VXVCLS (FRED's "
+            "series id for VIX3M), both of one observation date. "
             "State: ratio < 0.95 -> contango -> V = 1.00; 0.95 <= ratio <= 1.0 -> flat -> "
             "V = 1.05; ratio > 1.0 -> backwardation -> V = 1.15. Applied as "
-            "D = min(D_raw * V, 1.0). Source order: CBOE delayed quotes (primary) -> FRED ratio "
-            "(fallback)."
+            "D = min(D_raw * V, 1.0). No second source: without the pair V is 1.0 and the "
+            "state is unknown."
         ),
         why=(
             "In calm markets longer-dated implied volatility exceeds near-dated (contango), which "
