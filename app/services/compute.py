@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from app import methodology as _M
 from app.alerts.calendars import is_trading_day, trading_days_after
@@ -365,6 +365,10 @@ class RawInputs:
     vix_ratio_fallback: bool = False
     vix_as_of: str | None = None
     vix_level: float | None = None
+    # The level is FRED's VIXCLS close first, the CBOE quote as the fallback
+    # (vix.vix_level); the date is FRED's observation date, None for the quote.
+    vix_level_source: str = "fred_VIXCLS"
+    vix_level_as_of: str | None = None
     skew: float | None = None
 
     spy_daily_closes: list[float] | None = None
@@ -671,31 +675,43 @@ def gather_inputs() -> RawInputs:
         import math
 
         # GSADF needs a long monthly history to calibrate (PSY tables start at
-        # T=100); fetch QQQ monthly from 1999 (T~329), falling back to the
-        # shorter recompute series if the long fetch is unavailable.
-        try:
-            gsadf_pairs = price_src.fetch_tiingo_monthly("NDX")
+        # T=100); fetch QQQ monthly from 1999 (T~329). The fetch, the cut to
+        # completed months and the logarithms run inside `_track`, like `_ebp`
+        # below: when one of them fails, S4 has no statistic this run and no
+        # shorter series stands in.
+        def _s4_series() -> tuple[list[float], str, str]:
+            # Completed months only. Tiingo's monthly series ends with the month
+            # in progress, under the label of that month's last business day
+            # (2026-11-30 on 2026-11-10): a date in the future, which reads as
+            # stale, and at each month turn a month of one day in the fit. The
+            # README changelog has the production numbers. `today` is the UTC
+            # date of this gather; the last completed month is at most 33 days
+            # old on any day of the next one (S4's SLA is 35).
+            gsadf_pairs = [(d, c) for d, c in price_src.fetch_tiingo_monthly("NDX")
+                           if d[:7] < today[:7]]
             gsadf_monthly = [c for _, c in gsadf_pairs]
-            raw.gsadf_as_of = gsadf_pairs[-1][0] if gsadf_pairs else None
             gsadf_src_note = f"Nasdaq-100 via QQQ proxy (Tiingo monthly 1999+, T={len(gsadf_monthly)})"
-        except Exception as exc:
-            gsadf_monthly = legs.monthly_closes(ndx.value)
-            raw.gsadf_as_of = ndx.provenance.as_of
-            gsadf_src_note = (f"Nasdaq-100 via QQQ proxy (short series T={len(gsadf_monthly)}; "
-                              f"long history unavailable: {str(exc)[:80]})")
-        out = run_gsadf([math.log(v) for v in gsadf_monthly[-_M.get_path("gsadf", "series_months_max"):]],
-                        timeout_s=get_settings().gsadf_timeout_s)
-        if out:
-            raw.gsadf_stat, raw.gsadf_cv90, raw.gsadf_cv95 = out.gsadf, out.cv90, out.cv95
-            raw.bsadf_stat, raw.bsadf_cv90 = out.bsadf, out.bsadf_cv90
-            raw.bsadf_cv95, raw.bsadf_argmax = out.bsadf_cv95, out.bsadf_argmax
-            raw.bsadf_n, raw.bsadf_n_finite = out.bsadf_n, out.bsadf_n_finite
-            raw.bsadf_cv_route = out.bsadf_cv_route
-            raw.gsadf_note = f"{gsadf_src_note} (cached MC CVs)"
+            return ([math.log(v) for v in gsadf_monthly[-_M.get_path("gsadf", "series_months_max"):]],
+                    gsadf_pairs[-1][0], gsadf_src_note)
+
+        s4_series = _track(raw, "price_NDX_monthly", _s4_series)
+        if s4_series:
+            gsadf_logs, raw.gsadf_as_of, gsadf_src_note = s4_series
+            out = run_gsadf(gsadf_logs, timeout_s=get_settings().gsadf_timeout_s)
+            if out:
+                raw.gsadf_stat, raw.gsadf_cv90, raw.gsadf_cv95 = out.gsadf, out.cv90, out.cv95
+                raw.bsadf_stat, raw.bsadf_cv90 = out.bsadf, out.bsadf_cv90
+                raw.bsadf_cv95, raw.bsadf_argmax = out.bsadf_cv95, out.bsadf_argmax
+                raw.bsadf_n, raw.bsadf_n_finite = out.bsadf_n, out.bsadf_n_finite
+                raw.bsadf_cv_route = out.bsadf_cv_route
+                raw.gsadf_note = f"{gsadf_src_note} (cached MC CVs)"
+            else:
+                # Reason only — the "GSADF not computable this run" prefix is added
+                # once by the s4 note builder; do not repeat it here (was double-nested).
+                raw.gsadf_note = "R/exuber unavailable or the fit failed"
         else:
-            # Reason only — the "GSADF not computable this run" prefix is added
-            # once by the s4 note builder; do not repeat it here (was double-nested).
-            raw.gsadf_note = "R/exuber unavailable or the fit failed"
+            cause = raw.gather_errors.get("price_NDX_monthly", "unknown cause")
+            raw.gsadf_note = f"long monthly history unavailable: {cause[:80]}"
     else:
         raw.gsadf_note = "no Nasdaq-100/QQQ series this run"
 
@@ -849,6 +865,8 @@ def gather_inputs() -> RawInputs:
     r = _track(raw, "vix_level", vix_src.vix_level)
     if r:
         raw.vix_level = r.value
+        raw.vix_level_source = r.provenance.source
+        raw.vix_level_as_of = r.provenance.as_of
     r = _track(raw, "cboe_skew", vix_src.skew_level)
     if r:
         raw.skew = r.value
@@ -1040,8 +1058,9 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
                                            note="run-up unavailable; dropped, Block S renormalized")
 
     # ---- S4 GSADF ----
-    # Mapping: explosive p<0.05 non-contested -> 1.0; p<0.10 -> 0.5;
-    # contested-or-stale-or-DATA-MISSING -> 0.25; tested-and-not-explosive -> 0.05.
+    # Mapping: stat > cv95 non-contested -> 1.0; > cv90 -> 0.5; a contested
+    # rejection, or a statistic that could not be computed -> 0.25;
+    # tested-and-not-explosive -> 0.05.
     # asymmetric= is deliberately NOT bound to a setting: see app/config.py. It
     # is the frozen gsadf.contested_rule, "asymmetric" since v4.1, so this
     # call passes True (the parameter's own default is False).
@@ -1570,7 +1589,9 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         ts_state = v_vix.state(raw.vix_ratio) if raw.vix_ratio is not None else "unknown"
     except ValueError:
         ts_state = "unknown"   # v3.7.8/§9: invalid ratio -> unknown, never mislabelled
-    alarm = legs.fast_alarm(ts_state, raw.vix_level, raw.spy_daily_closes, raw.skew)
+    alarm = legs.fast_alarm(ts_state, raw.vix_level,
+                            legs.closes_through(raw.spy_daily, raw.vix_level_as_of),
+                            raw.skew, vrp_as_of=raw.vix_level_as_of)
 
     freshness: dict[str, str] = {}
     for ind in indicators.values():
@@ -1629,23 +1650,12 @@ def persist_snapshot(data: SnapshotData, raw: RawInputs) -> int:
     settings = get_settings()
     now = datetime.now(UTC)
 
-    # judgment call (degrades gracefully; never blocks the recompute)
     with session_scope() as session:
         last = session.execute(
             select(Snapshot).order_by(Snapshot.computed_at.desc(), Snapshot.id.desc()).limit(1)
         ).scalars().first()
         last_text = last.judgment_call if last else None
         prev_snapshot_id = last.id if last else None
-
-    s_scores = {k: v.sub_score for k, v in data.indicators.items() if k.startswith("s")}
-    d_scores = {k: v.sub_score for k, v in data.indicators.items() if k.startswith("d")}
-    call = judgment.generate(
-        data.median, data.iqr, data.action_band, s_scores, d_scores, data.v_multiplier,
-        data.red_flags.as_dict(), data.override_fired,
-        data.trend_states.get("SPY", {}).get("faber_10mo", "unknown"),
-        data.trend_states.get("QQQ", {}).get("faber_10mo", "unknown"),
-        data.fast_alarm, last_successful=last_text,
-    )
 
     # ---- typed alert contract (Stage 0). NON-SCORING, post-hoc, pure. -------
     # Built here (not in compute_snapshot) so `observed_at` is the SAME instant
@@ -1722,9 +1732,11 @@ def persist_snapshot(data: SnapshotData, raw: RawInputs) -> int:
             block_d=block_d_payload,
             trend_states=data.trend_states,
             fast_alarm=data.fast_alarm,
-            judgment_call=call.text,
-            judgment_stale=call.stale,
-            judgment_error=call.error_class,
+            # Until write_judgment replaces it, GET /api/v1/score and the
+            # status page serve this as what it is: the previous note, stale.
+            judgment_call=last_text,
+            judgment_stale=True,
+            judgment_error=None,
             data_freshness={**data.freshness, "_coverage": data.coverage,
                             "_ath_provenance": data.ath_provenance},
             # RM-1: stamp the methodology actually in force in THIS process —
@@ -1763,8 +1775,33 @@ def persist_snapshot(data: SnapshotData, raw: RawInputs) -> int:
     return snap_id
 
 
+def write_judgment(snap_id: int, data: SnapshotData) -> None:
+    """Ask the gateway for the note and write it onto the committed snapshot.
+
+    The model call sits inside no transaction. On a failed call the row gets
+    the previous snapshot's note as it stands then (none for the first
+    snapshot), stale, and the error class (app.engine.judgment)."""
+    s_scores = {k: v.sub_score for k, v in data.indicators.items() if k.startswith("s")}
+    d_scores = {k: v.sub_score for k, v in data.indicators.items() if k.startswith("d")}
+    call = judgment.generate(
+        data.median, data.iqr, data.action_band, s_scores, d_scores, data.v_multiplier,
+        data.red_flags.as_dict(), data.override_fired,
+        data.trend_states.get("SPY", {}).get("faber_10mo", "unknown"),
+        data.trend_states.get("QQQ", {}).get("faber_10mo", "unknown"),
+        data.fast_alarm,
+    )
+    with session_scope() as session:
+        text = call.text
+        if call.stale:  # the call failed: the fallback is read now, when it is used
+            prev = session.get_one(Snapshot, snap_id).prev_snapshot_id
+            text = session.scalar(select(Snapshot.judgment_call).where(Snapshot.id == prev))
+        session.execute(update(Snapshot).where(Snapshot.id == snap_id).values(
+            judgment_call=text, judgment_stale=call.stale, judgment_error=call.error_class))
+
+
 def run_recompute() -> int | None:
-    """Full recompute: gather -> compute -> persist -> Parquet export.
+    """Full recompute: gather -> compute -> persist -> alert capture ->
+    feed -> judgment note.
 
     Returns the snapshot id, or None if scoring was impossible (an entire
     block empty). Never raises upstream failures."""
@@ -1777,12 +1814,18 @@ def run_recompute() -> int | None:
         log.error("recompute_impossible", error=str(exc))
         return None
     snap_id = persist_snapshot(data, raw)
+    # Alert system: directly after the snapshot commits, before anything that
+    # waits on a disk or a network. The capture is the one step of a run that
+    # nothing makes up for: a snapshot without its sidecar is a hole in the
+    # replay record (app/services/alert_integration.py). Its own transaction
+    # and its own exception boundary: it cannot delay, alter or roll back the
+    # snapshot.
     try:
-        from app.services.backfill import export_parquet
+        from app.services.alert_integration import on_snapshot_committed
 
-        export_parquet(snap_id)
+        on_snapshot_committed(snap_id)
     except Exception as exc:
-        log.warning("parquet_export_failed", error=str(exc))
+        log.warning("alert_hook_failed", error=str(exc)[:300])
     # Dashboard feed (v3.4.0): built strictly AFTER the score persists — a feed
     # failure can never affect scoring; the endpoint then serves the prior payload.
     try:
@@ -1791,15 +1834,11 @@ def run_recompute() -> int | None:
         build_and_persist_feed(raw, data)
     except Exception as exc:
         log.warning("dashboard_feed_failed", error=str(exc)[:300])
-    # Alert system: strictly AFTER the snapshot commits, in its own transaction
-    # and its own exception boundary. It cannot delay, alter or roll back the
-    # snapshot — the whole system is off by default and does nothing here until
-    # an operator enables capture.
+    # The judgment note last: the one model call of the run, onto the committed
+    # snapshot. Nothing above waits for it.
     try:
-        from app.services.alert_integration import on_snapshot_committed
-
-        on_snapshot_committed(snap_id)
+        write_judgment(snap_id, data)
     except Exception as exc:
-        log.warning("alert_hook_failed", error=str(exc)[:300])
+        log.warning("judgment_write_failed", error=sanitize(exc, limit=300))
     log.info("recompute_done", snapshot_id=snap_id, median=data.median, band=data.action_band)
     return snap_id

@@ -171,7 +171,9 @@ def evaluate_red_flags(
 ) -> RedFlags:
     """Evaluate the four non-compensatory red flags.
 
-    1. GSADF explosive at p < 0.05 AND non-contested (requires GSADF_CONTESTED=false).
+    1. S4's scored statistic above its 95% critical value AND non-contested
+       (requires GSADF_CONTESTED=false). The critical value is no p-level of the
+       statistic: see REGISTRY["s4"].how.
     2. Semiconductor 2-yr net-of-market run-up >= 150 pp.
     3. HY OAS has widened > 100 bps above its trailing 3-yr tights.
     4. Breadth < 50% of S&P 500 members above their 200-DMA WHILE the index is
@@ -208,6 +210,22 @@ def action_band(score: float) -> str:
     if score >= _BAND_TRIM_AT:
         return "trim"
     return "hold"
+
+
+def headline(median: float) -> int:
+    """The whole number shown for the median: the whole points it has reached.
+
+    The band lines are whole numbers and a band begins "at or above" its line
+    (action_band), so this number is at or above a line exactly when the
+    median is. The nearest whole number read 60 beside the band "trim" from
+    59.5 up: on 47 of the 615 production snapshots up to 2026-11-10 and in 7
+    of the 54 daily digests sent. The price: 59.7 reads 59, one lower than the
+    nearest whole number on 286 of those snapshots, and the golden median
+    (52.5605) reads 52 where it read 53. The ends of a range shown beside it as
+    whole numbers go through this function too: the floor is monotonic, so a
+    median inside its range is shown inside it.
+    """
+    return math.floor(median)
 
 
 def action_band_with_override(score: float, red_flags: RedFlags) -> str:

@@ -10,7 +10,7 @@
 > 1. All six Tiingo series failed (`only 61 rows`) — a ≥100-row guard meant for GSADF's long-history calibration; the feed now passes `min_rows=24`. Capture #2 shows all six populated.
 > 2. `XAG/USD` needs a paid Twelve Data plan (XAU/USD is free) — on the free tier `silver_spot` **permanently** serves the labeled SLV-close fallback (`source: tiingo:SLV`, note "NOT spot"), the 1A-detectable behavior; `gold_silver_ratio` declares its `mixed` basis. Confirmed live in capture #2. Since then `silver_spot` and `gold_silver_ratio` have left the contract and `gold_spot` has lost its ETF fallback (section 2); this item describes the capture.
 >
-> Known run-to-run property (documented, not a bug): `lppls_confidence` uses random-restart fits and moves between recomputes (0.294 → 0.253 across captures); consume it with its `detail.state`/bands, not as a stable constant.
+> `lppls_confidence` between recomputes: the two captures differ (0.294 → 0.253 on the same `as_of`) because the fit's random starting points were unseeded then. They now come from the methodology's pinned seed (`monte_carlo.seed`), so recomputes of the same closes give the same value (`tests/test_d4_reproducible.py`). Consume it with its `detail.state`/bands.
 
 ---
 
@@ -378,9 +378,11 @@ present-tense regime. Selection lives in the SHA-pinned `frozen_methodology.json
 under `gsadf.statistic`; there is no environment variable.
 
 `metrics.gsadf.value` is `IndicatorOutput("s4").value`, so it is now the endpoint
-BSADF. `detail.cv90`/`detail.cv95` are the **endpoint** CV row — the same family
-as the value, so a consumer never compares a statistic to the wrong null. Two
-detail keys are new; none are removed:
+BSADF. `detail.cv90`/`detail.cv95` are the **endpoint** CV row — the values the
+library pairs with the value (the last row of exuber's date-stamping critical
+values, which is the SADF critical value for the sample size, not a quantile of
+the endpoint statistic itself), so a consumer never compares the statistic to
+the sup's critical values. Two detail keys are new; none are removed:
 
 ```jsonc
 "gsadf": { "value": 1.1315, "unit": "stat", "source": "exuber",

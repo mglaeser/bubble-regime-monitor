@@ -15,27 +15,52 @@ def _compute(raw, **kw):
 
 
 @pytest.mark.parametrize(
-    "kill,indicator,expect_drop",
+    # The third column: every Monte Carlo input that could carry a stand-in for
+    # the indicator, its sub-score and the raw value its anchors are resampled on.
+    "kill,indicator,mc_fields",
     [
-        ("cape", "s1", True),
-        ("top10_pct", "s2", True),
-        ("smh_2yr_return_pct", "s3", True),
-        ("hy_oas_bps", "s5", True),
-        ("breadth_pct", "d1", True),
-        ("margin_balances", "d2", True),
-        ("hyperscalers", "d3", True),
-        ("lppls_confidence", "d4", True),
+        pytest.param("cape", "s1", ("s1_sub", "s1_ecy_extremity", "cape_pct_by_window"), id="s1"),
+        pytest.param("top10_pct", "s2", ("top10_pct", "s2_sub"), id="s2"),
+        pytest.param("smh_2yr_return_pct", "s3", ("runup_pp", "s3_sub"), id="s3"),
+        pytest.param("hy_oas_bps", "s5", ("s5_sub",), id="s5"),
+        pytest.param("breadth_pct", "d1", ("breadth_pct", "d1_sub"), id="d1"),
+        pytest.param("margin_balances", "d2", ("d2_sub",), id="d2"),
+        pytest.param("hyperscalers", "d3", ("d3_sub",), id="d3"),
+        pytest.param("lppls_confidence", "d4", ("d4_sub",), id="d4"),
     ],
 )
-def test_single_source_down_drops_and_renormalizes(isolated_db, kill, indicator, expect_drop):
+def test_single_source_down_drops_and_renormalizes(isolated_db, monkeypatch, kill, indicator, mc_fields):
+    """AGENTS.md rule 4, asked of what is aggregated and not only of the
+    indicator's row."""
+    from app.engine.aggregate import geometric_block, renormalize
+    from app.engine.montecarlo import BASE_WEIGHTS_D, BASE_WEIGHTS_S
+    from app.services import compute
+
+    seen = {}
+    real_monte_carlo = compute.monte_carlo
+
+    def _recording_monte_carlo(inputs, **kw):
+        seen["inputs"] = inputs
+        return real_monte_carlo(inputs, **kw)
+
+    monkeypatch.setattr(compute, "monte_carlo", _recording_monte_carlo)
     raw = make_golden_raw_inputs()
     setattr(raw, kill, None)
     data = _compute(raw)
     ind = data.indicators[indicator]
-    assert ind.dropped is expect_drop
+    assert ind.dropped is True
     assert ind.sub_score is None
     assert ind.note  # provenance note always attached
     assert 0.0 <= data.median <= 100.0  # scoring still completes
+    # What is aggregated: each block is the weighted geometric mean of the
+    # REMAINING sub-scores under weights renormalised over them (README,
+    # guardrail 5: "drop the indicator and renormalize its block").
+    for prefix, weights, block in (("s", BASE_WEIGHTS_S, data.s_block), ("d", BASE_WEIGHTS_D, data.d_raw)):
+        left = {k: v.sub_score for k, v in data.indicators.items() if k.startswith(prefix) and not v.dropped}
+        assert indicator not in left
+        assert block == pytest.approx(geometric_block(left, renormalize(weights, set(left))), abs=1e-12)
+    # ... and the Monte Carlo is handed nothing for it: no sub-score, no raw value.
+    assert {field: getattr(seen["inputs"], field) for field in mc_fields} == dict.fromkeys(mc_fields)
 
 
 def test_gsadf_unavailable_floors_at_contested_level(isolated_db):

@@ -11,6 +11,7 @@ from sqlalchemy import func, select
 from app.config import get_settings
 from app.content_registry import gauge_display
 from app.db import session_scope
+from app.engine.aggregate import headline
 from app.engine.snapshot_contract import FLAG_UNKNOWN
 from app.models import Snapshot
 from app.references import EPISTEMIC_CAVEATS
@@ -114,7 +115,7 @@ def get_score(request: Request, _: None = Depends(require_read_access)) -> dict[
     # production snapshots up to 2026-11-10 (06:00 that day: 49.8, 54.0 and 4.19).
     q1, q3 = round(snap.iqr_lo, 2), round(snap.iqr_hi, 2)
     data = {
-        "headline_median": round(snap.median),
+        "headline_median": headline(snap.median),
         # v3.7.8/M-02: `iqr` is the (q1,q3) interquartile INTERVAL (kept for
         # compatibility); `iqr_width` is the IQR proper (q3 - q1).
         "iqr": [q1, q3],

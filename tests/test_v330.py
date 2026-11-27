@@ -193,14 +193,13 @@ class TestS5BaaProxy:
 
 
 class TestVrpUnits:
-    def test_fast_alarm_exposes_units_and_sanity(self):
+    def test_fast_alarm_exposes_units_and_one_verdict(self):
         from app.engine.legs import fast_alarm
 
-        # ~0.8%/day alternating moves -> realistic ~13% annualized realized vol,
-        # so VRP lands in the sane band (a 0-vol series would legitimately flag).
+        # ~0.8%/day alternating moves -> realistic ~13% annualized realized vol.
         closes = [100.0]
         for i in range(30):
             closes.append(closes[-1] * (1.008 if i % 2 == 0 else 0.992))
-        fa = fast_alarm("contango", 14.0, closes, 128.0).as_dict()
+        fa = fast_alarm("contango", 14.0, closes, 128.0, vrp_as_of="2026-11-09").as_dict()
         assert fa["vrp_units"] == "annualized_variance_pts_pct2"
-        assert fa["vrp_sane"] is True
+        assert {key for key, value in fa.items() if isinstance(value, bool)} == {"vrp_flag"}

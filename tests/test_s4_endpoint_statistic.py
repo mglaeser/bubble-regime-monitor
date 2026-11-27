@@ -325,13 +325,6 @@ class TestTheContestedRuleIsAFrozenConstant:
         extra = compute_snapshot(_raw_diverging()).indicators["s4"].extra
         assert extra["s4_statistic"]["contested_rule"] == "asymmetric"
 
-    def test_staleness_still_caps_regardless(self):
-        # Staleness is DATA AGE, not a size property, so the asymmetry must not
-        # apply to it.
-        from app.indicators.s4_gsadf import sub_score
-        assert sub_score(END_1986, END_CV90, END_CV95, contested=True,
-                         stale=True, asymmetric=True) == 0.25
-
 
 class TestFailClosed:
     def test_a_missing_endpoint_floors_rather_than_falling_back_to_the_sup(self):

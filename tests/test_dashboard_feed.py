@@ -8,7 +8,7 @@ Per DASHBOARD_FEED_SPEC.md sign-off: frozen key inventory; points ALWAYS length
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -73,6 +73,19 @@ def patched_sources(monkeypatch):
     monkeypatch.setattr(df, "_fred_series", fake_fred)
     monkeypatch.setattr(df, "_td_series", fake_td)
     monkeypatch.setattr(df, "_fear_greed", fake_fear_greed)
+
+
+@pytest.fixture()
+def monday(monkeypatch):
+    """The feed's clock at 12:00 UTC on Monday 2026-11-23."""
+    moment = datetime(2026, 11, 23, 12, tzinfo=UTC)
+
+    class _Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return moment.astimezone(tz) if tz else moment.replace(tzinfo=None)
+
+    monkeypatch.setattr(df, "datetime", _Clock)
 
 
 class TestBuildFeedGolden:
@@ -175,6 +188,67 @@ class TestBuildFeedGolden:
         assert (g["detail"]["cv90"], g["detail"]["cv95"]) != (SUP_CV90, SUP_CV95)
         sup = g["detail"]["gsadf_sup"]                      # sup still visible
         assert (sup["stat"], sup["cv90"], sup["cv95"]) == (SUP_1986, SUP_CV90, SUP_CV95)
+
+    def test_the_ratios_date_is_not_lent_to_the_level_the_vrp_or_skew(
+            self, snapshot, patched_sources, monday):
+        """raw.vix_as_of is the date of the VIX / VIX3M pair, and the ratio ages
+        as a daily market series: Friday's close read on Monday is current. The
+        level, the VRP and SKEW are other readings and do not borrow the date."""
+        raw, data = snapshot
+        raw.vix_as_of = "2026-11-20"
+        m = df.build_feed(raw, data)["metrics"]
+        assert m["vix_term_ratio"]["as_of"] == m["vix_term_state"]["as_of"] == "2026-11-20"
+        assert m["vix_term_ratio"]["stale"] is False
+        for key in ("vix_level", "vrp", "skew"):
+            assert m[key]["as_of"] is None and m[key]["stale"] is None, key
+
+    @pytest.mark.parametrize(("source", "as_of"), [
+        ("fred_VIXCLS", "2026-11-20"),  # a daily close with its observation date
+        ("cboe_vix", None),             # a quote without a date
+    ])
+    def test_the_feed_names_the_vix_levels_source_and_day(self, snapshot, patched_sources,
+                                                          monday, source, as_of):
+        """The level is published with the source and the date the gather
+        recorded for it, and the VRP, which is computed from the level, names
+        that source."""
+        raw, data = snapshot
+        raw.vix_level_source, raw.vix_level_as_of = source, as_of
+        m = df.build_feed(raw, data)["metrics"]
+        assert m["vix_level"]["value"] == raw.vix_level
+        assert m["vix_level"]["source"] == source
+        assert m["vix_level"]["as_of"] == as_of
+        assert m["vix_level"]["stale"] is (None if as_of is None else False)
+        assert m["vrp"]["source"] == f"{source}+spy_realized"
+
+    @pytest.mark.parametrize(("source", "as_of"), [("fred_VIXCLS", "2026-11-09"), ("cboe_vix", None)])
+    def test_the_gather_carries_the_vix_levels_source_and_day(self, isolated_db, monkeypatch,
+                                                              source, as_of):
+        """Through gather_inputs: the adapter's provenance reaches RawInputs.
+        `_track` answers the level's step and fails every other one."""
+        from app.services import compute
+        from app.sources import Provenance, SourceResult
+
+        level = SourceResult(19.92, Provenance(source=source, as_of=as_of))
+        monkeypatch.setattr(compute, "_track",
+                            lambda raw, step, fn: level if step == "vix_level" else None)
+        raw = compute.gather_inputs()
+        assert (raw.vix_level, raw.vix_level_source, raw.vix_level_as_of) == (19.92, source, as_of)
+
+    def test_the_feed_dates_the_vrp_by_its_session(self, isolated_db, patched_sources, monday):
+        """The VRP row carries the day of its two legs and ages as a daily
+        market value."""
+        from app.services.compute import compute_snapshot
+        from tests.conftest import make_golden_raw_inputs
+
+        raw = make_golden_raw_inputs()
+        day = date(2026, 11, 20)                # three days before the feed's Monday
+        raw.spy_daily = [((day - timedelta(days=29 - i)).isoformat(), 400.0 + i) for i in range(30)]
+        raw.vix_level_as_of = raw.spy_daily[-2][0]
+        data = compute_snapshot(raw, mc_samples=2_000, mc_seed=20260711)
+        vrp = df.build_feed(raw, data)["metrics"]["vrp"]
+        assert vrp["value"] == data.fast_alarm["vrp"] is not None
+        assert vrp["as_of"] == data.fast_alarm["vrp_as_of"] == raw.vix_level_as_of
+        assert vrp["stale"] is False            # four days old: a daily market value ages at 7
 
 
 class TestStaleSlas:

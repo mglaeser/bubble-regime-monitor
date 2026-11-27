@@ -101,14 +101,14 @@ The ladder below is statistic-agnostic; `gsadf.statistic` selects what `stat` is
 
 | Constant | Value | Source |
 |---|---|---|
-| Scored statistic | `gsadf.statistic = "bsadf_endpoint"` — BSADF at the last observation vs the last row of the simulated BSADF CV matrix. `"gsadf_sup"` selects the pre-v4.0 sup. Unknown value → fail-closed FLOOR. | `frozen_methodology.json`; `compute.py:scored_s4_statistic` |
+| Scored statistic | `gsadf.statistic = "bsadf_endpoint"` — BSADF at the last observation vs the last row of exuber's date-stamping critical values (`bsadf_cv`; the SADF critical value for the sample size). `"gsadf_sup"` selects the pre-v4.0 sup. Unknown value → fail-closed FLOOR. | `frozen_methodology.json`; `compute.py:scored_s4_statistic` |
 | Contested rule | `gsadf.contested_rule = "asymmetric"` (v4.1) — a contested REJECTION stays capped at 0.25; a contested NON-REJECTION is released to `SUB_NULL`. `"symmetric"` restores the pre-v4.1 unconditional cap. Unknown value → fail-closed FLOOR. | `frozen_methodology.json`; `compute.py:scored_s4_contested_rule` |
 
 | Condition | Value | Source |
 |---|---|---|
 | Explosive & non-contested (`stat > cv95`) | `1.0` | `s4_gsadf.py` |
 | `stat > cv90` | `0.5` | `s4_gsadf.py` |
-| Contested REJECTION / stale / data-missing / degenerate CV / unknown rule | `SUB_CONTESTED_OR_STALE = 0.25` | `s4_gsadf.py` |
+| Contested REJECTION / data-missing / degenerate CV / unknown rule | `SUB_CONTESTED_OR_STALE = 0.25` | `s4_gsadf.py` |
 | Contested NON-rejection (`stat <= cv90`) under `contested_rule = "asymmetric"` | `SUB_NULL = 0.05` | `s4_gsadf.py` |
 | Tested-and-not-explosive | `0.05` | `s4_gsadf.py` |
 | COMPUTED gate | finite `stat`, finite `cv90 < cv95`, else FLOOR (0.25, quality 0.0) | `s4_gsadf.py`/`compute.py` (G-04) |
@@ -158,6 +158,7 @@ The ladder below is statistic-agnostic; `gsadf.statistic` selects what `stat` is
 | `O_min` / `D_min` / tc-window | library DS-LPPLS defaults **⚠ from module comment, not set in our code** — confirm vs pinned lppls 0.6.24 before final freeze | `d4_lppls.py` header comment |
 | Sub-score | `clip(pos_confidence_at_t2, 0, 1)` | `d4_lppls.py:sub_score` |
 | Quality | `1.0` full scan / `0.5` partial (<100 windows) / `0.0` FLOOR | `d4_lppls.py` |
+| Fit seed (since 2026-11) | the Monte Carlo's frozen seed, `monte_carlo.seed` = `20260711`, set in the forked fit worker; no key of its own | `d4_lppls.py:LPPLS_SEED` |
 | Subprocess timeout | `lppls_timeout_s = 1500` | `config.py` |
 
 ## 5. VIX term-structure thresholds and multipliers
@@ -261,7 +262,7 @@ MC anchor ranges: CAPE window integers `U[20,40]`; concentration `lo U(16,20)`, 
 | MC CV replications | `MC_NREP = 2000` | `r/gsadf.R` |
 | MC CV seed | `MC_SEED = 20260711` | `r/gsadf.R` |
 | CV cache key | `mc_cv_n{n}_nrep{nrep}_seed{seed}.rds` (G-01) | `r/gsadf.R` |
-| Series fed | last 360 monthly log prices (QQQ proxy for NDX) | `compute.py` |
+| Series fed | last 360 completed monthly log prices of the long history (QQQ proxy for NDX); the month in progress is not in the fit | `compute.py` |
 | Timeout / contested default | `gsadf_timeout_s = 1800` / `gsadf_contested = True` | `config.py` |
 
 Note: `1.49` is a SADF critical value and must NEVER be hard-coded; the simulated GSADF 95% CV is ~1.9–2.1 depending on T.

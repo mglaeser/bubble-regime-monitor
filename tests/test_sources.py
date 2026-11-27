@@ -507,3 +507,119 @@ def test_freds_newest_first_answer_to_a_limit_is_read_oldest_first(monkeypatch):
                                                         {"date": "2026-11-06", "value": "4.0"}]})
     monkeypatch.setattr(fred, "fetch", lambda *_args, **_kwargs: answer)
     assert fred.observations("DGS10", limit=3) == [("2026-11-06", 4.0), ("2026-11-10", 4.1)]
+
+
+# The SEC contact has one setting. AGENTS.md: "compatibility shims (none are
+# kept: the owner ruled on 2026-09-20 that there is no backward compatibility
+# anywhere)". It had two: SEC_USER_AGENT, the name the template offers, and
+# SEC_EDGAR_UA ("the v3.1 name"), which won when it was set. One module reads
+# the contact (app/sources/edgar.py) and no test named either setting.
+
+_CONTACT = "Example Research research@example.com"
+
+
+def test_the_sec_contact_has_one_setting():
+    from app.config import Settings
+
+    assert "sec_user_agent" in Settings.model_fields
+    assert "sec_edgar_ua" not in Settings.model_fields
+    assert not hasattr(Settings, "effective_sec_ua")
+
+
+def test_a_leftover_sec_edgar_ua_is_reported():
+    """The retired-key contract of app/config.py (RETIRED_ENV_KEYS): a removed
+    setting an environment still holds changes nothing and is named - at boot,
+    by the alerts preflight and by alert health - with what to do instead. The
+    key is named with or without a value: the template shipped an empty
+    `SEC_EDGAR_UA=` line. The template offers no retired setting any more, so
+    a host made from it reports none."""
+    from pathlib import Path
+
+    from dotenv import dotenv_values
+
+    from app.config import retired_env_keys
+
+    for value in ("Old Name old@example.com", ""):
+        named = dict(retired_env_keys({"SEC_EDGAR_UA": value}))
+        assert set(named) == {"SEC_EDGAR_UA"}
+        assert "SEC_USER_AGENT" in named["SEC_EDGAR_UA"]
+
+    template = dotenv_values(Path(__file__).resolve().parents[1] / ".env.example")
+    assert "SEC_USER_AGENT" in template
+    assert retired_env_keys(template) == []
+
+
+@pytest.mark.parametrize("leftover", [None, "Old Name old@example.com"],
+                         ids=["no leftover", "a leftover SEC_EDGAR_UA"])
+def test_the_edgar_request_carries_the_configured_contact(monkeypatch, leftover):
+    """SEC's fair-access rule wants a contact in the User-Agent of every
+    request (app/sources/edgar.py). It is SEC_USER_AGENT, on each of the five
+    companyfacts requests - also on a host that still holds the removed key,
+    whose value overrode the contact while the second setting existed."""
+    import app.sources.edgar as edgar
+    from app.config import get_settings
+
+    sent: list[tuple[str, dict]] = []
+
+    def fake_fetch(source, url, **kwargs):
+        sent.append((url, kwargs["headers"]))
+        return _Response(payload={"facts": {}})
+
+    monkeypatch.setattr(edgar, "fetch", fake_fetch)
+    monkeypatch.setattr(edgar, "MIN_INTERVAL_S", 0.0)
+    monkeypatch.setattr(edgar, "_last_request", [0.0])
+    monkeypatch.setenv("SEC_USER_AGENT", _CONTACT)
+    if leftover is None:
+        monkeypatch.delenv("SEC_EDGAR_UA", raising=False)
+    else:
+        monkeypatch.setenv("SEC_EDGAR_UA", leftover)
+    get_settings.cache_clear()
+    try:
+        with pytest.raises(SourceError, match="no hyperscaler facts"):   # the fake files nothing
+            edgar.hyperscaler_readings()
+    finally:
+        get_settings.cache_clear()
+    assert [url for url, _ in sent] == [edgar.BASE.format(cik=cik) for cik in edgar.CIKS.values()]
+    assert [headers for _, headers in sent] == [{"User-Agent": _CONTACT}] * len(edgar.CIKS)
+
+
+def test_without_a_contact_no_edgar_request_is_made_and_d3_is_dropped(monkeypatch):
+    """SEC_USER_AGENT has no placeholder: unset, the adapter asks EDGAR nothing,
+    the gather's EDGAR step fails, and D3 is dropped (AGENTS.md rules 3 and 4)."""
+    import app.sources.edgar as edgar
+    from app.config import Settings
+    from app.services.compute import _track, compute_snapshot
+    from tests.conftest import make_golden_raw_inputs
+
+    sent: list[str] = []
+    monkeypatch.setattr(edgar, "fetch", lambda source, url, **kwargs: sent.append(url))
+    monkeypatch.setattr(edgar, "MIN_INTERVAL_S", 0.0)
+    monkeypatch.delenv("SEC_USER_AGENT", raising=False)
+    monkeypatch.setattr(edgar, "get_settings", lambda: Settings(_env_file=None))
+
+    raw = make_golden_raw_inputs()
+    step = _track(raw, "sec_edgar", edgar.hyperscaler_readings)
+    assert step is None and "sec_edgar" in raw.gather_errors and sent == []
+    raw.hyperscalers = None   # gather_inputs keeps a reading only from a step that returned one
+    assert compute_snapshot(raw, mc_samples=2_000, mc_seed=1).indicators["d3"].dropped
+
+
+def test_a_contact_without_an_email_is_sent_as_the_operator_set_it(monkeypatch):
+    """Only an absent contact is refused; the form is the SEC's to judge."""
+    import app.sources.edgar as edgar
+    from app.config import Settings
+
+    sent: list[dict] = []
+
+    def fake_fetch(source, url, **kwargs):
+        sent.append(kwargs["headers"])
+        return _Response(payload={"facts": {}})
+
+    monkeypatch.setattr(edgar, "fetch", fake_fetch)
+    monkeypatch.setattr(edgar, "MIN_INTERVAL_S", 0.0)
+    monkeypatch.setattr(edgar, "_last_request", [0.0])
+    monkeypatch.setattr(edgar, "get_settings",
+                        lambda: Settings(_env_file=None, sec_user_agent="Example Research"))
+    with pytest.raises(SourceError, match="no hyperscaler facts"):   # the fake files nothing
+        edgar.hyperscaler_readings()
+    assert sent == [{"User-Agent": "Example Research"}] * len(edgar.CIKS)

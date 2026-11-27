@@ -1,0 +1,84 @@
+"""Leg 3's VRP is one session's: VIX^2 - RealizedVariance_21d(SPY), annualised
+(app/engine/legs.py), for the VIX close's day and from SPY's closes through it."""
+from __future__ import annotations
+
+import math
+
+import pytest
+
+from app.engine import legs
+
+# 30 sessions: 29 closes 0.4 % under and over 700 in turn, then a fall of 4.4 %.
+DAYS = [f"2026-10-{day:02d}" for day in range(1, 31)]
+CALM = [700.0 * (1.004 if i % 2 else 0.996) for i in range(29)]
+SPY = list(zip(DAYS, [*CALM, CALM[-1] * 0.956], strict=True))
+
+
+def _premium(vix: float, closes: list[float]) -> float:
+    """The definition, written out: VIX^2 less 252/21 times the sum of the
+    last 21 squared daily log returns, in annualised percent squared."""
+    returns = [math.log(b / a) for a, b in zip(closes[-22:-1], closes[-21:], strict=True)]
+    return round(vix ** 2 - (252 / 21) * sum(r * r for r in returns) * 1e4, 2)
+
+
+def _alarm(vix: float, vix_as_of: str | None, series) -> dict[str, object]:
+    """As compute_snapshot builds it: the closes through the VIX's own day."""
+    return legs.fast_alarm("flat", vix, legs.closes_through(series, vix_as_of), None,
+                           vrp_as_of=vix_as_of).as_dict()
+
+
+def test_the_premium_sets_a_vix_close_against_spy_through_that_same_day():
+    """The VIX close of the 29th, while the series already holds the 30th."""
+    alarm = _alarm(16.61, "2026-10-29", SPY)
+    assert alarm["vrp"] == _premium(16.61, CALM)
+    assert alarm["vrp_as_of"] == "2026-10-29"
+
+
+def test_a_vix_close_of_the_series_last_day_reads_every_close():
+    alarm = _alarm(28.18, "2026-10-30", SPY)
+    assert alarm["vrp"] == _premium(28.18, [close for _, close in SPY])
+    assert alarm["vrp_as_of"] == "2026-10-30"
+
+
+@pytest.mark.parametrize(("vix_as_of", "series"), [
+    pytest.param("2026-10-31", SPY, id="the_vix_is_newer_than_the_series"),
+    pytest.param(None, SPY, id="the_vix_has_no_date"),      # the CBOE quote, FRED down
+    pytest.param("2026-10-30", None, id="no_series"),
+])
+def test_without_a_spy_close_on_the_vix_day_there_is_no_premium(vix_as_of, series):
+    """No pair of one day, no premium: never the nearest other day's closes."""
+    alarm = _alarm(16.61, vix_as_of, series)
+    assert alarm["vrp"] is None and alarm["vrp_as_of"] is None
+
+
+def test_closes_handed_over_without_their_day_give_no_premium_and_no_flag():
+    """A direct caller that passes closes and no day gets neither a value nor a
+    verdict without a session."""
+    alarm = legs.fast_alarm("flat", 16.61, CALM, None).as_dict()
+    assert (alarm["vrp"], alarm["vrp_flag"], alarm["vrp_as_of"]) == (None, None, None)
+
+
+def test_the_recompute_pairs_the_level_with_its_own_day(isolated_db):
+    """compute_snapshot hands the fast alarm the level's own date and the
+    dated series, not the bare newest closes."""
+    from app.services.compute import compute_snapshot
+    from tests.conftest import make_golden_raw_inputs
+
+    raw = make_golden_raw_inputs()
+    raw.spy_daily, raw.spy_daily_closes = SPY, [close for _, close in SPY]
+    raw.vix_level, raw.vix_level_as_of = 16.61, "2026-10-29"
+    alarm = compute_snapshot(raw, mc_samples=2_000, mc_seed=20260711).fast_alarm
+    assert alarm["vrp"] == _premium(16.61, CALM) and alarm["vrp_as_of"] == "2026-10-29"
+
+
+def test_the_judgment_prompt_gets_the_premium_but_not_its_day(monkeypatch):
+    """The day is a date string out of FRED's payload: it stays out of the
+    judgment's prompt (AGENTS.md ground rule 1), and the alarm keeps it."""
+    from app.engine import judgment
+
+    prompts: list[str] = []
+    monkeypatch.setattr(judgment, "run_completion", lambda prompt: prompts.append(prompt) or "Calm.")
+    alarm = _alarm(16.61, "2026-10-29", SPY)
+    judgment.generate(50.0, (40.0, 60.0), "trim", {}, {}, 1.0, {}, False, "IN", "IN", alarm)
+    assert f"'vrp': {alarm['vrp']}" in prompts[0] and "2026-10-29" not in prompts[0]
+    assert alarm["vrp_as_of"] == "2026-10-29"

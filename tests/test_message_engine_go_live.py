@@ -104,7 +104,7 @@ class TestDigestFacts:
         headline = {name: facts[name] for name in list(facts)[:21]}
         assert headline == {
             "median": 51, "score_scale_max": 100, "action_band": "trim", "override_fired": False,
-            "override_suffix": "", "iqr_lo": 40, "iqr_hi": 61, "red_flag_count": 2, "red_flag_total": 4,
+            "override_suffix": "", "iqr_lo": 40, "iqr_hi": 60, "red_flag_count": 2, "red_flag_total": 4,
             "spy_trend": "IN", "qqq_trend": "OUT", "s1": 0.42, "s2": None, "s3": None, "s4": None,
             "s5": None, "d1": 0.11, "d2": None, "d3": None, "d4": None,
             "judgment": "Breadth narrow, credit tight."}
@@ -127,7 +127,7 @@ class TestDigestFacts:
     def test_the_fallback_renders_the_old_deterministic_digest(self):
         entry = composer.library()["prompts"]["daily_digest"]
         text = composer.render_fallback(entry["fallback"], digest.digest_facts(_snapshot(override_fired=True)))
-        assert text == "bubblegauge 51/100 trim OVERRIDE. range 40-61. SPY IN, QQQ OUT. Flags 2/4."
+        assert text == "bubblegauge 51/100 trim OVERRIDE. range 40-60. SPY IN, QQQ OUT. Flags 2/4."
 
 
 class TestEngineOff:
@@ -267,7 +267,7 @@ class TestEngineOn:
         monkeypatch.setattr(composer, "complete", lambda **_kw: (_ for _ in ()).throw(RuntimeError("down")))
         out = digest.send_daily_digest()
         assert out["status"] == "sent" and out["source"] == "fallback" and out["llm_used"] is False
-        assert sends == ["bubblegauge 51/100 trim. range 40-61. SPY IN, QQQ OUT. Flags 2/4."]
+        assert sends == ["bubblegauge 51/100 trim. range 40-60. SPY IN, QQQ OUT. Flags 2/4."]
 
     def test_a_fallbacks_delivery_line_names_its_reason(self, monkeypatch, engine_on):
         """The journal says why the template went out. From 2026-11-11 to
@@ -453,7 +453,7 @@ class TestSignOff:
         TestEngineOn()._sent(monkeypatch, sends)
         out = service.deliver(trigger="daily_digest", facts=digest.digest_facts(_snapshot()), priority=3)
         assert out["status"] == "sent" and out["source"] == "fallback"
-        assert sends == ["bubblegauge 51/100 trim. range 40-61. SPY IN, QQQ OUT. Flags 2/4."]
+        assert sends == ["bubblegauge 51/100 trim. range 40-60. SPY IN, QQQ OUT. Flags 2/4."]
         assert len(prompts) == 1 and "DRAFT" not in prompts[0] and "TASK: Write today's digest about one point" in prompts[0]
         assert len(reads) == 1
 

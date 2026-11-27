@@ -20,11 +20,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.config import get_settings
+from app.engine.aggregate import headline
 from app.logging_conf import get_logger
 from app.redaction import sanitize
 
 log = get_logger(__name__)
 
+# The gauges are named in the template's own words: one line per indicator of the
+# registry's S and D blocks, the plain-word form of what app/references.py says it
+# measures (tests/test_judgment_prompt.py holds that each has its line). The names are
+# template text, not a field (AGENTS.md ground rule 1).
 PROMPT_TEMPLATE = """You are writing a one-line note for a research bubble-regime monitor, for a
 COMPLETE NON-EXPERT with no finance background — write it so a smart 15-year-old
 could follow it.
@@ -44,8 +49,19 @@ Rules:
 
 Readings (context for you — do NOT quote these codes or labels back to the reader):
 Headline: {median} out of 100 (rough range {iqr_lo}-{iqr_hi}); status: {band}.
+Each gauge below reads from 0 to 1; the higher, the more bubble-like. None means no reading today.
 "How deep a fall could be" gauges: {s_scores}.
-"Is a turn near" gauges: {d_scores}. Fear-gauge multiplier: {v}.
+  s1 = how pricey shares are compared with their own history and with interest rates
+  s2 = how much of the market's value sits in its ten biggest companies
+  s3 = how far chip makers' shares have outrun the rest of the market over two years
+  s4 = a statistical test for tech and chip share prices climbing at an ever faster, runaway pace (prone to false alarms)
+  s5 = how little extra interest lenders asked of risky companies about two years ago (very relaxed lending then reads high)
+"Is a turn near" gauges: {d_scores}.
+  d1 = how few companies are still climbing (many climbing together reads low)
+  d2 = people borrowing money to buy shares: how fast that borrowing has grown in a year, and whether it has fallen two months running
+  d3 = how much of their incoming cash the biggest cloud companies spend on building out (kept low unless that spending has stopped turning into sales growth and spare cash)
+  d4 = a pattern test for tech share prices speeding up toward a breaking point (prone to early and false alarms)
+Fear-gauge multiplier: {v} (above 1.0 = near-term fear has risen close to or above longer-term fear, which scales the combined "turn near" reading up).
 Warning flags tripped: {red_flag_detail}. Emergency override tripped: {override}.
 Long-term trend (still in the market?): SPY {spy_state}, QQQ {qqq_state}.
 Fast fear signals: {fast_alarm}.
@@ -96,11 +112,14 @@ def generate(median: float, iqr: tuple[float, float], band: str,
              spy_state: str, qqq_state: str, fast_alarm: dict[str, object],
              last_successful: str | None = None) -> JudgmentCall:
     """Call the gateway; degrade to the last successful text on failure."""
+    # The VRP's day (vrp_as_of) is a date string out of FRED's payload, no number
+    # or enum the monitor computes: it stays out of the prompt (AGENTS.md ground rule 1).
+    alarm = {key: value for key, value in fast_alarm.items() if key != "vrp_as_of"}
     prompt = PROMPT_TEMPLATE.format(
-        median=round(median), iqr_lo=round(iqr[0]), iqr_hi=round(iqr[1]), band=band,
+        median=headline(median), iqr_lo=headline(iqr[0]), iqr_hi=headline(iqr[1]), band=band,
         s_scores=s_scores, d_scores=d_scores, v=v,
         red_flag_detail=red_flag_detail, override=override,
-        spy_state=spy_state, qqq_state=qqq_state, fast_alarm=fast_alarm,
+        spy_state=spy_state, qqq_state=qqq_state, fast_alarm=alarm,
     )
     try:
         text = run_completion(prompt)
