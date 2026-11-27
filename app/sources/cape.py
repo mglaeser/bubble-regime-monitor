@@ -56,29 +56,6 @@ def _current_from_multpl(html: str) -> float:
     return cape
 
 
-def _as_of_from_multpl(html: str, today: date) -> str | None:
-    """Returns an ISO date in exactly one case: exactly one element has the id
-    "timestamp", its own text is multpl's stamp and nothing else ("4:00 PM
-    EST, Fri Nov 13" on the page of 2026-11-14: New York time, no year), and
-    in the run's year or the one before that day falls on the stamped weekday
-    and not after the run's day (UTC, never behind New York). Everything else
-    is None. It reads a page `_current_from_multpl` has parsed."""
-    texts = [" ".join(element.xpath("text()")).strip()
-             for element in lxml.html.fromstring(html).xpath('//*[@id="timestamp"]')]
-    stamp = re.fullmatch(r"[0-9]{1,2}:[0-9]{2} [AP]M E[SD]T, ([A-Z][a-z]{2}) ([A-Z][a-z]{2} [0-9]{1,2})",
-                         texts[0]) if len(texts) == 1 else None
-    if stamp is None:
-        return None
-    for year in (today.year, today.year - 1):
-        try:
-            day = datetime.strptime(f"{stamp[2]} {year}", "%b %d %Y").date()
-        except ValueError:
-            continue                        # 29 February in a year without it
-        if day.strftime("%a") == stamp[1] and day <= today:
-            return day.isoformat()
-    return None
-
-
 def _history_from_shillerdata(content: bytes) -> list[float]:
     df = pd.read_excel(io.BytesIO(content), sheet_name="Data", header=7)
     cape_col = next((c for c in df.columns if "CAPE" in str(c).upper()), None)
@@ -88,11 +65,12 @@ def _history_from_shillerdata(content: bytes) -> list[float]:
     return [float(v) for v in series.tolist()]
 
 
-def _as_of_from_shillerdata(content: bytes) -> str | None:
+def _as_of_from_shillerdata(content: bytes, today: date) -> str | None:
     """Returns an ISO date in exactly one case: the P cell below the row of the
     file's last CAPE is "<month> price is <month> <day><st|nd|rd|th> close"
     ("Nov price is Nov 12th close"), both months that row's own (first three
-    letters, any case), and the day one of that month: the close the latest
+    letters, any case), and the day, with that row's year and month, a date the
+    standard library accepts that is not after `today`: the close the latest
     month is priced at. Everything else is None, every exception of the parser
     included. The month gate (`_check_shillers_month`) has read that row's
     Date as a month before this runs."""
@@ -102,10 +80,11 @@ def _as_of_from_shillerdata(content: bytes) -> str | None:
                                errors="coerce").last_valid_index()
         stamp = float(df.at[latest, "Date"])
         year, month = math.floor(stamp), round((stamp - math.floor(stamp)) * 100)
-        close = re.fullmatch(r"([A-Za-z]+) price is ([A-Za-z]+) ([0-9]{1,2})(st|nd|rd|th) close",
+        close = re.fullmatch(r"([A-Za-z]+) price is ([A-Za-z]+) ([0-9]+)(st|nd|rd|th) close",
                              df.at[latest + 1, "P"])
         if close and close[1][:3].lower() == close[2][:3].lower() == calendar.month_abbr[month].lower():
-            return date(year, month, int(close[3])).isoformat()
+            day = date(year, month, int(close[3]))
+            return day.isoformat() if day <= today else None
         return None
     except Exception:
         return None
@@ -161,21 +140,20 @@ def _check_shillers_month(content: bytes, today: date) -> None:
 def current_cape(today: date | None = None) -> SourceResult:
     """Current CAPE: the last value in the CAPE column of Shiller's file while
     its row is of this month or the last (of `today`, by default the UTC date),
-    dated by the close its note names, if it names one; multpl's page, dated
-    by its stamp, is the fallback."""
+    dated by the close its note names, if it names one not after `today`;
+    multpl's page is the fallback, undated: its stamp names no year."""
     today = today or datetime.now(UTC).date()
     errors: list[str] = []
     try:
         content = _shillerdata_file()
         _check_shillers_month(content, today)
-        return SourceResult(_history_from_shillerdata(content)[-1],
-                            Provenance(source="shillerdata_ie_data", as_of=_as_of_from_shillerdata(content)))
+        return SourceResult(_history_from_shillerdata(content)[-1], Provenance(
+            source="shillerdata_ie_data", as_of=_as_of_from_shillerdata(content, today)))
     except Exception as e:
         errors.append(f"shillerdata: {e}")
     try:
-        html = fetch("multpl", MULTPL_URL).text
-        return SourceResult(_current_from_multpl(html), Provenance(source="multpl", fallback_used=True,
-                                                                   as_of=_as_of_from_multpl(html, today)))
+        return SourceResult(_current_from_multpl(fetch("multpl", MULTPL_URL).text),
+                            Provenance(source="multpl", fallback_used=True))
     except Exception as e:
         errors.append(f"multpl: {e}")
     raise SourceError("CAPE: all sources failed: " + "; ".join(errors))

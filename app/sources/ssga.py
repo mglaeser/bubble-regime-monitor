@@ -11,7 +11,7 @@ cross-check by hand.
 from __future__ import annotations
 
 import io
-from datetime import datetime
+from datetime import UTC, datetime
 
 import pandas as pd
 
@@ -47,15 +47,16 @@ def _as_of_from_xlsx(content: bytes) -> str | None:
     """Returns an ISO date in exactly one case: the workbook parses, exactly
     one cell of its first sheet is the text "Holdings:", and the cell to its
     right is a text of the form `As of %d-%b-%Y` ("As of 12-Nov-2026" in the
-    file of 2026-11-14). Everything else is None, every exception of the
-    reader included."""
+    file of 2026-11-14) whose date is not after the run's (UTC). Everything
+    else is None, every exception of the reader included."""
     try:
         rows = pd.read_excel(io.BytesIO(content), header=None).to_numpy().tolist()
         labels = [(i, j) for i, row in enumerate(rows) for j, cell in enumerate(row) if cell == "Holdings:"]
         if len(labels) != 1:
             return None
         i, j = labels[0]
-        return datetime.strptime(rows[i][j + 1], "As of %d-%b-%Y").date().isoformat()
+        day = datetime.strptime(rows[i][j + 1], "As of %d-%b-%Y").date()
+        return day.isoformat() if day <= datetime.now(UTC).date() else None
     except Exception:
         return None
 

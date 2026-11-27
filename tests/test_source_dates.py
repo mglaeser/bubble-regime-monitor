@@ -35,8 +35,8 @@ def _workbook(title: str, rows: list[list]) -> bytes:
     return out.getvalue()
 
 
-def _run_on(monkeypatch, day: str) -> None:
-    """The CAPE adapter's clock reads noon UTC of `day`."""
+def _run_on(monkeypatch, day: str, adapter=cape) -> None:
+    """The adapter's clock reads noon UTC of `day`."""
     moment = datetime.fromisoformat(day).replace(hour=12, tzinfo=UTC)
 
     class _Clock(datetime):
@@ -44,23 +44,16 @@ def _run_on(monkeypatch, day: str) -> None:
         def now(cls, tz=None):
             return moment
 
-    monkeypatch.setattr(cape, "datetime", _Clock, raising=False)
+    monkeypatch.setattr(adapter, "datetime", _Clock, raising=False)
 
 
-@pytest.mark.parametrize(("stamp", "run_day", "as_of"), [
-    ("Fri Nov 13", "2026-11-14", "2026-11-13"),     # the page as taken, on a Saturday
-    ("Thu Dec 31", "2027-01-01", "2026-12-31"),     # the stamp names no year
-    ("Fri Nov 13", "2027-11-20", "2026-11-13"),     # it stood still: 13 Nov 2027 is a Saturday
-    ("Thu Feb 29", "2025-03-01", "2024-02-29"),     # no 29 February in 2025
-    ("Fri Dec 4", "2026-11-14", None),              # a Friday this year, but after the run's day
-    ("", "2026-11-14", None),                       # no stamp
-])
-def test_multpls_value_is_dated_by_its_stamp(monkeypatch, stamp, run_day, as_of):
-    _run_on(monkeypatch, run_day)
-    page = MULTPL_PAGE.replace("Fri Nov 13", stamp)
+@pytest.mark.parametrize("clock", ["4:00 PM", "99:99 PM"])   # the page as taken, and a clock no day has
+def test_multpls_value_is_undated_as_its_stamp_names_no_year(monkeypatch, clock):
+    _run_on(monkeypatch, "2026-11-14")
+    page = MULTPL_PAGE.replace("4:00 PM", clock)
     monkeypatch.setattr(cape, "fetch", lambda source, url, **kwargs: _Response(text=page))
     result = cape.current_cape()
-    assert (result.value, result.provenance.source, result.provenance.as_of) == (39.95, "multpl", as_of)
+    assert (result.value, result.provenance.source, result.provenance.as_of) == (39.95, "multpl", None)
 
 
 CURRENT = [[2026.09, 7669.41, 40.27], [2026.1, 7726.69, 40.12], [2026.11, 7619.38, 39.37]]
@@ -71,7 +64,8 @@ SHILLER_PAGE = '<a href="https://img1.wsimg.com/ie_data.xls">ie_data.xls</a>'   
     (CURRENT, "Nov price is Nov 12th close", "2026-11-26", (39.37, "2026-11-12")),
     (CURRENT, None, "2026-11-26", (39.37, None)),                                   # no note
     (CURRENT, "Oct price is Oct 12th close", "2026-11-26", (39.37, None)),          # another month's
-    (CURRENT, "Nov price is Nov 31st close", "2026-11-26", (39.37, None)),          # no such day
+    (CURRENT, "Nov price is Nov 31st close", "2026-12-05", (39.37, None)),          # no such day
+    (CURRENT, "Nov price is Nov 30th close", "2026-11-26", (39.37, None)),          # after the run's day
     ([[2025.12, 6845.5, 39.4], [2026.01, 6903.3, 39.5]], "Jan price is Jan 9th close", "2026-01-20",
      (39.5, "2026-01-09")),
 ])
@@ -86,15 +80,20 @@ def test_shillers_reading_is_dated_by_the_close_its_note_names(monkeypatch, rows
     assert (result.value, result.provenance.as_of) == reading
 
 
-def test_the_workbooks_weight_is_dated_by_its_holdings_cell(monkeypatch):
+@pytest.mark.parametrize(("stated", "as_of"), [
+    ("As of 12-Nov-2026", "2026-11-12"),
+    ("As of 30-Nov-2099", None),                     # a date after the run's
+])
+def test_the_workbooks_weight_is_dated_by_its_holdings_cell(monkeypatch, stated, as_of):
+    _run_on(monkeypatch, "2026-11-14", ssga)
     workbook = _workbook("holdings", [
         ["Fund Name:", "State Street® SPDR® S&P 500® ETF Trust"], ["Ticker Symbol:", "SPY"],
-        ["Holdings:", "As of 12-Nov-2026"], [],
+        ["Holdings:", stated], [],
         ["Name", "Ticker", "Identifier", "SEDOL", "Weight", "Sector", "Shares Held", "Local Currency"],
         *[[f"Name {i}", f"T{i}", "-", "-", 7.0 - 0.4 * i, "-", 1.0, "USD"] for i in range(12)]])
     monkeypatch.setattr(ssga, "fetch", lambda source, url, **kwargs: _Response(content=workbook))
     result = ssga.top10_concentration()
-    assert (result.provenance.source, result.provenance.as_of) == ("ssga_spy_xlsx", "2026-11-12")
+    assert (result.provenance.source, result.provenance.as_of) == ("ssga_spy_xlsx", as_of)
 
 
 def test_the_gather_leaves_a_reading_without_its_own_date_undated(isolated_db, monkeypatch):
