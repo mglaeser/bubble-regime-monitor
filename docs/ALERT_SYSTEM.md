@@ -391,7 +391,7 @@ bubblegauge alerts preflight                  # pre-stage checks
 bubblegauge alerts ruleset                    # active ruleset summary
 bubblegauge alerts health
 bubblegauge alerts pending                    # open episodes
-bubblegauge alerts evaluate --input-identity ID [--shadow]
+bubblegauge alerts evaluate --input-identity ID   # always shadow
 bubblegauge alerts explain --evaluation-id ID
 bubblegauge alerts recover-evaluations --once
 bubblegauge alerts recover-leases --once
@@ -544,7 +544,7 @@ completion timestamp no more than ten hours old. Disabled mode explicitly
 reports the evaluator as not required.
 
 The health projection also reports the latest and p95 evaluation duration, P1
-enqueue-to-provider-attempt p95, rolling LLM cap/call/fallback evidence,
+enqueue-to-provider-attempt p95,
 missing typed sidecars, overdue or malformed outbox holds, the UNKNOWN
 deliveries, SQLite WAL/foreign-key/busy-timeout/RETURNING
 capabilities, the Alembic revision, required partial indexes and immutability
