@@ -15,6 +15,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Response
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from sqlalchemy import delete, update
 
 from app.alerts.canonical import new_ulid, sha256_of
 from app.alerts.models import AlertSilence, ApiIdempotencyRecord
@@ -143,25 +144,30 @@ def create_silence(
 def delete_silence(response: Response, silence_id: str,
                    _: None = Depends(require_alerts_write)) -> Any:
     _no_store(response)
-    now = datetime.now(UTC)
-    withdrawn = False
-    with session_scope() as session:
-        row = session.get(AlertSilence, silence_id)
-        if row is None:
+    # SQLite's write reservation is taken before the read and the time after
+    # it, so no other writer runs between this time and the statements below.
+    with immediate_session_scope() as session:
+        if session.get(AlertSilence, silence_id) is None:
             raise HTTPException(status_code=404, detail="no silence with that id",
                                 headers=ERROR_HEADERS)
-        if now <= row.starts_at:
-            # It has not started: it silenced nothing, so there is no record
-            # of a silence to keep, and the table admits no empty window to
-            # expire it into (ck_alert_silence_window, ends_at > starts_at;
-            # hence `<=`). The log line below is the trace of the withdrawal.
-            session.delete(row)
-            withdrawn = True
-        elif now < row.ends_at:
+        now = datetime.now(UTC)
+        # Not started: it silenced nothing, so there is no record of a silence
+        # to keep, and the table admits no empty window to expire it into
+        # (ck_alert_silence_window, ends_at > starts_at; hence `>=`). The log
+        # line below is the trace of the withdrawal.
+        withdrawn = session.execute(
+            delete(AlertSilence)
+            .where(AlertSilence.silence_id == silence_id, AlertSilence.starts_at >= now)
+            .returning(AlertSilence.silence_id)
+        ).scalar_one_or_none() is not None
+        if not withdrawn:
             # Expire rather than delete: the audit trail of what was silenced,
-            # by whom and when must survive.
-            row.ends_at = now
-        # One that has ended keeps the end it had: that end is the record.
+            # by whom and when must survive. One that has ended keeps the end
+            # it had: that end is the record.
+            session.execute(update(AlertSilence)
+                            .where(AlertSilence.silence_id == silence_id,
+                                   AlertSilence.ends_at > now)
+                            .values(ends_at=now))
     if withdrawn:
         log.info("alert_silence_withdrawn", silence_id=silence_id)
     return {"silence_id": silence_id, "ended": True}

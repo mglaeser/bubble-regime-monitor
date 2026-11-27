@@ -1363,31 +1363,86 @@ def test_a_scheduled_silence_can_be_withdrawn(client):
         assert load_active_silences(session, now=once_started).all is False
 
 
-def test_ending_a_silence_keeps_its_record_and_ending_it_again_changes_nothing(client):
+@pytest.fixture()
+def silence_clock(monkeypatch):
+    """The clock of app/routers/admin_alerts.py, set by the test: [now]."""
+    from datetime import UTC, datetime
+
+    from app.routers import admin_alerts
+
+    clock = [datetime(2026, 11, 27, 12, 0, tzinfo=UTC)]
+
+    class _Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock[0].astimezone(tz)
+
+    monkeypatch.setattr(admin_alerts, "datetime", _Clock)
+    return clock
+
+
+def test_ending_a_silence_keeps_its_record_and_ending_it_again_changes_nothing(
+        client, silence_clock):
     """A silence that started keeps its row, ended at the moment of the
     request; a second DELETE, of a silence that has ended, leaves that end
     where it was."""
-    from datetime import UTC, datetime
+    from datetime import timedelta
 
     from app.alerts.models import AlertSilence
     from app.db import session_scope
 
+    started = silence_clock[0]
     body = {"matcher_kind": "ALL", "matcher_value": "*", "duration_seconds": 3600,
             "comment": "maintenance"}
     silence_id = client.post("/api/v1/alerts/silences", json=body,
                              headers={"X-API-Key": WRITE_KEY}).json()["silence_id"]
 
+    silence_clock[0] = ended = started + timedelta(minutes=10)
     assert client.delete(f"/api/v1/alerts/silences/{silence_id}",
                          headers={"X-API-Key": WRITE_KEY}).status_code == 200
     with session_scope() as session:
         row = session.get(AlertSilence, silence_id)
-        started_at, ended_at = row.starts_at, row.ends_at
-    assert started_at < ended_at <= datetime.now(UTC)
+        assert (row.starts_at, row.ends_at) == (started, ended)
 
+    silence_clock[0] = ended + timedelta(minutes=10)
     assert client.delete(f"/api/v1/alerts/silences/{silence_id}",
                          headers={"X-API-Key": WRITE_KEY}).status_code == 200
     with session_scope() as session:
-        assert session.get(AlertSilence, silence_id).ends_at == ended_at
+        assert session.get(AlertSilence, silence_id).ends_at == ended
+
+
+def test_a_silence_that_starts_while_its_delete_runs_is_ended_not_withdrawn(
+        client, silence_clock, monkeypatch):
+    """The clock passes the start between the DELETE's read of the silence and
+    its write: the silence is in force by then, so it keeps its row, ended."""
+    from datetime import timedelta
+
+    from sqlalchemy import select
+    from sqlalchemy.orm import Session
+
+    from app.alerts.models import AlertSilence
+    from app.db import session_scope
+
+    body = {"matcher_kind": "ALL", "matcher_value": "*", "duration_seconds": 3600,
+            "comment": "maintenance", "starts_in_seconds": 60}
+    silence_id = client.post("/api/v1/alerts/silences", json=body,
+                             headers={"X-API-Key": WRITE_KEY}).json()["silence_id"]
+    in_force = silence_clock[0] + timedelta(seconds=61)
+    read = Session.get
+
+    def _the_start_passes_after_the_read(self, entity, *args, **kwargs):
+        found = read(self, entity, *args, **kwargs)
+        if entity is AlertSilence:
+            silence_clock[0] = in_force
+        return found
+
+    monkeypatch.setattr(Session, "get", _the_start_passes_after_the_read)
+    assert client.delete(f"/api/v1/alerts/silences/{silence_id}",
+                         headers={"X-API-Key": WRITE_KEY}).status_code == 200
+    with session_scope() as session:
+        ends = session.scalars(select(AlertSilence.ends_at)
+                               .where(AlertSilence.silence_id == silence_id)).all()
+    assert ends == [in_force]
 
 
 def test_instance_silence_is_persisted_in_canonical_lowercase(client):
