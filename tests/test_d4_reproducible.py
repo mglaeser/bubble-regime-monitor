@@ -8,6 +8,7 @@ published another D4 and another headline.
 from __future__ import annotations
 
 import math
+import os
 import random
 from pathlib import Path
 
@@ -29,7 +30,7 @@ def _closes(n: int) -> list[float]:
     return out
 
 
-def test_the_same_closes_give_the_same_d4_through_the_production_path(monkeypatch):
+def test_the_same_closes_give_the_same_d4_through_the_production_path(monkeypatch, tmp_path):
     # The real engine in the real subprocess, as a recompute runs it; an
     # environment without lppls self-skips.
     pytest.importorskip("lppls")
@@ -38,6 +39,10 @@ def test_the_same_closes_give_the_same_d4_through_the_production_path(monkeypatc
     # The subprocess is `python -m app.indicators.d4_lppls` and finds `app` in
     # its working directory: the repository root, wherever pytest was started.
     monkeypatch.chdir(Path(__file__).resolve().parents[1])
+    # Its interpreter's default start method is forkserver here, as it is on
+    # Linux from Python 3.14: the reading must not rest on that default.
+    (tmp_path / "sitecustomize.py").write_text('import multiprocessing\nmultiprocessing.set_start_method("forkserver")\n')
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(filter(None, [str(tmp_path), os.environ.get("PYTHONPATH")])))
     closes = _closes(MIN_CLOSES)
     first = compute_confidence_isolated(closes, timeout_s=600)
     second = compute_confidence_isolated(closes, timeout_s=600)

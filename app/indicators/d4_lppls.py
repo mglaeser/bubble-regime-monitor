@@ -288,6 +288,7 @@ def compute_confidence_isolated(daily_closes: list[float], timeout_s: int = 1800
 
 if __name__ == "__main__":
     import json as _json
+    import multiprocessing as _mp
     import sys as _sys
 
     _payload = _json.loads(_sys.stdin.read())
@@ -295,9 +296,12 @@ if __name__ == "__main__":
     # the worker its Pool forks, and CPython re-seeds `random` from the OS in
     # every forked child, so a seed set in this process does nothing. This
     # hook runs in the child after CPython's own (at-fork hooks run in the
-    # order they were registered) and gives the worker the pinned seed. It
-    # needs the fork start method, the default on Linux under Python 3.12;
-    # under another one tests/test_d4_reproducible.py fails.
+    # order they were registered) and gives the worker the pinned seed.
+    # lppls opens its Pool from the default context, so this process fixes
+    # that context to fork, the start method whose workers inherit the hook;
+    # the service runs in its Linux image (Containerfile), where fork and
+    # os.register_at_fork both exist.
+    _mp.set_start_method("fork", force=True)
     os.register_at_fork(after_in_child=lambda: random.seed(LPPLS_SEED))
     # Route all fit-time output (tqdm, lppls' print(e) in parent AND forked
     # workers) to stderr so stdout carries only the framed result line.
