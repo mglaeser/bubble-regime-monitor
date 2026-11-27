@@ -52,13 +52,10 @@ def test_golden_fixture_byte_identical(golden_subscores, golden_mc_inputs):
     assert mc.iqr[1] == pytest.approx(54.9951, abs=1e-3)
 
 
-def test_frozen_methodology_hash_unchanged():
-    from app import methodology as _M
-
-    # The artifact is the scoring authority; Stage 0 must not touch it.
-    assert _M.frozen_sha256() == _M.frozen_sha256()
-    assert _M.get_path("_meta", "golden_headline") == 52.43
-    assert _M.get_path("override", "min_flags") == 3
+# The artifact's bytes, and with them golden_headline 52.43 and
+# override.min_flags 3, are pinned by
+# tests/test_frozen_methodology.py::test_sha256_byte_guard; the test here
+# compared the hash with itself.
 
 
 def test_typed_snapshot_fields_do_not_enter_scoring():
@@ -206,7 +203,7 @@ def _meta(**overrides):
         # rf4 has TWO legs and both must have been observed for it to be
         # fireable (B-11). The default here is the seeing case; the tests that
         # care about a blind near-ATH leg say so explicitly.
-        near_ath_available=True, near_ath_state=False,
+        near_ath_available=True,
     )
     base.update(overrides)
     return build_red_flag_meta(**base)
@@ -245,7 +242,7 @@ def test_a_blind_near_ath_leg_makes_rf4_unknown_not_inactive():
     missing the conjunction reads false and rf4 would report a confident
     "not firing" built on no evidence. Both legs, or the flag is unknown.
     """
-    meta = _meta(gsadf_contested=False, near_ath_available=False, near_ath_state=None)
+    meta = _meta(gsadf_contested=False, near_ath_available=False)
     rf4 = meta["flags"]["rf4"]
     assert rf4["fireable"] is False
     assert rf4["state"] == "UNKNOWN"

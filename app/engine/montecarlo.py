@@ -47,7 +47,6 @@ ALPHA_RANGE: tuple[float, float] = _M.as_tuple("monte_carlo", "alpha_range")
 
 _MC_SAMPLES = _M.get_path("monte_carlo", "samples")
 _MC_SEED = _M.get_path("monte_carlo", "seed")
-_AR = _M.get_path("monte_carlo", "anchor_ranges")   # MC resampling anchor ranges
 _CAPE_WIN = _M.as_tuple("monte_carlo", "anchor_ranges", "cape_window_years_int")
 _S2_LO = _M.as_tuple("monte_carlo", "anchor_ranges", "s2_lo")
 _S2_HI = _M.as_tuple("monte_carlo", "anchor_ranges", "s2_hi")
