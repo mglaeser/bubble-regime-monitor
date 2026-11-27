@@ -675,9 +675,11 @@ def gather_inputs() -> RawInputs:
         import math
 
         # GSADF needs a long monthly history to calibrate (PSY tables start at
-        # T=100); fetch QQQ monthly from 1999 (T~329), falling back to the
-        # shorter recompute series if the long fetch is unavailable.
-        try:
+        # T=100); fetch QQQ monthly from 1999 (T~329). The fetch, the cut to
+        # completed months and the logarithms run inside `_track`, like `_ebp`
+        # below: when one of them fails, S4 has no statistic this run and no
+        # shorter series stands in.
+        def _s4_series() -> tuple[list[float], str, str]:
             # Completed months only. Tiingo's monthly series ends with the month
             # in progress, under the label of that month's last business day
             # (2026-11-30 on 2026-11-10): a date in the future, which reads as
@@ -688,26 +690,28 @@ def gather_inputs() -> RawInputs:
             gsadf_pairs = [(d, c) for d, c in price_src.fetch_tiingo_monthly("NDX")
                            if d[:7] < today[:7]]
             gsadf_monthly = [c for _, c in gsadf_pairs]
-            raw.gsadf_as_of = gsadf_pairs[-1][0] if gsadf_pairs else None
             gsadf_src_note = f"Nasdaq-100 via QQQ proxy (Tiingo monthly 1999+, T={len(gsadf_monthly)})"
-        except Exception as exc:
-            gsadf_monthly = legs.monthly_closes(ndx.value)
-            raw.gsadf_as_of = ndx.provenance.as_of
-            gsadf_src_note = (f"Nasdaq-100 via QQQ proxy (short series T={len(gsadf_monthly)}; "
-                              f"long history unavailable: {str(exc)[:80]})")
-        out = run_gsadf([math.log(v) for v in gsadf_monthly[-_M.get_path("gsadf", "series_months_max"):]],
-                        timeout_s=get_settings().gsadf_timeout_s)
-        if out:
-            raw.gsadf_stat, raw.gsadf_cv90, raw.gsadf_cv95 = out.gsadf, out.cv90, out.cv95
-            raw.bsadf_stat, raw.bsadf_cv90 = out.bsadf, out.bsadf_cv90
-            raw.bsadf_cv95, raw.bsadf_argmax = out.bsadf_cv95, out.bsadf_argmax
-            raw.bsadf_n, raw.bsadf_n_finite = out.bsadf_n, out.bsadf_n_finite
-            raw.bsadf_cv_route = out.bsadf_cv_route
-            raw.gsadf_note = f"{gsadf_src_note} (cached MC CVs)"
+            return ([math.log(v) for v in gsadf_monthly[-_M.get_path("gsadf", "series_months_max"):]],
+                    gsadf_pairs[-1][0], gsadf_src_note)
+
+        s4_series = _track(raw, "price_NDX_monthly", _s4_series)
+        if s4_series:
+            gsadf_logs, raw.gsadf_as_of, gsadf_src_note = s4_series
+            out = run_gsadf(gsadf_logs, timeout_s=get_settings().gsadf_timeout_s)
+            if out:
+                raw.gsadf_stat, raw.gsadf_cv90, raw.gsadf_cv95 = out.gsadf, out.cv90, out.cv95
+                raw.bsadf_stat, raw.bsadf_cv90 = out.bsadf, out.bsadf_cv90
+                raw.bsadf_cv95, raw.bsadf_argmax = out.bsadf_cv95, out.bsadf_argmax
+                raw.bsadf_n, raw.bsadf_n_finite = out.bsadf_n, out.bsadf_n_finite
+                raw.bsadf_cv_route = out.bsadf_cv_route
+                raw.gsadf_note = f"{gsadf_src_note} (cached MC CVs)"
+            else:
+                # Reason only — the "GSADF not computable this run" prefix is added
+                # once by the s4 note builder; do not repeat it here (was double-nested).
+                raw.gsadf_note = "R/exuber unavailable or the fit failed"
         else:
-            # Reason only — the "GSADF not computable this run" prefix is added
-            # once by the s4 note builder; do not repeat it here (was double-nested).
-            raw.gsadf_note = "R/exuber unavailable or the fit failed"
+            cause = raw.gather_errors.get("price_NDX_monthly", "unknown cause")
+            raw.gsadf_note = f"long monthly history unavailable: {cause[:80]}"
     else:
         raw.gsadf_note = "no Nasdaq-100/QQQ series this run"
 
@@ -1585,7 +1589,9 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         ts_state = v_vix.state(raw.vix_ratio) if raw.vix_ratio is not None else "unknown"
     except ValueError:
         ts_state = "unknown"   # v3.7.8/§9: invalid ratio -> unknown, never mislabelled
-    alarm = legs.fast_alarm(ts_state, raw.vix_level, raw.spy_daily_closes, raw.skew)
+    alarm = legs.fast_alarm(ts_state, raw.vix_level,
+                            legs.closes_through(raw.spy_daily, raw.vix_level_as_of),
+                            raw.skew, vrp_as_of=raw.vix_level_as_of)
 
     freshness: dict[str, str] = {}
     for ind in indicators.values():

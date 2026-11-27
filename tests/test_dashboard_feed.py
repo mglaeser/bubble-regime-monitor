@@ -8,7 +8,7 @@ Per DASHBOARD_FEED_SPEC.md sign-off: frozen key inventory; points ALWAYS length
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -233,6 +233,22 @@ class TestBuildFeedGolden:
                             lambda raw, step, fn: level if step == "vix_level" else None)
         raw = compute.gather_inputs()
         assert (raw.vix_level, raw.vix_level_source, raw.vix_level_as_of) == (19.92, source, as_of)
+
+    def test_the_feed_dates_the_vrp_by_its_session(self, isolated_db, patched_sources, monday):
+        """The VRP row carries the day of its two legs and ages as a daily
+        market value."""
+        from app.services.compute import compute_snapshot
+        from tests.conftest import make_golden_raw_inputs
+
+        raw = make_golden_raw_inputs()
+        day = date(2026, 11, 20)                # three days before the feed's Monday
+        raw.spy_daily = [((day - timedelta(days=29 - i)).isoformat(), 400.0 + i) for i in range(30)]
+        raw.vix_level_as_of = raw.spy_daily[-2][0]
+        data = compute_snapshot(raw, mc_samples=2_000, mc_seed=20260711)
+        vrp = df.build_feed(raw, data)["metrics"]["vrp"]
+        assert vrp["value"] == data.fast_alarm["vrp"] is not None
+        assert vrp["as_of"] == data.fast_alarm["vrp_as_of"] == raw.vix_level_as_of
+        assert vrp["stale"] is False            # four days old: a daily market value ages at 7
 
 
 class TestStaleSlas:

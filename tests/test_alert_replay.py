@@ -59,11 +59,9 @@ def _history() -> list:
     ]
 
 
-def _run(tmp_path, artifacts, *, name="replay.db", stage=3, inputs=None,
-         events=None) -> ReplaySummary:
+def _run(tmp_path, artifacts, *, stage=3, inputs=None, events=None) -> ReplaySummary:
     config = ReplayConfig(
         source_db_url="sqlite:///unused-by-this-call",
-        state_db_path=tmp_path / name,
         evaluate_at_stage=stage,
         mandatory_events_path=events,
     )
@@ -109,8 +107,8 @@ def test_two_replays_of_the_same_history_are_byte_identical(tmp_path, artifacts)
     Byte-identical rather than merely equal: the artifact is committed as
     evidence, so a diff in it has to mean a diff in behaviour.
     """
-    first = _run(tmp_path, artifacts, name="a.db").to_json()
-    second = _run(tmp_path, artifacts, name="b.db").to_json()
+    first = _run(tmp_path, artifacts).to_json()
+    second = _run(tmp_path, artifacts).to_json()
     assert first == second
 
 
@@ -147,12 +145,12 @@ def test_a_slow_host_does_not_change_a_replay(tmp_path, artifacts, monkeypatch):
     from app.alerts.errors import EvaluationDeadlineExceeded
     from app.config import Settings
 
-    quiet = _run(tmp_path, artifacts, name="quiet.db")
+    quiet = _run(tmp_path, artifacts)
     # Every look at the engine's clock is 25 hours later. Replacing the
     # engine's `time` name keeps the stepping clock away from SQLAlchemy.
     ticks = itertools.count(step=25 * 3600.0)
     monkeypatch.setattr(engine, "time", SimpleNamespace(monotonic=lambda: next(ticks)))
-    slow = _run(tmp_path, artifacts, name="slow.db")
+    slow = _run(tmp_path, artifacts)
 
     assert slow.evaluations_timed_out == 0
     assert slow.to_json() == quiet.to_json()
@@ -185,18 +183,39 @@ def test_replay_writes_to_its_own_database_and_never_the_app_one(
             assert count == 0, f"replay wrote {model.__name__} rows into production"
 
 
-def test_replay_state_database_is_recreated_not_appended(tmp_path, artifacts):
-    """Re-running into the same path must not accumulate — that is what makes
-    a second run comparable to the first rather than a superset of it."""
-    state = tmp_path / "shared.db"
-    config = ReplayConfig(source_db_url="sqlite:///unused",
-                          state_db_path=state, evaluate_at_stage=3)
-    first = run_replay(config=config, ruleset=artifacts.ruleset,
-                       phrase_set=artifacts.phrase_set, inputs=_history())
-    second = run_replay(config=config, ruleset=artifacts.ruleset,
-                        phrase_set=artifacts.phrase_set, inputs=_history())
-    assert first.episodes_opened == second.episodes_opened
-    assert first.to_json() == second.to_json()
+def test_a_replay_takes_no_state_path_and_leaves_no_state_behind(
+        tmp_path, artifacts, isolated_db, monkeypatch):
+    """A file at the path `dryrun --state-db` names keeps its bytes, also with a
+    sidecar in the source to replay; a replay keeps its state in a temporary
+    directory of its own, which is gone when the run ends."""
+    import tempfile
+    from contextlib import suppress
+
+    from app.alerts import cli
+    from app.alerts.models import AlertInputSnapshot
+    from app.db import session_scope
+
+    now = datetime(2026, 8, 15, 10, 0, tzinfo=UTC)
+    record = make_input(identity="s1", computed_at=now.isoformat())
+    with session_scope() as session:
+        session.add(AlertInputSnapshot(
+            input_identity=record.input_identity, snapshot_id=None, origin="RECOMPUTE",
+            built_at=now, computed_at=now,
+            alert_input_schema_version=record.schema_version,
+            methodology_version=None, methodology_sha256=None, reconstructed=False,
+            evaluation_eligibility="EVALUABLE", ineligibility_reasons=[],
+            payload=json.dumps(record.model_dump(mode="json")), payload_sha256="x"))
+    kept = tmp_path / "kept.db"
+    kept.write_bytes(b"not the replay's")
+    with suppress(SystemExit):
+        cli.main(["dryrun", "--state-db", str(kept)])
+    assert kept.read_bytes() == b"not the replay's"
+
+    root = tmp_path / "temp"
+    root.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(root))
+    assert _run(tmp_path, artifacts).evaluations_committed > 0
+    assert list(root.iterdir()) == []
 
 
 def test_replay_module_cannot_reach_a_provider_or_a_transport():
@@ -225,15 +244,20 @@ def test_replay_never_dispatches(tmp_path, artifacts):
     assert summary.mode == str(Mode.DRYRUN)
 
 
-def test_replay_uses_the_dryrun_state_namespace(tmp_path, artifacts):
-    """Shadow and live state must never see a replay's episodes."""
+def test_replay_uses_the_dryrun_state_namespace(tmp_path, artifacts, monkeypatch):
+    """Shadow and live state must never see a replay's episodes. The replay's
+    temporary directory is this test's own, kept after the run to be read."""
+    from contextlib import nullcontext
+
     from sqlalchemy import create_engine, select
     from sqlalchemy.orm import sessionmaker
 
+    from app.alerts import replay
     from app.alerts.models import AlertEpisode
 
-    state = tmp_path / "ns.db"
-    _run(tmp_path, artifacts, name="ns.db")
+    monkeypatch.setattr(replay, "TemporaryDirectory", lambda: nullcontext(str(tmp_path)))
+    state = tmp_path / "replay.db"
+    _run(tmp_path, artifacts)
     engine = create_engine(f"sqlite:///{state}", future=True)
     session = sessionmaker(bind=engine)()
     try:
@@ -431,7 +455,6 @@ def test_an_empty_mandatory_catalogue_reports_zero_not_full_recall(tmp_path, art
     stage1 = _run(
         tmp_path,
         artifacts,
-        name="empty-stage1.db",
         stage=1,
         events=catalogue,
     )
@@ -455,7 +478,7 @@ def test_mandatory_event_recall_requires_timely_rule_and_priority_match(
 def test_mandatory_event_detected_after_slot_limit_is_a_miss(tmp_path, artifacts):
     catalogue = _catalogue(
         tmp_path, [_mandatory_event(max_detection_slots=0)], name="late.json")
-    summary = _run(tmp_path, artifacts, name="late.db", events=catalogue)
+    summary = _run(tmp_path, artifacts, events=catalogue)
 
     assert summary.detection_times_slots == {"band-entry": 1}
     assert summary.mandatory_event_detected == 0
@@ -475,9 +498,7 @@ def test_mandatory_event_outside_window_or_at_wrong_priority_is_a_miss(
     event = _mandatory_event(**overrides)
     catalogue = _catalogue(
         tmp_path, [event], name=f"miss-{event['expected_priority']}.json")
-    summary = _run(
-        tmp_path, artifacts, name=f"miss-{event['expected_priority']}.db",
-        events=catalogue)
+    summary = _run(tmp_path, artifacts, events=catalogue)
 
     assert summary.mandatory_event_detected == 0
     assert summary.detection_times_slots == {}
@@ -500,7 +521,7 @@ def test_not_evaluable_is_scoped_to_each_mandatory_event_window(tmp_path, artifa
     )
     catalogue = _catalogue(tmp_path, [_mandatory_event(), blind], name="local.json")
     summary = _run(
-        tmp_path, artifacts, name="local.db", inputs=history, events=catalogue)
+        tmp_path, artifacts, inputs=history, events=catalogue)
 
     assert summary.mandatory_event_total == 2
     assert summary.mandatory_event_not_evaluable == 1
@@ -523,7 +544,7 @@ def test_all_mandatory_events_not_evaluable_reports_recall_unmeasured(
     )
     catalogue = _catalogue(tmp_path, [event], name="all-blind.json")
     summary = _run(
-        tmp_path, artifacts, name="all-blind.db", inputs=history,
+        tmp_path, artifacts, inputs=history,
         events=catalogue)
 
     assert summary.mandatory_event_not_evaluable == 1
@@ -599,8 +620,8 @@ def test_restamping_a_stage_rehashes_the_ruleset(artifacts):
 
 def test_stage_gating_still_binds_inside_a_replay(tmp_path, artifacts):
     """Replay can ask about another stage; it cannot ignore staging."""
-    at_one = _run(tmp_path, artifacts, name="s1.db", stage=1)
-    at_three = _run(tmp_path, artifacts, name="s3.db", stage=3)
+    at_one = _run(tmp_path, artifacts, stage=1)
+    at_three = _run(tmp_path, artifacts, stage=3)
     # The history ends on a degraded slot, and the two stage-1 rules about
     # degraded data fire on it. Nothing gated to a later stage may.
     stage_one = {rule.rule_id for rule in artifacts.ruleset.active_rules(1)}
@@ -624,7 +645,7 @@ def test_an_unknown_snapshot_does_not_resolve_an_episode(tmp_path, artifacts):
     # The last input is degraded/UNKNOWN. It must not have closed anything as
     # RESOLVED on the strength of not knowing.
     only_unknown_resolved = summary.episodes_resolved
-    without_blind = _run(tmp_path, artifacts, name="nb.db", inputs=history[:-1])
+    without_blind = _run(tmp_path, artifacts, inputs=history[:-1])
     assert only_unknown_resolved == without_blind.episodes_resolved
 
 
@@ -654,7 +675,7 @@ def test_a_blind_neighbour_does_not_make_an_excursion_transient(tmp_path, artifa
 
     history = [at(2, "trim"), at(6, "de-risk"), at(10, None), at(14, "de-risk"),
                at(18, "trim")]
-    summary = _run(tmp_path, artifacts, name="exc.db", inputs=history)
+    summary = _run(tmp_path, artifacts, inputs=history)
     # index 1: neighbours trim / UNKNOWN -> indeterminate
     # index 3: neighbours UNKNOWN / trim -> indeterminate
     assert summary.transient_one_snapshot_band_p1 == 0
@@ -671,7 +692,7 @@ def test_a_derisk_neighbour_settles_an_excursion(tmp_path, artifacts):
 
     history = [at(2, "trim"), at(6, "de-risk"), at(10, "de-risk"), at(14, None),
                at(18, "trim")]
-    summary = _run(tmp_path, artifacts, name="run.db", inputs=history)
+    summary = _run(tmp_path, artifacts, inputs=history)
     assert summary.transient_one_snapshot_band_p1 == 0
     assert summary.indeterminate_band_excursions == 0
 
@@ -703,7 +724,7 @@ def test_the_gate_judges_the_busiest_24_months_of_one_snapshot_derisk_entries(
                    median=63.0 if band == "de-risk" else 52.0)
         for i, (moment, band) in enumerate(moments)
     ]
-    summary = _run(tmp_path, artifacts, name="keep.db", stage=1, inputs=history)
+    summary = _run(tmp_path, artifacts, stage=1, inputs=history)
     assert summary.failures == ([
         "2 transient one-snapshot de-risk entries inside one window of 24 months; "
         "regime.band_to_derisk is kept only while replay shows <= 1 per 24 months"]
@@ -723,7 +744,7 @@ def test_a_history_of_one_whole_window_measures_the_keep_condition(tmp_path, art
     these histories is stored as 23.98 months, its whole days divided by 30.44."""
     history = [make_input(identity=f"c{i}", computed_at=moment.isoformat())
                for i, moment in enumerate((_FIRST_ENTRY, _FIRST_ENTRY + span))]
-    summary = _run(tmp_path, artifacts, name="span.db", stage=1, inputs=history)
+    summary = _run(tmp_path, artifacts, stage=1, inputs=history)
     listed = [note for note in summary.not_measured if "transient_derisk_p1_rate" in note]
     assert bool(listed) is not covered, listed
     assert (summary.band_excursion_months, summary.band_excursion_covers_24_months) == (23.98, covered)
@@ -935,7 +956,7 @@ def test_grouping_is_reversible_and_full_fidelity():
 # ---------------------------------------------------------------------------
 
 
-def test_loading_source_inputs_leaves_the_source_untouched(tmp_path, isolated_db):
+def test_loading_source_inputs_leaves_the_source_untouched(isolated_db):
     """A replay opens its own engine over the source and only selects."""
     from app.alerts.models import AlertInputSnapshot
     from app.config import get_settings
@@ -954,15 +975,14 @@ def test_loading_source_inputs_leaves_the_source_untouched(tmp_path, isolated_db
 
     db_url = get_settings().db_url
     before = Path(db_url.replace("sqlite:///", "")).stat().st_mtime_ns
-    loaded = load_source_inputs(ReplayConfig(source_db_url=db_url,
-                                             state_db_path=tmp_path / "s.db"))
+    loaded = load_source_inputs(ReplayConfig(source_db_url=db_url))
     after = Path(db_url.replace("sqlite:///", "")).stat().st_mtime_ns
 
     assert [r.input_identity for r in loaded] == ["s1"]
     assert before == after, "reading the source must not modify it"
 
 
-def test_the_window_filters_by_the_inputs_own_time(tmp_path, isolated_db):
+def test_the_window_filters_by_the_inputs_own_time(isolated_db):
     """`--from`/`--to` select history, not rows that happened to be written."""
     from app.alerts.models import AlertInputSnapshot
     from app.config import get_settings
@@ -982,7 +1002,7 @@ def test_the_window_filters_by_the_inputs_own_time(tmp_path, isolated_db):
                 payload_sha256=f"x{index}"))
 
     loaded = load_source_inputs(ReplayConfig(
-        source_db_url=get_settings().db_url, state_db_path=tmp_path / "w.db",
+        source_db_url=get_settings().db_url,
         from_moment=datetime(2026, 8, 11, tzinfo=UTC),
         to_moment=datetime(2026, 8, 13, tzinfo=UTC)))
     assert [r.input_identity for r in loaded] == ["w1"]
@@ -1010,19 +1030,15 @@ def test_the_cli_dryrun_command_exists_and_is_read_only():
     """The operator surface has to expose the gate, and expose it as a dry run."""
     from app.alerts.cli import build_parser
 
-    args = build_parser().parse_args(["dryrun", "--state-db", "/tmp/x.db",
-                                      "--stage", "3"])
+    args = build_parser().parse_args(["dryrun", "--stage", "3"])
     assert args.command == "dryrun"
     assert args.stage == 3
-    assert args.state_db == "/tmp/x.db"
 
 
 def test_the_replay_script_forwards_to_the_cli():
     from scripts.alert_replay import build_parser
 
-    args = build_parser().parse_args(["--state-db", "/tmp/x.db", "--from",
-                                      "2026-01-01T00:00:00+00:00"])
-    assert args.state_db == "/tmp/x.db"
+    args = build_parser().parse_args(["--from", "2026-01-01T00:00:00+00:00"])
     assert args.from_moment == "2026-01-01T00:00:00+00:00"
 
 
