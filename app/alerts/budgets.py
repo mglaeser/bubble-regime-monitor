@@ -51,7 +51,7 @@ class BudgetLimits:
 
 #: The non-P1 budget. Caps raised 3->5 / 6->8 on 2026-08-27 by explicit
 #: operator decision ("I want that it takes over now"), matching the maxima the
-#: stage-3 coverage replay measures; the quiet-regime target stays 2. A
+#: stage-3 coverage replay measured then; the quiet-regime target stays 2. A
 #: constant, not a host setting (owner decision D2d, #153 round 6): the CI
 #: replay gate judges exactly these, so no host runs caps the evidence never
 #: saw - changing one is a code change the gate re-checks.

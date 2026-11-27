@@ -217,6 +217,52 @@ def test_transition_statistics_cover_every_mandated_operational_family(isolated_
         assert required in report
 
 
+def test_a_snapshot_from_before_the_typed_contract_is_no_sidecar_gap(isolated_db):
+    """A sidecar gap is a TYPED snapshot without its sidecar, as
+    `reconcile_sidecars` counts it. A snapshot stored before the typed
+    contract is not a gap."""
+    from app.alerts.recovery import reconcile_sidecars
+    from app.db import session_scope
+    from app.models import Snapshot
+
+    def snapshot(computed_at: str, contract: int | None) -> Snapshot:
+        return Snapshot(
+            computed_at=datetime.fromisoformat(computed_at), service_version="test",
+            median=52.0, iqr_lo=50.0, iqr_hi=55.0, band5=47.0, band95=58.0,
+            point_score=52.0, action_band="trim", alert_contract_version=contract)
+
+    with session_scope() as session:
+        session.add(snapshot("2026-07-11T21:26:00+00:00", None))
+        typed = snapshot("2026-08-20T18:01:00+00:00", 1)
+        session.add(typed)
+        session.flush()
+        typed_id = typed.id
+
+    with session_scope() as session:
+        report = transition_statistics(session)
+        # The job that reports gaps, on the same rows: the typed one alone.
+        assert reconcile_sidecars(session) == [typed_id]
+    assert report["sidecar_gap_count"] == 1
+
+
+def test_a_change_of_letter_case_is_no_faber_transition(isolated_db):
+    """The report's key says transitions: a trend leg that changed state. The
+    stored word changed its spelling once ("IN", then "in") while the leg
+    stayed in; that is no transition, and the next real one is still counted."""
+    from app.db import session_scope
+
+    history = [
+        make_input(identity=letter * 64, computed_at=f"2026-08-25T{hour}:00:00+00:00",
+                   faber=word).model_copy(update={"snapshot_id": None})
+        for letter, hour, word in (("a", "18", "IN"), ("b", "22", "in"), ("c", "23", "out"))
+    ]
+    _persist_inputs(history)
+    with session_scope() as session:
+        report = transition_statistics(session)
+
+    assert report["faber_transitions"] == {"SPY:in->out": 1}
+
+
 def test_statistics_cli_writes_reports_without_mutating_the_database(
         isolated_db, tmp_path, capsys):
     from app.cli import main

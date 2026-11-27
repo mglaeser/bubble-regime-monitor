@@ -295,7 +295,8 @@ class TestConfiguration:
         for name in ("LLM_API_BASE_URL", "LLM_API_KEY", "LLM_MODEL", "LLM_AUTH_HEADER"):
             monkeypatch.setenv(name, "")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "legacy-only")  # pragma: allowlist secret
-        assert Settings(_env_file=None).llm_configured is False
+        with pytest.raises(GatewayConfigError):
+            GatewayConfig.from_settings(Settings(_env_file=None))
 
     def test_partial_settings_fail_before_http_client_construction(self, monkeypatch):
         import app.llm_gateway as gateway
