@@ -176,15 +176,16 @@ def claim_evaluation(
 
 
 class Deadline:
-    """A monotonic budget. `time.monotonic` because a wall-clock jump during an
-    NTP correction must not silently extend or truncate an evaluation."""
+    """A monotonic budget, or none when `budget_ms` is None. `time.monotonic`
+    because a wall-clock jump during an NTP correction must not silently extend
+    or truncate an evaluation."""
 
-    def __init__(self, budget_ms: int) -> None:
-        self._deadline = time.monotonic() + budget_ms / 1000.0
+    def __init__(self, budget_ms: int | None) -> None:
+        self._deadline = None if budget_ms is None else time.monotonic() + budget_ms / 1000.0
         self.budget_ms = budget_ms
 
     def check(self, where: str) -> None:
-        if time.monotonic() > self._deadline:
+        if self._deadline is not None and time.monotonic() > self._deadline:
             raise EvaluationDeadlineExceeded(
                 f"evaluation exceeded its {self.budget_ms}ms budget at {where}"
             )
@@ -255,7 +256,7 @@ def run_evaluation(
     live_profile: str = "default",
     now: datetime | None = None,
     lease_seconds: int = 300,
-    budget_ms: int = 1500,
+    budget_ms: int | None = 1500,
 ) -> EvaluationOutcome:
     """Claim, evaluate and apply one evaluation batch.
 
