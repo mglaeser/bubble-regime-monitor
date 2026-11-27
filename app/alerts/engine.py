@@ -56,6 +56,7 @@ from app.alerts.repository import (
     load_open_generations,
     load_recent_inputs,
     load_reminders_sent,
+    newest_recompute_input,
     resolve_predecessor,
     resolve_replaced_episodes,
     utc_ms,
@@ -257,6 +258,7 @@ def run_evaluation(
     now: datetime | None = None,
     lease_seconds: int = 300,
     budget_ms: int | None = 1500,
+    only_while_newest: bool = False,
 ) -> EvaluationOutcome:
     """Claim, evaluate and apply one evaluation batch.
 
@@ -358,6 +360,12 @@ def run_evaluation(
                 if registered is None or registered.status != RulesetStatus.PROMOTED:
                     raise EvaluationConflict(
                         f"ruleset {current.rules_sha256[:12]} is no longer the promoted one")
+            # A re-run asked to apply only while its input is the newest
+            # recompute's applies nothing once a newer one is captured, under
+            # the same lock: the newer recompute has its own evaluation.
+            if only_while_newest and newest_recompute_input(session) != alert_input.input_identity:
+                raise EvaluationConflict(
+                    f"input {alert_input.input_identity} is no longer the newest recompute's")
             # Only the current ruleset decides episodes (owner decision D2e).
             # An episode another ruleset opened in this mode and profile - the
             # candidate changed without a promotion - ends here, in the

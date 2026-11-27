@@ -177,7 +177,7 @@ def on_snapshot_committed(snapshot_id: int) -> None:
 
 
 def evaluate_input(input_identity: str, *, mode: str | None = None,
-                   now: datetime | None = None) -> Any:
+                   now: datetime | None = None, only_while_newest: bool = False) -> Any:
     """P0b + P1 + P2 for one captured sidecar.
 
     Separated from the hook so an operator can replay a single input by hand
@@ -207,4 +207,5 @@ def evaluate_input(input_identity: str, *, mode: str | None = None,
         now=now,
         lease_seconds=settings.alerts_eval_lease_s,
         budget_ms=settings.alerts_eval_budget_ms,
+        only_while_newest=only_while_newest,
     )

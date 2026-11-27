@@ -1545,6 +1545,33 @@ def test_an_older_input_is_not_rerun_once_a_newer_one_exists(
     assert _derisk_alerts() == 0
 
 
+def test_a_rerun_applies_nothing_once_a_newer_recompute_is_captured(
+        isolated_db, tmp_path, monkeypatch):
+    """The next recompute is captured and evaluated after the job chose its
+    re-run and before the re-run applies: the re-run applies nothing."""
+    from app.config import get_settings
+    from app.jobs import alert_recovery
+    from app.services import alert_integration
+
+    assert _evaluate(_slot_input(0, effective="trim"), tmp_path, monkeypatch) == "COMMITTED"
+    entered = _slot_input(1, effective="de-risk", base="de-risk", median=60.2)
+    assert _evaluate(entered, tmp_path, monkeypatch, budget_ms=0) == "TIMED_OUT"
+    monkeypatch.setenv("ALERTS_EVAL_BUDGET_MS", "60000")
+    get_settings.cache_clear()
+    rerun = alert_integration.evaluate_input
+
+    def a_newer_recompute_first(identity, **kwargs):
+        newer = _slot_input(2, effective="trim")
+        assert str(rerun(newer.input_identity,
+                         now=datetime.fromisoformat(newer.computed_at)).status) == "COMMITTED"
+        return rerun(identity, **kwargs)
+
+    monkeypatch.setattr(alert_integration, "evaluate_input", a_newer_recompute_first)
+    alert_recovery.run_once()
+
+    assert _derisk_alerts() == 0, "a de-risk alert while the band is trim"
+
+
 def test_the_reruns_stop_at_the_budget_and_the_job_reports_the_loss(
         isolated_db, tmp_path, monkeypatch):
     """ALERTS_EVAL_RETRY_MAX = 2: the first run and two re-runs, then every run
@@ -1560,6 +1587,32 @@ def test_the_reruns_stop_at_the_budget_and_the_job_reports_the_loss(
     assert _evaluations()[item.input_identity] == ("TIMED_OUT", 3)
     assert [run["retries_budget_exhausted"] for run in runs] == [0, 0, 1, 1]
     assert [run["status"] for run in runs] == ["critical", "critical", "degraded", "degraded"]
+
+
+@pytest.mark.parametrize(("shadow_runs", "reruns"), [(1, ["shadow"]), (3, [])])
+def test_every_run_of_the_input_counts_against_the_budget(
+        isolated_db, monkeypatch, shadow_runs, reruns):
+    """The live run timed out and the mode is shadow now: the runs in shadow
+    count against ALERTS_EVAL_RETRY_MAX = 2 as well, so after one shadow run
+    the job re-runs the input once more, and after three no more."""
+    from app.config import get_settings
+    from app.jobs import alert_recovery
+    from app.services import alert_integration
+
+    monkeypatch.setenv("ALERTS_MODE", "shadow")
+    monkeypatch.setenv("ALERTS_EVAL_RETRY_MAX", "2")
+    get_settings.cache_clear()
+    _row("TIMED_OUT", "live")
+    shadow = _row("TIMED_OUT", "shadow")
+    with session_scope() as session:
+        session.get(AlertEvaluation, shadow).attempt_count = shadow_runs
+    seen: list[str] = []
+    monkeypatch.setattr(alert_integration, "evaluate_input",
+                        lambda identity, **kwargs: seen.append(kwargs["mode"]))
+
+    alert_recovery.run_once()
+
+    assert seen == reruns
 
 
 def _row(status: str, mode: str) -> str:

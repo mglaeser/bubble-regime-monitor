@@ -27,6 +27,7 @@ from app.alerts.enums import (
     EpisodeStatus,
     Evaluability,
     EvaluationStatus,
+    InputOrigin,
     SuppressionReason,
 )
 from app.alerts.errors import EvaluationConflict
@@ -60,6 +61,16 @@ def load_input(session: Session, input_identity: str) -> AlertInput | None:
     if row is None:
         return None
     return AlertInput.model_validate(json.loads(row.payload))
+
+
+def newest_recompute_input(session: Session) -> str | None:
+    """The identity of the newest recompute's input, by its own time."""
+    moment = func.coalesce(AlertInputSnapshot.computed_at, AlertInputSnapshot.built_at)
+    return session.execute(
+        select(AlertInputSnapshot.input_identity)
+        .where(AlertInputSnapshot.origin == InputOrigin.RECOMPUTE)
+        .order_by(moment.desc()).limit(1)
+    ).scalar_one_or_none()
 
 
 def load_recent_inputs(session: Session, *, before: datetime, limit: int = 60) -> list[AlertInput]:

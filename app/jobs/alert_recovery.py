@@ -17,11 +17,12 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 
-from app.alerts.enums import EvaluationRunStatus, InputOrigin
-from app.alerts.models import AlertComponentHeartbeat, AlertEvaluation, AlertInputSnapshot
+from app.alerts.enums import EvaluationRunStatus
+from app.alerts.models import AlertComponentHeartbeat, AlertEvaluation
 from app.alerts.recovery import reconcile_sidecars, recover_evaluations
+from app.alerts.repository import newest_recompute_input
 from app.config import get_settings
 from app.db import session_scope
 from app.logging_conf import get_logger
@@ -147,12 +148,7 @@ def _unfinished_evaluations(session: Any, *, ambient_mode: str) -> list[str]:
     An input that has committed in the mode a re-run would use is done: a
     re-run under promoted rules or in a reduced mode commits a row of its own.
     """
-    moment = func.coalesce(AlertInputSnapshot.computed_at, AlertInputSnapshot.built_at)
-    newest = session.execute(
-        select(AlertInputSnapshot.input_identity)
-        .where(AlertInputSnapshot.origin == InputOrigin.RECOMPUTE)
-        .order_by(moment.desc()).limit(1)
-    ).scalar_one_or_none()
+    newest = newest_recompute_input(session)
     if newest is None:
         return []
     rows = session.execute(
@@ -170,10 +166,13 @@ def _retryable_inputs(session: Any, unfinished: list[str], *, limit: int,
                       exhausted: list[str] | None = None) -> list[tuple[str, str]]:
     """(input identity, mode) for unfinished evaluations still in budget.
 
-    The attempt count lives on the evaluation row, so a retry that abandons
-    again is counted and eventually stops. Without the bound one permanently
-    failing input would keep the recovery job busy forever, which is a worse
-    failure than the one it is fixing.
+    The attempt counts live on the evaluation rows, and the unfinished rows of
+    one input share one budget: a re-run in a reduced mode or under promoted
+    rules writes a row of its own, so it is counted with the row it re-runs,
+    and a retry that fails again stops wherever it runs. An input is re-run
+    once per job run, however many of its rows are unfinished. Without the
+    bound one permanently failing input would keep the recovery job busy
+    forever, which is a worse failure than the one it is fixing.
 
     The MODE is carried out with the identity rather than left to the ambient
     setting. A retry is a resumption of work that already had a mode, and
@@ -181,14 +180,18 @@ def _retryable_inputs(session: Any, unfinished: list[str], *, limit: int,
     can turn an interrupted shadow evaluation into a live one that sends.
     """
     exhausted = exhausted if exhausted is not None else []
+    rows = [(evaluation_id, row) for evaluation_id in unfinished
+            if (row := session.get(AlertEvaluation, evaluation_id)) is not None
+            and row.input_identity is not None]
     out: list[tuple[str, str]] = []
-    for evaluation_id in unfinished:
-        row = session.get(AlertEvaluation, evaluation_id)
-        if row is None or row.input_identity is None:
+    for evaluation_id, row in rows:
+        if any(identity == row.input_identity for identity, _mode in out):
             continue
-        if (row.attempt_count or 0) > limit:
+        attempts = sum(other.attempt_count or 0 for _id, other in rows
+                       if other.input_identity == row.input_identity)
+        if attempts > limit:
             log.warning("alert_evaluation_retry_budget_spent",
-                        evaluation_id=evaluation_id, attempts=row.attempt_count)
+                        evaluation_id=evaluation_id, attempts=attempts)
             exhausted.append(evaluation_id)
             continue
         out.append((row.input_identity, str(row.mode)))
@@ -234,7 +237,7 @@ def run_once() -> dict[str, Any]:
                 log.warning("alert_evaluation_retry_mode_reduced",
                             input_identity=identity, was=original_mode, now=mode)
             try:
-                outcome = evaluate_input(identity, mode=mode)
+                outcome = evaluate_input(identity, mode=mode, only_while_newest=True)
                 # An evaluation that RETURNS a failure raises nothing, so
                 # "it did not throw" is not the same as "it worked". A run
                 # that ends FAILED, TIMED_OUT, CONFLICT or ABANDONED left the
