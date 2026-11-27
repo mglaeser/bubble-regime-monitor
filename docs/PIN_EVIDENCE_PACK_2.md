@@ -328,4 +328,5 @@ mutation) and prints a single JSON document for operator review.
 *No PIN beyond A was resolved in this cycle. No score-shifting change is
 activated. The remaining PINs stay explicitly open: falsification date; B
 semantics/threshold; C canonical basis; D mapping; E quorum; F source chain;
-G execution design; the six S5 constants.*
+the six S5 constants. (G, the LPPLS execution design, was listed here until
+2026-11; it is resolved, see the PIN Decision Memo's banner.)*
