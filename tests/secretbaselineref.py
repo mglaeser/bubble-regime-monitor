@@ -1,4 +1,4 @@
-"""The accepted secret-baseline reference, in one place, as a pinned commit.
+"""The accepted secret baseline, in one place: the entries as a literal, the scan as a pinned commit.
 
 ## Why this module exists
 
@@ -53,6 +53,8 @@ from __future__ import annotations
 
 import json
 import subprocess
+
+from detect_secrets.core.secrets_collection import SecretsCollection
 
 #: The accepted baseline. A 40-hex commit id, written as a literal so that no
 #: ref lookup — and therefore no branch movement — can change it.
@@ -168,6 +170,49 @@ def _configuration(document: dict) -> dict:
             json.dumps(p, sort_keys=True)
             for p in document.get("plugins_used", [])),
     }
+
+
+#: The `results` of the approved baseline, in detect-secrets' record format:
+#: under each file, the detector type and the `hashed_secret` of every secret
+#: the committed baseline may hold. `line_number` and `is_verified` are left
+#: out: detect-secrets does not count them in a secret's identity.
+#:
+#: A literal, so that a change to it is in the diff a reviewer reads. The four
+#: are the SHA-1 digests of key fixtures of the admin-key and read-access tests
+#: in tests/test_audit_v331.py, as `.secrets.baseline` records them; a digest
+#: is credential-shaped to the scan, hence the pragmas.
+ACCEPTED_ENTRIES: dict[str, list[dict[str, str]]] = {
+    "tests/test_audit_v331.py": [
+        # the shipped placeholder key, which must not authenticate
+        {"type": "Secret Keyword", "hashed_secret": "2d1c3689e7808257bc4766b7a041f4ab23f18221"},  # pragma: allowlist secret
+        # the made-up key the tests configure as the real one
+        {"type": "Secret Keyword", "hashed_secret": "ae8d7f6c6ba6a60c610084db45a951794b1c3805"},  # pragma: allowlist secret
+        # the wrong key, refused with 401
+        {"type": "Secret Keyword", "hashed_secret": "a4b48a81cdab1e1a5dd37907d6c85ca1c61ddc7c"},  # pragma: allowlist secret
+        # the non-ASCII key, refused with 401
+        {"type": "Secret Keyword", "hashed_secret": "7859fe48ea5b2d07394321d3d1b6c80e14a9abb8"},  # pragma: allowlist secret
+    ],
+}
+
+
+def assert_accepted_entries(current: dict) -> None:
+    """The baseline holds exactly the secrets of `ACCEPTED_ENTRIES`, as
+    detect-secrets identifies them.
+
+    Both are loaded with detect-secrets' `SecretsCollection.load_from_baseline`
+    and compared with its `==`, under which a secret is its file, its hash and
+    its type (`PotentialSecret.fields_to_compare`), whatever its line number or
+    verification flag. An added secret needs a reviewer, and so does one
+    exchanged for another: the scan accepts whatever secret the new hash belongs
+    to. A removed one leaves the literal in the same change, so that no room for
+    a later addition opens."""
+    now = SecretsCollection.load_from_baseline(current)
+    accepted = SecretsCollection.load_from_baseline({"results": ACCEPTED_ENTRIES})
+    if now != accepted:
+        raise AssertionError(
+            f"baseline secrets {now.json()} are not the accepted {accepted.json()}: "
+            "an added or exchanged secret needs review; a removed one has to leave "
+            "ACCEPTED_ENTRIES in tests/secretbaselineref.py in the same change")
 
 
 def assert_identical_to_reference(current: bytes, reference: bytes) -> None:
