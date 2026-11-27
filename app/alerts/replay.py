@@ -592,6 +592,11 @@ def run_replay(
                 mode=Mode.DRYRUN,
                 live_profile=config.live_profile,
                 now=_moment_of(alert_input),
+                # No deadline: a replay's result must not depend on the host's
+                # clock, and a replay runs offline (the dryrun command, the gate
+                # script, tests), while the service's own evaluations keep their
+                # budget (ALERTS_EVAL_BUDGET_MS, 1,500 ms by default).
+                budget_ms=None,
             )
             if outcome.status == EvaluationRunStatus.COMMITTED:
                 summary.evaluations_committed += 1
