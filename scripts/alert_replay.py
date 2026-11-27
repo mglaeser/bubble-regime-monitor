@@ -5,9 +5,9 @@ gate is a thing an operator runs and commits the output of, and that deserves
 an entry point with a stable name and a stable default output path rather than
 a remembered flag combination.
 
-    python -m scripts.alert_replay --state-db /tmp/replay.db
-    python -m scripts.alert_replay --state-db /tmp/replay.db --from 2025-01-01
-    python -m scripts.alert_replay --state-db /tmp/replay.db --out docs/…json
+    python -m scripts.alert_replay
+    python -m scripts.alert_replay --from 2025-01-01
+    python -m scripts.alert_replay --out docs/…json
 
 Exit codes are the gate:
 
@@ -33,8 +33,6 @@ def build_parser() -> argparse.ArgumentParser:
         prog="alert_replay",
         description="Replay captured alert sidecars into an isolated database",
     )
-    parser.add_argument("--state-db", required=True,
-                        help="path for the ISOLATED replay database (recreated each run)")
     parser.add_argument("--from", dest="from_moment", help="ISO-8601 window start")
     parser.add_argument("--to", dest="to_moment", help="ISO-8601 window end")
     parser.add_argument("--source-db", help="source DB URL (default: the app's)")
@@ -54,7 +52,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     from app.alerts.cli import main as cli_main
 
-    forwarded = ["dryrun", "--state-db", args.state_db]
+    forwarded = ["dryrun"]
     for flag, value in (("--from", args.from_moment), ("--to", args.to_moment),
                         ("--source-db", args.source_db), ("--rules", args.rules),
                         ("--phrases", args.phrases), ("--out", args.out)):
