@@ -230,17 +230,20 @@ def variance_risk_premium(vix_level: float, daily_spy_closes: list[float]) -> fl
 
 # The VRP is annualised implied less annualised realised variance, in percent
 # squared: a VIX of 16 against 10 % realised volatility reads 256 - 100 = 156.
-# It carries no sanity band: vrp_sane's -50..150 called 320 of the 605
-# production readings to 2026-11-10 a units or data error, the median (153.6)
-# among them.
 VRP_UNITS = "annualized_variance_pts_pct2"
 
 
 @dataclass
 class FastAlarm:
+    """The VRP carries no sanity band: `vrp_sane`'s -50..150 was set for readings
+    that "run roughly single digits to low tens", the size of the VRP divided by 12
+    (production's median, 153.6, is 12.8 so divided), and on the annualised value
+    it called 320 of the 605 production readings to 2026-11-10 a units or data
+    error, the median and all six readings with the flag set among them."""
+
     term_structure: str
     vrp: float | None
-    vrp_flag: bool
+    vrp_flag: bool | None
     skew: float | None
     skew_label: str = "coincident context only"
     vrp_as_of: str | None = None   # the session both legs of the VRP close on
@@ -272,14 +275,15 @@ def fast_alarm(term_structure_state: str, vix_level: float | None,
                daily_spy_closes: list[float] | None, skew: float | None,
                vrp_as_of: str | None = None) -> FastAlarm:
     """`daily_spy_closes` are SPY's closes through the day `vix_level` closed
-    on (closes_through), and `vrp_as_of` is that day."""
+    on (closes_through), and `vrp_as_of` is that day. Without the day there is
+    no premium and no flag: both are None."""
     vrp: float | None = None
-    if vix_level is not None and daily_spy_closes:
+    if vix_level is not None and daily_spy_closes and vrp_as_of:
         vrp = variance_risk_premium(vix_level, daily_spy_closes)
     return FastAlarm(
         term_structure=term_structure_state,
         vrp=round(vrp, 2) if vrp is not None else None,
-        vrp_flag=vrp is not None and vrp <= 0.0,
+        vrp_flag=(vrp <= 0.0) if vrp is not None else None,
         skew=skew,
         vrp_as_of=vrp_as_of[:10] if vrp is not None and vrp_as_of else None,
     )

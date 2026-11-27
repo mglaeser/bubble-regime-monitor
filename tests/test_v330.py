@@ -200,6 +200,6 @@ class TestVrpUnits:
         closes = [100.0]
         for i in range(30):
             closes.append(closes[-1] * (1.008 if i % 2 == 0 else 0.992))
-        fa = fast_alarm("contango", 14.0, closes, 128.0).as_dict()
+        fa = fast_alarm("contango", 14.0, closes, 128.0, vrp_as_of="2026-11-09").as_dict()
         assert fa["vrp_units"] == "annualized_variance_pts_pct2"
         assert {key for key, value in fa.items() if isinstance(value, bool)} == {"vrp_flag"}

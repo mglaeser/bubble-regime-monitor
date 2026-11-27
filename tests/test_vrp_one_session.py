@@ -51,6 +51,13 @@ def test_without_a_spy_close_on_the_vix_day_there_is_no_premium(vix_as_of, serie
     assert alarm["vrp"] is None and alarm["vrp_as_of"] is None
 
 
+def test_closes_handed_over_without_their_day_give_no_premium_and_no_flag():
+    """A direct caller that passes closes and no day gets neither a value nor a
+    verdict without a session."""
+    alarm = legs.fast_alarm("flat", 16.61, CALM, None).as_dict()
+    assert (alarm["vrp"], alarm["vrp_flag"], alarm["vrp_as_of"]) == (None, None, None)
+
+
 def test_the_recompute_pairs_the_level_with_its_own_day(isolated_db):
     """compute_snapshot hands the fast alarm the level's own date and the
     dated series, not the bare newest closes."""

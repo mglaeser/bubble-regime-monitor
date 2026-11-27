@@ -40,8 +40,8 @@ def test_the_vrp_is_implied_minus_realised_and_flags_below_zero():
     closes = _one_percent_a_day()
     # VIX 20 -> implied variance 0.04; less 0.0252 realised = 0.0148 -> 148 variance points
     assert legs.variance_risk_premium(20.0, closes) == pytest.approx(148.0)
-    assert legs.fast_alarm("contango", 20.0, closes, 128.0).vrp_flag is False
+    assert legs.fast_alarm("contango", 20.0, closes, 128.0, vrp_as_of="2026-11-09").vrp_flag is False
     # VIX 10 -> 0.01 - 0.0252 < 0: realised above implied, the flag is up
-    alarm = legs.fast_alarm("contango", 10.0, closes, 128.0)
+    alarm = legs.fast_alarm("contango", 10.0, closes, 128.0, vrp_as_of="2026-11-09")
     assert alarm.vrp == pytest.approx(-152.0)
     assert alarm.vrp_flag is True
