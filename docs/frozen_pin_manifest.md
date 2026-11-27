@@ -2,12 +2,14 @@
 
 > **Governance note (F-01 / L-07).** This manifest DOCUMENTS the frozen,
 > score-effective constants of the bubblegauge engine for governance and
-> change-control. It is a mirror of the values currently hard-coded in the
-> engine — it is **NOT** yet wired into the engine, and the engine is **NOT**
-> switched to load its constants from this file (that is the deferred F-01/L-07
-> runtime-artifact work). Every value below is quoted verbatim from the live
-> source as of service_version **3.7.7**. The golden fixture headline (seeded
-> Monte-Carlo median) is **52.43**, IQR **(50, 55)**.
+> change-control. It is the readable mirror of `frozen_methodology.json`, which
+> the engine loads at import (`app/methodology.py`). The test file
+> `tests/test_frozen_methodology.py` pins the artifact's bytes and holds the
+> engine's constants to it. The page itself is kept by hand; the engine never
+> reads it: where the page and the artifact differ, the artifact is right. The
+> service version is not a pin and is not listed here (`app/config.py` has it).
+> The golden fixture's deterministic point score is **52.43**, its seeded Monte
+> Carlo median (the headline) **52.56**, IQR **(50, 55)**.
 >
 > Provisional / deferred items are labelled inline. In particular the S5 lag
 > convention is **`provisional_positional`** (defects C-01 / C-02 / C-03 deferred
@@ -15,7 +17,7 @@
 > emits `{"s5_lag": "provisional_positional", "known_defects": ["C-01","C-02","C-03"]}`
 > in its runtime payload. Do not treat a provisional pin as final.
 >
-> Source-of-truth files:
+> The files the "Source" columns below point to, where the engine uses them:
 > `app/engine/aggregate.py`, `app/engine/montecarlo.py`, `app/config.py`,
 > `app/references.py`, `app/services/compute.py`, `app/indicators/*.py`,
 > `r/gsadf.R`.
@@ -99,14 +101,14 @@ The ladder below is statistic-agnostic; `gsadf.statistic` selects what `stat` is
 
 | Constant | Value | Source |
 |---|---|---|
-| Scored statistic | `gsadf.statistic = "bsadf_endpoint"` — BSADF at the last observation vs the last row of the simulated BSADF CV matrix. `"gsadf_sup"` selects the pre-v4.0 sup. Unknown value → fail-closed FLOOR. | `frozen_methodology.json`; `compute.py:scored_s4_statistic` |
+| Scored statistic | `gsadf.statistic = "bsadf_endpoint"` — BSADF at the last observation vs the last row of exuber's date-stamping critical values (`bsadf_cv`; the SADF critical value for the sample size). `"gsadf_sup"` selects the pre-v4.0 sup. Unknown value → fail-closed FLOOR. | `frozen_methodology.json`; `compute.py:scored_s4_statistic` |
 | Contested rule | `gsadf.contested_rule = "asymmetric"` (v4.1) — a contested REJECTION stays capped at 0.25; a contested NON-REJECTION is released to `SUB_NULL`. `"symmetric"` restores the pre-v4.1 unconditional cap. Unknown value → fail-closed FLOOR. | `frozen_methodology.json`; `compute.py:scored_s4_contested_rule` |
 
 | Condition | Value | Source |
 |---|---|---|
 | Explosive & non-contested (`stat > cv95`) | `1.0` | `s4_gsadf.py` |
 | `stat > cv90` | `0.5` | `s4_gsadf.py` |
-| Contested REJECTION / stale / data-missing / degenerate CV / unknown rule | `SUB_CONTESTED_OR_STALE = 0.25` | `s4_gsadf.py` |
+| Contested REJECTION / data-missing / degenerate CV / unknown rule | `SUB_CONTESTED_OR_STALE = 0.25` | `s4_gsadf.py` |
 | Contested NON-rejection (`stat <= cv90`) under `contested_rule = "asymmetric"` | `SUB_NULL = 0.05` | `s4_gsadf.py` |
 | Tested-and-not-explosive | `0.05` | `s4_gsadf.py` |
 | COMPUTED gate | finite `stat`, finite `cv90 < cv95`, else FLOOR (0.25, quality 0.0) | `s4_gsadf.py`/`compute.py` (G-04) |
@@ -156,6 +158,7 @@ The ladder below is statistic-agnostic; `gsadf.statistic` selects what `stat` is
 | `O_min` / `D_min` / tc-window | library DS-LPPLS defaults **⚠ from module comment, not set in our code** — confirm vs pinned lppls 0.6.24 before final freeze | `d4_lppls.py` header comment |
 | Sub-score | `clip(pos_confidence_at_t2, 0, 1)` | `d4_lppls.py:sub_score` |
 | Quality | `1.0` full scan / `0.5` partial (<100 windows) / `0.0` FLOOR | `d4_lppls.py` |
+| Fit seed (since 2026-11) | the Monte Carlo's frozen seed, `monte_carlo.seed` = `20260711`, set in the forked fit worker; no key of its own | `d4_lppls.py:LPPLS_SEED` |
 | Subprocess timeout | `lppls_timeout_s = 1500` | `config.py` |
 
 ## 5. VIX term-structure thresholds and multipliers
@@ -221,7 +224,7 @@ s2, s3, d1 and d4 count NYSE sessions since `as_of` (`compute.py:SESSION_AGED`);
 | s1 full / s1 ECY-only shim | `1.0` / `0.5` |
 | s4 COMPUTED / FLOOR | `1.0` / `0.0` (sub-score still 0.25) |
 | s5 EBP / BAA-DGS10 / HY-OAS | `1.0` / `0.5` / `0.3` |
-| d1 breadth | `min(1.0, breadth_n / 503)` |
+| d1 breadth | `min(1.0, breadth_n / breadth_universe)` (the current constituent list's size, not a fixed 503) |
 | d3 hyperscaler | `usable / 5` |
 | d4 VALID(_ZERO) full / partial / FLOOR | `1.0` / `0.5` / `0.0` |
 | default | `1.0` |
@@ -232,9 +235,10 @@ Source: `compute.py`, `d4_lppls.py`.
 
 - Never HTTP 500 on data failure: fall back down the chain, or drop the indicator and renormalize its block, always with a provenance note (guardrail #5).
 - Drop + renormalize over present keys (`aggregate.py:renormalize`; raises if a block empties → recompute returns None, no 500).
-- d4 FLOOR / s4 FLOOR: row stays in payload with `quality=0.0`; the value is EXCLUDED from the geometric mean (block renormalizes). `VALID_ZERO` (a genuine 0) ENTERS the aggregation.
+- d4 FLOOR: row stays in payload with `quality=0.0`; the value is EXCLUDED from the geometric mean (Block D renormalizes). `VALID_ZERO` (a genuine 0) ENTERS the aggregation.
+- s4 FLOOR: row stays in payload with `quality=0.0` and KEEPS 0.25 (`SUB_CONTESTED_OR_STALE`) in the geometric mean of Block S, labelled `imputation: missing_to_contested_floor` (AGENTS.md rule 4).
 - s5 chain: EBP (≥24 mo) → BAA-DGS10 proxy (≥24 mo) → HY-OAS 3yr → drop.
-- d2: within 75d SLA → YoY + rollover; else last-good cached (rollover unknown); else drop.
+- d2: a reference month at most 75 days old → YoY + rollover from the file, or, when the file cannot be read or lacks the month a year back, the stored reading of the latest month computed from it (rollover unknown); else drop.
 
 ## 12. Monte Carlo constants
 
@@ -258,7 +262,7 @@ MC anchor ranges: CAPE window integers `U[20,40]`; concentration `lo U(16,20)`, 
 | MC CV replications | `MC_NREP = 2000` | `r/gsadf.R` |
 | MC CV seed | `MC_SEED = 20260711` | `r/gsadf.R` |
 | CV cache key | `mc_cv_n{n}_nrep{nrep}_seed{seed}.rds` (G-01) | `r/gsadf.R` |
-| Series fed | last 360 monthly log prices (QQQ proxy for NDX) | `compute.py` |
+| Series fed | last 360 completed monthly log prices of the long history (QQQ proxy for NDX); the month in progress is not in the fit | `compute.py` |
 | Timeout / contested default | `gsadf_timeout_s = 1800` / `gsadf_contested = True` | `config.py` |
 
 Note: `1.49` is a SADF critical value and must NEVER be hard-coded; the simulated GSADF 95% CV is ~1.9–2.1 depending on T.
@@ -267,8 +271,7 @@ Note: `1.49` is a SADF critical value and must NEVER be hard-coded; the simulate
 
 | Item | Value | Source |
 |---|---|---|
-| service_version | `3.7.7` | `config.py` |
-| Golden fixture headline | `52.43`, IQR `(50, 55)` | `references.py` CHANGELOG; `tests/conftest.py` golden inputs |
+| Golden fixture: point score / seeded MC median (the headline) | `52.43` / `52.56`, IQR `(50, 55)` | `tests/test_golden_fixture.py`; `tests/conftest.py` golden inputs |
 | S1 no-history CAPE step | `35` | `compute.py` |
 
 ---
@@ -276,6 +279,6 @@ Note: `1.49` is a SADF critical value and must NEVER be hard-coded; the simulate
 ## Values to verify before a hard freeze
 
 1. **LPPLS `O_min` / `D_min` / tc-window params.** Not set in our code — `FILTER_CONDITIONS` overrides only `m`/`w`. Quoted from the `d4_lppls.py` module comment as the "library DS-LPPLS defaults" for lppls==0.6.24. Confirm against the pinned lppls 0.6.24 source before pinning them as ours.
-2. **Golden `52.43` / IQR `(50,55)`.** Sourced from the CHANGELOG prose and the seeded golden fixture (`tests/conftest.py` + `tests/test_golden_fixture.py`); the number is regenerated by the seeded Monte Carlo, not stored as a byte literal.
+2. **Golden `52.43` / median `52.56` / IQR `(50,55)`.** `52.43` is the deterministic point score of the golden sub-scores (`tests/conftest.py`), asserted by `tests/test_golden_fixture.py` and recorded in the artifact as `_meta.golden_headline`. The median and the IQR are regenerated by the seeded Monte Carlo (n = 100,000, seed 20260711) and asserted by the same test to three decimals (52.5605; 50.0439, 54.9951).
 
-*This manifest is documentation for governance (F-01 / L-07). The engine is not yet switched to load from it. Research and engineering documentation — not investment advice.*
+*This manifest is documentation for governance (F-01 / L-07). The engine loads `frozen_methodology.json`, not this page. Research and engineering documentation — not investment advice.*

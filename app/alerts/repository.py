@@ -25,6 +25,7 @@ from app.alerts.enums import (
     ConditionState,
     DeliveryKind,
     EpisodeStatus,
+    Evaluability,
     EvaluationStatus,
     SuppressionReason,
 )
@@ -476,9 +477,10 @@ def load_notification_memories(
 
 
 def load_reminders_sent(session: Session, *, episode_ids: set[str]) -> dict[str, int]:
-    """Reminders sent per episode: the REMINDER deliveries whose body
-    represented it, which `mark_sent` alone marks `delivered`. A queued,
-    UNKNOWN or failed reminder is not one. Episodes with none are absent."""
+    """Reminders sent per episode: the REMINDER members marked `delivered`,
+    by `mark_sent` for a body that represented them (never while queued,
+    UNKNOWN or failed) and by a replay for each one it takes as sent.
+    Episodes with none are absent."""
     if not episode_ids:
         return {}
     rows = session.execute(
@@ -624,27 +626,34 @@ def resolve_predecessor(session: Session, alert_input: AlertInput) -> AlertInput
 
 def load_latest_compatible_input(session: Session, *, like: AlertInput,
                                  ) -> AlertInput | None:
-    """The newest EVALUABLE sidecar, only if compatible with `like` (17.4).
+    """The newest sidecar of the trigger's origin, if compatible with `like` (17.4).
 
     Current facts may join a render only when the schema version and the
     methodology are the ones the trigger was evaluated under — otherwise the
     message would mix numbers computed two different ways and present them as
-    one comparison.  Deliberately inspect the newest row *before* applying the
-    compatibility check: selecting the newest compatible historical row would
-    silently return the trigger when a newer methodology exists, making stale
-    context look current. Incompatible or absent means the caller renders from
-    trigger facts alone, with CONTEXT_STALE.
+    one comparison.  Deliberately inspect the newest row *before* applying any
+    check: selecting the newest row that passes one would silently return an
+    older reading and make stale context look current. Incompatible, not
+    evaluable or absent means the caller renders from trigger facts alone,
+    with CONTEXT_STALE.
+
+    Eligibility is no filter: the evaluator decides on PARTIAL inputs, and the
+    message about a decision is worded from what was decided on.
+
+    Same origin, because a comparison of trigger and current needs like with
+    like: a watchdog sidecar carries no market fact and a recompute sidecar no
+    missed-slot count. The watchdog's sidecars of one outage share
+    `computed_at` (the last snapshot's), hence the second sort key.
     """
     row = session.execute(
         select(AlertInputSnapshot)
-        .where(
-            AlertInputSnapshot.evaluation_eligibility == "EVALUABLE",
-        )
+        .where(AlertInputSnapshot.origin == str(like.origin))
         .order_by(func.coalesce(AlertInputSnapshot.computed_at,
-                                AlertInputSnapshot.built_at).desc())
+                                AlertInputSnapshot.built_at).desc(),
+                  AlertInputSnapshot.built_at.desc())
         .limit(1)
     ).scalars().first()
-    if row is None:
+    if row is None or row.evaluation_eligibility == Evaluability.NOT_EVALUABLE:
         return None
     candidate = AlertInput.model_validate(json.loads(row.payload))
     if candidate.schema_version != like.schema_version \

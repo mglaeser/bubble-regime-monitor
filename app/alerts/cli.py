@@ -9,8 +9,8 @@ read-only unless its name says otherwise.
     python -m app.alerts.cli ruleset
     python -m app.alerts.cli health
     python -m app.alerts.cli pending
-    python -m app.alerts.cli evaluate --input-identity ID [--shadow]
-    python -m app.alerts.cli dryrun [--from T] [--to T] --state-db PATH [--out PATH]
+    python -m app.alerts.cli evaluate --input-identity ID     # always shadow
+    python -m app.alerts.cli dryrun [--from T] [--to T] [--out PATH]
     python -m app.alerts.cli explain --evaluation-id ID
     python -m app.alerts.cli recover-evaluations --once
     python -m app.alerts.cli reconcile-sidecars
@@ -232,7 +232,9 @@ def cmd_pending(_args: argparse.Namespace) -> int:
 def cmd_evaluate(args: argparse.Namespace) -> int:
     from app.services.alert_integration import evaluate_input
 
-    outcome = evaluate_input(args.input_identity, mode="shadow" if args.shadow else None)
+    # Always shadow. The --shadow flag was `store_true, default=True`: on
+    # whether given or not, so it never chose anything.
+    outcome = evaluate_input(args.input_identity, mode="shadow")
     if outcome is None:
         _print({"error": "no captured sidecar with that identity, or alerting is disabled"})
         return 1
@@ -283,7 +285,6 @@ def cmd_dryrun(args: argparse.Namespace) -> int:
     settings = get_settings()
     config = ReplayConfig(
         source_db_url=args.source_db or settings.db_url,
-        state_db_path=Path(args.state_db),
         from_moment=_parse_moment(args.from_moment),
         to_moment=_parse_moment(args.to_moment),
         mandatory_events_path=Path(args.events) if args.events else None,
@@ -423,12 +424,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     evaluate = sub.add_parser("evaluate", help="evaluate one captured sidecar")
     evaluate.add_argument("--input-identity", required=True)
-    evaluate.add_argument("--shadow", action="store_true", default=True)
     evaluate.set_defaults(func=cmd_evaluate)
 
     dryrun = sub.add_parser("dryrun", help="replay captured sidecars (isolated, no send)")
-    dryrun.add_argument("--state-db", required=True,
-                        help="path for the ISOLATED replay database (recreated)")
     dryrun.add_argument("--from", dest="from_moment", help="ISO-8601 window start")
     dryrun.add_argument("--to", dest="to_moment", help="ISO-8601 window end")
     dryrun.add_argument("--source-db", help="source DB URL (default: the app's)")

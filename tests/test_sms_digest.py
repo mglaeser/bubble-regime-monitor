@@ -43,7 +43,8 @@ class TestDeterministicReport:
     def test_within_single_sms_and_has_core(self):
         body = deterministic_report(_snap(), 160)
         assert len(body) <= 160
-        assert "41/100" in body and "hold" in body
+        # The median is 40.6: the headline is the whole points reached.
+        assert "40/100" in body and "hold" in body
         # v3.6.0: the digest carries no disclaimer tag (frees chars for content)
         assert "Research, not advice." not in body
         assert body.isascii()
@@ -56,7 +57,7 @@ class TestDeterministicReport:
         # An absurdly tight limit must still keep the score, dropping the tag.
         body = deterministic_report(_snap(), 40)
         assert len(body) <= 40
-        assert "41/100" in body
+        assert "40/100" in body
 
 
 class TestSipgateSender:
