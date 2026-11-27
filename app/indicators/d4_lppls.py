@@ -52,6 +52,8 @@ EPISTEMIC GUARDRAILS: the five, verbatim, are in app/references.py.
 from __future__ import annotations
 
 import math
+import os
+import random
 
 from app import methodology as _M
 
@@ -76,6 +78,9 @@ LPPLS_INNER_INCREMENT = _M.get_path("indicators", "d4", "inner_increment")      
 LPPLS_MAX_SEARCHES = _M.get_path("indicators", "d4", "max_searches")
 LPPLS_MIN_WINDOWS_FULL_QUALITY = _M.get_path("indicators", "d4", "min_windows_full_quality")  # 100
 MIN_CLOSES = _M.get_path("indicators", "d4", "min_closes")
+# The fit's seed is the methodology's one pinned seed (AGENTS.md ground rule 6,
+# operator PIN G); it has no key of its own in the frozen artifact.
+LPPLS_SEED = _M.get_path("monte_carlo", "seed")
 # dt bands (trading days) for the multi-scale diagnostics; long extends to the
 # scan maximum so every fitted window belongs to exactly one band.
 LPPLS_BANDS: tuple[tuple[str, int, int], ...] = tuple(
@@ -283,9 +288,21 @@ def compute_confidence_isolated(daily_closes: list[float], timeout_s: int = 1800
 
 if __name__ == "__main__":
     import json as _json
+    import multiprocessing as _mp
     import sys as _sys
 
     _payload = _json.loads(_sys.stdin.read())
+    # lppls draws each fit's starting point with the stdlib `random`, inside
+    # the worker its Pool forks, and CPython re-seeds `random` from the OS in
+    # every forked child, so a seed set in this process does nothing. This
+    # hook runs in the child after CPython's own (at-fork hooks run in the
+    # order they were registered) and gives the worker the pinned seed.
+    # lppls opens its Pool from the default context, so this process fixes
+    # that context to fork, the start method whose workers inherit the hook;
+    # the service runs in its Linux image (Containerfile), where fork and
+    # os.register_at_fork both exist.
+    _mp.set_start_method("fork", force=True)
+    os.register_at_fork(after_in_child=lambda: random.seed(LPPLS_SEED))
     # Route all fit-time output (tqdm, lppls' print(e) in parent AND forked
     # workers) to stderr so stdout carries only the framed result line.
     _real_stdout = _sys.stdout

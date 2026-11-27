@@ -212,8 +212,12 @@ def b_policy_report() -> dict[str, Any]:
 
 def assemble_decision_packages() -> dict[str, Any]:
     """Collate the per-PIN evidence packages. Studies that need the production
-    host's network/data (EDGAR PIT grid, ALFRED vintages, price seeds, Atom
-    G1-vs-mp benchmarks) are explicitly PENDING_HOST — never silently omitted."""
+    host's network/data (EDGAR PIT grid, ALFRED vintages, price seeds) are
+    explicitly PENDING_HOST — never silently omitted.
+
+    PIN G (the LPPLS execution model) is resolved and no longer listed: the
+    fit's worker is seeded (app/indicators/d4_lppls.py), so no benchmark of a
+    deterministic reference against the multiprocessing path is pending."""
     pending = {"status": "PENDING_HOST",
                "run_on": "production host (network + data access required)"}
     return {
@@ -226,9 +230,6 @@ def assemble_decision_packages() -> dict[str, Any]:
                              "harness": "docs/harnesses/de_d3_pit_harness.py"},
         "F_ath_basis": {**pending,
                         "harness": "docs/harnesses/f_ath_continuity_harness.py"},
-        "G_lppls_execution": {**pending,
-                              "needs": "Atom runtime benchmark: G1 deterministic "
-                                       "reference vs multiprocessing path"},
         "C_ndx_identity": {**pending,
                            "harness": "docs/harnesses/c_ndx_drift_harness.py"},
     }

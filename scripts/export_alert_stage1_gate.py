@@ -27,7 +27,6 @@ import argparse
 import hashlib
 import json
 import sys
-import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -96,17 +95,15 @@ def build_evidence() -> dict:
     event_document = json.loads(event_bytes)
 
     runs: dict[str, dict] = {}
-    with tempfile.TemporaryDirectory() as tmp:
-        for stage in STAGES:
-            config = ReplayConfig(
-                source_db_url="sqlite:///not-used-the-history-is-passed-in",
-                state_db_path=Path(tmp) / f"stage{stage}.db",
-                evaluate_at_stage=stage,
-                mandatory_events_path=EVENTS if EVENTS.exists() else None,
-            )
-            summary = run_replay(config=config, ruleset=artifacts.ruleset,
-                                 phrase_set=artifacts.phrase_set, inputs=inputs)
-            runs[f"stage_{stage}"] = _without_digests(summary.as_dict())
+    for stage in STAGES:
+        config = ReplayConfig(
+            source_db_url="sqlite:///not-used-the-history-is-passed-in",
+            evaluate_at_stage=stage,
+            mandatory_events_path=EVENTS if EVENTS.exists() else None,
+        )
+        summary = run_replay(config=config, ruleset=artifacts.ruleset,
+                             phrase_set=artifacts.phrase_set, inputs=inputs)
+        runs[f"stage_{stage}"] = _without_digests(summary.as_dict())
 
     document = history.document()
     return {
