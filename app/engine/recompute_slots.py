@@ -16,9 +16,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-# UTC hours at which a full recompute is scheduled. Offset +2h so runs sit 1h
-# AFTER the 01:00/13:00 breadth sweeps while keeping the historical 06/18
-# anchors (see app/scheduler.py).
+# UTC hours at which a full recompute is scheduled: every four hours on the
+# historical 06/18 anchors (see app/scheduler.py).
 RECOMPUTE_SLOT_HOURS: tuple[int, ...] = (2, 6, 10, 14, 18, 22)
 
 SLOT_INTERVAL_HOURS = 4
