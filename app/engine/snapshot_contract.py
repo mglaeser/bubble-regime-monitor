@@ -198,13 +198,13 @@ def build_red_flag_meta(
     breadth_as_of: str | None,
     breadth_stale: bool | None,
     near_ath_available: bool = False,
-    near_ath_state: bool | None = None,
 ) -> dict[str, Any]:
     """Build the typed red-flag contract for one snapshot.
 
     Callers pass the same inputs the frozen `evaluate_red_flags` consumed, plus
     per-source provenance. Nothing here re-decides whether a flag fired: the
-    booleans come from the already-evaluated `red_flags`.
+    booleans come from the already-evaluated `red_flags`. That is why rf4's
+    near-ATH leg enters as its availability alone.
     """
     values = red_flags.as_dict()
 
@@ -280,13 +280,3 @@ def build_red_flag_meta(
         "override_fireable_universe_count": sum(1 for f in facts.values() if f.fireable),
         "override_fired": bool(red_flags.override_fired),
     }
-
-
-def fireable_universe_count(red_flag_meta: dict[str, Any]) -> int:
-    """Read the persisted fireable universe. Never recomputed by a consumer."""
-    return int(red_flag_meta.get("override_fireable_universe_count", 0))
-
-
-def required_flag_count(red_flag_meta: dict[str, Any]) -> int:
-    """Read the persisted override requirement. Never hardcoded by a consumer."""
-    return int(red_flag_meta.get("override_required_count", 0))
