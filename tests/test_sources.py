@@ -275,9 +275,8 @@ class TestSourceChains:
 
     def _serve(self, monkeypatch, months: list[tuple[float | None, float]], down: str | None = None) -> None:
         """Shiller's page, the file it links (as in ie_data.xls: the sheet "Data", seven lines
-        above the column headings, a Date, a P and a CAPE cell per month, and below the last
-        month the note that names its close) and multpl's page answer; `down` and any other URL
-        raise."""
+        above the column headings, a Date and a CAPE cell per month) and multpl's page answer;
+        `down` and any other URL raise."""
         import io
 
         import pandas as pd
@@ -285,9 +284,7 @@ class TestSourceChains:
         import app.sources.cape as cape
 
         workbook = io.BytesIO()
-        month = calendar.month_abbr[round(months[-1][0] * 100) % 100]
-        rows = [["Robert J. Shiller"]] + [[None]] * 6 + [["Date", "P", "CAPE"]] + \
-            [[stamp, None, value] for stamp, value in months] + [[None, f"{month} price is {month} 12th close"]]
+        rows = [["Robert J. Shiller"]] + [[None]] * 6 + [["Date", "CAPE"]] + [list(m) for m in months]
         pd.DataFrame(rows).to_excel(workbook, sheet_name="Data", header=False, index=False)
         answers = {"https://shillerdata.com/": _Response(text=self.SHILLER_PAGE),
                    self.SHILLER_FILE: _Response(content=workbook.getvalue()),

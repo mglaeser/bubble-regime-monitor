@@ -51,6 +51,9 @@ def _run_on(monkeypatch, day: str) -> None:
     ("Fri Nov 13", "2026-11-14", "2026-11-13"),     # the page as taken, on a Saturday
     ("Thu Dec 31", "2027-01-01", "2026-12-31"),     # the stamp names no year
     ("Fri Nov 13", "2027-11-20", "2026-11-13"),     # it stood still: 13 Nov 2027 is a Saturday
+    ("Thu Feb 29", "2025-03-01", "2024-02-29"),     # no 29 February in 2025
+    ("Fri Dec 4", "2026-11-14", None),              # a Friday this year, but after the run's day
+    ("", "2026-11-14", None),                       # no stamp
 ])
 def test_multpls_value_is_dated_by_its_stamp(monkeypatch, stamp, run_day, as_of):
     _run_on(monkeypatch, run_day)
@@ -66,18 +69,19 @@ SHILLER_PAGE = '<a href="https://img1.wsimg.com/ie_data.xls">ie_data.xls</a>'   
 
 @pytest.mark.parametrize(("rows", "note", "run_day", "reading"), [
     (CURRENT, "Nov price is Nov 12th close", "2026-11-26", (39.37, "2026-11-12")),
-    (CURRENT, None, "2026-11-26", (40.12, "2026-10-31")),                           # October is 2026.1
-    (CURRENT, "Oct price is Oct 12th close", "2026-11-26", (40.12, "2026-10-31")),  # another month's
-    (CURRENT, "Nov price is Nov 31st close", "2026-11-26", (40.12, "2026-10-31")),  # no such day
+    (CURRENT, None, "2026-11-26", (39.37, None)),                                   # no note
+    (CURRENT, "Oct price is Oct 12th close", "2026-11-26", (39.37, None)),          # another month's
+    (CURRENT, "Nov price is Nov 31st close", "2026-11-26", (39.37, None)),          # no such day
     ([[2025.12, 6845.5, 39.4], [2026.01, 6903.3, 39.5]], "Jan price is Jan 9th close", "2026-01-20",
      (39.5, "2026-01-09")),
 ])
-def test_shillers_reading_is_its_dated_close_or_its_last_completed_month(monkeypatch, rows, note, run_day, reading):
+def test_shillers_reading_is_dated_by_the_close_its_note_names(monkeypatch, rows, note, run_day, reading):
     _run_on(monkeypatch, run_day)
     sheet = _workbook("Data", [[], ["Robert J. Shiller"], [], [], [], [], [], ["Date", "P", "CAPE"], *rows,
                                [None, note]])
     # Shiller's page and the sheet it links answer, so the reading comes from the sheet.
-    monkeypatch.setattr(cape, "fetch", lambda source, url, **kwargs: _Response(text=SHILLER_PAGE, content=sheet))
+    monkeypatch.setattr(cape, "fetch",
+                        lambda source, url, **kwargs: _Response(text=SHILLER_PAGE, content=sheet))
     result = cape.current_cape()
     assert (result.value, result.provenance.as_of) == reading
 
