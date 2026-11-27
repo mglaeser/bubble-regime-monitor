@@ -845,9 +845,9 @@ v3.2.2 - with nothing queued under it (read-only, 2026-10-04).
 Stage 1's gate is *deterministic replay; no PII; no scoring regression*.
 
 ```bash
-python -m scripts.alert_replay --state-db /tmp/replay.db          # committed stage
-python -m scripts.alert_replay --state-db /tmp/replay.db --stage 3 --out report.json
-python -m app.alerts.cli dryrun --state-db /tmp/replay.db --from 2026-01-01
+python -m scripts.alert_replay                              # committed stage
+python -m scripts.alert_replay --stage 3 --out report.json
+python -m app.alerts.cli dryrun --from 2026-01-01
 ```
 
 Exit 0 means every check the run could make held; exit 1 means one failed, or
