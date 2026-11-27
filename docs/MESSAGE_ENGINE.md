@@ -295,7 +295,7 @@ of the send, not as a refusal (`test_a_gate_that_cannot_be_evaluated_refuses`).
 |---|---|---|
 | `MESSAGE_ENGINE_MIN_INTERVAL_S` | 300 | floor between two model calls |
 | `MESSAGE_ENGINE_BREAKER_STRIKES` | 5 | failed calls in a row before the cooldown; read within [1, 1000], so a zero never switches the breaker off |
-| `MESSAGE_ENGINE_BREAKER_COOLDOWN_S` | 86400 | no model call for this long after them |
+| `MESSAGE_ENGINE_BREAKER_COOLDOWN_S` | 43200 | no model call for this long after them (86400 until 2026-11-25, decision 27) |
 | `MESSAGE_ENGINE_DAILY_BUDGET` | 100 | model calls per UTC day (ruling Q40) |
 
 Plus `MESSAGE_ENGINE_ENABLED` (default false — inert until switched on, Q42).
@@ -327,7 +327,12 @@ still derived from the attempt rows alone:
 * after `MESSAGE_ENGINE_BREAKER_STRIKES` failed calls in a row (a reply that
   fails the basic checks, or a gateway failure), no call for
   `MESSAGE_ENGINE_BREAKER_COOLDOWN_S` after the last of them; the next call is
-  the probe.
+  the probe. The default cooldown is 12 hours, a day until 2026-11-25 (the
+  owner delegated the decision: "Do it as most sensible or recommend"). A
+  failed digest call ends minutes after its trigger, so a day's cooldown
+  covered the next morning's digest too and an open breaker asked the model
+  only every second day
+  (`tests/test_message_governor.py::TestAnyFailedCallIsAStrike::test_by_default_the_next_mornings_digest_is_the_probe`).
 
 | the engine… | outcome | a call? | a strike? |
 |---|---|---|---|
@@ -479,9 +484,11 @@ a deliberate refactor rather than a review-round patch.
 ## Decision 13 — the engine owns its transactions
 
 `compose()` takes no session. Every `message_engine_attempts` write is made
-by the governor on a short transaction of its own: `reserve()` writes the
-IN_FLIGHT claim under `BEGIN IMMEDIATE`, evaluates every gate with that row
-excluded, commits on ASK and returns the claim's id; `resolve()` closes the
+by the governor on a short transaction of its own: `reserve()` opens a
+`BEGIN IMMEDIATE` transaction (after the two refusals that need no database:
+the engine off, a P1), evaluates the governor's rules in it and, only on ASK,
+writes the IN_FLIGHT claim, then commits and returns the claim's id;
+`resolve()` closes the
 claim by id, only while it is still in flight, so a reaped claim's strike is
 never erased by a late reply; `record_fallback()` records the evergreen text
 as NOT_ASKED, or as the FALLBACK_USED marker when the compose is exhausted —

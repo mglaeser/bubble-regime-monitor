@@ -11,7 +11,7 @@ import ast
 import hashlib
 import itertools
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -596,7 +596,13 @@ def test_stage_gating_still_binds_inside_a_replay(tmp_path, artifacts):
     """Replay can ask about another stage; it cannot ignore staging."""
     at_one = _run(tmp_path, artifacts, name="s1.db", stage=1)
     at_three = _run(tmp_path, artifacts, name="s3.db", stage=3)
-    assert at_one.episodes_by_rule == {}
+    # The history ends on a degraded slot, and the two stage-1 rules about
+    # degraded data fire on it. Nothing gated to a later stage may.
+    stage_one = {rule.rule_id for rule in artifacts.ruleset.active_rules(1)}
+    assert set(at_one.episodes_by_rule) == {
+        "constellation.false_alarm_likely", "ops.coverage_degraded_info"}
+    assert set(at_one.episodes_by_rule) <= stage_one
+    assert "regime.band_to_derisk" not in stage_one
     assert "regime.band_to_derisk" in at_three.episodes_by_rule
 
 
@@ -663,6 +669,99 @@ def test_a_derisk_neighbour_settles_an_excursion(tmp_path, artifacts):
     summary = _run(tmp_path, artifacts, name="run.db", inputs=history)
     assert summary.transient_one_snapshot_band_p1 == 0
     assert summary.indeterminate_band_excursions == 0
+
+
+_FIRST_ENTRY = datetime(2026, 8, 15, 6, tzinfo=UTC)
+_AFTER_48_MONTHS = datetime(2030, 8, 15, 2, tzinfo=UTC)
+_24_MONTHS = timedelta(days=24 * 30.44)
+
+
+@pytest.mark.parametrize(("second_entry", "last_snapshot", "busiest"), [
+    pytest.param(_FIRST_ENTRY + timedelta(hours=12), None, 2, id="12 hours apart in one day"),
+    pytest.param(datetime(2028, 9, 15, 6, tzinfo=UTC), _AFTER_48_MONTHS, 1, id="25 months apart in 48"),
+    pytest.param(datetime(2028, 7, 15, 6, tzinfo=UTC), _AFTER_48_MONTHS, 2, id="23 months apart in 48"),
+    pytest.param(_FIRST_ENTRY + _24_MONTHS, _AFTER_48_MONTHS, 2, id="exactly 24 months apart"),
+    pytest.param(_FIRST_ENTRY + _24_MONTHS + timedelta(seconds=1), _AFTER_48_MONTHS, 1,
+                 id="24 months and one second apart"),
+])
+def test_the_gate_judges_the_busiest_24_months_of_one_snapshot_derisk_entries(
+        tmp_path, artifacts, second_entry, last_snapshot, busiest):
+    """config/alert_rules.v3.2.yaml, regime.band_to_derisk: "Keep it only while
+    replay shows <= 1 transient one-snapshot P1 per 24 months". A month is 30.44
+    days, and two entries exactly 24 of them apart lie in one window."""
+    moments = [(entry + timedelta(hours=offset), band) for entry in (_FIRST_ENTRY, second_entry)
+               for offset, band in ((-4, "trim"), (0, "de-risk"), (4, "trim"))]
+    if last_snapshot is not None:
+        moments.append((last_snapshot, "trim"))
+    history = [
+        make_input(identity=f"k{i}", computed_at=moment.isoformat(), effective=band, base=band,
+                   median=63.0 if band == "de-risk" else 52.0)
+        for i, (moment, band) in enumerate(moments)
+    ]
+    summary = _run(tmp_path, artifacts, name="keep.db", stage=1, inputs=history)
+    assert summary.failures == ([
+        "2 transient one-snapshot de-risk entries inside one window of 24 months; "
+        "regime.band_to_derisk is kept only while replay shows <= 1 per 24 months"]
+        if busiest > 1 else [])
+    assert (summary.transient_one_snapshot_band_p1,
+            summary.transient_one_snapshot_band_p1_busiest_24_months) == (2, busiest)
+
+
+@pytest.mark.parametrize(("span", "covered"), [
+    pytest.param(_24_MONTHS, True, id="exactly 24 months"),
+    pytest.param(_24_MONTHS - timedelta(seconds=1), False, id="24 months less one second"),
+    pytest.param(timedelta(days=730, hours=16), True, id="730 days and 16 hours"),
+])
+def test_a_history_of_one_whole_window_measures_the_keep_condition(tmp_path, artifacts, span, covered):
+    """A history whose last snapshot is at least 24 months of 30.44 days after its
+    first measures the keep condition, and one second less does not. Each of
+    these histories is stored as 23.98 months, its whole days divided by 30.44."""
+    history = [make_input(identity=f"c{i}", computed_at=moment.isoformat())
+               for i, moment in enumerate((_FIRST_ENTRY, _FIRST_ENTRY + span))]
+    summary = _run(tmp_path, artifacts, name="span.db", stage=1, inputs=history)
+    listed = [note for note in summary.not_measured if "transient_derisk_p1_rate" in note]
+    assert bool(listed) is not covered, listed
+    assert (summary.band_excursion_months, summary.band_excursion_covers_24_months) == (23.98, covered)
+
+
+def _band_arc(states: list[str]) -> list:
+    """One input every four hours from 2026-08-17 06:00 UTC, one band each."""
+    start = datetime(2026, 8, 17, 6, tzinfo=UTC)
+    return [make_input(identity=f"arc-{index}", computed_at=(start + timedelta(hours=4 * index)).isoformat(),
+                       effective=state, base=state, median=64.0 if state == "de-risk" else 52.0)
+            for index, state in enumerate(states)]
+
+
+def test_a_replay_runs_the_cooldown_from_the_release_of_the_alert(tmp_path, artifacts):
+    """De-risk at 4 h, 24 h and 52 h. The P1 released at 4 h starts the rule's
+    48 h cooldown, so the entry at 24 h is suppressed and the one at 52 h is
+    planned (`planner._cooldown_active`)."""
+    assert artifacts.ruleset.rule("regime.band_to_derisk").cooldown_seconds == 48 * 3600
+    summary = _run(tmp_path, artifacts, inputs=_band_arc(
+        ["de-risk" if index in (1, 6, 13) else "trim" for index in range(14)]))
+    assert summary.episodes_by_rule["regime.band_to_derisk"] == 3
+    assert (summary.p1_total, summary.suppressions_by_reason.get("COOLDOWN")) == (2, 1)
+
+
+def test_a_replay_plans_the_one_reminder_of_a_condition_that_lasts(tmp_path, artifacts):
+    """De-risk from 4 h to 108 h: the P1, and 48 h after it the one reminder
+    the rule allows; the reminder counts for its episode, so none follows at 100 h."""
+    policy = artifacts.ruleset.rule("regime.band_to_derisk").reminder_policy
+    assert (policy.after_seconds, policy.max_reminders) == (48 * 3600, 1)
+    summary = _run(tmp_path, artifacts, inputs=_band_arc(["trim"] + ["de-risk"] * 27))
+    assert summary.deliveries_by_kind == {"INITIAL": 1, "REMINDER": 1}
+
+
+def test_a_replay_takes_no_member_as_sent_that_the_dispatcher_drops(tmp_path, artifacts):
+    """Hold to trim at 22:00 UTC (00:00 in Berlin: the P2 waits for 07:00), back to
+    hold at 02:00, trim again at 06:00. At the release the dispatcher drops the
+    first, its episode over (`outbox.revalidate_members`), so no cooldown starts
+    and the second is planned."""
+    rule = artifacts.ruleset.rule("regime.band_hold_to_trim")
+    assert (rule.priority, rule.cooldown_seconds) == (2, 24 * 3600)
+    summary = _run(tmp_path, artifacts, inputs=_band_arc(["hold"] * 4 + ["trim", "hold", "trim"]))
+    assert summary.episodes_by_rule["regime.band_hold_to_trim"] == 2
+    assert (summary.deliveries_planned, summary.suppressions_by_reason.get("COOLDOWN")) == (3, None)
 
 
 # ---------------------------------------------------------------------------
@@ -957,18 +1056,26 @@ def test_the_committed_stage_is_not_one_whose_replay_failed():
         "or lower the stage — do not ship a stage its own replay refuses.")
 
 
-def test_the_artifact_carries_evidence_for_the_stage_the_cutover_targets():
-    """Stage 4 is where the cutover goes, so its evidence is produced here.
+def test_the_gate_replays_stage_1_and_the_committed_stage_and_no_deleted_stage():
+    """The gate replays stage 1 and stage 3, and no stage 4.
 
-    Without it the Stage 4 decision would have had to generate its own evidence
-    by hand on the day, and the absence would have surfaced at exactly the
-    wrong moment.
+    Stage 4 was the legacy daily-digest cutover, deleted with its switch (owner
+    decision D2c, 2026-10-02; the rollout table in docs/ALERT_SYSTEM.md). A rule
+    active at one of stages 3 and 4 and not the other would make a stage-4
+    replay evidence of its own, and this fails then. The paths are the
+    script's own, so the test reads the file the script writes.
     """
-    payload = json.loads(Path("docs/alert-stage1-gate.json").read_text(encoding="utf-8"))
-    assert "stage_4" in payload["runs"], sorted(payload["runs"])
-    stage4 = payload["runs"]["stage_4"]
-    assert stage4["evaluated_at_stage"] == 4
-    assert stage4["passed"] is (stage4["failures"] == [])
+    from scripts import export_alert_stage1_gate as gate
+
+    payload = json.loads(gate.ARTIFACT.read_text(encoding="utf-8"))
+    assert sorted(payload["runs"]) == ["stage_1", "stage_3"]
+    assert gate.STAGES == (1, 3)
+
+    ruleset = validate_from_disk(rules_path=gate.RULES, phrase_path=gate.PHRASES,
+                                 service_version="3.8.0").ruleset
+    at_stage_3 = [rule.rule_id for rule in ruleset.active_rules(3)]
+    at_stage_4 = [rule.rule_id for rule in ruleset.active_rules(4)]
+    assert at_stage_3 and at_stage_3 == at_stage_4
 
 
 def test_the_ci_replay_gate_is_the_evidence_and_it_blocks():

@@ -18,14 +18,16 @@ def _make_finra_xlsx(newest_first: bool = True) -> bytes:
     ws = wb.active
     ws.append(["FINRA Margin Statistics"])
     ws.append([])
-    ws.append(["Month/Year", "Debit Balances in Customers' Securities Margin Accounts"])
+    # The heading and the months as FINRA's file writes them, "Year-Month" and
+    # "YYYY-MM": the reader takes no other (tests/test_sources.py::TestFinraMonths).
+    ws.append(["Year-Month", "Debit Balances in Customers' Securities Margin Accounts"])
     # 14 months, 2025-04 .. 2026-05; May 2026 = 1,415,557 and May 2025 set
     # twelve rows earlier so the YoY works out to +53.7%.
     rows = []
     for i in range(14):
         month_total = 4 + i  # April 2025 start
         y, m = 2025 + (month_total - 1) // 12, (month_total - 1) % 12 + 1
-        rows.append([f"{y}-{m:02d}-01", 900_000.0 + i * 1000])
+        rows.append([f"{y}-{m:02d}", 900_000.0 + i * 1000])
     rows[-1][1] = 1_415_557.0          # 2026-05
     rows[1][1] = 1_415_557 / 1.537     # 2025-05 (12 months before the latest)
     if newest_first:
@@ -61,20 +63,10 @@ class TestFinraParser:
 
 
 class TestD2Guards:
-    def test_stale_over_90d_uses_cached_reading(self, isolated_db):
-        from app.services.compute import compute_snapshot
-
-        raw = make_golden_raw_inputs()
-        raw.margin_as_of = (datetime.now(UTC) - timedelta(days=200)).date().isoformat()
-        raw.margin_cached = {"value": 53.7, "sub_score": 0.49,
-                             "timestamp": "2026-06-01T06:00:00+00:00"}
-        data = compute_snapshot(raw, mc_samples=2_000, mc_seed=1)
-        d2 = data.indicators["d2"]
-        assert not d2.dropped
-        assert d2.sub_score == pytest.approx(0.49)
-        assert "cached reading" in (d2.note or "")
-        assert "rollover: unknown" in (d2.note or "")
-
+    # The stored reading's tier (served while its own month is inside the 75d
+    # SLA, then dropped) is pinned in tests/test_d2_cached_reading.py. The test
+    # that stood here pinned what that tier ends: an undated stored reading
+    # scored for a file 200 days old, with no limit on its age.
     def test_stale_over_90d_without_cache_drops(self, isolated_db):
         from app.services.compute import compute_snapshot
 

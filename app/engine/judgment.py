@@ -78,9 +78,9 @@ def _clean_completion(text: str, limit: int = 300) -> str:
 def run_completion(prompt: str) -> str:
     """Run the one configured gateway route; return raw text or raise safely.
 
-    Shared by the judgment call and the daily digest. There is deliberately no
+    Used by the judgment call alone (`generate`, below). There is deliberately no
     application-side model fallback list: the configured gateway route owns
-    provider failover, while callers retain their deterministic/stale fallback.
+    provider failover, while the caller keeps its stale fallback.
     """
     from app.llm_gateway import complete
 
