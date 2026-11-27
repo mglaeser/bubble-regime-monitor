@@ -1188,7 +1188,7 @@ SOURCE_REGISTRY: list[SourceSpec] = [
                "levels, so NDX/SPX use QQQ/SPY ETF proxies.", 3,
                "https://www.tiingo.com",
                "Index proxies in use; Alpha Vantage free tier is unadjusted.",
-               ("price_SPY", "price_QQQ", "price_SMH", "price_SOXX", "price_NDX")),
+               ("price_SPY", "price_QQQ", "price_SMH", "price_SOXX", "price_NDX", "price_NDX_monthly")),
     # v3.7.2: the S5 PRIMARY source (Fed EBP, v3.3.1) and the 0.5-quality proxy
     # were tracked per-recompute but wired to NO registry row, so the status
     # page silently omitted them — the matrix showed only the weakest fallback.
