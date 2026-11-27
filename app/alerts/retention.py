@@ -5,7 +5,7 @@ low-value-over-time part of the record; everything around them is the audit
 trail and is worth keeping far longer:
 
     ALERTS_MESSAGE_RETENTION_DAYS   (default 400)  rendered message BODIES
-    ALERTS_METADATA_RETENTION_DAYS  (default 800)  everything else
+    ALERTS_METADATA_RETENTION_DAYS  (default 800)  the rows of `alert_event`
 
 The short sweep REDACTS rather than deletes. An `alert_render` row carries the
 phrase-set provenance it was planned under, the render source, the septet count
@@ -15,10 +15,10 @@ H-07 says must not happen. So the body is emptied in place, `body_redacted_at`
 is stamped, and migration 0009's trigger permits that ONE transition and no
 other: a render still cannot be rewritten, and cannot be redacted twice.
 
-The long sweep is intentionally narrow. It removes CLOSED, fully-settled
-history and nothing else, because "delete rows older than N days" applied to a
-table with open episodes is how an open episode loses the ruleset that opened
-it.
+The long sweep is intentionally narrow. It deletes rows of `alert_event`, of
+no other table, and only those whose linked work is CLOSED and fully settled,
+because "delete rows older than N days" applied to a table with open episodes
+is how an open episode loses the ruleset that opened it.
 """
 
 from __future__ import annotations
@@ -32,7 +32,6 @@ from sqlalchemy.orm import Session
 from app.alerts.models import (
     AlertDelivery,
     AlertEpisode,
-    AlertEvaluation,
     AlertEvent,
     AlertRender,
 )
@@ -100,9 +99,9 @@ def sweep_settled_events(session: Session, *, older_than: datetime) -> int:
     An event belonging to an open episode is never removed regardless of age —
     the trail that explains a still-firing mechanism is the trail an operator
     is most likely to need.  The same protection applies to deliveries not yet
-    terminal and to replay evidence.  Delivery audit events commonly have no
-    episode link, so checking episodes alone would delete the trail of a
-    delivery still waiting for its retry.
+    terminal.  Delivery audit events commonly have no episode link, so checking
+    episodes alone would delete the trail of a delivery still waiting for its
+    retry.
     """
     from app.alerts.enums import TransportStatus
 
@@ -118,29 +117,17 @@ def sweep_settled_events(session: Session, *, older_than: datetime) -> int:
         select(AlertDelivery.delivery_id).where(
             AlertDelivery.transport_status.in_(unresolved_statuses))
     ).scalars().all())
-    replay_episode_ids = set(session.execute(
-        select(AlertEpisode.episode_id).where(AlertEpisode.mode == "replay")
-    ).scalars().all())
-    replay_delivery_ids = set(session.execute(
-        select(AlertDelivery.delivery_id).where(AlertDelivery.mode == "replay")
-    ).scalars().all())
-    replay_evaluation_ids = set(session.execute(
-        select(AlertEvaluation.evaluation_id).where(
-            AlertEvaluation.mode == "replay")
-    ).scalars().all())
+    # No mode is exempt. The three queries that stood here asked for rows of
+    # mode "replay", a value `app.alerts.enums.Mode` does not have.
     rows = session.execute(
         select(AlertEvent).where(AlertEvent.occurred_at < older_than)
     ).scalars().all()
 
     deleted = 0
     for event in rows:
-        if event.episode_id and event.episode_id in (
-                open_ids | replay_episode_ids):
+        if event.episode_id and event.episode_id in open_ids:
             continue
-        if event.delivery_id and event.delivery_id in (
-                unresolved_delivery_ids | replay_delivery_ids):
-            continue
-        if event.evaluation_id and event.evaluation_id in replay_evaluation_ids:
+        if event.delivery_id and event.delivery_id in unresolved_delivery_ids:
             continue
         session.delete(event)
         deleted += 1
