@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import itertools
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -136,6 +138,28 @@ def test_replay_derives_time_from_the_input_not_from_the_clock(tmp_path, artifac
     summary = _run(tmp_path, artifacts)
     assert summary.window_first == "2026-08-14T22:00:00+00:00"
     assert summary.window_last == "2026-08-15T14:00:00+00:00"
+
+
+def test_a_slow_host_does_not_change_a_replay(tmp_path, artifacts, monkeypatch):
+    """`now` comes from each input's own `computed_at`, never from a clock
+    (docs/ALERT_SYSTEM.md, section 12, "It is deterministic")."""
+    from app.alerts import engine
+    from app.alerts.errors import EvaluationDeadlineExceeded
+    from app.config import Settings
+
+    quiet = _run(tmp_path, artifacts, name="quiet.db")
+    # Every look at the engine's clock is 25 hours later. Replacing the
+    # engine's `time` name keeps the stepping clock away from SQLAlchemy.
+    ticks = itertools.count(step=25 * 3600.0)
+    monkeypatch.setattr(engine, "time", SimpleNamespace(monotonic=lambda: next(ticks)))
+    slow = _run(tmp_path, artifacts, name="slow.db")
+
+    assert slow.evaluations_timed_out == 0
+    assert slow.to_json() == quiet.to_json()
+    # The service's own evaluations keep their budget: under this clock its
+    # default times out.
+    with pytest.raises(EvaluationDeadlineExceeded):
+        engine.Deadline(Settings.model_fields["alerts_eval_budget_ms"].default).check("live")
 
 
 # ---------------------------------------------------------------------------
