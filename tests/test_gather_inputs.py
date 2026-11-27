@@ -81,4 +81,5 @@ def test_every_upstream_down_never_raises(isolated_db, monkeypatch):
     raw = compute.gather_inputs()
     assert not any(entry["ok"] for entry in raw.source_health)
     # Every upstream was asked: a gather that returned early passes the line above.
-    assert [name for name, n in calls.items() if not n] == []
+    # GSADF runs on the long monthly history alone, which is down here.
+    assert [name for name, n in calls.items() if not n] == ["gsadf"]
