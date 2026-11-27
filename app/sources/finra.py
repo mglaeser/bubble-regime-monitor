@@ -2,20 +2,24 @@
 
 URL: https://www.finra.org/sites/default/files/2021-03/margin-statistics.xlsx
 Published third week of the month following the reference month; FINRA states
-"data feeds are not available" — there is NO true fallback: cache and
-tolerate staleness (the engine's operative D2 freshness SLA is 75 days, which
-covers one skipped publication; as_of is the reference month-END). MacroMicro
-mirrors the series for display only.
+"data feeds are not available" — there is NO true fallback: when the file
+cannot be read, the engine serves its stored reading of the latest month it
+computed from it while that month is inside the D2 freshness SLA (75 days from
+the reference month-END, which is as_of), then drops D2. MacroMicro mirrors
+the series for display only.
 
 ROW ORDER IS NOT ASSUMED. The live file lists months NEWEST-FIRST, which a
 naive column read once inverted into a -22% "YoY" computed across the series
 start (Jan 1997). Rows are parsed as (date, debit) PAIRS and sorted by date
-ascending; a parseable date column is mandatory.
+ascending; the one column headed "Year-Month", its cells written as the file
+writes them, "YYYY-MM", is mandatory.
 """
 
 from __future__ import annotations
 
 import io
+import re
+from datetime import date
 
 import pandas as pd
 
@@ -23,6 +27,8 @@ from app.http_client import fetch
 from app.sources import Provenance, SourceError, SourceResult
 
 XLSX_URL = "https://www.finra.org/sites/default/files/2021-03/margin-statistics.xlsx"
+# A month cell: the text "YYYY-MM", a year 1000 to 9999 and a month 01 to 12.
+_MONTH = re.compile(r"[1-9][0-9]{3}-(0[1-9]|1[0-2])")
 
 
 def parse_debit_balances(content: bytes) -> tuple[list[float], list[str], str]:
@@ -49,25 +55,26 @@ def parse_debit_balances(content: bytes) -> tuple[list[float], list[str], str]:
     body = raw.iloc[header_row + 1:]
     values = pd.to_numeric(body.iloc[:, debit_col], errors="coerce")
 
-    date_series = None
-    for j in range(raw.shape[1]):
-        if j == debit_col:
-            continue
-        dates = pd.to_datetime(body.iloc[:, j], errors="coerce")
-        if (values.notna() & dates.notna()).sum() >= 13:
-            date_series = dates
-            break
-    if date_series is None:
+    # The months are read from one column only: the one headed "Year-Month" in
+    # the heading row, every cell under it a month cell (_MONTH). Without
+    # exactly one such heading, or with any other cell under it, an empty one
+    # too, the pull fails: no other column stands in, nothing is guessed, and
+    # no row is left out for its date.
+    heading = [str(c).strip().lower() for c in raw.iloc[header_row].tolist()]
+    month_cols = [j for j, c in enumerate(heading) if c == "year-month"]
+    if len(month_cols) != 1 or not all(
+        isinstance(c, str) and _MONTH.fullmatch(c) for c in body.iloc[:, month_cols[0]]
+    ):
         raise SourceError("FINRA XLSX: no parseable date column — cannot establish month order")
+    date_series = body.iloc[:, month_cols[0]].map(lambda c: date.fromisoformat(f"{c}-01"))
 
-    mask = values.notna() & date_series.notna()
+    mask = values.notna()
     pairs = sorted(zip(date_series[mask], values[mask], strict=True), key=lambda p: p[0])
     if len(pairs) < 13:
         raise SourceError("FINRA XLSX: fewer than 13 dated monthly observations")
     # De-duplicate by calendar month, last value wins (v3.7.4/C-07): a duplicated
     # month would otherwise shift the 12-month YoY offset off a true year.
     import calendar
-    from datetime import date
 
     by_month: dict[tuple[int, int], float] = {}
     order: list[tuple[int, int]] = []
