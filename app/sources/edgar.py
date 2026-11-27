@@ -77,7 +77,12 @@ def _companyfacts(cik: str) -> dict[str, Any]:
     if wait > 0:
         time.sleep(wait)
     settings = get_settings()
-    resp = fetch("sec_edgar", BASE.format(cik=cik), headers={"User-Agent": settings.effective_sec_ua})
+    # Only an absent contact is refused here, as there is nothing to send; its
+    # form ("Name email") is the SEC's to judge, a contact the SEC refuses comes
+    # back as an EDGAR error, and with no issuer read D3 is dropped.
+    if not settings.sec_user_agent:
+        raise SourceError("EDGAR: SEC_USER_AGENT is empty, so no request is made")
+    resp = fetch("sec_edgar", BASE.format(cik=cik), headers={"User-Agent": settings.sec_user_agent})
     _last_request[0] = time.monotonic()
     return resp.json()
 

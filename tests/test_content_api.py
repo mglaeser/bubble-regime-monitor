@@ -152,6 +152,16 @@ class TestDynamicContent:
         assert content_registry.provenance_of("fallback") == "template"
         assert content_registry.provenance_of("placeholder") == "template"
 
+    def test_a_slot_carries_these_fields_and_names_no_writer(self, client):
+        # docs/CONTENT_API.md, "Endpoints": the fields of a served slot.
+        from pathlib import Path
+
+        fields = ("text", "source", "provenance", "updated_at", "purpose", "as_of", "constraints")
+        slots = client.get("/api/v1/content/dynamic").json()["data"]["slots"]
+        assert {frozenset(slot) for slot in slots.values()} == {frozenset(fields)}
+        doc = (Path(__file__).resolve().parents[1] / "docs" / "CONTENT_API.md").read_text(encoding="utf-8")
+        assert "dynamic slots {slug: {" + ", ".join(fields) + "}} + marker" in doc
+
 
 class TestCacheScope:
     def test_public_while_read_surface_is_public(self, client):
@@ -596,7 +606,7 @@ class TestBlockArtifact:
             unknown_rows = [r for r in blocks[table]["items"] if r.get("band") == "unknown"]
             for row in unknown_rows:
                 text = row.get("template", "").lower()
-                for verb in ("de-risk now", "trim now", "hold —", "hold -"):
+                for verb in ("de-risk", "trim", "hold —", "hold -"):
                     assert verb not in text, f"{table} unknown row carries action copy"
         reg._clear_artifact_cache()
 
@@ -941,8 +951,8 @@ class TestBlockArtifact:
         import app.content_registry as reg
 
         # Round 18 (SOTA-A): gauge.reg.s5 was wrongly on this list — its
-        # "Today's spreads are near 25-year tights" is a frozen market fact,
-        # not live-referential copy; it is now dated + stamped. The rest were
+        # "Today's spreads are near 25-year tights" was a frozen market fact,
+        # not live-referential copy. The rest were
         # re-reviewed after that miss: each block's "today/now" refers to the
         # live payload it rides (band state, coverage, fusion output).
         LIVE_REFERENTIAL = {
@@ -974,9 +984,12 @@ class TestBlockArtifact:
 
         reg._clear_artifact_cache()
         # 3: the deck's gauge.reg.d3 names total revenue as what fires the gate.
-        assert reg.content_version() == 3
+        # 4: four deck statements the service contradicted are corrected.
+        # 5: the de-risk and trim rows of gauge.verdict.lead and the trim one-liner are reworded.
+        # 6: gauge.changelog gains three rows (3.3.0, 3.3.2, 3.9.0) and gauge.redflag.header a sentence.
+        assert reg.content_version() == 6
         payload = reg.dashboard_payload()
-        assert payload["content_version"] == 3
+        assert payload["content_version"] == 6
         assert len(payload["blocks"]) >= 211
         reg._clear_artifact_cache()
 

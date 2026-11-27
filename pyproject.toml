@@ -31,7 +31,7 @@ dependencies = [
     "numpy>=1.26,<2.3",
     "pandas>=2.2,<3.0",
     "openpyxl>=3.1",
-    "xlrd>=2.0.1",  # legacy .xls support (shillerdata ie_data.xls CAPE fallback)
+    "xlrd>=2.0.1",  # legacy .xls support (Shiller's ie_data.xls, S1's CAPE)
     "lxml>=5.2",
     # The NYSE calendar, one-off closures included. Exact: a release can add a
     # closure, which moves trading-day arithmetic, so the version moves on purpose.
@@ -45,7 +45,7 @@ dependencies = [
     "linkify-it-py==2.2.0",
     "phonenumberslite==9.0.40",
     "lppls==0.6.24",
-    # The Parquet snapshot export (app/services/backfill.py, `bubblegauge
+    # The Parquet export of the CLI (app/alerts/reports.py, `bubblegauge
     # export snapshots --format parquet`).
     "pyarrow>=16.0",
 ]

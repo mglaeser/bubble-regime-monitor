@@ -6,11 +6,12 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.config import get_settings
 from app.content_registry import gauge_display
 from app.db import session_scope
+from app.engine.aggregate import headline
 from app.engine.snapshot_contract import FLAG_UNKNOWN
 from app.models import Snapshot
 from app.references import EPISTEMIC_CAVEATS
@@ -114,7 +115,7 @@ def get_score(request: Request, _: None = Depends(require_read_access)) -> dict[
     # production snapshots up to 2026-11-10 (06:00 that day: 49.8, 54.0 and 4.19).
     q1, q3 = round(snap.iqr_lo, 2), round(snap.iqr_hi, 2)
     data = {
-        "headline_median": round(snap.median),
+        "headline_median": headline(snap.median),
         # v3.7.8/M-02: `iqr` is the (q1,q3) interquartile INTERVAL (kept for
         # compatibility); `iqr_width` is the IQR proper (q3 - q1).
         "iqr": [q1, q3],
@@ -183,17 +184,18 @@ def get_history(
             except OverflowError:
                 upper = datetime.max
             q = q.where(Snapshot.computed_at < upper)
+        if granularity != "raw":
+            # The database finds the last snapshot of each UTC day or month, so
+            # that `limit` counts the days or months returned. The period is the
+            # head of the UTC text the column stores (app/models.py:TZDateTime):
+            # SQLite's date functions can round 23:59:59.9995 into the next day.
+            period = func.substr(Snapshot.computed_at, 1, 10 if granularity == "daily" else 7)
+            last = func.max(Snapshot.computed_at)
+            q = select(Snapshot).where(Snapshot.computed_at.in_(
+                q.with_only_columns(last).group_by(period).order_by(last.desc()).limit(limit)))
         # filter + newest-first limit in SQL, then restore chronological order
         q = q.order_by(Snapshot.computed_at.desc()).limit(limit)
         rows = list(reversed(session.execute(q).scalars().all()))
-
-    if granularity != "raw":
-        keyfn = (lambda s: s.computed_at.date().isoformat()) if granularity == "daily" \
-            else (lambda s: s.computed_at.strftime("%Y-%m"))
-        last_per: dict[str, Snapshot] = {}
-        for s in rows:
-            last_per[keyfn(s)] = s
-        rows = sorted(last_per.values(), key=lambda s: s.computed_at)
 
     data = [
         {
@@ -204,6 +206,10 @@ def get_history(
             "action_band": s.action_band,
             "override_fired": s.override_fired,
             "red_flag_count": s.red_flag_count,
+            # The versions that computed this row, as stored with it
+            # (meta.service_version is the answering service's).
+            "service_version": s.service_version,
+            "methodology_version": s.methodology_version,
         }
         for s in rows
     ]

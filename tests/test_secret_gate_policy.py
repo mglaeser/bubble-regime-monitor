@@ -136,6 +136,15 @@ class TestBaselineShape:
         secretbaselineref.assert_has_not_grown(_baseline(),
                                                json.loads(reference))
 
+    def test_the_baseline_holds_exactly_the_accepted_entries(self):
+        # The accepted secrets are a literal in `tests/secretbaselineref.py`,
+        # and the comparison is detect-secrets' own: a secret added, removed or
+        # exchanged for another, as detect-secrets identifies it, fails here
+        # until the literal moves.
+        # No skip path: a literal needs no git object, so a checkout without
+        # the pinned commit is checked like any other.
+        secretbaselineref.assert_accepted_entries(_baseline())
+
     def test_the_baseline_scan_configuration_has_not_changed(self):
         """Filters and plugins decide WHAT is scanned, so they ratchet too."""
         reference = secretbaselineref.reference_baseline_bytes(root=ROOT)
