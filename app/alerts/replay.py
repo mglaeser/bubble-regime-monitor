@@ -91,12 +91,6 @@ _MANDATORY_EVENT_FIELDS = frozenset({
 # ---------------------------------------------------------------------------
 
 
-#: A replay takes `now` from each input and never from a clock (module
-#: docstring), while an evaluation's budget is measured on the host's clock.
-#: A day per evaluation is a budget no replay reaches.
-_NO_WALL_CLOCK_BUDGET_MS = 24 * 60 * 60 * 1000
-
-
 @dataclass(frozen=True)
 class ReplayConfig:
     """What to replay, and where to put the state it produces."""
@@ -598,7 +592,11 @@ def run_replay(
                 mode=Mode.DRYRUN,
                 live_profile=config.live_profile,
                 now=_moment_of(alert_input),
-                budget_ms=_NO_WALL_CLOCK_BUDGET_MS,
+                # No deadline: a replay's result must not depend on the host's
+                # clock, and a replay runs offline (the dryrun command, the gate
+                # script, tests), while the service's own evaluations keep their
+                # budget (ALERTS_EVAL_BUDGET_MS, 1,500 ms by default).
+                budget_ms=None,
             )
             if outcome.status == EvaluationRunStatus.COMMITTED:
                 summary.evaluations_committed += 1
