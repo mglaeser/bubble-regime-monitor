@@ -75,9 +75,9 @@ class RenderContext:
         return self.members[self.headline_member_index]
 
     def context_hash(self) -> str:
-        # The primary-member index and priority both affect the model prompt
-        # and rendered body.  Omitting them made materially different contexts
-        # share one audit fingerprint.
+        # The primary-member index and priority both affect the rendered body.
+        # Omitting them made materially different contexts share one audit
+        # fingerprint.
         return sha256_of({
             "headline_member_index": self.headline_member_index,
             "members": [
@@ -345,7 +345,8 @@ def build_member_context(
     Uses current values only when they are compatible with the trigger;
     otherwise it falls back to trigger values and adds `CONTEXT_STALE` to the
     required caveats. Silently mixing the two would produce a message whose
-    numbers came from two different methodologies.
+    numbers came from two different methodologies. A fact a compatible current
+    input lacks is the trigger's, with the same caveat.
     """
     notes: list[str] = []
     caveats = list(required_caveat_codes)
@@ -372,9 +373,18 @@ def build_member_context(
         trigger=trigger, current=current, previous=previous, labels=labels,
         authorized_fact_ids=authorized_fact_ids,
     )
-    facts = dict(current_facts if current_facts else trigger_facts)
+    # Per fact, not all or nothing: a reading a compatible current input lacks
+    # is the trigger's, and the message says so.
+    facts = {**trigger_facts, **current_facts}
+    lacks_a_fact = use_current and bool(trigger_facts.keys() - current_facts.keys())
+    if lacks_a_fact:
+        caveats.append("CONTEXT_STALE")
     material_fact_id: str | None = None
-    if condition_status == "MATERIALLY_CHANGED_BUT_ACTIVE" and deltas:
+    # A member stale this way shows no trigger/current clause: the ruleset
+    # validator proves a message's length with either caveat, not with both
+    # (registry.py, _check_render_contracts). Its deltas stay in the context.
+    if condition_status == "MATERIALLY_CHANGED_BUT_ACTIVE" and deltas \
+            and not lacks_a_fact:
         material_fact_id = next(iter(deltas))
         selected = deltas[material_fact_id]
         facts["F_TRIGGER_VALUE"] = str(selected["trigger"])

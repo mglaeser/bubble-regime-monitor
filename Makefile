@@ -21,7 +21,7 @@ lint:
 	ruff check app tests scripts
 
 type:
-	mypy app
+	mypy --config-file pyproject.toml app
 
 test:
 	pytest -q

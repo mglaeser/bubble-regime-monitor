@@ -14,8 +14,9 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
-from scripts.regime import authz_coverage, findings_gate, separation_check
+from scripts.regime import authz_coverage, findings_gate, mypy_pin, separation_check
 
 ROOT = Path(__file__).resolve().parents[1]
 GATES = ("findings_gate", "separation_check", "authz_coverage")
@@ -37,6 +38,108 @@ def test_gate_passes_against_the_real_repository(gate: str) -> None:
     out = subprocess.run([sys.executable, "-m", f"scripts.regime.{gate}"],
                          capture_output=True, text=True, cwd=ROOT, check=False)
     assert out.returncode == 0, f"{gate} blocked on the committed tree:\n{out.stdout}\n{out.stderr}"
+
+
+class TestMypyDepthPin:
+    """`.mypy-config.pinned`: changing `[tool.mypy]` fails the build until that
+    file is updated in the same commit.
+
+    The pin compares the table the TOML library parses, sub-tables included,
+    and the step names the file mypy reads. The pin has no `--selftest`: these
+    tests feed it.
+    """
+
+    OVERRIDE = '\n[[tool.mypy.overrides]]\nmodule = ["app.*"]\nignore_errors = true\n'
+
+    @staticmethod
+    def _tree(tmp_path: Path, pyproject: str, pinned: str | None = None) -> Path:
+        committed = (ROOT / ".mypy-config.pinned").read_text(encoding="utf-8")
+        (tmp_path / "pyproject.toml").write_text(pyproject, encoding="utf-8")
+        (tmp_path / ".mypy-config.pinned").write_text(
+            committed if pinned is None else pinned, encoding="utf-8")
+        return tmp_path
+
+    @staticmethod
+    def _pyproject() -> str:
+        return (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+
+    def test_the_committed_configuration_matches_the_pin(self):
+        assert mypy_pin.problems() == []
+        assert mypy_pin.main() == 0
+
+    def test_a_per_module_override_fails_the_pin(self, tmp_path, capsys):
+        root = self._tree(tmp_path, self._pyproject() + self.OVERRIDE)
+        assert mypy_pin.problems(root), "a per-module override passed the depth pin"
+        assert mypy_pin.main(root) == 1
+        assert "BLOCK" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("sub_table", ["", '[[tool.mypy.overrides]]\nmodule = ["app.*"]\n'],
+                             ids=["table", "override"])
+    def test_a_reordered_table_fails_the_pin(self, tmp_path, sub_table):
+        # mypy takes the later of two spellings of one option: the pinned table
+        # reports errors, the reordered one ignores them.
+        head = "[tool.mypy]\nstrict = true\n" + sub_table
+        pinned = head + "no_ignore_errors = false\nignore_errors = false\n"
+        reordered = head + "ignore_errors = false\nno_ignore_errors = false\n"
+        assert mypy_pin.problems(self._tree(tmp_path, reordered, pinned=pinned))
+
+    def test_a_value_of_another_type_fails_the_pin(self, tmp_path):
+        # Python calls `1.0` equal to `true`; mypy answers "Not a boolean" and
+        # checks without `strict`.
+        loosened = "[tool.mypy]\nstrict = 1.0\n"
+        assert mypy_pin.problems(self._tree(tmp_path, loosened, pinned="[tool.mypy]\nstrict = true\n"))
+
+    def test_a_file_the_toml_library_refuses_fails_the_pin(self, tmp_path, capsys):
+        # A bare CR is no line end in TOML, and text mode reads it as one.
+        # Measured with mypy 2.3.1: it prints the parse error and checks
+        # without the table, so without `strict`.
+        (tmp_path / "pyproject.toml").write_bytes(b"[tool.mypy]\rstrict = true\r")
+        (tmp_path / ".mypy-config.pinned").write_bytes(b"[tool.mypy]\nstrict = true\n")
+        assert mypy_pin.main(tmp_path) == 1
+        assert "BLOCK" in capsys.readouterr().err
+
+    TABLE = b"[tool.mypy]\nstrict = true\n"
+    NUMBER = b"[tool]\nmypy = 1\n"
+    ARRAY = b"[[tool.mypy]]\nstrict = true\n"
+    # tomllib parses it; printing an integer that long raises ValueError by default.
+    LONG = b"[tool.mypy]\nstrict = 0x" + b"f" * 4000 + b"\n"
+
+    @pytest.mark.parametrize(("pyproject", "pinned", "named"), [
+        (b"tool = []\n", TABLE, "pyproject.toml"),
+        (NUMBER, NUMBER, "pyproject.toml"),
+        (TABLE + b"\xff", TABLE, "pyproject.toml"),
+        (TABLE, None, ".mypy-config.pinned"),
+        (ARRAY, ARRAY, "pyproject.toml"),
+        (TABLE, LONG, ".mypy-config.pinned"),
+    ], ids=["tool-is-an-array", "the-same-number-in-both", "a-byte-that-is-not-utf-8",
+            "no-pin-file", "the-same-array-of-tables-in-both", "a-number-too-long-to-print"])
+    def test_anything_but_two_equal_tables_is_one_block_line(
+            self, tmp_path, capsys, pyproject, pinned, named):
+        # The pin passes on two equal tables and on nothing else: neither equal
+        # values that are no tables nor an exception get through.
+        (tmp_path / "pyproject.toml").write_bytes(pyproject)
+        if pinned is not None:
+            (tmp_path / ".mypy-config.pinned").write_bytes(pinned)
+        assert mypy_pin.main(tmp_path) == 1
+        printed = capsys.readouterr()
+        blocks = [line for line in printed.err.splitlines() if line.startswith("BLOCK")]
+        assert len(blocks) == 1 and named in blocks[0], printed.err
+        assert "Traceback" not in printed.out + printed.err
+
+    def test_the_type_check_step_runs_the_pin_and_names_the_config_file(self):
+        # A mypy.ini outranks pyproject.toml when mypy looks for its
+        # configuration, so the step names the file the pin compares. The pin
+        # runs before `set +e`, where a failing command still fails the step.
+        workflow = yaml.safe_load(
+            (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))
+        steps = [step for step in workflow["jobs"]["test"]["steps"]
+                 if step.get("name", "").startswith("Type-check")]
+        assert len(steps) == 1
+        lines = [line.strip() for line in steps[0]["run"].splitlines()]
+        assert "python -m scripts.regime.mypy_pin" in lines
+        assert lines.index("python -m scripts.regime.mypy_pin") < lines.index("set +e")
+        assert [line for line in lines if line.startswith("mypy ")] == [
+            "mypy --config-file pyproject.toml app > /tmp/mypy.txt 2>&1"]
 
 
 class TestFindingsGateComputesRatherThanAsserts:
@@ -64,29 +167,37 @@ class TestFindingsGateComputesRatherThanAsserts:
         t = findings_gate.tally([{"id": "X", "verdict": "PARTIAL", "band": "STOP-SHIP"}])
         assert t["open_by_band"]["STOP-SHIP"] == 1
 
-    def test_the_real_ledger_is_not_eligible_and_says_why(self):
-        t = findings_gate.tally(findings_gate.load_findings())
-        eligible, why = findings_gate.production_eligible(t)
-        assert eligible is False, "blocking findings are open; this must not compute true"
-        assert why, "a refusal must carry its reason"
+    def test_an_unknown_argument_is_refused(self, capsys):
+        # A caller that still passes the removed `--admission` must fail: it
+        # must not get the report's exit 0 and take it for an admission.
+        assert findings_gate.main(["--admission"]) == 2
+        captured = capsys.readouterr()
+        assert captured.err == findings_gate.USAGE + "\n"
+        assert captured.out == "", "a refused call must not print the tally"
 
-    def test_admission_refuses_on_the_real_ledger(self):
-        out = subprocess.run([sys.executable, "-m", "scripts.regime.findings_gate", "--admission"],
-                             capture_output=True, text=True, cwd=ROOT, check=False)
-        assert out.returncode == 1
-        assert "REFUSE deploy admission" in out.stderr
+    @pytest.mark.parametrize("argv", [["--help", "--admission"], ["-h"], ["--help"], ["--admission", "--help"],
+                                      ["--strict", "--admission"], ["--stric"], ["--strict", "--strict"],
+                                      ["--selftest", "--strict"]])
+    def test_any_other_argument_list_is_refused(self, argv, capsys):
+        # argparse's help action exited 0 before it refused `--admission`
+        assert findings_gate.main(argv) == 2
+        assert capsys.readouterr() == ("", findings_gate.USAGE + "\n")
 
-    def test_an_unreadable_ledger_refuses_rather_than_admits(self, tmp_path, monkeypatch):
+    def test_an_unreadable_ledger_refuses_rather_than_admits(self, tmp_path, monkeypatch, capsys):
         bad = tmp_path / "03-findings.json"
         bad.write_text("{ not json", encoding="utf-8")
         monkeypatch.setattr(findings_gate, "FINDINGS_PATH", bad)
-        assert findings_gate.main(["--admission"]) == 1
+        assert findings_gate.main([]) == 1
+        assert "cannot evaluate the ledger" in capsys.readouterr().err
+        assert findings_gate.main(["--strict"]) == 1
 
-    def test_a_ledger_that_is_not_a_list_refuses(self, tmp_path, monkeypatch):
+    def test_a_ledger_that_is_not_a_list_refuses(self, tmp_path, monkeypatch, capsys):
         bad = tmp_path / "03-findings.json"
         bad.write_text(json.dumps({"A-01": {}}), encoding="utf-8")
         monkeypatch.setattr(findings_gate, "FINDINGS_PATH", bad)
-        assert findings_gate.main(["--admission"]) == 1
+        assert findings_gate.main([]) == 1
+        assert "cannot evaluate the ledger" in capsys.readouterr().err
+        assert findings_gate.main(["--strict"]) == 1
 
 
 class TestSeparationCheck:
@@ -105,6 +216,22 @@ class TestSeparationCheck:
     def test_every_protected_surface_is_currently_owned(self):
         text = (ROOT / ".github" / "CODEOWNERS").read_text(encoding="utf-8")
         assert separation_check.uncovered(text) == []
+
+    def test_every_protected_surface_exists(self):
+        # `governance/` ("the constitution and its attested hash") was listed
+        # and owned while the directory was gone, and the check answered "all
+        # 9 policy-carrying surfaces are owned".
+        missing = [path for path, _ in separation_check.PROTECTED if not (ROOT / path).exists()]
+        assert missing == []
+
+    def test_the_constitution_is_protected(self):
+        # AGENTS.md calls itself the constitution; the two pin files are what
+        # the type-check step and the secret scan compare against.
+        protected = dict(separation_check.PROTECTED)
+        assert {"AGENTS.md", ".mypy-config.pinned", ".secrets.baseline"} <= protected.keys()
+        owned = separation_check.owned_patterns(
+            (ROOT / ".github" / "CODEOWNERS").read_text(encoding="utf-8"))
+        assert {"/AGENTS.md", "/.mypy-config.pinned", "/.secrets.baseline"} <= set(owned)
 
 
 class TestAuthzCoverage:
@@ -149,23 +276,12 @@ class TestStrictModeIsActuallyReachable:
     it is not a reason for the code path to be untested.
     """
 
-    import json as _json
-
     @staticmethod
     def _gate_with(tmp_path, monkeypatch, records):
-        import json
-
-        from scripts.regime import findings_gate as fg
         path = tmp_path / "03-findings.json"
         path.write_text(json.dumps(records), encoding="utf-8")
-        # load_findings binds FINDINGS_PATH as a DEFAULT ARGUMENT, so patching
-        # the module attribute does not reach it -- the gate reads the real
-        # 119-record ledger and the assertions silently describe production
-        # instead of the fixture. Patching load_findings is what redirects it,
-        # and that binding is a fair part of why --strict went uncovered.
-        monkeypatch.setattr(fg, "FINDINGS_PATH", path)
-        monkeypatch.setattr(fg, "load_findings", lambda p=path: json.loads(p.read_text()))
-        return fg
+        monkeypatch.setattr(findings_gate, "FINDINGS_PATH", path)
+        return findings_gate
 
     def test_strict_blocks_on_an_open_blocking_band(self, tmp_path, monkeypatch, capsys):
         fg = self._gate_with(tmp_path, monkeypatch, [
@@ -199,9 +315,3 @@ class TestStrictModeIsActuallyReachable:
         fg = self._gate_with(tmp_path, monkeypatch, [
             {"id": "A-1", "verdict": "FAIL", "band": "STOP-SHIP"}])
         assert fg.main([]) == 0
-
-    def test_admission_still_refuses_where_strict_does(self, tmp_path, monkeypatch, capsys):
-        fg = self._gate_with(tmp_path, monkeypatch, [
-            {"id": "A-1", "verdict": "FAIL", "band": "STOP-SHIP"}])
-        assert fg.main(["--admission"]) == 1
-        assert "REFUSE deploy admission" in capsys.readouterr().err
