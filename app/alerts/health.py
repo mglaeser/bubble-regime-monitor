@@ -508,9 +508,9 @@ _CLOCK_SKEW_TOLERANCE_S = 60
 
 #: The schema this build expects. Health reports a FAULT when the live
 #: database is on any other revision, so this moves in the same PR as a
-#: migration - 0027 passes the stored source-health notes through the
-#: gather's redaction.
-_ALERT_SCHEMA_REVISION = "0027"
+#: migration - 0028 drops the calibration registry and the idempotency
+#: record's expiry.
+_ALERT_SCHEMA_REVISION = "0028"
 _REQUIRED_PARTIAL_INDEXES = frozenset({
     "uq_alert_input_snapshot_id",
     "uq_alert_episode_open",
@@ -654,12 +654,11 @@ def health_projection(
     # ABSENCE OF A MONITOR IS A FAULT, NOT SILENCE.
     #
     # Each component records liveness when it runs, and the projection above
-    # lists the rows that EXIST. So a component that has NEVER run — because its
-    # systemd timer was never installed on the host, which is the recorded state
-    # of this deployment — contributed no row, and no row rendered as nothing at
-    # all. The watchdog is the component this matters most for: it is the thing
-    # that notices recomputes have stopped, so a watchdog nobody installed is an
-    # outage detector that cannot detect, reporting no problem.
+    # lists the rows that EXIST. So a component that has NEVER run contributed
+    # no row, and no row rendered as nothing at all. The watchdog is the
+    # component this matters most for: it is the thing that notices recomputes
+    # have stopped, so a watchdog that never ran is an outage detector that
+    # cannot detect, reporting no problem.
     expected = {
         "watchdog": _WATCHDOG_MAX_SILENCE_S,
         "dispatcher": max(
