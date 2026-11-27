@@ -131,8 +131,11 @@ class RedFlagFact:
     `fireable` answers "could this flag have contributed to the override on this
     run?" — false when its input was unavailable (data) or when governance
     structurally blocks it (e.g. the GSADF flag while the statistic is
-    contested). `distance_to_threshold` is signed: negative means below the
-    firing threshold.
+    contested). `distance_to_threshold` is the reading minus the threshold, and
+    its sign does not mean the same for every flag: rf1 to rf3 fire above their
+    threshold (rf2 from it on), so a negative distance is their calm side; rf4
+    fires with breadth BELOW 50 % (and the index near its high), so a negative
+    distance is its firing side.
     """
 
     flag_id: str

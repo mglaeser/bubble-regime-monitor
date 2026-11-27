@@ -1,5 +1,5 @@
 {
-  "content_version": 2,
+  "content_version": 6,
   "generated": "2026-08-29",
   "origin": "save-haven-monitor prose migration (shallow-frontend program, A1 ledger; verbatim extraction)",
   "blocks": {
@@ -1063,18 +1063,18 @@
     },
     "gauge.epistemic.chip_long": {
       "kind": "text",
-      "text": "Heuristic · not a probability · calibrated on n≈4 · see limits",
+      "text": "Heuristic · not a probability · uncalibrated (n≈4) · see limits",
       "source": "src/bubblegauge.tsx:148"
     },
     "gauge.band.oneliner": {
       "kind": "map",
       "entries": {
         "hold": "Hold — structural risk is present but not acute. No action indicated by the trend rule.",
-        "trim": "Trim — fragility is elevated. Consider easing risk if the trend rule confirms.",
+        "trim": "Trim — fragility is elevated. The trend rule is the trigger.",
         "de-risk": "De-risk — fragility is high or a hard override has fired. The trend rule is now the thing to watch.",
-        "suppressed": "Not scored right now — too many inputs for one block are unavailable, so the action band is withheld rather than guessed.",
-        "suppressed (block degraded)": "Not scored right now — too many inputs for one block are unavailable, so the action band is withheld rather than guessed.",
-        "fallback": "Not scored right now — too many inputs for one block are unavailable, so the action band is withheld rather than guessed.",
+        "suppressed": "Band withheld right now — too many inputs for one block are unavailable, so the action band is withheld rather than guessed; the score is still published.",
+        "suppressed (block degraded)": "Band withheld right now — too many inputs for one block are unavailable, so the action band is withheld rather than guessed; the score is still published.",
+        "fallback": "Band withheld right now — too many inputs for one block are unavailable, so the action band is withheld rather than guessed; the score is still published.",
         "unknown": "Not scored — the current reading could not be classified, so the action band is withheld."
       },
       "source": "src/bubblegauge.tsx:149-154"
@@ -1101,7 +1101,7 @@
     },
     "gauge.redflag.header": {
       "kind": "text",
-      "text": "What would have to happen — each flag has a specific threshold (encoded in its name). If at least 3 of 4 fire, the score is floored at 70 regardless of everything else (a deliberate non-compensatory override).",
+      "text": "What would have to happen — each flag has a specific threshold (encoded in its name). If at least 3 of 4 fire, the score is floored at 70 regardless of everything else (a deliberate non-compensatory override). While the GSADF flag is contested (the standing setting) it cannot fire, so all three others must fire together.",
       "source": "src/bubblegauge.tsx:161"
     },
     "gauge.falsify.header": {
@@ -1178,12 +1178,11 @@
     "gauge.reg.s5": {
       "kind": "map",
       "entries": {
-        "plain": "When lenders are most relaxed, trouble tends to arrive about two years later. As of Jul 2026, spreads were near 25-year tights.",
-        "fire": "High-yield spreads are historically tight (measured with a two-year lead).",
+        "plain": "When lenders are most relaxed, trouble tends to arrive about two years later. So the reading is how loosely credit was priced two years ago; it does not follow where spreads stand at the moment.",
+        "fire": "Two years ago credit risk was priced unusually cheaply.",
         "why": "Literature-grounded on López-Salido-Stein-Zakrajšek's finding that hot credit at t−2 precedes contraction at t."
       },
-      "source": "src/bubblegauge.tsx:194-197",
-      "as_of": "2026-07"
+      "source": "src/bubblegauge.tsx:194-197"
     },
     "gauge.reg.d1": {
       "kind": "map",
@@ -1208,7 +1207,7 @@
       "kind": "map",
       "entries": {
         "plain": "Spending a fortune on data centers is only alarming if the revenue stops showing up.",
-        "fire": "Cloud revenue growth falls below 15% YoY while trailing free cash flow is negative; otherwise capped low.",
+        "fire": "A hyperscaler's total revenue growth falls below 15% YoY while its trailing free cash flow is negative; otherwise capped low.",
         "why": "Literature-grounded: railroads and fiber both had cash-flow troughs years before any peak — capex is only a bubble signal when it stops converting to revenue."
       },
       "source": "src/bubblegauge.tsx:206-209"
@@ -1274,6 +1273,24 @@
           "v": "3.1.0",
           "score": null,
           "note": "price-layer restructure (provider chain + source hardening). Methodology unchanged."
+        },
+        {
+          "key": "v3_3_0",
+          "v": "3.3.0",
+          "score": 45,
+          "note": "AGGREGATION CHANGE (2026-07-14): each sub-score is rescaled to the range 0.10 to 1 before the geometric mean, so a single zero no longer silences its block. The score went from 33 to 45 and the band from hold to trim between two runs nine hours apart. NOT market deterioration."
+        },
+        {
+          "key": "v3_3_2",
+          "v": "3.3.2",
+          "score": 52,
+          "note": "LPPLS METHOD CHANGE (2026-07-15): one endpoint, scanned densely. D4 readings before and after are not comparable. Deployed together with 3.3.1, which moved S5 to the excess bond premium. The score went from 49 to 52 between two runs four hours apart: about 1 point from D4, about 2 from S5. NOT market deterioration."
+        },
+        {
+          "key": "v3_9_0",
+          "v": "3.9.0",
+          "score": null,
+          "note": "S4 reads the test at the last month of its sample, and a contested non-rejection scores 0.05 instead of 0.25 (2026-08-23). No step at release (51.4 to 51.5). When the statistic is no longer above its 90% critical value the score drops by 1.3 to 2.0 points: the policy, not the market."
         }
       ],
       "source": "src/bubblegauge.tsx:231-237"
@@ -1370,9 +1387,9 @@
         "hold": "Structural risk present, not acute.",
         "trim": "Fragility elevated — the trend rule is the trigger.",
         "de-risk": "Fragility high, or a hard override fired.",
-        "suppressed": "Not scored — inputs degraded.",
-        "suppressed (block degraded)": "Not scored — inputs degraded.",
-        "fallback": "Not scored — inputs degraded.",
+        "suppressed": "Band withheld — inputs degraded.",
+        "suppressed (block degraded)": "Band withheld — inputs degraded.",
+        "fallback": "Band withheld — inputs degraded.",
         "unknown": "Not scored — reading unclassified."
       },
       "source": "src/bubblegauge.tsx:1438"
@@ -1412,7 +1429,7 @@
     },
     "gauge.live_backfill.editorial_line": {
       "kind": "text",
-      "text": "The panel's written analysis remains the Jul 2026 editorial snapshot. Refreshes twice daily.",
+      "text": "The panel's written analysis remains the Jul 2026 editorial snapshot.",
       "source": "src/bubblegauge.tsx:1276",
       "as_of": "2026-07"
     },
@@ -1446,27 +1463,27 @@
         {
           "band": "suppressed (block degraded)",
           "trend_broken": "any",
-          "template": "Not scored today."
+          "template": "Band withheld today."
         },
         {
           "band": "de-risk",
           "trend_broken": "yes",
-          "template": "De-risk now — {names} has broken trend."
+          "template": "Band de-risk — {names} has broken trend."
         },
         {
           "band": "de-risk",
           "trend_broken": "no",
-          "template": "De-risk is warranted; the trigger has not fired."
+          "template": "Band de-risk; the trigger has not fired."
         },
         {
           "band": "trim",
           "trend_broken": "yes",
-          "template": "Trim now — the trigger has fired on {names}."
+          "template": "Band trim — the trigger has fired on {names}."
         },
         {
           "band": "trim",
           "trend_broken": "no",
-          "template": "Trim is warranted — but nothing forces action today."
+          "template": "Band trim; the trigger has not fired."
         },
         {
           "band": "hold",
@@ -1486,7 +1503,7 @@
         {
           "band": "suppressed",
           "trend_broken": "any",
-          "template": "Not scored today."
+          "template": "Band withheld today."
         },
         {
           "band": "fallback",
