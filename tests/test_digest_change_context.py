@@ -30,18 +30,19 @@ pytestmark = pytest.mark.usefixtures("isolated_db")
 T0 = datetime(2026, 10, 4, 6, 0, 49, tzinfo=UTC)
 
 
-def _flag(active: bool, distance: float) -> dict:
-    return {"active": active, "distance_to_threshold": distance}
+def _flag(state: str, distance: float) -> dict:
+    return {"active": state == "ACTIVE", "state": state, "distance_to_threshold": distance}
 
 
 def _snapshot(*, computed_at: datetime = T0, median: float = 60.51, action_band: str = "de-risk",
               s1: float = 0.98, d1: float = 0.88, rf4: bool = True, qqq: str = "IN",
-              red_flag_count: int = 1) -> Snapshot:
-    """A snapshot as production stored snapshot 392 (2026-10-04 18:00 UTC)."""
+              red_flag_count: int = 1, v_state: str = "contango", v_multiplier: float = 1.0) -> Snapshot:
+    """A snapshot as production stored snapshot 392 (2026-10-04 18:00 UTC):
+    flag 1 set aside as contested, so three of the four flags can fire."""
     return Snapshot(
         computed_at=computed_at, service_version="3.9.0", median=median, iqr_lo=58.5, iqr_hi=62.57,
         band5=55.74, band95=65.54, point_score=60.47, action_band=action_band, override_fired=False,
-        red_flag_count=red_flag_count, red_flag_detail={}, v_multiplier=1.0, v_state="contango",
+        red_flag_count=red_flag_count, red_flag_detail={}, v_multiplier=v_multiplier, v_state=v_state,
         block_s={"value": 0.743865, "indicators": {
             "s1": {"value": 41.38, "sub_score": s1}, "s2": {"value": 38.905092, "sub_score": 0.91},
             "s3": {"value": 111.072, "sub_score": 0.525}, "s4": {"value": 1.3181, "sub_score": 0.25},
@@ -53,8 +54,10 @@ def _snapshot(*, computed_at: datetime = T0, median: float = 60.51, action_band:
                       "QQQ": {"faber_10mo": qqq, "faber_distance_pct": 8.72458}},
         fast_alarm={}, judgment_call="A few giants carry the market.", judgment_stale=False,
         data_freshness={}, data_degraded=False, override_required_count=3,
-        red_flag_meta={"flags": {"rf1": _flag(False, -0.0599), "rf2": _flag(False, -38.928),
-                                 "rf3": _flag(False, -35.0), "rf4": _flag(rf4, -8.2)}})
+        override_fireable_universe_count=3,
+        red_flag_meta={"flags": {"rf1": _flag("BLOCKED", -0.0599), "rf2": _flag("INACTIVE", -38.928),
+                                 "rf3": _flag("INACTIVE", -35.0),
+                                 "rf4": _flag("ACTIVE" if rf4 else "INACTIVE", -8.2)}})
 
 
 def _entry() -> dict:
@@ -68,13 +71,14 @@ class TestWhatTheApiServes:
         facts = digest.digest_facts(_snapshot())
         assert {name: facts[name] for name in (
             "range_lo", "range_hi", "trim_line", "derisk_line", "trim_line_gap", "derisk_line_gap",
-            "override_required", "override_floor", "rf1_active", "rf2_active", "rf3_active", "rf4_active",
-            "rf1_distance", "rf2_distance", "rf3_distance", "rf4_distance", "spy_distance_pct",
+            "override_required", "override_fireable", "override_floor", "rf1_state", "rf2_state",
+            "rf3_state", "rf4_state", "rf1_distance", "rf2_distance", "rf3_distance", "rf4_distance", "spy_distance_pct",
             "qqq_distance_pct", "vol_state", "vol_multiplier", "fragility_block", "timing_block",
             "s1_value", "s2_value", "s3_value", "d1_value", "d2_value", "data_degraded")} == {
             "range_lo": 55, "range_hi": 65, "trim_line": 45, "derisk_line": 60, "trim_line_gap": 15,
-            "derisk_line_gap": 0, "override_required": 3, "override_floor": 70, "rf1_active": False,
-            "rf2_active": False, "rf3_active": False, "rf4_active": True, "rf1_distance": -0.06,
+            "derisk_line_gap": 0, "override_required": 3, "override_fireable": 3, "override_floor": 70,
+            "rf1_state": "BLOCKED", "rf2_state": "INACTIVE", "rf3_state": "INACTIVE", "rf4_state": "ACTIVE",
+            "rf1_distance": -0.06,
             "rf2_distance": -38.93, "rf3_distance": -35.0, "rf4_distance": -8.2, "spy_distance_pct": 5.2,
             "qqq_distance_pct": 8.7, "vol_state": "contango", "vol_multiplier": 1.0, "fragility_block": 74,
             "timing_block": 49, "s1_value": 41.4, "s2_value": 38.9, "s3_value": 111.1, "d1_value": 41.8,
@@ -95,7 +99,7 @@ class TestWhatTheApiServes:
         snap.trend_states = {"SPY": {"faber_10mo": "IN", "faber_distance_pct": float("nan")}}
         facts = digest.digest_facts(snap)
         assert facts["d1_value"] is None and facts["timing_block"] is None
-        assert facts["rf4_active"] is None and facts["rf4_distance"] is None
+        assert facts["rf4_state"] is None and facts["rf4_distance"] is None
         assert facts["spy_distance_pct"] is None and facts["qqq_trend"] == "?"
 
     def test_every_fact_is_declared_typed_and_named_in_the_data(self):
@@ -109,6 +113,49 @@ class TestWhatTheApiServes:
         assert composer.typed_facts(entry, facts) == facts and None not in facts.values()
         data = dict(composer._SECTION_RE.findall(entry["prompt"]))["DATA"]
         assert set(re.findall(r"\{(\w+)\}", data)) == set(facts) - {"override_suffix"}
+
+    def test_a_flag_that_cannot_fire_is_not_called_inactive(self):
+        """The flag contract keeps four states apart and counts the flags that
+        can fire; the digest took the active bit alone, so a blocked and an
+        unknown flag both read "active False" beside a distance. Production:
+        flag 1 is BLOCKED in all 490 snapshots that carry the contract. Here:
+        the contested statistic ABOVE its critical value, no credit reading,
+        and breadth with no index series."""
+        from app.engine.aggregate import RedFlags
+        from app.engine.snapshot_contract import build_red_flag_meta
+
+        meta = build_red_flag_meta(
+            red_flags=RedFlags(), observed_at="2026-11-10T06:00:00+00:00", gsadf_stat=1.50, gsadf_cv95=1.48,
+            gsadf_contested=True, gsadf_available=True, gsadf_as_of="2026-11-09", gsadf_stale=False,
+            semi_runup_pp=70.0, semis_as_of="2026-11-09", semis_stale=False, hy_oas_bps=None,
+            hy_oas_tight_bps=None, hy_oas_as_of=None, hy_oas_stale=None, breadth_pct=41.0,
+            breadth_as_of="2026-11-09", breadth_stale=False, near_ath_available=False)
+        snap = _snapshot(red_flag_count=0)
+        snap.red_flag_meta, snap.override_fireable_universe_count = meta, meta["override_fireable_universe_count"]
+        facts = digest.digest_facts(snap)
+        assert [facts[f"rf{n}_state"] for n in (1, 2, 3, 4)] == ["BLOCKED", "INACTIVE", "UNKNOWN", "UNKNOWN"]
+        assert (facts["rf1_distance"], facts["rf3_distance"], facts["rf4_distance"]) == (0.02, None, -9.0)
+        assert (facts["override_fireable"], facts["override_required"]) == (1, 3)
+        assert not any(name.endswith("_active") or name.endswith("_active_1d_ago") for name in facts)
+        prompt = composer.prompt_for("daily_digest", _entry(), facts, Channel.IMESSAGE,
+                                     Settings(_env_file=None, message_engine_enabled=True))
+        assert "contested: BLOCKED; its reading minus its threshold: 0.02" in prompt
+        assert "three-year low: UNKNOWN; reading minus threshold: - basis points" in prompt
+        assert "warning flags active: 0 of 4; 1 of the 4 can fire today; at 3 or more" in prompt
+        assert "active False" not in prompt and "  rf1_state = BLOCKED" in prompt
+        # the DATA says what the two states that are not ACTIVE or INACTIVE mean
+        legend = next(line for line in prompt.splitlines() if line.startswith("a flag's state is "))
+        assert all(state in legend for state in ("ACTIVE", "INACTIVE", "BLOCKED", "UNKNOWN"))
+
+    def test_the_flag_states_are_the_contracts(self):
+        from app.engine import snapshot_contract as contract
+
+        produced = {contract._flag_state(active=a, fireable=f, available=v)
+                    for a in (False, True) for f in (False, True) for v in (False, True)}
+        assert produced == {"ACTIVE", "INACTIVE", "UNKNOWN", "BLOCKED"}
+        for name in [f"rf{n}_state{when}" for n in (1, 2, 3, 4) for when in ("", "_1d_ago")]:
+            assert composer.WORDS[name] == produced
+        assert composer.typed("rf1_state", "FIRING") is None
 
     def test_the_model_reads_the_whole_judgment(self):
         """The judgment's own cap is the composer's: at 180, 24 of
@@ -143,17 +190,50 @@ class TestTheChange:
         # 60.51) against 57 (57.4) and 55 (55.2).
         assert {name: value for name, value in facts.items() if "_1d_" in name or "_7d_" in name} == {
             "median_1d_ago": 57, "median_1d_change": 3, "band_1d_ago": "trim", "override_fired_1d_ago": False,
-            "red_flag_count_1d_ago": 0, "rf1_active_1d_ago": False, "rf2_active_1d_ago": False,
-            "rf3_active_1d_ago": False, "rf4_active_1d_ago": False, "spy_trend_1d_ago": "IN",
-            "qqq_trend_1d_ago": "OUT", "s1_1d_change": 0.03, "s2_1d_change": 0.0, "s3_1d_change": 0.0,
+            "red_flag_count_1d_ago": 0, "rf1_state_1d_ago": "BLOCKED", "rf2_state_1d_ago": "INACTIVE",
+            "rf3_state_1d_ago": "INACTIVE", "rf4_state_1d_ago": "INACTIVE", "spy_trend_1d_ago": "IN",
+            "qqq_trend_1d_ago": "OUT", "vol_state_1d_ago": "contango", "vol_multiplier_1d_ago": 1.0,
+            "s1_1d_change": 0.03, "s2_1d_change": 0.0, "s3_1d_change": 0.0,
             "s4_1d_change": 0.0, "s5_1d_change": 0.0, "d1_1d_change": 0.08, "d2_1d_change": 0.0,
             "d3_1d_change": 0.0, "d4_1d_change": 0.0, "median_7d_ago": 55, "median_7d_change": 5,
             "band_7d_ago": "trim", "red_flag_count_7d_ago": 0}
 
+    def test_a_changed_volatility_term_structure_is_carried(self):
+        """The VIX multiplier scales the whole timing block (D = min(D_raw * V, 1),
+        app/indicators/v_vix.py), so a change of state moves the score with no
+        sub-score moving. Production: on 6 of the 37 digest mornings of
+        2026-10-05..11-10 the state differed from the day-earlier slot, and
+        the facts carried nothing to compare today's state with."""
+        day = _snapshot(computed_at=T0 - timedelta(days=1))
+        today = _snapshot(v_state="backwardation", v_multiplier=1.15)
+        facts = digest.digest_facts(today, day=day)
+        assert (facts["vol_state"], facts["vol_multiplier"]) == ("backwardation", 1.15)
+        assert (facts["vol_state_1d_ago"], facts["vol_multiplier_1d_ago"]) == ("contango", 1.0)
+        prompt = composer.prompt_for("daily_digest", _entry(), facts, Channel.IMESSAGE,
+                                     Settings(_env_file=None, message_engine_enabled=True))
+        earlier = next(line for line in prompt.splitlines() if line.startswith("a day earlier:"))
+        assert earlier.endswith("volatility term structure contango, its multiplier 1.0")
+        assert "  vol_state_1d_ago = contango" in prompt and "  vol_multiplier_1d_ago = 1.0" in prompt
+
+    def test_the_earlier_volatility_state_is_one_of_the_producers_words(self):
+        assert composer.WORDS["vol_state_1d_ago"] is composer.WORDS["vol_state"]
+        day = _snapshot(computed_at=T0 - timedelta(days=1), v_state="calm")
+        assert composer.typed_facts(_entry(), digest.digest_facts(_snapshot(), day=day))["vol_state_1d_ago"] is None
+
+    def test_a_change_of_the_term_structure_can_be_the_point(self):
+        """The TASK's first tier names it beside the band, the override, the
+        flags and the trends, and the explanation is pointed at the earlier
+        multiplier, not at the sub-score changes alone."""
+        task = " ".join(dict(composer._SECTION_RE.findall(_entry()["prompt"]))["TASK"].split())
+        first = task.split("Choose the point in this order:")[1].split("; else")[0]
+        assert "the volatility term structure" in first
+        explain = task.split("what changed, from what to what,")[1].split(";")[0]
+        assert "the sub-score changes" in explain and "the multiplier a day earlier" in explain
+
     def test_with_no_earlier_snapshot_the_change_is_left_out(self, monkeypatch):
         facts = digest.digest_facts(_snapshot())
         changes = {name for name in facts if "_1d_" in name or "_7d_" in name}
-        assert len(changes) == 24 and all(facts[name] is None for name in changes)
+        assert len(changes) == 26 and all(facts[name] is None for name in changes)
         prompts: list[str] = []
         monkeypatch.setattr(composer, "complete",
                             lambda *, user, **_kw: prompts.append(user) or type("C", (), {"text": "ok"})())
