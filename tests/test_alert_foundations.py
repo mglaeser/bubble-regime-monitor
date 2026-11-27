@@ -850,28 +850,8 @@ def test_sidecar_is_immutable_at_the_database_level(isolated_db, monkeypatch):
     get_settings.cache_clear()
 
 
-def test_alert_failure_does_not_block_snapshot_commit(isolated_db, monkeypatch):
-    """A broken alert hook must not cost a snapshot."""
-    monkeypatch.setenv("ALERT_INPUT_CAPTURE", "true")
-    from app.config import get_settings
-
-    get_settings.cache_clear()
-
-    import app.services.alert_integration as integration
-
-    def _boom(_snapshot_id: int) -> None:
-        raise RuntimeError("alert layer exploded")
-
-    monkeypatch.setattr(integration, "on_snapshot_committed", _boom)
-
-    from app.services.compute import compute_snapshot, persist_snapshot
-    from tests.conftest import make_golden_raw_inputs
-
-    raw = make_golden_raw_inputs()
-    data = compute_snapshot(raw, mc_samples=1_000, mc_seed=20260711, gsadf_contested=True)
-    snap_id = persist_snapshot(data, raw)      # must not raise
-    assert snap_id
-    get_settings.cache_clear()
+# That a failing alert hook does not cost the snapshot is asserted on
+# run_recompute, the hook's only caller: tests/test_recompute_boundaries.py.
 
 
 def test_sidecar_carries_the_typed_contract_not_the_display_string(isolated_db, monkeypatch):

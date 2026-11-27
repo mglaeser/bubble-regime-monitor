@@ -42,8 +42,7 @@ def fake_fred(series_id):
 def fake_td(symbol, interval, outputsize):
     if interval == "1month":  # BTC monthly: SHORT history -> left-pad expected
         return [(f"{m}-01", 40_000.0 + i * 500) for i, m in enumerate(_months_now(24))]
-    spot = {"XAU/USD": 3350.0, "XAG/USD": 39.5, "USD/JPY": 156.2,
-            "USD/CHF": 0.874, "BTC/USD": 96_000.0}
+    spot = {"XAU/USD": 3350.0, "USD/JPY": 156.2, "USD/CHF": 0.874, "BTC/USD": 96_000.0}
     return [(datetime.now(UTC).date().isoformat(), spot.get(symbol, 1.0))]
 
 
@@ -76,13 +75,26 @@ def patched_sources(monkeypatch):
     monkeypatch.setattr(df, "_fear_greed", fake_fear_greed)
 
 
+@pytest.fixture()
+def monday(monkeypatch):
+    """The feed's clock at 12:00 UTC on Monday 2026-11-23."""
+    moment = datetime(2026, 11, 23, 12, tzinfo=UTC)
+
+    class _Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return moment.astimezone(tz) if tz else moment.replace(tzinfo=None)
+
+    monkeypatch.setattr(df, "datetime", _Clock)
+
+
 class TestBuildFeedGolden:
     def test_frozen_key_inventory(self, snapshot, patched_sources):
         raw, data = snapshot
         feed = df.build_feed(raw, data)
         assert sorted(feed["series"].keys()) == sorted(df.SERIES_KEYS)
         assert sorted(feed["metrics"].keys()) == sorted(df.METRIC_KEYS)
-        assert len(df.SERIES_KEYS) == 13 and len(df.METRIC_KEYS) == 33  # v3.7.0 +fear_greed; D13 -2 IMF keys
+        assert len(df.SERIES_KEYS) == 13 and len(df.METRIC_KEYS) == 30  # v3.7.0 +fear_greed; D13 -2 IMF keys; 1A as amended -3
 
     def test_points_always_61_and_left_padded(self, snapshot, patched_sources):
         raw, data = snapshot
@@ -119,12 +131,10 @@ class TestBuildFeedGolden:
         feed = df.build_feed(raw, data)
         m = feed["metrics"]
         assert m["gold_spot"]["source"] == "twelvedata:XAU/USD"      # true spot (1A)
-        assert m["gold_silver_ratio"]["value"] == pytest.approx(3350.0 / 39.5, rel=1e-3)
         assert m["btc_ath"]["value"] >= m["btc_spot"]["value"]        # spot included in basis
         assert m["btc_drawdown_pct"]["value"] <= 0.0
         assert m["usd_broad_index_ytd_pct"]["value"] is not None
         assert m["mmf_total_assets_usd"]["unit"] == "USD_mn"
-        assert m["ndx_close"]["available"] is False                   # never fabricated
         # ECY consistency with S1 inputs
         assert m["excess_cape_yield"]["value"] == pytest.approx(
             (1.0 / raw.cape - raw.real10y_decimal) * 100.0, abs=0.05)
@@ -179,6 +189,81 @@ class TestBuildFeedGolden:
         sup = g["detail"]["gsadf_sup"]                      # sup still visible
         assert (sup["stat"], sup["cv90"], sup["cv95"]) == (SUP_1986, SUP_CV90, SUP_CV95)
 
+    def test_the_ratios_date_is_not_lent_to_the_level_the_vrp_or_skew(
+            self, snapshot, patched_sources, monday):
+        """raw.vix_as_of is the date of the VIX / VIX3M pair, and the ratio ages
+        as a daily market series: Friday's close read on Monday is current. The
+        level, the VRP and SKEW are other readings and do not borrow the date."""
+        raw, data = snapshot
+        raw.vix_as_of = "2026-11-20"
+        m = df.build_feed(raw, data)["metrics"]
+        assert m["vix_term_ratio"]["as_of"] == m["vix_term_state"]["as_of"] == "2026-11-20"
+        assert m["vix_term_ratio"]["stale"] is False
+        for key in ("vix_level", "vrp", "skew"):
+            assert m[key]["as_of"] is None and m[key]["stale"] is None, key
+
+    @pytest.mark.parametrize(("source", "as_of"), [
+        ("fred_VIXCLS", "2026-11-20"),  # a daily close with its observation date
+        ("cboe_vix", None),             # a quote without a date
+    ])
+    def test_the_feed_names_the_vix_levels_source_and_day(self, snapshot, patched_sources,
+                                                          monday, source, as_of):
+        """The level is published with the source and the date the gather
+        recorded for it, and the VRP, which is computed from the level, names
+        that source."""
+        raw, data = snapshot
+        raw.vix_level_source, raw.vix_level_as_of = source, as_of
+        m = df.build_feed(raw, data)["metrics"]
+        assert m["vix_level"]["value"] == raw.vix_level
+        assert m["vix_level"]["source"] == source
+        assert m["vix_level"]["as_of"] == as_of
+        assert m["vix_level"]["stale"] is (None if as_of is None else False)
+        assert m["vrp"]["source"] == f"{source}+spy_realized"
+
+    @pytest.mark.parametrize(("source", "as_of"), [("fred_VIXCLS", "2026-11-09"), ("cboe_vix", None)])
+    def test_the_gather_carries_the_vix_levels_source_and_day(self, isolated_db, monkeypatch,
+                                                              source, as_of):
+        """Through gather_inputs: the adapter's provenance reaches RawInputs.
+        `_track` answers the level's step and fails every other one."""
+        from app.services import compute
+        from app.sources import Provenance, SourceResult
+
+        level = SourceResult(19.92, Provenance(source=source, as_of=as_of))
+        monkeypatch.setattr(compute, "_track",
+                            lambda raw, step, fn: level if step == "vix_level" else None)
+        raw = compute.gather_inputs()
+        assert (raw.vix_level, raw.vix_level_source, raw.vix_level_as_of) == (19.92, source, as_of)
+
+
+class TestStaleSlas:
+    """Spec section 4: `stale` says an item is older than its SLA, counted
+    from the date its source gives it."""
+
+    @pytest.mark.parametrize(("age_days", "stale"), [
+        (163, False),   # the day a quarter appears: its 91 days and about 72 to the release
+        (255, False),   # the day the next release replaces it
+        (347, True),    # one release later still: a release was missed
+    ])
+    def test_the_quarterly_item_is_stale_only_when_a_release_was_missed(
+            self, snapshot, patched_sources, monkeypatch, age_days, stale):
+        """Decision 5A's item is quarterly with about a quarter of publication
+        lag, and FRED dates a quarter at its first day, so its newest
+        observation is never young."""
+        from datetime import timedelta
+
+        raw, data = snapshot
+        label = (datetime.now(UTC).date() - timedelta(days=age_days)).isoformat()
+
+        def fred(series_id):
+            if series_id == "MMMFFAQ027S":
+                return [(label, 8_441_374.0)]
+            return fake_fred(series_id)
+
+        monkeypatch.setattr(df, "_fred_series", fred)
+        mmf = df.build_feed(raw, data)["metrics"]["mmf_total_assets_usd"]
+        assert mmf["available"] is True and mmf["as_of"] == label
+        assert mmf["stale"] is stale
+
 
 class TestDegradation:
     def test_one_source_down_degrades_only_that_item(self, snapshot, patched_sources,
@@ -199,7 +284,7 @@ class TestDegradation:
         # neighbours unaffected
         assert feed["series"]["qqq"]["available"] is True
         assert feed["series"]["silver"]["available"] is True
-        # spot keeps its true-spot source; the ETF fallback is only for spot failure
+        # the spot quote is its own source: a failed GLD series does not touch it
         assert feed["metrics"]["gold_spot"]["available"] is True
 
     def test_the_imf_reserve_keys_left_the_contract(self, snapshot, patched_sources):
@@ -212,23 +297,24 @@ class TestDegradation:
             assert key not in m and key not in df.METRIC_KEYS
         assert m["mmf_total_assets_usd"]["unit"] == "USD_mn"    # neighbours unaffected
 
-    def test_spot_failure_falls_back_to_labeled_etf_close(self, snapshot, patched_sources,
-                                                          monkeypatch):
+    def test_a_spot_key_never_carries_an_etf_share_price(self, snapshot, patched_sources,
+                                                         monkeypatch):
+        """A failed XAU/USD quote ships unavailable, not the GLD close: a fund
+        share's price, not an ounce's (369.36 USD beside a quote of 4033.09 on
+        2026-11-10)."""
         raw, data = snapshot
 
-        def td_no_metals(symbol, interval, outputsize):
-            if symbol in ("XAU/USD", "XAG/USD"):
-                raise RuntimeError("symbol not on plan")
+        def td_no_gold(symbol, interval, outputsize):
+            if symbol == "XAU/USD":
+                raise RuntimeError("quote failed")
             return fake_td(symbol, interval, outputsize)
 
-        monkeypatch.setattr(df, "_td_series", td_no_metals)
+        monkeypatch.setattr(df, "_td_series", td_no_gold)
         feed = df.build_feed(raw, data)
         gs = feed["metrics"]["gold_spot"]
-        # 1A: fallback must be clearly detectable via source/note
-        assert gs["available"] is True
-        assert gs["source"].startswith("tiingo:")
-        assert "NOT spot" in gs["note"]
-        assert "ETF" in feed["metrics"]["gold_silver_ratio"]["note"]
+        assert gs["available"] is False and gs["value"] is None
+        assert gs["source"] == "twelvedata:XAU/USD"
+        assert gs["note"].startswith("source failed")
 
 
 class TestFeedEndpoint:
@@ -258,6 +344,15 @@ class TestFeedEndpoint:
     def test_503_before_first_payload(self, client):
         assert client.get("/api/v1/dashboard/feed").status_code == 503
 
+    def test_the_route_text_restates_no_inventory_count(self, client):
+        """The inventory is counted where it is pinned: SERIES_KEYS and
+        METRIC_KEYS (test_frozen_key_inventory) and spec section 2."""
+        import re
+
+        op = client.get("/openapi.json").json()["paths"]["/api/v1/dashboard/feed"]["get"]
+        count = re.compile(r"\d+\s+(monthly\s+)?series|\d+\s+(scalar\s+)?metrics")
+        assert not count.search(op["summary"]), op["summary"]
+
     def test_serves_latest_payload_with_cache_header(self, client):
         self._persist_payload()
         r = client.get("/api/v1/dashboard/feed")
@@ -276,3 +371,63 @@ class TestFeedEndpoint:
         r = client.get("/api/v1/dashboard/feed?sections=bogus")
         assert r.status_code == 200                      # unknown section ignored
         assert "series" in r.json()["data"]
+
+    # What an older build stored and the contract no longer holds, with the
+    # values, sources and notes of production's newest row of 2026-11-10.
+    _LEFT_THE_CONTRACT = {
+        "ndx_close": {"value": None, "unit": "index", "as_of": None, "source": "none",
+                      "available": False, "stale": None,
+                      "note": "no free raw NASDAQ-100 index source; use qqq_close (ETF proxy)"},
+        "silver_spot": {"value": 46.48, "unit": "USD", "as_of": "2026-11-10",
+                        "source": "tiingo:SLV", "available": True, "stale": False,
+                        "note": "SLV ETF close proxy - NOT spot (spot source failed)"},
+        "gold_silver_ratio": {"value": 86.77, "unit": "ratio", "as_of": "2026-11-10",
+                              "source": "twelvedata:XAU/USD/tiingo:SLV", "available": True,
+                              "stale": False,
+                              "note": "basis: mixed - one leg spot, one leg ETF close (see source)"},
+    }
+    # A GLD close under `gold_spot`, in the form the old fallback wrote on a failed quote.
+    _GLD_CLOSE = {"value": 369.36, "unit": "USD", "as_of": "2026-11-10", "source": "tiingo:GLD",
+                  "available": True, "stale": False,
+                  "note": "GLD ETF close proxy - NOT spot (spot source failed)"}
+
+    def _store_a_payload_from_before(self, snapshot, gold_spot=None):
+        """Store what an older build wrote: today's payload plus the three
+        keys, and the GLD close under `gold_spot` when one is given."""
+        from app.db import session_scope
+        from app.models import DashboardFeed
+
+        payload = df.build_feed(*snapshot)
+        payload["metrics"].update(self._LEFT_THE_CONTRACT)
+        if gold_spot is not None:
+            payload["metrics"]["gold_spot"] = gold_spot
+        with session_scope() as s:
+            s.add(DashboardFeed(computed_at=datetime(2026, 11, 10, 22, 2, tzinfo=UTC),
+                                payload=json.dumps(payload)))
+
+    def _served_metrics(self, client, query=""):
+        return client.get("/api/v1/dashboard/feed" + query).json()["data"]["metrics"]
+
+    def test_a_stored_payload_is_served_without_the_keys_that_left(
+            self, client, snapshot, patched_sources):
+        """A row stored by an older build holds the three keys that left the
+        contract: they are not served, by default or by name; the spot quote
+        under `gold_spot` is."""
+        self._store_a_payload_from_before(snapshot)
+        served = self._served_metrics(client)
+        assert sorted(served) == sorted(df.METRIC_KEYS)
+        assert served["gold_spot"]["value"] == 3350.0
+        assert served["gold_spot"]["source"] == "twelvedata:XAU/USD"
+        assert self._served_metrics(
+            client, "?symbols=ndx_close,silver_spot,gold_silver_ratio") == {}
+
+    def test_a_stored_etf_close_is_not_served_as_gold_spot(
+            self, client, snapshot, patched_sources):
+        """A row stored by an older build on a failed quote holds the GLD close
+        under `gold_spot`: it is served as a failed quote is served, unavailable
+        and without a value."""
+        self._store_a_payload_from_before(snapshot, gold_spot=self._GLD_CLOSE)
+        gold = self._served_metrics(client)["gold_spot"]
+        assert gold["available"] is False and gold["value"] is None
+        assert gold["source"] == "twelvedata:XAU/USD"
+        assert gold["note"].startswith("source failed")
