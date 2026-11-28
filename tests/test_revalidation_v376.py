@@ -138,18 +138,17 @@ def test_c07_calendar_yoy_missing_reference_raises():
 
 def _patch_vix_to_fred(monkeypatch, vix_date, vix3m_date):
     import app.sources.vix as vixmod
-    from app.sources import Provenance, SourceError, SourceResult
+    from app.sources import SourceError
 
     def _boom(*a, **k):
         raise SourceError("upstream down")
 
     monkeypatch.setattr(vixmod, "_cboe_last", _boom)     # CBOE refuses: the ratio is FRED's alone
 
-    def _fred(series_id):
-        d, v = {"VIXCLS": (vix_date, 18.0), "VXVCLS": (vix3m_date, 20.0)}[series_id]
-        return SourceResult(v, Provenance(source="fred", as_of=d))
+    def _fred(series_id, limit=None):
+        return [{"VIXCLS": (vix_date, 18.0), "VXVCLS": (vix3m_date, 20.0)}[series_id]]
 
-    monkeypatch.setattr(vixmod, "fred_latest", _fred)
+    monkeypatch.setattr(vixmod, "fred_observations", _fred)
     return vixmod
 
 
