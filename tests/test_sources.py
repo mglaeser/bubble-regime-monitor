@@ -236,6 +236,24 @@ class TestSourceChains:
         assert result.provenance.source == "fred_vix_ratio"
         assert result.provenance.fallback_used is False
 
+    def test_the_ratio_is_of_the_newest_date_both_series_hold(self, monkeypatch):
+        """VIX's newest close is a day ahead of VIX3M's: the ratio is the two
+        closes of the newest date both series hold, dated by that date."""
+        import app.sources.fred as fred
+        import app.sources.vix as vix
+
+        closes = {"VIXCLS": {"2026-11-26": 17.2, "2026-11-25": 16.8, "2026-11-24": 17.5},
+                  "VXVCLS": {"2026-11-25": 19.6, "2026-11-24": 19.9}}
+
+        def fake_fred(source, url, params=None, **kwargs):
+            rows = sorted(closes[params["series_id"]].items(), reverse=params["sort_order"] == "desc")
+            rows = rows[:int(params["limit"])] if "limit" in params else rows
+            return _Response(payload={"observations": [{"date": d, "value": str(v)} for d, v in rows]})
+
+        monkeypatch.setattr(fred, "fetch", fake_fred)
+        result = vix.term_structure_ratio()
+        assert (result.value, result.provenance.as_of) == (pytest.approx(16.8 / 19.6), "2026-11-25")
+
     @pytest.mark.parametrize("closes", [
         {"VIXCLS": ("2026-11-09", 19.92)},                                         # no VIX3M close
         {"VIXCLS": (None, 19.92), "VXVCLS": (None, 20.85)},                        # no date
@@ -248,17 +266,15 @@ class TestSourceChains:
         a finite positive number; anything else is a SourceError, and CBOE,
         answering, is not asked."""
         import app.sources.vix as vix
-        from app.sources import Provenance, SourceResult
 
         cboe_asked = _cboe_answers(monkeypatch)
 
-        def fred_latest(series_id):
+        def fred_observations(series_id, limit=None):
             if series_id not in closes:
                 raise SourceError(f"fred:{series_id}: 400 Bad Request")
-            day, value = closes[series_id]
-            return SourceResult(value, Provenance(source=f"fred_{series_id}", as_of=day))
+            return [closes[series_id]]
 
-        monkeypatch.setattr(vix, "fred_latest", fred_latest)
+        monkeypatch.setattr(vix, "fred_observations", fred_observations)
         with pytest.raises(SourceError):
             vix.term_structure_ratio()
         assert cboe_asked == []
