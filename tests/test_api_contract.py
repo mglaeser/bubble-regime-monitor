@@ -215,18 +215,29 @@ def test_legs_endpoints(client_with_snapshot):
     assert alarm.json()["data"]["skew_label"] == "coincident context only"
 
 
-def test_a_trend_without_a_price_series_serves_its_month_end_state_null(client):
-    """The rule text says the state is null without ten completed months, and
-    without a price series there are none: the key is served, as null."""
-    from app.services.compute import compute_snapshot, persist_snapshot
+@pytest.mark.parametrize("without_prices", [False, True],
+                         ids=["stored_before_the_month_end_state", "computed_without_a_price_series"])
+def test_every_served_trend_record_carries_every_key_the_rule_describes(client_with_snapshot,
+                                                                         without_prices):
+    """A stored record that does not hold a key the rule text describes is
+    served with that key null: the record production stored before the
+    month-end state existed (ids 1 to 144), and the one compute stores
+    without a price series."""
+    from sqlalchemy import update
+
+    from app.services.compute import compute_snapshot
     from tests.conftest import make_golden_raw_inputs
 
-    raw = make_golden_raw_inputs()
-    raw.spy_daily, raw.spy_daily_closes = None, None
-    persist_snapshot(compute_snapshot(raw, mc_samples=1_000, mc_seed=20260711), raw)
-    spy = client.get("/api/v1/legs/trend").json()["data"]["states"]["SPY"]
-    assert (spy["faber_month_end_state"], spy["faber_month_end_period"]) == (None, None)
-    assert (spy["faber_10mo"], spy["sma200"]) == ("unknown", "unknown")
+    stored = {"faber_10mo": "IN", "sma200": "IN"}
+    if without_prices:
+        raw = make_golden_raw_inputs()
+        raw.spy_daily, raw.spy_daily_closes = None, None
+        stored = compute_snapshot(raw, mc_samples=1_000, mc_seed=20260711).trend_states["SPY"]
+    with session_scope() as session:
+        session.execute(update(Snapshot).values(trend_states={"SPY": stored, "QQQ": stored}))
+    served = client_with_snapshot.get("/api/v1/legs/trend").json()["data"]["states"]
+    nulls = {"faber_month_end_state": None, "faber_month_end_period": None, "faber_distance_pct": None}
+    assert served == {"SPY": {**stored, **nulls}, "QQQ": {**stored, **nulls}}
 
 
 def test_methodology_endpoint(client):
