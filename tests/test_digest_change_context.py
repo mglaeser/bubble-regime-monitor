@@ -38,7 +38,10 @@ def _snapshot(*, computed_at: datetime = T0, median: float = 60.51, action_band:
               s1: float = 0.98, d1: float = 0.88, rf4: bool = True, qqq: str = "IN",
               red_flag_count: int = 1, v_state: str = "contango", v_multiplier: float = 1.0) -> Snapshot:
     """A snapshot as production stored snapshot 392 (2026-10-04 18:00 UTC):
-    flag 1 set aside as contested, so three of the four flags can fire."""
+    flag 1 set aside as contested, so three of the four flags can fire. The
+    trend states hold what compute stores: the rule's state at the last
+    completed month-end (`qqq` sets QQQ's) beside the running month's
+    preview, which stays IN with the latest close above its average."""
     return Snapshot(
         computed_at=computed_at, service_version="3.9.0", median=median, iqr_lo=58.5, iqr_hi=62.57,
         band5=55.74, band95=65.54, point_score=60.47, action_band=action_band, override_fired=False,
@@ -50,8 +53,10 @@ def _snapshot(*, computed_at: datetime = T0, median: float = 60.51, action_band:
         block_d={"value_raw": 0.491574, "value": 0.491574, "indicators": {
             "d1": {"value": 41.78499, "sub_score": d1}, "d2": {"value": 37.18981, "sub_score": 0.21},
             "d3": {"value": 0.738, "sub_score": 0.3}, "d4": {"value": 0.3208, "sub_score": 0.32}}},
-        trend_states={"SPY": {"faber_10mo": "IN", "faber_distance_pct": 5.17517},
-                      "QQQ": {"faber_10mo": qqq, "faber_distance_pct": 8.72458}},
+        trend_states={"SPY": {"faber_10mo": "IN", "faber_distance_pct": 5.17517,
+                              "faber_month_end_state": "IN", "faber_month_end_period": "2026-09"},
+                      "QQQ": {"faber_10mo": "IN", "faber_distance_pct": 8.72458,
+                              "faber_month_end_state": qqq, "faber_month_end_period": "2026-09"}},
         fast_alarm={}, judgment_call="A few giants carry the market.", judgment_stale=False,
         data_freshness={}, data_degraded=False, override_required_count=3,
         override_fireable_universe_count=3,
@@ -96,11 +101,12 @@ class TestWhatTheApiServes:
         snap = _snapshot()
         snap.block_d = {"indicators": {"d1": {"value": None, "sub_score": None}}}
         snap.red_flag_meta = {}
-        snap.trend_states = {"SPY": {"faber_10mo": "IN", "faber_distance_pct": float("nan")}}
+        snap.trend_states = {"SPY": {"faber_month_end_state": "IN", "faber_distance_pct": float("nan")}}
         facts = digest.digest_facts(snap)
         assert facts["d1_value"] is None and facts["timing_block"] is None
         assert facts["rf4_state"] is None and facts["rf4_distance"] is None
-        assert facts["spy_distance_pct"] is None and facts["qqq_trend"] == "?"
+        # a trend state that is not there is the monitor's word for it, not a "?"
+        assert facts["spy_distance_pct"] is None and facts["qqq_trend"] == "unknown"
 
     def test_every_fact_is_declared_typed_and_named_in_the_data(self):
         """Owner decision D7 holds for every new fact: a number, a truth
@@ -166,6 +172,28 @@ class TestWhatTheApiServes:
         assert 180 < len(stored) <= 300 == composer.JUDGMENT_MAX
         assert composer.typed("judgment", stored) == stored
 
+    def test_a_stale_judgment_is_not_handed_on_as_todays_note(self):
+        """When the judgment's call fails the snapshot keeps the LAST
+        successful text with judgment_stale = True (app/engine/judgment.py:
+        "persist the last successful text with stale:true"): a note written
+        for an earlier snapshot's numbers. The score API serves the flag
+        beside the text; the digest dropped the flag and handed the text on
+        as the "plain-language note you may draw on". Production: 58 of 615
+        snapshots hold a stale text, in runs of up to 22 (2026-09-02 22:01 to
+        09-06 10:01 UTC, one note for 3.5 days), and one of the 58 digest
+        attempts was handed one: 2026-10-01 08:00, the 06:01 snapshot with
+        the 02:00 note, which the digest gave as its "Größter Treiber"."""
+        snap = _snapshot()
+        assert digest.digest_facts(snap)["judgment"] == "A few giants carry the market."
+        snap.judgment_stale = True
+        facts = digest.digest_facts(snap)
+        assert facts["judgment"] == "n/a"
+        prompt = composer.prompt_for("daily_digest", _entry(), facts, Channel.IMESSAGE,
+                                     Settings(_env_file=None, message_engine_enabled=True))
+        assert "plain-language note you may draw on: n/a" in prompt and "A few giants" not in prompt
+        # what the snapshot stores and the score API serves is untouched: the text with its flag
+        assert (snap.judgment_call, snap.judgment_stale) == ("A few giants carry the market.", True)
+
     def test_the_volatility_states_are_the_producers(self):
         """v_vix.state's three states for a measured ratio, and the state
         compute_snapshot stores for a run without one: a fourth word, not one
@@ -178,6 +206,95 @@ class TestWhatTheApiServes:
         no_ratio = compute.compute_snapshot(raw, mc_samples=2_000, mc_seed=1).v_state
         assert no_ratio not in measured
         assert measured | {no_ratio} == composer.WORDS["vol_state"]
+
+
+#: The trend states production stored in snapshot 568 (2026-11-03 02:00 UTC),
+#: the first of 48 in a row (to 2026-11-10 22:00) in which QQQ's running
+#: month read OUT while the rule's state, at October's close, was IN.
+PREVIEW_OUT = {
+    "SPY": {"faber_10mo": "IN", "faber_live_preview": "IN", "faber_distance_pct": 2.7289757844301397,
+            "faber_month_end_state": "IN", "faber_month_end_period": "2026-10"},
+    "QQQ": {"faber_10mo": "OUT", "faber_live_preview": "OUT", "faber_distance_pct": -0.3471388086092497,
+            "faber_month_end_state": "IN", "faber_month_end_period": "2026-10"}}
+
+
+class TestTheTrendIsTheRulesState:
+    """Leg 2 is Faber's rule, and the rule is read once a month: the state is
+    the last COMPLETED month's close against its 10-month average
+    (legs.month_end_faber, "the AUTHORITATIVE Faber state ... completed
+    months only"), which the alert rules read (app/alerts/input_builder.py).
+    `faber_10mo` stands the running month's latest close in for a month-end
+    close: "a useful live preview, and the wrong thing to alert on" (the
+    same docstring). The digest read the preview and worded it as the state.
+    Production, 2026-11-03..11-10: QQQ's preview OUT, the rule's state IN, on
+    all eight mornings; the digests said "QQQ von IN auf OUT: 0.3% unter dem
+    10-Monats-Mittel; SPY bleibt IN." (11-03), "10-Monats-Trend unverändert:
+    SPY IN, QQQ OUT." (11-04) and, as the template, "SPY IN, QQQ OUT."
+    (11-09), while no trend alert fired, correctly."""
+
+    def test_an_intramonth_dip_is_a_distance_not_a_state(self):
+        snap = _snapshot()
+        snap.trend_states = PREVIEW_OUT
+        facts = digest.digest_facts(snap)
+        assert (facts["spy_trend"], facts["qqq_trend"]) == ("IN", "IN")
+        # the dip is still handed over, as what it is: the latest close's distance
+        assert (facts["spy_distance_pct"], facts["qqq_distance_pct"]) == (2.7, -0.3)
+        entry = _entry()
+        template = composer.render_fallback(composer.template_for(entry, None), composer.typed_facts(entry, facts))
+        assert "SPY IN, QQQ IN." in template
+
+    def test_a_month_that_closed_below_its_average_is_out_whatever_todays_price(self):
+        """The change the digest's task ranks first is the rule's: a day
+        earlier IN, today OUT, once the month has closed below its average -
+        with the running month's preview back above it."""
+        day = _snapshot(computed_at=T0 - timedelta(days=1))
+        today = _snapshot(qqq="OUT")
+        assert today.trend_states["QQQ"]["faber_10mo"] == "IN"
+        facts = digest.digest_facts(today, day=day)
+        assert (facts["qqq_trend"], facts["qqq_trend_1d_ago"]) == ("OUT", "IN")
+        assert (facts["spy_trend"], facts["spy_trend_1d_ago"]) == ("IN", "IN")
+
+    @pytest.mark.parametrize("states", [
+        pytest.param({"SPY": {"faber_10mo": "IN", "faber_month_end_state": None, "faber_month_end_period": None},
+                      "QQQ": {"faber_10mo": "OUT", "faber_month_end_state": None, "faber_month_end_period": None}},
+                     id="fewer_than_ten_completed_months"),
+        pytest.param({"SPY": {"faber_10mo": "IN", "sma200": "IN"}, "QQQ": {"faber_10mo": "OUT"}},
+                     id="a_snapshot_older_than_the_key"),
+        pytest.param({"SPY": {"faber_10mo": "unknown", "sma200": "unknown"}}, id="no_price_series"),
+        pytest.param({}, id="no_trend_states"),
+    ])
+    def test_without_a_month_end_state_the_trend_is_unknown(self, states):
+        """legs.month_end_faber returns None without ten completed months, and
+        production's snapshots before id 145 (2026-08-23) hold no such key.
+        The preview is not read in its place."""
+        snap = _snapshot()
+        snap.trend_states = states
+        facts = digest.digest_facts(snap, day=snap)
+        assert {facts[name] for name in ("spy_trend", "qqq_trend", "spy_trend_1d_ago", "qqq_trend_1d_ago")} == {"unknown"}
+        assert composer.typed_facts(_entry(), facts)["spy_trend"] == "unknown"
+
+    def test_the_data_names_the_state_month_end_and_the_distance_a_preview(self):
+        data = dict(composer._SECTION_RE.findall(_entry()["prompt"]))["DATA"]
+        (line,) = [line for line in data.splitlines() if "{spy_trend}" in line]
+        state, distance = line.split("{qqq_trend}")
+        assert "{spy_trend}" in state and "month-end" in state and "completed month" in state
+        assert "{spy_distance_pct}" in distance and "{qqq_distance_pct}" in distance and "preview" in distance
+        assert "changes no state" in distance
+
+    def test_the_trend_words_are_the_rules_states_and_unknown(self):
+        """legs.month_end_faber yields IN, OUT or None, and the digest words
+        None "unknown". The "?" the digest wrote for a missing preview is no
+        trend value any more."""
+        from app.engine import legs
+
+        months = [(f"2025-{month:02d}-28", float(month)) for month in range(1, 13)]
+        falling = [(day, 13.0 - close) for day, close in months]
+        produced = {legs.month_end_faber(series, as_of_month="2026-01", feed_current=True)[0]
+                    for series in (months, falling, months[:6])}
+        assert produced == {"IN", "OUT", None}
+        for name in ("spy_trend", "qqq_trend", "spy_trend_1d_ago", "qqq_trend_1d_ago"):
+            assert composer.WORDS[name] == {"IN", "OUT", "unknown"}
+        assert composer.typed("spy_trend", "?") is None
 
 
 class TestTheChange:

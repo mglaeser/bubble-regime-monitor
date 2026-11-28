@@ -189,7 +189,7 @@ _CONTROL_RE = re.compile(
 #: judgment, redacted and capped. Any other value - text, a non-finite
 #: number, a structure - is no fact: the template shows a dash and the
 #: prompt leaves it out.
-_TRENDS = frozenset({"IN", "OUT", "unknown", "?"})
+_TRENDS = frozenset({"IN", "OUT", "unknown"})
 _DIGEST_BANDS = frozenset(ACTION_BANDS) | {"suppressed (block degraded)", "de-risk (data degraded)"}
 _VOL_STATES = frozenset({"contango", "flat", "backwardation", "unknown"})
 _FLAG_STATES = frozenset({FLAG_ACTIVE, FLAG_INACTIVE, FLAG_UNKNOWN, FLAG_BLOCKED})
@@ -197,8 +197,11 @@ WORDS: dict[str, frozenset[str]] = {
     # the digest: the snapshot's band - the whole of its producer's range,
     # action_band_with_override's three bands and the two degraded displays
     # compute.py folds the coverage gate into; neither the bare "suppressed"
-    # state nor any other word is a band of it - and legs.faber_state's trend,
-    # today and in the earlier snapshots it is compared with
+    # state nor any other word is a band of it - and the trend rule's state at
+    # the last completed month-end (legs.month_end_faber: IN or OUT, "unknown"
+    # without one), today and in the earlier snapshots it is compared with.
+    # "?" was the digest's word for a missing `faber_10mo` preview until
+    # 2026-11; nothing writes it since the texts read the month-end state
     "action_band": _DIGEST_BANDS,
     "band_1d_ago": _DIGEST_BANDS,
     "band_7d_ago": _DIGEST_BANDS,

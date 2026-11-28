@@ -196,10 +196,48 @@ def test_legs_endpoints(client_with_snapshot):
     trend = client_with_snapshot.get("/api/v1/legs/trend")
     assert trend.status_code == 200
     assert "Zakamulin" in trend.json()["data"]["caveat"]
+    # The rule text says which of the served keys is the rule's state and which
+    # a preview. One sentence ("IN if last monthly close > 10-month SMA") stood
+    # for all of them, while `faber_10mo` reads the running month's latest close
+    # and disagreed with `faber_month_end_state` in 48 of production's snapshots
+    # (QQQ, 2026-11-03..11-10).
+    rule = {key: text for key, _, text in
+            (clause.strip().partition(": ") for clause in trend.json()["data"]["rule"].split(";"))}
+    states = trend.json()["data"]["states"]["SPY"]
+    assert set(rule) == {"faber_month_end_state", "faber_10mo", "faber_distance_pct", "sma200"} <= set(states)
+    assert "last completed month" in rule["faber_month_end_state"] and "Faber 2007" in rule["faber_month_end_state"]
+    assert "faber_month_end_period" in rule["faber_month_end_state"]
+    assert "running month" in rule["faber_10mo"] and "preview" in rule["faber_10mo"]
+    assert "percent" in rule["faber_distance_pct"] and "200-day" in rule["sma200"]
 
     alarm = client_with_snapshot.get("/api/v1/legs/fast-alarm")
     assert alarm.status_code == 200
     assert alarm.json()["data"]["skew_label"] == "coincident context only"
+
+
+@pytest.mark.parametrize("without_prices", [False, True],
+                         ids=["stored_before_the_month_end_state", "computed_without_a_price_series"])
+def test_every_served_trend_record_carries_every_key_the_rule_describes(client_with_snapshot,
+                                                                         without_prices):
+    """A stored record that does not hold a key the rule text describes is
+    served with that key null: the record production stored before the
+    month-end state existed (ids 1 to 144), and the one compute stores
+    without a price series."""
+    from sqlalchemy import update
+
+    from app.services.compute import compute_snapshot
+    from tests.conftest import make_golden_raw_inputs
+
+    stored = {"faber_10mo": "IN", "sma200": "IN"}
+    if without_prices:
+        raw = make_golden_raw_inputs()
+        raw.spy_daily, raw.spy_daily_closes = None, None
+        stored = compute_snapshot(raw, mc_samples=1_000, mc_seed=20260711).trend_states["SPY"]
+    with session_scope() as session:
+        session.execute(update(Snapshot).values(trend_states={"SPY": stored, "QQQ": stored}))
+    served = client_with_snapshot.get("/api/v1/legs/trend").json()["data"]["states"]
+    nulls = {"faber_month_end_state": None, "faber_month_end_period": None, "faber_distance_pct": None}
+    assert served == {"SPY": {**stored, **nulls}, "QQQ": {**stored, **nulls}}
 
 
 def test_methodology_endpoint(client):

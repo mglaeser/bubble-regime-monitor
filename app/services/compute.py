@@ -1521,7 +1521,9 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
     # between month ends and the wrong thing to alert on. The alert rules
     # confirm on a NEW MONTH-END PERIOD, so the authoritative state — computed
     # from COMPLETED months only — is persisted beside it, with the month it
-    # belongs to. `faber_10mo` keeps its meaning and its consumers unchanged.
+    # belongs to. `faber_10mo` keeps its meaning and stays served by /score and
+    # /legs/trend; the texts (the judgment's prompt, the digest's facts, the
+    # engine-off template) read the month-end state, as the alert rules do.
     for name, daily, closes in (("SPY", raw.spy_daily, raw.spy_daily_closes),
                                 ("QQQ", raw.qqq_daily, raw.qqq_daily_closes)):
         states: dict[str, Any] = {}
@@ -1766,11 +1768,14 @@ def write_judgment(snap_id: int, data: SnapshotData) -> None:
     snapshot), stale, and the error class (app.engine.judgment)."""
     s_scores = {k: v.sub_score for k, v in data.indicators.items() if k.startswith("s")}
     d_scores = {k: v.sub_score for k, v in data.indicators.items() if k.startswith("d")}
+    # The trend the model is handed is the rule's state at the last completed
+    # month-end, "unknown" without ten completed months - not `faber_10mo`, the
+    # running month's preview (the evidence is at judgment.PROMPT_TEMPLATE).
     call = judgment.generate(
         data.median, data.iqr, data.action_band, s_scores, d_scores, data.v_multiplier,
         data.red_flags.as_dict(), data.override_fired,
-        data.trend_states.get("SPY", {}).get("faber_10mo", "unknown"),
-        data.trend_states.get("QQQ", {}).get("faber_10mo", "unknown"),
+        data.trend_states.get("SPY", {}).get("faber_month_end_state") or "unknown",
+        data.trend_states.get("QQQ", {}).get("faber_month_end_state") or "unknown",
         data.fast_alarm,
     )
     with session_scope() as session:

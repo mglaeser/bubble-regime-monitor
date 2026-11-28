@@ -16,7 +16,7 @@ def _snap(**over) -> Snapshot:
         v_multiplier=1.0, v_state="contango",
         block_s={"indicators": {"s1": {"sub_score": 0.92}, "s5": {"sub_score": 0.80}}},
         block_d={"indicators": {"d1": {"sub_score": 0.54}, "d3": {"sub_score": 0.30}}},
-        trend_states={"SPY": {"faber_10mo": "IN"}, "QQQ": {"faber_10mo": "IN"}},
+        trend_states={"SPY": {"faber_month_end_state": "IN"}, "QQQ": {"faber_month_end_state": "IN"}},
         fast_alarm={}, judgment_call="Rich CAPE ~42 dominant; broad breadth the counter-signal.",
         judgment_stale=False, data_freshness={},
     )
@@ -52,6 +52,26 @@ class TestDeterministicReport:
     def test_override_marked(self):
         body = deterministic_report(_snap(override_fired=True, action_band="de-risk"), 160)
         assert "OVERRIDE" in body
+
+    def test_the_template_carries_the_month_end_state(self):
+        """The trend words are the Faber rule's state at the last completed
+        month-end (legs.month_end_faber), which the alert rules read - not
+        `faber_10mo`, the running month's preview. Trend states as production
+        stored them on 2026-11-09 06:00 UTC (snapshot 605): that morning the
+        engine's template, which mirrors this one, went out as "... SPY IN,
+        QQQ OUT. Flaggen 0/4." while the rule's state for QQQ was IN."""
+        stored = {"SPY": {"faber_10mo": "IN", "faber_distance_pct": 0.6640376575564292,
+                          "faber_month_end_state": "IN", "faber_month_end_period": "2026-10"},
+                  "QQQ": {"faber_10mo": "OUT", "faber_distance_pct": -3.6512326243237947,
+                          "faber_month_end_state": "IN", "faber_month_end_period": "2026-10"}}
+        assert "SPY IN, QQQ IN." in deterministic_report(_snap(trend_states=stored), 160)
+
+    def test_a_trend_without_a_month_end_state_reads_unknown(self):
+        """Fewer than ten completed months (None), or a snapshot from before
+        the key was stored: the monitor's word, never the preview."""
+        for states in ({"SPY": {"faber_10mo": "IN", "faber_month_end_state": None}, "QQQ": {"faber_10mo": "OUT"}},
+                       {}, None):
+            assert "SPY unknown, QQQ unknown." in deterministic_report(_snap(trend_states=states), 160)
 
     def test_drops_tag_before_score_when_cramped(self):
         # An absurdly tight limit must still keep the score, dropping the tag.

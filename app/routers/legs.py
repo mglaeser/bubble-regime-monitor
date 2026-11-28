@@ -37,13 +37,35 @@ def _meta(snap: Snapshot) -> dict[str, Any]:
     }
 
 
+#: The keys the rule text below describes. Every record served carries each of
+#: them, null where the stored snapshot holds none (one without prices, or one
+#: stored before the key existed).
+_RULE_KEYS = ("faber_month_end_state", "faber_month_end_period", "faber_10mo",
+              "faber_distance_pct", "sma200")
+
+
 @router.get("/trend", summary="Leg 2: Faber trend states (SPY, QQQ; 10-mo + 200-day)")
 @limiter.limit(READ_RATE_LIMIT)
 def get_trend(request: Request, _: None = Depends(require_read_access)) -> dict[str, Any]:
     snap = _latest()
+    states = {asset: {**record, **{key: None for key in _RULE_KEYS if key not in record}}
+              for asset, record in (snap.trend_states or {}).items()}
     data = {
-        "states": snap.trend_states,
-        "rule": "IN if last monthly close > 10-month SMA else OUT (Faber 2007); 200-day daily variant included",
+        "states": states,
+        # One clause per state or reading served (`faber_live_preview` and
+        # `sma200_state` repeat `faber_10mo` and `sma200`). A single sentence
+        # ("IN if last monthly close > 10-month SMA") stood for all of them,
+        # though `faber_10mo` compares the RUNNING month's latest close and
+        # the rule's state is `faber_month_end_state`: the two differed for
+        # QQQ in 48 of production's snapshots (2026-11-03..11-10, preview
+        # OUT, state IN).
+        "rule": ("faber_month_end_state: IN if the last completed month's close > the 10-month SMA of "
+                 "month-end closes, else OUT (Faber 2007), for the month in faber_month_end_period - "
+                 "the rule's state, null without ten completed months in a row; "
+                 "faber_10mo: the same comparison with the running month's latest close standing in "
+                 "for a month-end close - a preview until the month closes; "
+                 "faber_distance_pct: that latest close's distance from its 10-month SMA, in percent; "
+                 "sma200: IN if the last daily close > the 200-day SMA, else OUT"),
         "caveat": LEG_CAVEATS["trend"],
         "references": LEG_REFERENCES["trend"],
     }

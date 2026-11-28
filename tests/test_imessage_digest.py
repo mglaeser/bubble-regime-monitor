@@ -852,7 +852,7 @@ def _persist_snapshot():
             red_flag_count=0, red_flag_detail={},
             block_s={"indicators": {"s1": {"sub_score": 0.92}}},
             block_d={"indicators": {"d1": {"sub_score": 0.54}}},
-            trend_states={"SPY": {"faber_10mo": "IN"}}, fast_alarm={}, data_freshness={}))
+            trend_states={"SPY": {"faber_month_end_state": "IN"}}, fast_alarm={}, data_freshness={}))
 
 
 class _Recorder:
