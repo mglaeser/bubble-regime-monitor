@@ -1569,7 +1569,12 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
                     states["sma200_as_of"] = daily[-1][0][:10]
             except ValueError:
                 states["sma200"] = "unknown"
-        trend_states[name] = states or {"faber_10mo": "unknown", "sma200": "unknown"}
+        record = states or {"faber_10mo": "unknown", "sma200": "unknown"}
+        # Without a daily series there is no month-end state: null, with its
+        # month, as /legs/trend's rule text says and as for fewer than ten months.
+        record.setdefault("faber_month_end_state", None)
+        record.setdefault("faber_month_end_period", None)
+        trend_states[name] = record
 
     try:
         ts_state = v_vix.state(raw.vix_ratio) if raw.vix_ratio is not None else "unknown"

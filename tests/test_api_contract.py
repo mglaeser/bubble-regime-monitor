@@ -215,6 +215,20 @@ def test_legs_endpoints(client_with_snapshot):
     assert alarm.json()["data"]["skew_label"] == "coincident context only"
 
 
+def test_a_trend_without_a_price_series_serves_its_month_end_state_null(client):
+    """The rule text says the state is null without ten completed months, and
+    without a price series there are none: the key is served, as null."""
+    from app.services.compute import compute_snapshot, persist_snapshot
+    from tests.conftest import make_golden_raw_inputs
+
+    raw = make_golden_raw_inputs()
+    raw.spy_daily, raw.spy_daily_closes = None, None
+    persist_snapshot(compute_snapshot(raw, mc_samples=1_000, mc_seed=20260711), raw)
+    spy = client.get("/api/v1/legs/trend").json()["data"]["states"]["SPY"]
+    assert (spy["faber_month_end_state"], spy["faber_month_end_period"]) == (None, None)
+    assert (spy["faber_10mo"], spy["sma200"]) == ("unknown", "unknown")
+
+
 def test_methodology_endpoint(client):
     resp = client.get("/api/v1/meta/methodology")
     assert resp.status_code == 200
