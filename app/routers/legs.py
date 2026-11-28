@@ -37,12 +37,21 @@ def _meta(snap: Snapshot) -> dict[str, Any]:
     }
 
 
+#: The keys the rule text below describes. Every record served carries each of
+#: them, null where the stored snapshot holds none (one without prices, or one
+#: stored before the key existed).
+_RULE_KEYS = ("faber_month_end_state", "faber_month_end_period", "faber_10mo",
+              "faber_distance_pct", "sma200")
+
+
 @router.get("/trend", summary="Leg 2: Faber trend states (SPY, QQQ; 10-mo + 200-day)")
 @limiter.limit(READ_RATE_LIMIT)
 def get_trend(request: Request, _: None = Depends(require_read_access)) -> dict[str, Any]:
     snap = _latest()
+    states = {asset: {**record, **{key: None for key in _RULE_KEYS if key not in record}}
+              for asset, record in (snap.trend_states or {}).items()}
     data = {
-        "states": snap.trend_states,
+        "states": states,
         # One clause per state or reading served (`faber_live_preview` and
         # `sma200_state` repeat `faber_10mo` and `sma200`). A single sentence
         # ("IN if last monthly close > 10-month SMA") stood for all of them,
