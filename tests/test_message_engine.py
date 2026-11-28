@@ -572,7 +572,9 @@ class TestRoundNineOn126:
     def test_the_digests_trend_values_are_the_producers(self):
         months = [(f"2025-{month:02d}-28", float(month)) for month in range(1, 13)]
         falling = [(day, 13.0 - close) for day, close in months]
-        states = {legs.month_end_faber(series, as_of_month="2026-01", feed_current=True)[0]
+        # every month of these one-bar-a-month series is handed over as closed
+        states = {legs.month_end_faber(series, as_of_month="2026-01",
+                                       closed_months=frozenset(day[:7] for day, _ in series))[0]
                   for series in (months, falling, months[:6])}
         assert states == {"IN", "OUT", None}
         for state in states:

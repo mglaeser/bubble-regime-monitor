@@ -72,8 +72,7 @@ def _is_next_month(month: str, following: str) -> bool:
 
 
 def month_end_faber(daily: list[tuple[str, float]], *, as_of_month: str,
-                    feed_current: bool = False,
-                    closed_months: frozenset[str] | None = None
+                    closed_months: frozenset[str]
                     ) -> tuple[str | None, str | None]:
     """The AUTHORITATIVE Faber state: (state, month), completed months only.
 
@@ -84,78 +83,53 @@ def month_end_faber(daily: list[tuple[str, float]], *, as_of_month: str,
     presents as a completed flip and the most severe alert in the system fires
     on a month that is still running.
 
-    A month is completed when it is strictly earlier than the month we are
-    computing in; the in-progress month is dropped whatever its closes say.
+    `closed_months` is the calendar's answer (compute._closed_months): the
+    months whose last bar is that month's last trading day. There is no rule
+    without it.
+
+    A month is completed when the calendar closed it and it is strictly earlier
+    than the month we are computing in; the in-progress month is dropped
+    whatever its closes say.
     Returns (None, None) when fewer than ten completed months exist.
     """
     dated = monthly_closes_dated(daily)
     if not dated:
         return None, None
 
-    # A month is completed only when the DATA shows it closed — that is, when a
-    # LATER bar exists. The calendar is not enough on its own: a stale feed
-    # whose newest bar is mid-July is still "past" once September arrives, and
-    # promoting July then would publish a mid-July close as July's month-end
-    # close. That is the very substitution this function exists to refuse,
-    # returning by way of the clock instead of the bar.
+    # ONE rule for every month, newest included. A month is closed when its
+    # last bar is that month's last trading day, and that answer does not
+    # depend on whether the feed is still publishing today: a feed whose
+    # final bar IS 31 July has genuinely closed July, stale or not, while
+    # one that stopped on 2 July has not, however current it looks.
     #
-    # The cost is a bounded lag: a month that ends on a Friday is not
-    # authoritative until the next session's bar lands. That is deliberate. A
-    # late correct state is recoverable; a P1 fired on a partial month is not,
-    # and no staleness cutoff can separate the two without inventing a
-    # threshold no artifact defines.
+    # Judging the newest month by a freshness heuristic instead would
+    # contradict the exact test applied to every other month — promoting a
+    # partial month the calendar rejects, or withholding a complete one it
+    # accepts.
     #
-    # `as_of_month` can only ever WITHHOLD, never promote: a feed dated in the
-    # future relative to the evaluation is not evidence a month has closed.
-    # A month is closed when the month IMMEDIATELY AFTER it also has a bar.
+    # STRICTLY earlier than the month being evaluated in. On the final
+    # trading day itself the bar for that date exists but may still be an
+    # intraday price rather than the close — the feed publishes a daily bar
+    # that is only final once the session is over. Promoting then puts an
+    # unfinished price into an authoritative month-end state on exactly one
+    # day a month, which is the intramonth defect this function exists to
+    # remove, surviving in its last hiding place.
     #
-    # "Some later bar exists" is not enough. A feed that stops mid-July and
-    # resumes in September leaves July as the second-to-last month with a
-    # September bar behind it — and July's last close is then a MID-JULY close,
-    # promoted as if it were July's month-end. That is the same partial-month
-    # substitution this function exists to refuse, arriving through the gap
-    # instead of through the clock.
+    # The cost is at most a day or two of lag once the month rolls over.
+    # A late correct state is recoverable; a P1 fired on a mid-session
+    # price is not.
     #
-    # A bar in the next calendar month proves the previous one ran to its end;
-    # a bar two months later proves nothing about the month in between.
-    if closed_months is not None:
-        # ONE rule for every month, newest included. A month is closed when its
-        # last bar is that month's last trading day, and that answer does not
-        # depend on whether the feed is still publishing today: a feed whose
-        # final bar IS 31 July has genuinely closed July, stale or not, while
-        # one that stopped on 2 July has not, however current it looks.
-        #
-        # Judging the newest month by a freshness heuristic instead would
-        # contradict the exact test applied to every other month — promoting a
-        # partial month the calendar rejects, or withholding a complete one it
-        # accepts.
-        # STRICTLY earlier than the month being evaluated in. On the final
-        # trading day itself the bar for that date exists but may still be an
-        # intraday price rather than the close — the feed publishes a daily bar
-        # that is only final once the session is over. Promoting then puts an
-        # unfinished price into an authoritative month-end state on exactly one
-        # day a month, which is the intramonth defect this branch exists to
-        # remove, surviving in its last hiding place.
-        #
-        # The cost is at most a day or two of lag once the month rolls over.
-        # A late correct state is recoverable; a P1 fired on a mid-session
-        # price is not.
-        completed = [(m, c) for m, c in dated
-                     if m in closed_months and m < as_of_month]
-    else:
-        # Calendar-free fallback: a bar in the month immediately after proves
-        # closure for all but the newest month, and the newest is taken only on
-        # the caller's word that the feed is publishing normally. Weaker on
-        # both counts, and only for callers without a calendar.
-        adjacent = [
-            (month, close)
-            for i, (month, close) in enumerate(dated[:-1])
-            if _is_next_month(month, dated[i + 1][0])
-        ]
-        newest_month, newest_close = dated[-1]
-        if newest_month < as_of_month and feed_current:
-            adjacent.append((newest_month, newest_close))
-        completed = [(m, c) for m, c in adjacent if m < as_of_month]
+    # A caller without the calendar gets no answer. A second rule stood here
+    # for one (a bar in the following month closed a month, and the newest
+    # month closed on the caller's word `feed_current` that the feed was
+    # publishing). It was the weaker rule: a series with one bar on 2 July and
+    # the next on 14 August had July closed on the 2 July price. And it never
+    # ran: compute_snapshot, the only caller, has handed over the calendar on
+    # every call since the month-end state was first stored, so all 471
+    # production snapshots that carry the state (2026-08-23 .. 2026-11-10) hold
+    # this rule's answer. Dead code is removed, not maintained (AGENTS.md).
+    completed = [(m, c) for m, c in dated
+                 if m in closed_months and m < as_of_month]
 
     if len(completed) < 10:
         return None, None

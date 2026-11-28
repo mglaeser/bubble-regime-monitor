@@ -893,6 +893,14 @@ def _closed_months(daily: list[tuple[str, float]]) -> frozenset[str]:
 
     Uses the NYSE calendar (app.alerts.calendars), so nothing here is a
     tolerance an operator would tune.
+
+    This set is the whole closure rule of the month-end state
+    (legs.month_end_faber), the newest month included. No test of whether the
+    feed is publishing today stands beside it: the month a feed stopped in is
+    not in the set, and a month it finished is closed whether or not it still
+    publishes. The freshness test that stood below this function was computed
+    for both assets on every recompute and fed an argument this rule never
+    read.
     """
     last_bar: dict[str, date] = {}
     for stamp, _close in daily:
@@ -915,39 +923,6 @@ def _closed_months(daily: list[tuple[str, float]]) -> frozenset[str]:
         if seen >= final:
             closed.add(month)
     return frozenset(closed)
-
-
-def _feed_is_current(daily: list[tuple[str, float]], as_of_date: str | None) -> bool:
-    """Has this price feed printed a bar for the latest session it should have?
-
-    Decided against the MARKET CALENDAR, never against the series' own gap
-    history. Any statistic over those gaps is contaminated by the outages it
-    exists to detect — a single long hole earlier in the window raises the
-    tolerance enough for a feed that has since stopped to look healthy.
-
-    One session of slack, because today's bar may not have printed yet. That is
-    not a tuned threshold: a daily feed publishes once per session, so the
-    previous session is the newest bar that must exist.
-    """
-    if not daily or not as_of_date:
-        return False
-    try:
-        last_bar = date.fromisoformat(daily[-1][0][:10])
-        today = date.fromisoformat(as_of_date[:10])
-    except ValueError:
-        return False
-
-    def _session_on_or_before(day: date) -> date:
-        # Terminates: `is_trading_day` excludes weekends and the NYSE closures,
-        # so a trading day is never more than a few days back. No literal
-        # bound, because a number here would read as a tunable and is not one.
-        while not is_trading_day(day):
-            day -= timedelta(days=1)
-        return day
-
-    latest = _session_on_or_before(today)
-    previous = _session_on_or_before(latest - timedelta(days=1))
-    return last_bar >= previous
 
 
 #: The Monte Carlo's sample count and seed: the frozen artifact's, read through
@@ -1551,7 +1526,6 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
             me_state, me_period = legs.month_end_faber(
                 daily,
                 as_of_month=(as_of_date[:7] if as_of_date else daily[-1][0][:7]),
-                feed_current=_feed_is_current(daily, as_of_date),
                 closed_months=_closed_months(daily))
             states["faber_month_end_state"] = me_state
             states["faber_month_end_period"] = me_period
